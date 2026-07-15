@@ -13,10 +13,13 @@ templ Hero(snapshot Snapshot) {
 			<h2>{ snapshot.Hostname }</h2>
 			<p>{ snapshot.OS } is online and responding normally.<br/>Uptime { formatUptime(int64(snapshot.Uptime.Seconds())) }.</p>
 		</div>
-		<div class="hero-facts">
-			<div><strong>{ fmt.Sprintf("%.2f", snapshot.Load1) }</strong><span>1 min load</span></div>
-			<div><strong>{ snapshot.Kernel }</strong><span>Kernel</span></div>
-		</div>
+		<table class="hero-facts-table">
+			<tbody>
+				<tr><th>1 min load</th><td>{ fmt.Sprintf("%.2f", snapshot.Load1) }</td></tr>
+				<tr><th>Kernel</th><td>{ snapshot.Kernel }</td></tr>
+				<tr><th>Version</th><td>{ snapshot.Version }</td></tr>
+			</tbody>
+		</table>
 	</article>
 }
 
@@ -81,6 +84,7 @@ templ SystemPage(snapshot Snapshot) {
 					<div class="card-heading"><span class="card-icon">@web.Icon("server")</span><div><h2>Host identity</h2><p>Runtime environment</p></div></div>
 					<div class="mini-list">
 						<div class="mini-row"><div><strong>Operating system</strong></div><span class="version">{ snapshot.OS }</span></div>
+						<div class="mini-row"><div><strong>Version</strong></div><span class="version">{ snapshot.Version }</span></div>
 						<div class="mini-row"><div><strong>Kernel</strong></div><span class="version">{ snapshot.Kernel }</span></div>
 						<div class="mini-row"><div><strong>Logical CPUs</strong></div><span class="version">{ fmt.Sprintf("%d", snapshot.CPUs) }</span></div>
 					</div>

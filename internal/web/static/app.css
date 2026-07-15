@@ -85,9 +85,9 @@ svg { display: block; height: 1.15rem; width: 1.15rem; }
 .hero-kicker span { background: #75b890; border-radius: 50%; height: 7px; width: 7px; }
 .hero-card h2 { font-family: Georgia, "Times New Roman", serif; font-size: 27px; font-weight: 500; letter-spacing: -.02em; margin: 0 0 8px; }
 .hero-card p { color: #aebdb6; font-size: 12px; line-height: 1.6; margin: 0; }
-.hero-facts { bottom: 27px; display: flex; gap: 28px; position: absolute; right: 30px; z-index: 1; }
-.hero-facts strong { display: block; font-size: 13px; font-weight: 650; }
-.hero-facts span { color: #83958c; display: block; font-size: 9px; letter-spacing: .08em; margin-top: 3px; text-transform: uppercase; }
+.hero-facts-table { border-collapse: collapse; bottom: 27px; font-size: 11px; position: absolute; right: 30px; z-index: 1; }
+.hero-facts-table th { color: #83958c; font-size: 9px; font-weight: 500; letter-spacing: .08em; padding: 3px 18px 3px 0; text-align: left; text-transform: uppercase; }
+.hero-facts-table td { font-size: 13px; font-weight: 650; padding: 3px 0; text-align: left; }
 
 .metric-value { align-items: baseline; display: flex; gap: 5px; margin-top: 2px; }
 .metric-value strong { font-family: Georgia, serif; font-size: 30px; font-weight: 500; letter-spacing: -.025em; }
@@ -182,7 +182,7 @@ svg { display: block; height: 1.15rem; width: 1.15rem; }
 @media (max-width: 1050px) {
   .span-third { grid-column: span 3; }
   .hero-content { max-width: 76%; }
-  .hero-facts { display: none; }
+  .hero-facts-table { display: none; }
 }
 
 @media (max-width: 760px) {
