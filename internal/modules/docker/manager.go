@@ -12,6 +12,8 @@ import (
 	"github.com/moby/moby/client"
 )
 
+const defaultTimeout = 10
+
 type Container struct {
 	ID      string `json:"id"`
 	Image   string `json:"image"`
@@ -127,7 +129,7 @@ func (m *SystemManager) Restart(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	timeout := 10
+	timeout := defaultTimeout
 	_, err = m.client.ContainerRestart(ctx, id, client.ContainerRestartOptions{Timeout: &timeout})
 	return err
 }
@@ -152,7 +154,7 @@ func (m *SystemManager) Stop(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	timeout := 10
+	timeout := defaultTimeout
 	_, err = m.client.ContainerStop(ctx, id, client.ContainerStopOptions{Timeout: &timeout})
 	return err
 }

@@ -35,12 +35,36 @@ type Project struct {
 	Name        string `json:"name"`
 }
 
+type StorageBucket struct {
+	Name  string `json:"name"`
+	Pool  string `json:"pool"`
+	S3URL string `json:"s3_url"`
+}
+
+type StoragePool struct {
+	Driver string `json:"driver"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	UsedBy int    `json:"used_by"`
+}
+
+type StorageVolume struct {
+	ContentType string `json:"content_type"`
+	Name        string `json:"name"`
+	Pool        string `json:"pool"`
+	Type        string `json:"type"`
+	UsedBy      int    `json:"used_by"`
+}
+
 type State struct {
-	Images    []Image    `json:"images"`
-	Instances []Instance `json:"instances"`
-	Project   string     `json:"project"`
-	Projects  []Project  `json:"projects"`
-	Version   string     `json:"version"`
+	Buckets   []StorageBucket `json:"buckets"`
+	Images    []Image         `json:"images"`
+	Instances []Instance      `json:"instances"`
+	Pools     []StoragePool   `json:"pools"`
+	Project   string          `json:"project"`
+	Projects  []Project       `json:"projects"`
+	Version   string          `json:"version"`
+	Volumes   []StorageVolume `json:"volumes"`
 }
 
 type Manager interface {
@@ -61,6 +85,9 @@ type Client interface {
 	Restart(context.Context, string, string, int) error
 	Server(context.Context) (*api.Server, error)
 	Start(context.Context, string, string) error
+	StorageBuckets(context.Context, string, string) ([]api.StorageBucket, error)
+	StoragePools(context.Context) ([]api.StoragePool, error)
+	StorageVolumes(context.Context, string, string) ([]api.StorageVolume, error)
 	Stop(context.Context, string, string, int) error
 }
 
@@ -149,6 +176,30 @@ func (c *LocalClient) Start(ctx context.Context, project, name string) error {
 	return c.updateState(ctx, project, name, api.InstanceStatePut{Action: "start"})
 }
 
+func (c *LocalClient) StorageBuckets(ctx context.Context, project, pool string) ([]api.StorageBucket, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetStoragePoolBuckets(pool)
+}
+
+func (c *LocalClient) StoragePools(ctx context.Context) ([]api.StoragePool, error) {
+	server, err := c.connect(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	return server.GetStoragePools()
+}
+
+func (c *LocalClient) StorageVolumes(ctx context.Context, project, pool string) ([]api.StorageVolume, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetStoragePoolVolumes(pool)
+}
+
 func (c *LocalClient) Stop(ctx context.Context, project, name string, timeout int) error {
 	return c.updateState(ctx, project, name, api.InstanceStatePut{Action: "stop", Timeout: timeout})
 }
@@ -210,11 +261,71 @@ func (m *SystemManager) State(ctx context.Context, requestedProject string) (Sta
 		})
 	}
 	slices.SortFunc(images, func(a, b Image) int { return strings.Compare(a.Name, b.Name) })
+	pools, volumes, buckets, err := m.storage(ctx, project)
+	if err != nil {
+		return State{}, err
+	}
 	version := server.Environment.ServerVersion
 	if version == "" {
 		version = "installed"
 	}
-	return State{Images: images, Instances: instances, Project: project, Projects: projects, Version: version}, nil
+	return State{Buckets: buckets, Images: images, Instances: instances, Pools: pools, Project: project, Projects: projects, Version: version, Volumes: volumes}, nil
+}
+
+func (m *SystemManager) storage(ctx context.Context, project string) ([]StoragePool, []StorageVolume, []StorageBucket, error) {
+	rawPools, err := m.client.StoragePools(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pools := make([]StoragePool, 0, len(rawPools))
+	volumes := []StorageVolume{}
+	buckets := []StorageBucket{}
+	for _, pool := range rawPools {
+		status := pool.Status
+		if status == "" {
+			status = "created"
+		}
+		pools = append(pools, StoragePool{Driver: pool.Driver, Name: pool.Name, Status: status, UsedBy: len(pool.UsedBy)})
+		rawVolumes, err := m.client.StorageVolumes(ctx, project, pool.Name)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, volume := range rawVolumes {
+			if volume.Type != "custom" {
+				continue
+			}
+			volumes = append(volumes, StorageVolume{ContentType: volume.ContentType, Name: volume.Name, Pool: pool.Name, Type: volume.Type, UsedBy: len(volume.UsedBy)})
+		}
+		rawBuckets, err := m.client.StorageBuckets(ctx, project, pool.Name)
+		if err != nil {
+			if bucketsUnsupported(err) {
+				continue
+			}
+			return nil, nil, nil, err
+		}
+		for _, bucket := range rawBuckets {
+			buckets = append(buckets, StorageBucket{Name: bucket.Name, Pool: pool.Name, S3URL: bucket.S3URL})
+		}
+	}
+	slices.SortFunc(pools, func(a, b StoragePool) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(volumes, func(a, b StorageVolume) int {
+		if result := strings.Compare(a.Pool, b.Pool); result != 0 {
+			return result
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	slices.SortFunc(buckets, func(a, b StorageBucket) int {
+		if result := strings.Compare(a.Pool, b.Pool); result != 0 {
+			return result
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return pools, volumes, buckets, nil
+}
+
+func bucketsUnsupported(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not supported") || strings.Contains(message, "does not support") || strings.Contains(message, "storage_buckets")
 }
 
 func (m *SystemManager) Remove(ctx context.Context, project, name string) error {

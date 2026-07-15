@@ -125,6 +125,42 @@ templ Page(state State, csrf string, admin bool) {
 				</tbody></table>
 			}
 		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Storage pools</h2><span>{ fmt.Sprintf("%d total", len(state.Pools)) }</span></div>
+			if len(state.Pools) == 0 {
+				<div class="empty-state"><span class="card-icon orange">@web.Icon("incus")</span>No storage pools were found.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Pool</th><th>Driver</th><th>Status</th><th>Used by</th></tr></thead><tbody>
+					for _, pool := range state.Pools {
+						<tr><td><strong>{ pool.Name }</strong></td><td>{ pool.Driver }</td><td><span class="badge">{ pool.Status }</span></td><td>{ fmt.Sprint(pool.UsedBy) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Storage volumes</h2><span>{ fmt.Sprintf("%d custom", len(state.Volumes)) }</span></div>
+			if len(state.Volumes) == 0 {
+				<div class="empty-state"><span class="card-icon orange">@web.Icon("incus")</span>No custom storage volumes were found in the { state.Project } project.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Volume</th><th>Pool</th><th>Type</th><th>Used by</th></tr></thead><tbody>
+					for _, volume := range state.Volumes {
+						<tr><td><strong>{ volume.Name }</strong></td><td>{ volume.Pool }</td><td>{ volume.ContentType }</td><td>{ fmt.Sprint(volume.UsedBy) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Storage buckets</h2><span>{ fmt.Sprintf("%d total", len(state.Buckets)) }</span></div>
+			if len(state.Buckets) == 0 {
+				<div class="empty-state"><span class="card-icon orange">@web.Icon("incus")</span>No storage buckets were found.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Bucket</th><th>Pool</th><th>S3 URL</th></tr></thead><tbody>
+					for _, bucket := range state.Buckets {
+						<tr><td><strong>{ bucket.Name }</strong></td><td>{ bucket.Pool }</td><td>{ bucket.S3URL }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
 	</div>
 }
 
