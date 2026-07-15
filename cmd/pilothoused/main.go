@@ -20,6 +20,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
+	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	dockerclient "github.com/moby/moby/client"
 )
@@ -48,6 +49,13 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	actions := broker.NewActionRegistry()
 	queries := broker.NewQueryRegistry()
+	servicesManager, err := services.NewSystemManager()
+	if err != nil {
+		return err
+	}
+	if err := registerServices(actions, queries, servicesManager); err != nil {
+		return err
+	}
 	if err := registerSysextActions(actions, sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)); err != nil {
 		return err
 	}
@@ -178,6 +186,29 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 	}
 	for _, action := range actions {
 		if err := registry.Register(action.id, true, action.handler); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager) error {
+	if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
+	}); err != nil {
+		return err
+	}
+	registrations := []struct {
+		id      string
+		handler func(context.Context, string) error
+	}{
+		{broker.ActionServicesDisable, manager.Disable}, {broker.ActionServicesEnable, manager.Enable}, {broker.ActionServicesResetFailed, manager.ResetFailed}, {broker.ActionServicesRestart, manager.Restart}, {broker.ActionServicesStart, manager.Start}, {broker.ActionServicesStop, manager.Stop},
+	}
+	for _, registration := range registrations {
+		handler := registration.handler
+		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+			return handler(ctx, parameters["unit"])
+		}); err != nil {
 			return err
 		}
 	}

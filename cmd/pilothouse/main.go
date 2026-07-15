@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/modules/attention"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
+	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	systemmodule "github.com/frostyard/pilothouse/internal/modules/system"
 	"github.com/frostyard/pilothouse/internal/platform"
@@ -42,12 +44,16 @@ func run() error {
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
+	serviceModule := services.New()
 	registry, err := platform.NewRegistry(
-		systemmodule.New(systemmodule.NewLinuxCollector("/")),
+		attention.New(system, serviceModule),
+		system,
 		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
 		podman.New(),
 		docker.New(),
 		incus.New(),
+		serviceModule,
 	)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)

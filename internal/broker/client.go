@@ -36,6 +36,10 @@ func (c *Client) Action(ctx context.Context, token, id string, parameters map[st
 	return c.do(ctx, http.MethodPost, "/v1/actions/"+id, token, ActionRequest{Parameters: parameters}, nil)
 }
 
+func (c *Client) Health(ctx context.Context) error {
+	return c.do(ctx, http.MethodGet, "/v1/health", "", nil, nil)
+}
+
 func (c *Client) Login(ctx context.Context, username, password, remote string) (LoginResponse, error) {
 	var response LoginResponse
 	err := c.do(ctx, http.MethodPost, "/v1/login", "", LoginRequest{Password: password, Remote: remote, Username: username}, &response)

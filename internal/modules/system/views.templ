@@ -9,7 +9,7 @@ import (
 templ Hero(snapshot Snapshot) {
 	<article class="card hero-card">
 		<div class="hero-content">
-			<div class="hero-kicker"><span></span> All systems operational</div>
+			<div class="hero-kicker"><span></span> Live host telemetry</div>
 			<h2>{ snapshot.Hostname }</h2>
 			<p>{ snapshot.OS } is online and responding normally.<br/>Uptime { formatUptime(int64(snapshot.Uptime.Seconds())) }.</p>
 		</div>

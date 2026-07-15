@@ -1,0 +1,53 @@
+package attention
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/platform"
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(findings []platform.Finding) {
+	<article class="card">
+		<div class="card-heading split">
+			<div>
+				<h2>Attention required</h2>
+				if len(findings) == 0 {
+					<p>No current host or service issues.</p>
+				} else {
+					<p>{ fmt.Sprintf("%d item(s) need review", len(findings)) }</p>
+				}
+			</div>
+			<a class="card-link" href="/attention">View all @web.Icon("chevron")</a>
+		</div>
+		if len(findings) == 0 {
+			<div class="empty-state compact"><span class="card-icon green">@web.Icon("check")</span>No attention required.</div>
+		} else {
+			<div class="mini-list">
+				for index, finding := range findings {
+					if index < 4 {
+						<div class="mini-row"><div><strong>{ finding.Title }</strong><small>{ finding.Detail }</small></div><span class="badge">{ string(finding.Severity) }</span></div>
+					}
+				}
+			</div>
+		}
+	</article>
+}
+
+templ Page(findings []platform.Finding) {
+	<div class="page-stack">
+		<div class="page-intro"><p>Live host and service checks. An unavailable source is shown explicitly rather than treated as healthy.</p></div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Findings</h2><span>{ fmt.Sprintf("%d current", len(findings)) }</span></div>
+			if len(findings) == 0 {
+				<div class="empty-state"><span class="card-icon green">@web.Icon("check")</span>No attention required.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Severity</th><th>Finding</th><th>Source</th><th></th></tr></thead><tbody>
+					for _, finding := range findings {
+						<tr><td><span class="badge">{ string(finding.Severity) }</span></td><td><strong>{ finding.Title }</strong><small class="table-detail">{ finding.Detail }</small></td><td>{ finding.Source }</td><td><a class="card-link" href={ templ.SafeURL(finding.Path) }>Review @web.Icon("chevron")</a></td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+	</div>
+}

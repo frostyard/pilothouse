@@ -1,0 +1,66 @@
+package services
+
+import (
+	"fmt"
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ SummaryCard(state State) {
+	<article class="card"><div class="card-heading split"><div><h2>Services</h2><p>{ fmt.Sprintf("%d active · %d units", state.Summary.Active, state.Summary.Total) }</p></div><a class="card-link" href="/services">Manage @web.Icon("chevron")</a></div><div class="mini-list"><div class="mini-row"><div><strong>Active units</strong><small>services, sockets, and timers</small></div><span class="badge active">{ fmt.Sprint(state.Summary.Active) }</span></div><div class="mini-row"><div><strong>Failed units</strong></div><span class="badge">{ fmt.Sprint(state.Summary.Failed) }</span></div></div></article>
+}
+
+templ Page(state State, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>System-wide units managed by systemd through the authenticated broker. Only services, sockets, and timers are exposed.</p>
+			if admin {
+				<span class="badge active">Administrator</span>
+			} else {
+				<span class="badge">Read only</span>
+			}
+		</div>
+		<section class="engine-stats" aria-label="Service summary"><div class="engine-stat"><span>Units</span><strong>{ fmt.Sprint(state.Summary.Total) }</strong><small>known systemd units</small></div><div class="engine-stat"><span>Active</span><strong>{ fmt.Sprint(state.Summary.Active) }</strong><small>currently active</small></div><div class="engine-stat"><span>Failed</span><strong>{ fmt.Sprint(state.Summary.Failed) }</strong><small>require attention</small></div></section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Units</h2><span>{ fmt.Sprintf("%d total", state.Summary.Total) }</span></div>
+			if len(state.Units) == 0 {
+				<div class="empty-state"><span class="card-icon blue">@web.Icon("server")
+</span>No supported systemd units were found.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Unit</th><th>State</th><th>Unit file</th><th>Actions</th></tr></thead>
+					<tbody>
+						for _, unit := range state.Units {
+							<tr>
+								<td><div><strong>{ unit.Name }</strong><small>{ unit.Description }</small></div></td>
+								<td><span class="badge">{ unit.ActiveState }</span><small class="table-detail">{ unit.LoadState } · { unit.SubState }</small></td>
+								<td>{ unit.UnitFileState }</td>
+								<td>
+									<div class="actions">
+										if !admin {
+											<span class="card-subtle">No permission</span>
+										} else {
+											@unitAction(unit.Name, "start", "Start", csrf, "")
+											@unitAction(unit.Name, "restart", "Restart", csrf, "secondary")
+											@unitAction(unit.Name, "enable", "Enable", csrf, "secondary")
+											if !protectedUnits[unit.Name] {
+												@unitAction(unit.Name, "stop", "Stop", csrf, "danger")
+												@unitAction(unit.Name, "disable", "Disable", csrf, "secondary")
+											}
+											if unit.ActiveState == "failed" {
+												@unitAction(unit.Name, "reset-failed", "Reset", csrf, "secondary")
+											}
+										}
+									</div>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+	</div>
+}
+
+templ unitAction(unit, action, label, csrf, class string) {
+	<form method="post" action={ templ.SafeURL("/services/" + unit + "/" + action) }><input type="hidden" name="csrf" value={ csrf }/><button class={ "button", class } type="submit">{ label }</button></form>
+}

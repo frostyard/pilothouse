@@ -17,10 +17,12 @@ import (
 )
 
 type fakeBroker struct {
-	session broker.SessionResponse
+	healthErr error
+	session   broker.SessionResponse
 }
 
 func (b *fakeBroker) Action(context.Context, string, string, map[string]string) error { return nil }
+func (b *fakeBroker) Health(context.Context) error                                    { return b.healthErr }
 func (b *fakeBroker) Login(context.Context, string, string, string) (broker.LoginResponse, error) {
 	return broker.LoginResponse{Session: b.session, Token: "token"}, nil
 }
@@ -48,6 +50,20 @@ func TestServerHealthAndSecurityHeaders(t *testing.T) {
 	assert.Equal(t, "ok\n", response.Body.String())
 	assert.Contains(t, response.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'")
 	assert.Equal(t, "nosniff", response.Header().Get("X-Content-Type-Options"))
+}
+
+func TestServerReadinessRequiresBroker(t *testing.T) {
+	server := newTestServer(t)
+	request := httptest.NewRequest("GET", "/readyz", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "ready\n", response.Body.String())
+
+	server.broker = &fakeBroker{healthErr: broker.ErrUnavailable}
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
 }
 
 func TestProtectedPageRedirectsToLogin(t *testing.T) {
