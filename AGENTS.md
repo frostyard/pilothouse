@@ -11,4 +11,4 @@ Keep management features isolated in `internal/modules/<name>`. Web modules may 
 
 Run `make generate` after editing `*.templ`. Never hand-edit generated `*_templ.go` files.
 
-Run `make test` and `make build` before handing off changes.
+Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
