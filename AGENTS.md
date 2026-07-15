@@ -11,4 +11,15 @@ Keep management features isolated in `internal/modules/<name>`. Web modules may 
 
 Run `make generate` after editing `*.templ`. Never hand-edit generated `*_templ.go` files.
 
+When composing templ components with text, put the component invocation in its own template node. Do not embed calls such as `@web.Icon("chevron")` in a text node (`View all @web.Icon("chevron")` renders literally). For example:
+
+```templ
+<a class="card-link" href="/attention">
+    View all
+    @web.Icon("chevron")
+</a>
+```
+
+For any new or changed templ component invocation, add or update a rendering test that asserts the rendered HTML contains the component output and does not contain the literal `@web.` call syntax.
+
 Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
