@@ -15,6 +15,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
+	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	systemmodule "github.com/frostyard/pilothouse/internal/modules/system"
@@ -46,6 +47,7 @@ func run() error {
 		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
 		podman.New(),
 		docker.New(),
+		incus.New(),
 	)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)

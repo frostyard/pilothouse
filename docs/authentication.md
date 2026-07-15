@@ -14,7 +14,7 @@ pilothoused             User=root, no TCP listener
   ├── opaque session store
   ├── NSS identity and group resolution
   ├── query and action authorization
-  ├── narrow Podman and Docker inventory/lifecycle operations
+  ├── narrow Podman, Docker, and local Incus inventory/lifecycle operations
   └── updex/systemd-sysext execution
 ```
 
@@ -30,7 +30,7 @@ Authentication errors are deliberately generic. Empty passwords are rejected bef
 
 Every authenticated account may read metrics, extension state, and the narrow system container-engine inventories returned by the broker. Privileged actions require membership in the broker's `--admin-group`, which defaults to `sudo`. An optional `--login-group` restricts login entirely.
 
-The web process submits fixed query or action IDs and structured parameters. Before each operation, the broker resolves the account again so group removal takes effect without waiting for the session to expire. The registries are the only paths to privileged code; neither can execute caller-supplied commands. Podman and Docker operations accept only full hexadecimal container IDs discovered from their system inventories.
+The web process submits fixed query or action IDs and structured parameters. Before each operation, the broker resolves the account again so group removal takes effect without waiting for the session to expire. The registries are the only paths to privileged code; neither can execute caller-supplied commands. Podman and Docker operations accept only full hexadecimal container IDs discovered from their system inventories. Incus operations accept only validated instance names discovered from the local daemon's default project; the broker uses the fixed `/var/lib/incus/unix.socket` path and never loads configured remotes.
 
 ## PAM policy
 

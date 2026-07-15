@@ -18,6 +18,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
+	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	dockerclient "github.com/moby/moby/client"
@@ -61,6 +62,10 @@ func run() error {
 	}
 	defer func() { _ = dockerClient.Close() }()
 	if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient)); err != nil {
+		return err
+	}
+	incusClient := incus.NewLocalClient()
+	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient)); err != nil {
 		return err
 	}
 	sessions := broker.NewSessionStore(15*time.Minute, 8*time.Hour)
@@ -209,6 +214,32 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 		handler := registration.handler
 		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
 			return handler(ctx, parameters["id"])
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager) error {
+	if err := queries.Register(broker.QueryIncusState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
+	}); err != nil {
+		return err
+	}
+	registrations := []struct {
+		handler func(context.Context, string) error
+		id      string
+	}{
+		{id: broker.ActionIncusRemove, handler: manager.Remove},
+		{id: broker.ActionIncusRestart, handler: manager.Restart},
+		{id: broker.ActionIncusStart, handler: manager.Start},
+		{id: broker.ActionIncusStop, handler: manager.Stop},
+	}
+	for _, registration := range registrations {
+		handler := registration.handler
+		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+			return handler(ctx, parameters["name"])
 		}); err != nil {
 			return err
 		}
