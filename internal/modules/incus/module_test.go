@@ -17,6 +17,7 @@ import (
 )
 
 type fakeHost struct {
+	actionID         string
 	actionParameters map[string]string
 	queryError       error
 	queryParameters  map[string]string
@@ -24,9 +25,26 @@ type fakeHost struct {
 
 func (host *fakeHost) CSRFToken(*http.Request) string { return "token" }
 
-func (host *fakeHost) Execute(_ context.Context, _ *http.Request, _ string, parameters map[string]string) error {
+func (host *fakeHost) Execute(_ context.Context, _ *http.Request, action string, parameters map[string]string) error {
+	host.actionID = action
 	host.actionParameters = parameters
 	return nil
+}
+
+func TestImageActionDispatchAndUnknown(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	form := url.Values{"project": {"production"}}
+	request := httptest.NewRequest(http.MethodPost, "/incus/images/fingerprint/remove", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	assert.Equal(t, broker.ActionIncusRemoveImage, host.actionID)
+	assert.Equal(t, map[string]string{"fingerprint": "fingerprint", "project": "production"}, host.actionParameters)
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/incus/images/fingerprint/unknown", nil))
+	assert.Equal(t, http.StatusNotFound, response.Code)
 }
 
 func (host *fakeHost) Identity(*http.Request) auth.Identity { return auth.Identity{Admin: true} }

@@ -39,6 +39,11 @@ func (client *fakeClient) Remove(_ context.Context, id string) error {
 	return nil
 }
 
+func (client *fakeClient) RemoveImage(_ context.Context, id string) error {
+	client.actions = append(client.actions, "remove image "+id)
+	return nil
+}
+
 func (client *fakeClient) Restart(_ context.Context, id string, timeout int) error {
 	client.actions = append(client.actions, fmt.Sprintf("restart %d %s", timeout, id))
 	return nil
@@ -92,6 +97,18 @@ func TestContainerActionsValidateStateAndIdentifier(t *testing.T) {
 	assert.EqualError(t, err, "stop the container before removing it")
 	err = manager.Start(context.Background(), "--all")
 	assert.EqualError(t, err, "invalid container identifier")
+}
+
+func TestRemoveImageValidatesUsage(t *testing.T) {
+	used := &fakeClient{images: []apiImage{{ID: "image", Containers: 1}}}
+	err := NewSystemManager(used).RemoveImage(context.Background(), "image")
+	assert.EqualError(t, err, "remove containers using this image before deleting it")
+	assert.Empty(t, used.actions)
+
+	unused := &fakeClient{images: []apiImage{{ID: "image"}}}
+	require.NoError(t, NewSystemManager(unused).RemoveImage(context.Background(), "image"))
+	assert.Equal(t, []string{"remove image image"}, unused.actions)
+	assert.EqualError(t, NewSystemManager(unused).RemoveImage(context.Background(), ""), "invalid image identifier")
 }
 
 func TestAPIClientUsesFixedLibpodEndpoints(t *testing.T) {
