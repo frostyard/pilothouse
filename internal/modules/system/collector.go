@@ -43,6 +43,7 @@ type Snapshot struct {
 	NetworkSend    uint64
 	OS             string
 	Uptime         time.Duration
+	Version        string
 }
 
 type cpuTimes struct {
@@ -107,6 +108,10 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	version, err := c.readVersion()
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	return Snapshot{
 		CPUPercent:     cpuPercent(first, second),
@@ -127,6 +132,7 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 		NetworkSend:    networkSend,
 		OS:             osName,
 		Uptime:         uptime,
+		Version:        version,
 	}, nil
 }
 
@@ -293,6 +299,30 @@ func (c *LinuxCollector) readOSName() (string, error) {
 		}
 	}
 	return "Linux", nil
+}
+
+func (c *LinuxCollector) readVersion() (string, error) {
+	value, err := c.readTrimmed("etc/os-release")
+	if err != nil {
+		return "", nil
+	}
+	var version string
+	var imageVersion string
+	for _, line := range strings.Split(value, "\n") {
+		if parsed, ok := strings.CutPrefix(line, "VERSION="); ok {
+			version = strings.Trim(parsed, `"`)
+		}
+		if parsed, ok := strings.CutPrefix(line, "IMAGE_VERSION="); ok {
+			imageVersion = strings.Trim(parsed, `"`)
+		}
+	}
+	if version != "" && imageVersion != "" {
+		return version + " - " + imageVersion, nil
+	}
+	if imageVersion != "" {
+		return imageVersion, nil
+	}
+	return version, nil
 }
 
 func (c *LinuxCollector) readTrimmed(path string) (string, error) {

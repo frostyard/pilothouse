@@ -74,6 +74,11 @@ func (fake *fakeClient) ImageList(_ context.Context, options client.ImageListOpt
 	return client.ImageListResult{Items: fake.images}, nil
 }
 
+func (fake *fakeClient) ImageRemove(_ context.Context, id string, _ client.ImageRemoveOptions) (client.ImageRemoveResult, error) {
+	fake.actions = append(fake.actions, "remove image "+id)
+	return client.ImageRemoveResult{}, nil
+}
+
 func (fake *fakeClient) ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error) {
 	return client.ServerVersionResult{Version: fake.version}, nil
 }
@@ -110,6 +115,18 @@ func TestContainerActionsValidateStateAndIdentifier(t *testing.T) {
 	assert.EqualError(t, err, "stop the container before removing it")
 	err = manager.Start(context.Background(), "--all")
 	assert.EqualError(t, err, "invalid container identifier")
+}
+
+func TestRemoveImageValidatesUsage(t *testing.T) {
+	used := stateClient()
+	err := NewSystemManager(used).RemoveImage(context.Background(), imageID)
+	assert.EqualError(t, err, "remove containers using this image before deleting it")
+	assert.NotContains(t, used.actions, "remove image "+imageID)
+
+	unused := &fakeClient{images: []imagetypes.Summary{{ID: imageID}}}
+	require.NoError(t, NewSystemManager(unused).RemoveImage(context.Background(), imageID))
+	assert.Contains(t, unused.actions, "remove image "+imageID)
+	assert.EqualError(t, NewSystemManager(unused).RemoveImage(context.Background(), ""), "invalid image identifier")
 }
 
 func TestEmptyDaemonDoesNotInspectContainers(t *testing.T) {

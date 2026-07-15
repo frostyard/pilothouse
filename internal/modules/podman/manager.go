@@ -50,6 +50,7 @@ type State struct {
 
 type Manager interface {
 	Remove(context.Context, string) error
+	RemoveImage(context.Context, string) error
 	Restart(context.Context, string) error
 	Start(context.Context, string) error
 	State(context.Context) (State, error)
@@ -61,6 +62,7 @@ type Client interface {
 	Images(context.Context) ([]apiImage, error)
 	Pods(context.Context) ([]apiPod, error)
 	Remove(context.Context, string) error
+	RemoveImage(context.Context, string) error
 	Restart(context.Context, string, int) error
 	Start(context.Context, string) error
 	Stop(context.Context, string, int) error
@@ -105,6 +107,10 @@ func (c *APIClient) Pods(ctx context.Context) ([]apiPod, error) {
 
 func (c *APIClient) Remove(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/containers/"+url.PathEscape(id), nil)
+}
+
+func (c *APIClient) RemoveImage(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(id), nil)
 }
 
 func (c *APIClient) Restart(ctx context.Context, id string, timeout int) error {
@@ -195,6 +201,26 @@ func (m *SystemManager) Remove(ctx context.Context, id string) error {
 		return errors.New("stop the container before removing it")
 	}
 	return m.client.Remove(ctx, id)
+}
+
+func (m *SystemManager) RemoveImage(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("invalid image identifier")
+	}
+	raw, err := m.client.Images(ctx)
+	if err != nil {
+		return err
+	}
+	for _, image := range raw {
+		if image.ID != id {
+			continue
+		}
+		if image.Containers > 0 {
+			return errors.New("remove containers using this image before deleting it")
+		}
+		return m.client.RemoveImage(ctx, id)
+	}
+	return errors.New("image no longer exists")
 }
 
 func (m *SystemManager) Restart(ctx context.Context, id string) error {

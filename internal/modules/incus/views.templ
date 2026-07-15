@@ -110,9 +110,17 @@ templ Page(state State, csrf string, admin bool) {
 			if len(state.Images) == 0 {
 				<div class="empty-state">No images were found in the { state.Project } project.</div>
 			} else {
-				<table class="data-table"><thead><tr><th>Image</th><th>Fingerprint</th><th>Type</th><th>Instances</th><th>Size</th></tr></thead><tbody>
+				<table class="data-table"><thead><tr><th>Image</th><th>Fingerprint</th><th>Type</th><th>Instances</th><th>Size</th><th>Actions</th></tr></thead><tbody>
 					for _, image := range state.Images {
-						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.Fingerprint) }</span></td><td>{ image.Type }</td><td>{ fmt.Sprint(image.Instances) }</td><td>{ formatBytes(image.Size) }</td></tr>
+						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.Fingerprint) }</span></td><td>{ image.Type }</td><td>{ fmt.Sprint(image.Instances) }</td><td>{ formatBytes(image.Size) }</td><td>
+							if !admin {
+								<span class="card-subtle">No permission</span>
+							} else if image.Instances == 0 {
+								@imageAction(state.Project, image.Fingerprint, "remove", csrf, false, "Delete image")
+							} else {
+								@imageAction(state.Project, image.Fingerprint, "remove", csrf, true, fmt.Sprintf("In use by %d instance(s)", image.Instances))
+							}
+						</td></tr>
 					}
 				</tbody></table>
 			}
@@ -154,6 +162,14 @@ templ Page(state State, csrf string, admin bool) {
 			}
 		</article>
 	</div>
+}
+
+templ imageAction(project, fingerprint, action, csrf string, disabled bool, title string) {
+	<form method="post" action={ templ.SafeURL("/incus/images/" + fingerprint + "/" + action) }>
+		<input type="hidden" name="csrf" value={ csrf }/>
+		<input type="hidden" name="project" value={ project }/>
+		<button class="icon-button danger" type="submit" disabled?={ disabled } title={ title } aria-label="Delete image">@web.Icon("trash")</button>
+	</form>
 }
 
 templ instanceAction(project, name, action, label, csrf, class string) {

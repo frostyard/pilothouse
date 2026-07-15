@@ -81,6 +81,22 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		err := host.Execute(ctx, r, actionID, map[string]string{"name": name, "project": project})
 		m.redirect(w, r, project, fmt.Sprintf("Instance %sd", r.PathValue("action")), err)
 	})
+	mux.HandleFunc("POST /incus/images/{fingerprint}/{action}", func(w http.ResponseWriter, r *http.Request) {
+		if !host.ValidateAction(w, r) {
+			return
+		}
+		if r.PathValue("action") != "remove" {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		project := r.FormValue("project")
+		err := host.Execute(ctx, r, broker.ActionIncusRemoveImage, map[string]string{
+			"fingerprint": r.PathValue("fingerprint"), "project": project,
+		})
+		m.redirect(w, r, project, "Image removed", err)
+	})
 }
 
 func queryState(ctx context.Context, host platform.Host, project string) (State, error) {

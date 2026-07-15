@@ -45,3 +45,17 @@ func TestPageRendersStorageEmptyStates(t *testing.T) {
 		assert.Contains(t, output.String(), value)
 	}
 }
+
+func TestImagesRenderActionsAndDisabledUsage(t *testing.T) {
+	state := State{Project: "production", Images: []Image{{Fingerprint: "free", Name: "free"}, {Fingerprint: "used", Name: "used", Instances: 2}}}
+	var output strings.Builder
+	require.NoError(t, Page(state, "token", true).Render(context.Background(), &output))
+	html := output.String()
+	assert.Contains(t, html, "Actions")
+	assert.Contains(t, html, `/incus/images/free/remove`)
+	assert.Contains(t, html, `name="project" value="production"`)
+	assert.Contains(t, html, `title="Delete image"`)
+	assert.Contains(t, html, `title="In use by 2 instance(s)"`)
+	assert.Contains(t, html, "disabled")
+	assert.Contains(t, html, `<svg`)
+}

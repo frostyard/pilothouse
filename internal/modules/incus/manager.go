@@ -69,6 +69,7 @@ type State struct {
 
 type Manager interface {
 	Remove(context.Context, string, string) error
+	RemoveImage(context.Context, string, string) error
 	Restart(context.Context, string, string) error
 	Start(context.Context, string, string) error
 	State(context.Context, string) (State, error)
@@ -80,6 +81,7 @@ type Client interface {
 	Instances(context.Context, string) ([]api.Instance, error)
 	Projects(context.Context) ([]api.Project, error)
 	Remove(context.Context, string, string) error
+	RemoveImage(context.Context, string, string) error
 	Restart(context.Context, string, string, int) error
 	Server(context.Context) (*api.Server, error)
 	Start(context.Context, string, string) error
@@ -139,6 +141,18 @@ func (c *LocalClient) Remove(ctx context.Context, project, name string) error {
 		return err
 	}
 	operation, err := server.DeleteInstance(name)
+	if err != nil {
+		return err
+	}
+	return operation.WaitContext(ctx)
+}
+
+func (c *LocalClient) RemoveImage(ctx context.Context, project, fingerprint string) error {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return err
+	}
+	operation, err := server.DeleteImage(fingerprint)
 	if err != nil {
 		return err
 	}
@@ -323,6 +337,37 @@ func (m *SystemManager) Remove(ctx context.Context, project, name string) error 
 		return errors.New("stop the instance before removing it")
 	}
 	return m.client.Remove(ctx, project, name)
+}
+
+func (m *SystemManager) RemoveImage(ctx context.Context, requestedProject, fingerprint string) error {
+	if strings.TrimSpace(requestedProject) == "" || strings.TrimSpace(fingerprint) == "" {
+		return errors.New("project and image fingerprint are required")
+	}
+	project, _, err := m.project(ctx, requestedProject)
+	if err != nil {
+		return err
+	}
+	_, instances, err := m.instances(ctx, project)
+	if err != nil {
+		return err
+	}
+	for _, instance := range instances {
+		baseImage := instance.ExpandedConfig["volatile.base_image"]
+		if baseImage == "" {
+			baseImage = instance.Config["volatile.base_image"]
+		}
+		if baseImage == fingerprint {
+			return errors.New("remove instances using this image before deleting it")
+		}
+	}
+	images, err := m.client.Images(ctx, project)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(images, func(image api.Image) bool { return image.Fingerprint == fingerprint }) {
+		return errors.New("image no longer exists")
+	}
+	return m.client.RemoveImage(ctx, project, fingerprint)
 }
 
 func (m *SystemManager) Restart(ctx context.Context, project, name string) error {
