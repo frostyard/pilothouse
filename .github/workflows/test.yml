@@ -17,7 +17,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Generate templ
         run: go tool templ generate
@@ -37,7 +37,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Generate templ
         run: go tool templ generate
@@ -58,7 +58,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Download dependencies
         run: go mod download
@@ -87,7 +87,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Download dependencies
         run: go mod download
@@ -108,7 +108,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Generate templ
         run: go tool templ generate
@@ -141,7 +141,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       # pilothoused links libpam via cgo. Install libpam headers for the native
       # build, plus the aarch64 cross toolchain and arm64 libpam for arm64.
@@ -166,11 +166,15 @@ jobs:
             sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64
           fi
 
+      - name: Generate templ
+        run: go tool templ generate
+
       - name: Build binaries
         run: |
           export GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=1
           if [ "${{ matrix.goarch }}" = "arm64" ]; then
             export CC=aarch64-linux-gnu-gcc CGO_LDFLAGS=-L/usr/lib/aarch64-linux-gnu
           fi
-          make build
+          go build -buildvcs=false -o bin/pilothouse ./cmd/pilothouse
+          go build -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
           ls -lh bin/
