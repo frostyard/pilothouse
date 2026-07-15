@@ -2,7 +2,10 @@ package services
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/stretchr/testify/assert"
@@ -15,8 +18,75 @@ type fakeClient struct {
 	stopped  string
 }
 
+type fakeJournalReader struct {
+	records []JournalRecord
+	err     error
+	unit    string
+	since   time.Time
+	limit   int
+	calls   int
+}
+
+func (f *fakeJournalReader) Read(_ context.Context, unit string, since time.Time, limit int) ([]JournalRecord, error) {
+	f.calls++
+	f.unit, f.since, f.limit = unit, since, limit
+	return f.records, f.err
+}
+
 func (f *fakeClient) DisableUnitFilesContext(context.Context, []string, bool) ([]dbus.DisableUnitFileChange, error) {
 	return nil, nil
+}
+
+func TestJournalValidatesResolvesBoundsAndMapsEntries(t *testing.T) {
+	now := time.Now().UTC()
+	reader := &fakeJournalReader{records: []JournalRecord{
+		{Timestamp: now.Add(-2 * time.Hour), Fields: map[string]string{"PRIORITY": "6", "MESSAGE": "too old", "_SYSTEMD_UNIT": "backup.timer"}},
+		{Timestamp: now, Fields: map[string]string{"PRIORITY": "3", "MESSAGE": "failed safely", "_SYSTEMD_UNIT": "backup.timer", "SECRET": "not exposed"}},
+	}}
+	manager := newSystemManagerWithJournal(&fakeClient{statuses: []dbus.UnitStatus{{Name: "backup.timer", Description: "Nightly backup"}}}, reader)
+	journal, err := manager.Journal(context.Background(), "backup.timer")
+	require.NoError(t, err)
+	assert.Equal(t, "Nightly backup", journal.Description)
+	assert.Equal(t, []JournalEntry{{Timestamp: now, Priority: 3, Severity: "err", Message: "failed safely", Unit: "backup.timer"}}, journal.Entries)
+	assert.Equal(t, "backup.timer", reader.unit)
+	assert.Equal(t, journalLimit, reader.limit)
+	assert.WithinDuration(t, time.Now().Add(-journalWindow), reader.since, time.Second)
+
+	for _, invalid := range []string{"missing.scope", "../evil.service", "bad.service.extra", ""} {
+		_, err := manager.Journal(context.Background(), invalid)
+		assert.Error(t, err)
+	}
+	assert.Equal(t, 1, reader.calls)
+}
+
+func TestJournalRejectsUnknownMalformedOversizedAndReaderErrors(t *testing.T) {
+	client := &fakeClient{}
+	reader := &fakeJournalReader{}
+	manager := newSystemManagerWithJournal(client, reader)
+	_, err := manager.Journal(context.Background(), "missing.service")
+	assert.ErrorContains(t, err, "does not exist")
+	assert.Zero(t, reader.calls)
+
+	client.statuses = []dbus.UnitStatus{{Name: "known.service"}}
+	cases := []struct {
+		name    string
+		records []JournalRecord
+		err     error
+	}{
+		{"unavailable", nil, errors.New("journal details must not leak")},
+		{"malformed priority", []JournalRecord{{Timestamp: time.Now(), Fields: map[string]string{"PRIORITY": "loud", "MESSAGE": "partial", "_SYSTEMD_UNIT": "known.service"}}}, nil},
+		{"wrong unit", []JournalRecord{{Timestamp: time.Now(), Fields: map[string]string{"PRIORITY": "4", "MESSAGE": "partial", "_SYSTEMD_UNIT": "other.service"}}}, nil},
+		{"oversized", []JournalRecord{{Timestamp: time.Now(), Fields: map[string]string{"PRIORITY": "4", "MESSAGE": strings.Repeat("x", journalMaxBytes), "_SYSTEMD_UNIT": "known.service"}}}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader.records, reader.err = tc.records, tc.err
+			journal, err := manager.Journal(context.Background(), "known.service")
+			assert.ErrorIs(t, err, errJournalUnavailable)
+			assert.Empty(t, journal.Entries)
+			assert.NotContains(t, err.Error(), "partial")
+		})
+	}
 }
 func (f *fakeClient) EnableUnitFilesContext(context.Context, []string, bool, bool) (bool, []dbus.EnableUnitFileChange, error) {
 	return true, nil, nil

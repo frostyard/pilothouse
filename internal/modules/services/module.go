@@ -52,6 +52,21 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		}
 		_ = host.Render(w, r, platform.Page{Active: "services", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "systemd control plane", Title: "Services"})
 	})
+	mux.HandleFunc("GET /services/{unit}/logs", func(w http.ResponseWriter, r *http.Request) {
+		unit := r.PathValue("unit")
+		if !validUnitName(unit) {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		journal, err := queryJournal(ctx, host, unit)
+		unavailable := err != nil
+		if unavailable {
+			journal = Journal{Unit: unit}
+		}
+		_ = host.Render(w, r, platform.Page{Active: "services", Body: Logs(journal, unavailable), Eyebrow: "systemd diagnostics", Title: unit + " logs"})
+	})
 	mux.HandleFunc("POST /services/{unit}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
@@ -79,6 +94,12 @@ func queryState(ctx context.Context, host platform.Host) (State, error) {
 	var state State
 	err := host.Query(ctx, broker.QueryServicesState, nil, &state)
 	return state, err
+}
+
+func queryJournal(ctx context.Context, host platform.Host, unit string) (Journal, error) {
+	var journal Journal
+	err := host.Query(ctx, broker.QueryServicesJournal, map[string]string{"unit": unit}, &journal)
+	return journal, err
 }
 
 func (*Module) redirect(w http.ResponseWriter, r *http.Request, success string, err error) {

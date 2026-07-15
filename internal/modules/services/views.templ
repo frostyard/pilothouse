@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"time"
 	"github.com/frostyard/pilothouse/internal/web"
 )
 
@@ -39,8 +40,9 @@ templ Page(state State, csrf string, admin bool) {
 								<td>{ unit.UnitFileState }</td>
 								<td>
 									<div class="actions">
+										<a class="button secondary" href={ templ.SafeURL("/services/" + unit.Name + "/logs") }>Logs</a>
 										if !admin {
-											<span class="card-subtle">No permission</span>
+											<span class="card-subtle">Controls unavailable</span>
 										} else {
 											@unitAction(unit.Name, "start", "Start", csrf, "")
 											@unitAction(unit.Name, "restart", "Restart", csrf, "secondary")
@@ -56,6 +58,37 @@ templ Page(state State, csrf string, admin bool) {
 									</div>
 								</td>
 							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+	</div>
+}
+
+templ Logs(journal Journal, unavailable bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ journal.Unit }</h2>
+				if journal.Description != "" && journal.Description != journal.Unit {
+					<p>{ journal.Description }</p>
+				}
+			</div>
+			<a class="button secondary" href="/services">Back to services</a>
+		</div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Recent journal entries</h2><span>Last hour, up to 200 entries</span></div>
+			if unavailable {
+				<div class="empty-state">Recent diagnostics are unavailable. Try again later.</div>
+			} else if len(journal.Entries) == 0 {
+				<div class="empty-state">No journal entries were found in the last hour.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Timestamp</th><th>Priority</th><th>Message</th></tr></thead>
+					<tbody>
+						for _, entry := range journal.Entries {
+							<tr><td><time datetime={ entry.Timestamp.Format(time.RFC3339Nano) }>{ entry.Timestamp.Format("2006-01-02 15:04:05 MST") }</time></td><td><span class="badge">{ entry.Severity }</span></td><td>{ entry.Message }</td></tr>
 						}
 					</tbody>
 				</table>

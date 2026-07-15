@@ -36,10 +36,11 @@ const (
 )
 
 const (
-	QueryDockerState   = "org.frostyard.pilothouse.docker.state"
-	QueryIncusState    = "org.frostyard.pilothouse.incus.state"
-	QueryPodmanState   = "org.frostyard.pilothouse.podman.state"
-	QueryServicesState = "org.frostyard.pilothouse.services.state"
+	QueryDockerState     = "org.frostyard.pilothouse.docker.state"
+	QueryIncusState      = "org.frostyard.pilothouse.incus.state"
+	QueryPodmanState     = "org.frostyard.pilothouse.podman.state"
+	QueryServicesJournal = "org.frostyard.pilothouse.services.journal"
+	QueryServicesState   = "org.frostyard.pilothouse.services.state"
 )
 
 type ActionRequest struct {

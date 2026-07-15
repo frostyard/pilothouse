@@ -21,6 +21,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
+	servicejournal "github.com/frostyard/pilothouse/internal/modules/services/journal"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	dockerclient "github.com/moby/moby/client"
 )
@@ -49,7 +50,7 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	actions := broker.NewActionRegistry()
 	queries := broker.NewQueryRegistry()
-	servicesManager, err := services.NewSystemManager()
+	servicesManager, err := services.NewSystemManager(servicejournal.New())
 	if err != nil {
 		return err
 	}
@@ -198,6 +199,11 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 }
 
 func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager) error {
+	if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.Journal(ctx, parameters["unit"])
+	}); err != nil {
+		return err
+	}
 	if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	}); err != nil {
