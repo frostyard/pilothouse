@@ -73,6 +73,7 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
+      - -tags=sdjournal
     ldflags:
       - -s -w
 

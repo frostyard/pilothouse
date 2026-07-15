@@ -1,3 +1,11 @@
+//go:build sdjournal
+
+// Package journal reads systemd journal entries. This file holds the real
+// implementation backed by the cgo systemd bindings (go-systemd/sdjournal),
+// which require the libsystemd development headers. It is compiled only when
+// the "sdjournal" build tag is set; without it, journal_stub.go provides a
+// header-free fallback so the daemon (and go vet / test / lint / govulncheck)
+// build on toolchains that lack libsystemd-dev.
 package journal
 
 import (
