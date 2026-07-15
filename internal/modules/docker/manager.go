@@ -36,6 +36,7 @@ type State struct {
 
 type Manager interface {
 	Remove(context.Context, string) error
+	RemoveImage(context.Context, string) error
 	Restart(context.Context, string) error
 	Start(context.Context, string) error
 	State(context.Context) (State, error)
@@ -50,6 +51,7 @@ type Client interface {
 	ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerStop(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error)
 	ImageList(context.Context, client.ImageListOptions) (client.ImageListResult, error)
+	ImageRemove(context.Context, string, client.ImageRemoveOptions) (client.ImageRemoveResult, error)
 	ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error)
 }
 
@@ -90,6 +92,30 @@ func (m *SystemManager) Remove(ctx context.Context, id string) error {
 		return errors.New("stop the container before removing it")
 	}
 	_, err = m.client.ContainerRemove(ctx, id, client.ContainerRemoveOptions{})
+	return err
+}
+
+func (m *SystemManager) RemoveImage(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("invalid image identifier")
+	}
+	_, containers, err := m.containers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, container := range containers {
+		if container.Image == id {
+			return errors.New("remove containers using this image before deleting it")
+		}
+	}
+	images, err := m.images(ctx, containers)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(images, func(image Image) bool { return image.ID == id }) {
+		return errors.New("image no longer exists")
+	}
+	_, err = m.client.ImageRemove(ctx, id, client.ImageRemoveOptions{})
 	return err
 }
 

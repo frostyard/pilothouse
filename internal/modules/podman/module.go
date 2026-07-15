@@ -75,6 +75,19 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
 		m.redirect(w, r, fmt.Sprintf("Container %sd", action), err)
 	})
+	mux.HandleFunc("POST /podman/images/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+		if !host.ValidateAction(w, r) {
+			return
+		}
+		if r.PathValue("action") != "remove" {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		err := host.Execute(ctx, r, broker.ActionPodmanRemoveImage, map[string]string{"id": r.PathValue("id")})
+		m.redirect(w, r, "Image removed", err)
+	})
 }
 
 func queryState(ctx context.Context, host platform.Host) (State, error) {

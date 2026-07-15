@@ -143,6 +143,21 @@ func listenUnix(path, groupName string) (net.Listener, error) {
 	return listener, nil
 }
 
+func registerContainerActions(registry *broker.ActionRegistry, registrations []struct {
+	handler func(context.Context, string) error
+	id      string
+}) error {
+	for _, registration := range registrations {
+		handler := registration.handler
+		if err := registry.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+			return handler(ctx, parameters["id"])
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager) error {
 	actions := []struct {
 		handler broker.ActionHandler
@@ -175,24 +190,16 @@ func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	}); err != nil {
 		return err
 	}
-	registrations := []struct {
+	return registerContainerActions(actions, []struct {
 		handler func(context.Context, string) error
 		id      string
 	}{
 		{id: broker.ActionPodmanRemove, handler: manager.Remove},
+		{id: broker.ActionPodmanRemoveImage, handler: manager.RemoveImage},
 		{id: broker.ActionPodmanRestart, handler: manager.Restart},
 		{id: broker.ActionPodmanStart, handler: manager.Start},
 		{id: broker.ActionPodmanStop, handler: manager.Stop},
-	}
-	for _, registration := range registrations {
-		handler := registration.handler
-		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["id"])
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
 func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager docker.Manager) error {
@@ -201,24 +208,16 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	}); err != nil {
 		return err
 	}
-	registrations := []struct {
+	return registerContainerActions(actions, []struct {
 		handler func(context.Context, string) error
 		id      string
 	}{
 		{id: broker.ActionDockerRemove, handler: manager.Remove},
+		{id: broker.ActionDockerRemoveImage, handler: manager.RemoveImage},
 		{id: broker.ActionDockerRestart, handler: manager.Restart},
 		{id: broker.ActionDockerStart, handler: manager.Start},
 		{id: broker.ActionDockerStop, handler: manager.Stop},
-	}
-	for _, registration := range registrations {
-		handler := registration.handler
-		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["id"])
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
 func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager) error {
@@ -228,18 +227,21 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 		return err
 	}
 	registrations := []struct {
-		handler func(context.Context, string, string) error
-		id      string
+		handler   func(context.Context, string, string) error
+		id        string
+		parameter string
 	}{
-		{id: broker.ActionIncusRemove, handler: manager.Remove},
-		{id: broker.ActionIncusRestart, handler: manager.Restart},
-		{id: broker.ActionIncusStart, handler: manager.Start},
-		{id: broker.ActionIncusStop, handler: manager.Stop},
+		{id: broker.ActionIncusRemove, handler: manager.Remove, parameter: "name"},
+		{id: broker.ActionIncusRemoveImage, handler: manager.RemoveImage, parameter: "fingerprint"},
+		{id: broker.ActionIncusRestart, handler: manager.Restart, parameter: "name"},
+		{id: broker.ActionIncusStart, handler: manager.Start, parameter: "name"},
+		{id: broker.ActionIncusStop, handler: manager.Stop, parameter: "name"},
 	}
 	for _, registration := range registrations {
 		handler := registration.handler
+		parameter := registration.parameter
 		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["project"], parameters["name"])
+			return handler(ctx, parameters["project"], parameters[parameter])
 		}); err != nil {
 			return err
 		}

@@ -103,14 +103,29 @@ templ Page(state State, csrf string, admin bool) {
 			if len(state.Images) == 0 {
 				<div class="empty-state">No images were found in the Docker daemon.</div>
 			} else {
-				<table class="data-table"><thead><tr><th>Image</th><th>ID</th><th>Containers</th><th>Size</th></tr></thead><tbody>
+				<table class="data-table"><thead><tr><th>Image</th><th>ID</th><th>Containers</th><th>Size</th><th>Actions</th></tr></thead><tbody>
 					for _, image := range state.Images {
-						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.ID) }</span></td><td>{ fmt.Sprint(image.Containers) }</td><td>{ formatBytes(image.Size) }</td></tr>
+						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.ID) }</span></td><td>{ fmt.Sprint(image.Containers) }</td><td>{ formatBytes(image.Size) }</td><td>
+							if !admin {
+								<span class="card-subtle">No permission</span>
+							} else if image.Containers == 0 {
+								@imageAction(image.ID, "remove", csrf, false, "Delete image")
+							} else {
+								@imageAction(image.ID, "remove", csrf, true, fmt.Sprintf("In use by %d container(s)", image.Containers))
+							}
+						</td></tr>
 					}
 				</tbody></table>
 			}
 		</article>
 	</div>
+}
+
+templ imageAction(id, action, csrf string, disabled bool, title string) {
+	<form method="post" action={ templ.SafeURL("/docker/images/" + id + "/" + action) }>
+		<input type="hidden" name="csrf" value={ csrf }/>
+		<button class="icon-button danger" type="submit" disabled?={ disabled } title={ title } aria-label="Delete image">@web.Icon("trash")</button>
+	</form>
 }
 
 templ containerAction(id, action, label, csrf, class string) {

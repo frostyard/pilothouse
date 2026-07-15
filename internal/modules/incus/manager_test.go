@@ -39,6 +39,11 @@ func (client *fakeClient) Remove(_ context.Context, project, name string) error 
 	return nil
 }
 
+func (client *fakeClient) RemoveImage(_ context.Context, project, fingerprint string) error {
+	client.actions = append(client.actions, "remove image "+project+" "+fingerprint)
+	return nil
+}
+
 func (client *fakeClient) Restart(_ context.Context, project, name string, timeout int) error {
 	client.actions = append(client.actions, fmt.Sprintf("restart %d %s %s", timeout, project, name))
 	return nil
@@ -95,6 +100,21 @@ func TestInstanceActionsValidateStateAndName(t *testing.T) {
 	assert.EqualError(t, err, "invalid instance name")
 	err = manager.Start(context.Background(), "missing", "worker-vm")
 	assert.EqualError(t, err, "project is not available")
+}
+
+func TestRemoveImageValidatesUsageAndIdentifiers(t *testing.T) {
+	used := stateClient()
+	err := NewSystemManager(used).RemoveImage(context.Background(), "production", imageFingerprint)
+	assert.EqualError(t, err, "remove instances using this image before deleting it")
+	assert.NotContains(t, used.actions, "remove image production "+imageFingerprint)
+
+	unused := stateClient()
+	unused.instances = nil
+	require.NoError(t, NewSystemManager(unused).RemoveImage(context.Background(), "production", imageFingerprint))
+	assert.Contains(t, unused.actions, "remove image production "+imageFingerprint)
+
+	err = NewSystemManager(unused).RemoveImage(context.Background(), "production", "")
+	assert.EqualError(t, err, "project and image fingerprint are required")
 }
 
 func TestEmptyServerUsesInstalledVersionFallback(t *testing.T) {
