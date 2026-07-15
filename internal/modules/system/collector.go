@@ -96,19 +96,15 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	osName, version, err := c.readOSRelease()
+	if err != nil {
+		return Snapshot{}, err
+	}
 	hostname, err := os.Hostname()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read hostname: %w", err)
 	}
 	kernel, err := c.readTrimmed("proc/sys/kernel/osrelease")
-	if err != nil {
-		return Snapshot{}, err
-	}
-	osName, err := c.readOSName()
-	if err != nil {
-		return Snapshot{}, err
-	}
-	version, err := c.readVersion()
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -288,27 +284,18 @@ func (c *LinuxCollector) readNetwork() (uint64, uint64, error) {
 	return receive, send, nil
 }
 
-func (c *LinuxCollector) readOSName() (string, error) {
+func (c *LinuxCollector) readOSRelease() (string, string, error) {
 	value, err := c.readTrimmed("etc/os-release")
 	if err != nil {
-		return "Linux", nil
+		return "Linux", "", nil
 	}
-	for _, line := range strings.Split(value, "\n") {
-		if name, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
-			return strings.Trim(name, `"`), nil
-		}
-	}
-	return "Linux", nil
-}
-
-func (c *LinuxCollector) readVersion() (string, error) {
-	value, err := c.readTrimmed("etc/os-release")
-	if err != nil {
-		return "", nil
-	}
+	osName := "Linux"
 	var version string
 	var imageVersion string
 	for _, line := range strings.Split(value, "\n") {
+		if name, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+			osName = strings.Trim(name, `"`)
+		}
 		if parsed, ok := strings.CutPrefix(line, "VERSION="); ok {
 			version = strings.Trim(parsed, `"`)
 		}
@@ -317,12 +304,17 @@ func (c *LinuxCollector) readVersion() (string, error) {
 		}
 	}
 	if version != "" && imageVersion != "" {
-		return version + " - " + imageVersion, nil
+		return osName, version + " - " + imageVersion, nil
 	}
 	if imageVersion != "" {
-		return imageVersion, nil
+		return osName, imageVersion, nil
 	}
-	return version, nil
+	return osName, version, nil
+}
+
+func (c *LinuxCollector) readVersion() (string, error) {
+	_, version, err := c.readOSRelease()
+	return version, err
 }
 
 func (c *LinuxCollector) readTrimmed(path string) (string, error) {

@@ -19,3 +19,14 @@ func TestPageRendersUnitActionsAndProtectsBrokerUnits(t *testing.T) {
 	assert.NotContains(t, html, "/services/pilothouse.service/stop")
 	assert.NotContains(t, html, "/services/pilothouse.service/disable")
 }
+
+func TestSummaryCardRendersChevronIcon(t *testing.T) {
+	state := State{Summary: Summary{Active: 2, Failed: 1, Total: 3}}
+	var output strings.Builder
+	require.NoError(t, SummaryCard(state).Render(context.Background(), &output))
+
+	html := output.String()
+	assert.Contains(t, html, "Manage")
+	assert.Contains(t, html, "m9 18 6-6-6-6")
+	assert.NotContains(t, html, "@web.Icon")
+}

@@ -18,7 +18,10 @@ templ Summary(findings []platform.Finding) {
 					<p>{ fmt.Sprintf("%d item(s) need review", len(findings)) }</p>
 				}
 			</div>
-			<a class="card-link" href="/attention">View all @web.Icon("chevron")</a>
+			<a class="card-link" href="/attention">
+				View all
+				@web.Icon("chevron")
+			</a>
 		</div>
 		if len(findings) == 0 {
 			<div class="empty-state compact"><span class="card-icon green">@web.Icon("check")</span>No attention required.</div>
@@ -44,7 +47,10 @@ templ Page(findings []platform.Finding) {
 			} else {
 				<table class="data-table"><thead><tr><th>Severity</th><th>Finding</th><th>Source</th><th></th></tr></thead><tbody>
 					for _, finding := range findings {
-						<tr><td><span class="badge">{ string(finding.Severity) }</span></td><td><strong>{ finding.Title }</strong><small class="table-detail">{ finding.Detail }</small></td><td>{ finding.Source }</td><td><a class="card-link" href={ templ.SafeURL(finding.Path) }>Review @web.Icon("chevron")</a></td></tr>
+						<tr><td><span class="badge">{ string(finding.Severity) }</span></td><td><strong>{ finding.Title }</strong><small class="table-detail">{ finding.Detail }</small></td><td>{ finding.Source }</td><td><a class="card-link" href={ templ.SafeURL(finding.Path) }>
+							Review
+							@web.Icon("chevron")
+						</a></td></tr>
 					}
 				</tbody></table>
 			}
