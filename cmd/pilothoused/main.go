@@ -14,13 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
+	dockerclient "github.com/moby/moby/client"
 )
 
 func main() {
@@ -53,7 +53,7 @@ func run() error {
 	if err := registerPodman(actions, queries, podman.NewSystemManager(podman.ExecRunner{}, *podmanBinary)); err != nil {
 		return err
 	}
-	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	dockerClient, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
 		return fmt.Errorf("create Docker client: %w", err)
 	}

@@ -7,9 +7,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/docker/api/types"
-	containertypes "github.com/docker/docker/api/types/container"
-	imagetypes "github.com/docker/docker/api/types/image"
+	containertypes "github.com/moby/moby/api/types/container"
+	imagetypes "github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/client"
 )
 
 type Container struct {
@@ -43,14 +43,14 @@ type Manager interface {
 }
 
 type Client interface {
-	ContainerInspect(context.Context, string) (containertypes.InspectResponse, error)
-	ContainerList(context.Context, containertypes.ListOptions) ([]containertypes.Summary, error)
-	ContainerRemove(context.Context, string, containertypes.RemoveOptions) error
-	ContainerRestart(context.Context, string, containertypes.StopOptions) error
-	ContainerStart(context.Context, string, containertypes.StartOptions) error
-	ContainerStop(context.Context, string, containertypes.StopOptions) error
-	ImageList(context.Context, imagetypes.ListOptions) ([]imagetypes.Summary, error)
-	ServerVersion(context.Context) (types.Version, error)
+	ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error)
+	ContainerList(context.Context, client.ContainerListOptions) (client.ContainerListResult, error)
+	ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
+	ContainerRestart(context.Context, string, client.ContainerRestartOptions) (client.ContainerRestartResult, error)
+	ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error)
+	ContainerStop(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error)
+	ImageList(context.Context, client.ImageListOptions) (client.ImageListResult, error)
+	ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error)
 }
 
 type SystemManager struct {
@@ -62,7 +62,7 @@ func NewSystemManager(client Client) *SystemManager {
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
-	version, err := m.client.ServerVersion(ctx)
+	version, err := m.client.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
 		return State{}, err
 	}
@@ -89,7 +89,8 @@ func (m *SystemManager) Remove(ctx context.Context, id string) error {
 	if container.Running {
 		return errors.New("stop the container before removing it")
 	}
-	return m.client.ContainerRemove(ctx, id, containertypes.RemoveOptions{})
+	_, err = m.client.ContainerRemove(ctx, id, client.ContainerRemoveOptions{})
+	return err
 }
 
 func (m *SystemManager) Restart(ctx context.Context, id string) error {
@@ -101,7 +102,8 @@ func (m *SystemManager) Restart(ctx context.Context, id string) error {
 		return errors.New("container is not running")
 	}
 	timeout := 10
-	return m.client.ContainerRestart(ctx, id, containertypes.StopOptions{Timeout: &timeout})
+	_, err = m.client.ContainerRestart(ctx, id, client.ContainerRestartOptions{Timeout: &timeout})
+	return err
 }
 
 func (m *SystemManager) Start(ctx context.Context, id string) error {
@@ -112,7 +114,8 @@ func (m *SystemManager) Start(ctx context.Context, id string) error {
 	if container.Running {
 		return errors.New("container is already running")
 	}
-	return m.client.ContainerStart(ctx, id, containertypes.StartOptions{})
+	_, err = m.client.ContainerStart(ctx, id, client.ContainerStartOptions{})
+	return err
 }
 
 func (m *SystemManager) Stop(ctx context.Context, id string) error {
@@ -124,7 +127,8 @@ func (m *SystemManager) Stop(ctx context.Context, id string) error {
 		return errors.New("container is not running")
 	}
 	timeout := 10
-	return m.client.ContainerStop(ctx, id, containertypes.StopOptions{Timeout: &timeout})
+	_, err = m.client.ContainerStop(ctx, id, client.ContainerStopOptions{Timeout: &timeout})
+	return err
 }
 
 func (m *SystemManager) container(ctx context.Context, id string) (Container, error) {
@@ -144,18 +148,19 @@ func (m *SystemManager) container(ctx context.Context, id string) (Container, er
 }
 
 func (m *SystemManager) containers(ctx context.Context) ([]Container, []containertypes.InspectResponse, error) {
-	summaries, err := m.client.ContainerList(ctx, containertypes.ListOptions{All: true})
+	result, err := m.client.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, nil, err
 	}
-	containers := make([]Container, 0, len(summaries))
-	inspected := make([]containertypes.InspectResponse, 0, len(summaries))
-	for _, summary := range summaries {
-		item, err := m.client.ContainerInspect(ctx, summary.ID)
+	containers := make([]Container, 0, len(result.Items))
+	inspected := make([]containertypes.InspectResponse, 0, len(result.Items))
+	for _, summary := range result.Items {
+		inspect, err := m.client.ContainerInspect(ctx, summary.ID, client.ContainerInspectOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
-		if item.ContainerJSONBase == nil || item.State == nil || item.Config == nil {
+		item := inspect.Container
+		if item.ID == "" || item.State == nil || item.Config == nil {
 			return nil, nil, fmt.Errorf("docker returned incomplete inspect data for container %s", summary.ID)
 		}
 		status := string(item.State.Status)
@@ -173,7 +178,7 @@ func (m *SystemManager) containers(ctx context.Context) ([]Container, []containe
 }
 
 func (m *SystemManager) images(ctx context.Context, containers []containertypes.InspectResponse) ([]Image, error) {
-	raw, err := m.client.ImageList(ctx, imagetypes.ListOptions{})
+	result, err := m.client.ImageList(ctx, client.ImageListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +186,8 @@ func (m *SystemManager) images(ctx context.Context, containers []containertypes.
 	for _, container := range containers {
 		counts[container.Image]++
 	}
-	images := make([]Image, 0, len(raw))
-	for _, item := range raw {
+	images := make([]Image, 0, len(result.Items))
+	for _, item := range result.Items {
 		size := uint64(0)
 		if item.Size > 0 {
 			size = uint64(item.Size)

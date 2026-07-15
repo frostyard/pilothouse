@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/docker/docker/api/types"
-	containertypes "github.com/docker/docker/api/types/container"
-	imagetypes "github.com/docker/docker/api/types/image"
+	containertypes "github.com/moby/moby/api/types/container"
+	imagetypes "github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,58 +24,58 @@ type fakeClient struct {
 	version    string
 }
 
-func (client *fakeClient) ContainerList(_ context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error) {
+func (fake *fakeClient) ContainerList(_ context.Context, options client.ContainerListOptions) (client.ContainerListResult, error) {
 	if !options.All {
-		return nil, fmt.Errorf("expected all containers")
+		return client.ContainerListResult{}, fmt.Errorf("expected all containers")
 	}
-	summaries := make([]containertypes.Summary, 0, len(client.containers))
-	for _, item := range client.containers {
+	summaries := make([]containertypes.Summary, 0, len(fake.containers))
+	for _, item := range fake.containers {
 		summaries = append(summaries, containertypes.Summary{ID: item.ID})
 	}
-	return summaries, nil
+	return client.ContainerListResult{Items: summaries}, nil
 }
 
-func (client *fakeClient) ContainerInspect(_ context.Context, id string) (containertypes.InspectResponse, error) {
-	if client.inspectErr != nil {
-		return containertypes.InspectResponse{}, client.inspectErr
+func (fake *fakeClient) ContainerInspect(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+	if fake.inspectErr != nil {
+		return client.ContainerInspectResult{}, fake.inspectErr
 	}
-	for _, item := range client.containers {
+	for _, item := range fake.containers {
 		if item.ID == id {
-			return item, nil
+			return client.ContainerInspectResult{Container: item}, nil
 		}
 	}
-	return containertypes.InspectResponse{}, fmt.Errorf("unexpected container %s", id)
+	return client.ContainerInspectResult{}, fmt.Errorf("unexpected container %s", id)
 }
 
-func (client *fakeClient) ContainerRemove(_ context.Context, id string, _ containertypes.RemoveOptions) error {
-	client.actions = append(client.actions, "remove "+id)
-	return nil
+func (fake *fakeClient) ContainerRemove(_ context.Context, id string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+	fake.actions = append(fake.actions, "remove "+id)
+	return client.ContainerRemoveResult{}, nil
 }
 
-func (client *fakeClient) ContainerRestart(_ context.Context, id string, options containertypes.StopOptions) error {
-	client.actions = append(client.actions, fmt.Sprintf("restart %d %s", *options.Timeout, id))
-	return nil
+func (fake *fakeClient) ContainerRestart(_ context.Context, id string, options client.ContainerRestartOptions) (client.ContainerRestartResult, error) {
+	fake.actions = append(fake.actions, fmt.Sprintf("restart %d %s", *options.Timeout, id))
+	return client.ContainerRestartResult{}, nil
 }
 
-func (client *fakeClient) ContainerStart(_ context.Context, id string, _ containertypes.StartOptions) error {
-	client.actions = append(client.actions, "start "+id)
-	return nil
+func (fake *fakeClient) ContainerStart(_ context.Context, id string, _ client.ContainerStartOptions) (client.ContainerStartResult, error) {
+	fake.actions = append(fake.actions, "start "+id)
+	return client.ContainerStartResult{}, nil
 }
 
-func (client *fakeClient) ContainerStop(_ context.Context, id string, options containertypes.StopOptions) error {
-	client.actions = append(client.actions, fmt.Sprintf("stop %d %s", *options.Timeout, id))
-	return nil
+func (fake *fakeClient) ContainerStop(_ context.Context, id string, options client.ContainerStopOptions) (client.ContainerStopResult, error) {
+	fake.actions = append(fake.actions, fmt.Sprintf("stop %d %s", *options.Timeout, id))
+	return client.ContainerStopResult{}, nil
 }
 
-func (client *fakeClient) ImageList(_ context.Context, options imagetypes.ListOptions) ([]imagetypes.Summary, error) {
+func (fake *fakeClient) ImageList(_ context.Context, options client.ImageListOptions) (client.ImageListResult, error) {
 	if options.All {
-		return nil, fmt.Errorf("did not expect intermediate images")
+		return client.ImageListResult{}, fmt.Errorf("did not expect intermediate images")
 	}
-	return client.images, nil
+	return client.ImageListResult{Items: fake.images}, nil
 }
 
-func (client *fakeClient) ServerVersion(context.Context) (types.Version, error) {
-	return types.Version{Version: client.version}, nil
+func (fake *fakeClient) ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error) {
+	return client.ServerVersionResult{Version: fake.version}, nil
 }
 
 func TestSystemManagerBuildsCanonicalStateFromAPI(t *testing.T) {
@@ -122,7 +122,7 @@ func TestEmptyDaemonDoesNotInspectContainers(t *testing.T) {
 func TestStateRejectsIncompleteContainerInspectResponse(t *testing.T) {
 	client := &fakeClient{
 		version:    "29.6.1",
-		containers: []containertypes.InspectResponse{{ContainerJSONBase: &containertypes.ContainerJSONBase{ID: runningID}}},
+		containers: []containertypes.InspectResponse{{ID: runningID}},
 	}
 
 	_, err := NewSystemManager(client).State(context.Background())
@@ -150,10 +150,8 @@ func stateClient() *fakeClient {
 
 func inspectResponse(id, name string, running bool, status containertypes.ContainerState, exitCode int) containertypes.InspectResponse {
 	return containertypes.InspectResponse{
-		ContainerJSONBase: &containertypes.ContainerJSONBase{
-			ID: id, Image: imageID, Name: name,
-			State: &containertypes.State{Running: running, Status: status, ExitCode: exitCode},
-		},
+		ID: id, Image: imageID, Name: name,
+		State:  &containertypes.State{Running: running, Status: status, ExitCode: exitCode},
 		Config: &containertypes.Config{Image: "registry.example/api:latest"},
 	}
 }
