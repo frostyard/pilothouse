@@ -1,6 +1,7 @@
 [Unit]
 Description=Pilothouse privileged broker
-After=systemd-sysext.service
+After=systemd-sysext.service podman.socket
+Wants=podman.socket
 Before=pilothouse.service
 
 [Service]

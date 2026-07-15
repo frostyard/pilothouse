@@ -35,7 +35,7 @@ func run() error {
 	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
-	podmanBinary := flag.String("podman", "podman", "path to the Podman executable")
+	podmanSocket := flag.String("podman-socket", "/run/podman/podman.sock", "Podman API Unix socket path")
 	socket := flag.String("socket", "/run/pilothouse/broker.sock", "Unix socket path")
 	socketGroup := flag.String("socket-group", "pilothouse", "group allowed to connect to the broker")
 	updex := flag.String("updex", "updex", "path to the updex executable")
@@ -50,7 +50,9 @@ func run() error {
 	if err := registerSysextActions(actions, sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)); err != nil {
 		return err
 	}
-	if err := registerPodman(actions, queries, podman.NewSystemManager(podman.ExecRunner{}, *podmanBinary)); err != nil {
+	podmanClient := podman.NewAPIClient(*podmanSocket)
+	defer podmanClient.Close()
+	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient)); err != nil {
 		return err
 	}
 	dockerClient, err := dockerclient.New(dockerclient.FromEnv)

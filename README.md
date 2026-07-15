@@ -57,7 +57,7 @@ The central contract is deliberately small. Every management module provides:
 
 The shell knows only about `platform.Module`; it does not import concrete modules. The web composition root registers presentation modules. The broker composition root separately registers privileged queries and action implementations. Modules submit fixed query and action identifiers through `platform.Host`; they never execute privileged commands or connect to root-equivalent service sockets in the web process.
 
-The Podman module intentionally manages the root/system store used for host services. The Docker module targets the system Docker daemon. Rootless containers belonging to individual users remain isolated from this system administration surface.
+The Podman module intentionally manages the root/system store used for host services through the Podman 5.0 or newer Libpod API. Enable the rootful API socket with `sudo systemctl enable --now podman.socket`; use `--podman-socket` to select a different Unix socket. The Docker module targets the system Docker daemon. Rootless containers belonging to individual users remain isolated from this system administration surface.
 
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 

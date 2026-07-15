@@ -15,7 +15,9 @@ func TestLiveSystemManagerState(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	state, err := NewSystemManager(ExecRunner{}, "podman").State(ctx)
+	client := NewAPIClient("/run/podman/podman.sock")
+	defer client.Close()
+	state, err := NewSystemManager(client).State(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, state.Version)
 	t.Logf("Podman %s: %d containers, %d pods, %d images", state.Version, len(state.Containers), len(state.Pods), len(state.Images))
