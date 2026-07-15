@@ -28,8 +28,9 @@ jobs:
         with:
           go-version: stable
 
-      # pilothoused links libpam via cgo; install the aarch64 cross toolchain
-      # and arm64 libpam so the arm64 build can compile and link.
+      # pilothoused links libpam and (with -tags sdjournal) libsystemd via cgo;
+      # install the aarch64 cross toolchain and the arm64 headers so the arm64
+      # build can compile and link.
       - name: Install cross toolchain
         run: |
           sudo dpkg --add-architecture arm64
@@ -47,7 +48,7 @@ jobs:
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev libpam0g-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev libsystemd-dev libpam0g-dev:arm64 libsystemd-dev:arm64
 
       - name: Run GoReleaser Snapshot
         uses: goreleaser/goreleaser-action@v7
