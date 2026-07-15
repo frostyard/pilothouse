@@ -12,6 +12,10 @@ const (
 	ActionDockerRestart = "org.frostyard.pilothouse.docker.restart"
 	ActionDockerStart   = "org.frostyard.pilothouse.docker.start"
 	ActionDockerStop    = "org.frostyard.pilothouse.docker.stop"
+	ActionIncusRemove   = "org.frostyard.pilothouse.incus.remove"
+	ActionIncusRestart  = "org.frostyard.pilothouse.incus.restart"
+	ActionIncusStart    = "org.frostyard.pilothouse.incus.start"
+	ActionIncusStop     = "org.frostyard.pilothouse.incus.stop"
 	ActionPodmanRemove  = "org.frostyard.pilothouse.podman.remove"
 	ActionPodmanRestart = "org.frostyard.pilothouse.podman.restart"
 	ActionPodmanStart   = "org.frostyard.pilothouse.podman.start"
@@ -24,6 +28,7 @@ const (
 
 const (
 	QueryDockerState = "org.frostyard.pilothouse.docker.state"
+	QueryIncusState  = "org.frostyard.pilothouse.incus.state"
 	QueryPodmanState = "org.frostyard.pilothouse.podman.state"
 )
 

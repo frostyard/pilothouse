@@ -90,7 +90,7 @@ The corresponding broker action is registered once in `cmd/pilothoused`. The act
 
 ## Privileged reads
 
-Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker or Podman API socket is effectively root access, and Podman's rootless and rootful stores are different inventories.
+Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
 
 Register a fixed broker query and call it through `host.Query` from both `Dashboard` and page handlers:
 
@@ -99,7 +99,7 @@ var state State
 err := host.Query(ctx, broker.QueryPodmanState, nil, &state)
 ```
 
-Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, container environment variables, secrets, or root-equivalent sockets. Both container modules list full IDs and then use inspect JSON to avoid parsing localized display output.
+Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, instance environment variables, secrets, or root-equivalent sockets. Managers must rediscover resources and validate identifiers or names before every mutation.
 
 ## Design conventions
 

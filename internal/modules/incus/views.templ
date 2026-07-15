@@ -1,0 +1,119 @@
+package incus
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(state State) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>Incus</h2><p>{ fmt.Sprintf("%d running · %d instances", runningCount(state), len(state.Instances)) }</p></div>
+			<a class="card-link" href="/incus">
+				Manage
+				@web.Icon("chevron")
+			</a>
+		</div>
+		if len(state.Instances) == 0 {
+			<div class="empty-state compact">
+				<span class="card-icon orange">@web.Icon("incus")</span>
+				No local Incus instances.
+			</div>
+		} else {
+			<div class="mini-list">
+				for index, instance := range state.Instances {
+					if index < 4 {
+						<div class="mini-row">
+							<div><strong>{ instance.Name }</strong><small>{ instance.Type } · { instance.Image }</small></div>
+							if instance.Running {
+								<span class="badge active">Running</span>
+							} else {
+								<span class="badge">{ stateLabel(instance) }</span>
+							}
+						</div>
+					}
+				}
+			</div>
+		}
+	</article>
+}
+
+templ Page(state State, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>Containers and virtual machines from the local Incus daemon's default project. Pilothouse uses the official SDK over the local Unix socket and never reads configured remotes.</p>
+			if admin {
+				<span class="badge active">Administrator</span>
+			} else {
+				<span class="badge">Read only</span>
+			}
+		</div>
+		<section class="engine-stats" aria-label="Incus summary">
+			<div class="engine-stat"><span>Running</span><strong>{ fmt.Sprint(runningCount(state)) }</strong><small>of { fmt.Sprint(len(state.Instances)) } instances</small></div>
+			<div class="engine-stat"><span>Stopped</span><strong>{ fmt.Sprint(len(state.Instances) - runningCount(state)) }</strong><small>instances</small></div>
+			<div class="engine-stat"><span>Images</span><strong>{ fmt.Sprint(len(state.Images)) }</strong><small>{ formatBytes(imageBytes(state)) } local</small></div>
+			<div class="engine-stat"><span>Engine</span><strong class="version">{ state.Version }</strong><small>Incus</small></div>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Instances</h2><span>{ fmt.Sprintf("%d total", len(state.Instances)) }</span></div>
+			if len(state.Instances) == 0 {
+				<div class="empty-state">
+					<span class="card-icon orange">@web.Icon("incus")</span>
+					No instances were found in the default project.
+				</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Instance</th><th>Type</th><th>Status</th><th></th></tr></thead>
+					<tbody>
+						for _, instance := range state.Instances {
+							<tr>
+								<td><div class="extension-name"><span class="card-icon orange">@web.Icon("incus")</span><div><strong>{ instance.Name }</strong><small>{ instance.Image }</small></div></div></td>
+								<td>{ instance.Type }</td>
+								<td>
+									if instance.Running {
+										<span class="badge active">Running</span>
+									} else {
+										<span class="badge">{ stateLabel(instance) }</span>
+									}
+								</td>
+								<td>
+									<div class="actions">
+										if !admin {
+											<span class="card-subtle">No permission</span>
+										} else if instance.Running {
+											@instanceAction(instance.Name, "restart", "Restart", csrf, "secondary")
+											@instanceAction(instance.Name, "stop", "Stop", csrf, "danger")
+										} else {
+											@instanceAction(instance.Name, "start", "Start", csrf, "")
+											@instanceAction(instance.Name, "remove", "Remove", csrf, "danger")
+										}
+									</div>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Images</h2><span>{ formatBytes(imageBytes(state)) } local</span></div>
+			if len(state.Images) == 0 {
+				<div class="empty-state">No images were found in the default project.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Image</th><th>Fingerprint</th><th>Type</th><th>Instances</th><th>Size</th></tr></thead><tbody>
+					for _, image := range state.Images {
+						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.Fingerprint) }</span></td><td>{ image.Type }</td><td>{ fmt.Sprint(image.Instances) }</td><td>{ formatBytes(image.Size) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+	</div>
+}
+
+templ instanceAction(name, action, label, csrf, class string) {
+	<form method="post" action={ templ.SafeURL("/incus/instances/" + name + "/" + action) }>
+		<input type="hidden" name="csrf" value={ csrf }/>
+		<button class={ "button", class } type="submit">{ label }</button>
+	</form>
+}
