@@ -6,7 +6,10 @@ import (
 )
 
 templ SummaryCard(state State) {
-	<article class="card"><div class="card-heading split"><div><h2>Services</h2><p>{ fmt.Sprintf("%d active · %d units", state.Summary.Active, state.Summary.Total) }</p></div><a class="card-link" href="/services">Manage @web.Icon("chevron")</a></div><div class="mini-list"><div class="mini-row"><div><strong>Active units</strong><small>services, sockets, and timers</small></div><span class="badge active">{ fmt.Sprint(state.Summary.Active) }</span></div><div class="mini-row"><div><strong>Failed units</strong></div><span class="badge">{ fmt.Sprint(state.Summary.Failed) }</span></div></div></article>
+	<article class="card"><div class="card-heading split"><div><h2>Services</h2><p>{ fmt.Sprintf("%d active · %d units", state.Summary.Active, state.Summary.Total) }</p></div><a class="card-link" href="/services">
+			Manage
+			@web.Icon("chevron")
+		</a></div><div class="mini-list"><div class="mini-row"><div><strong>Active units</strong><small>services, sockets, and timers</small></div><span class="badge active">{ fmt.Sprint(state.Summary.Active) }</span></div><div class="mini-row"><div><strong>Failed units</strong></div><span class="badge">{ fmt.Sprint(state.Summary.Failed) }</span></div></div></article>
 }
 
 templ Page(state State, csrf string, admin bool) {

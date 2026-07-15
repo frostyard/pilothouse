@@ -3,10 +3,12 @@ package attention
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeProvider struct {
@@ -32,4 +34,29 @@ func TestFindingsSortsAndReportsUnavailableProvider(t *testing.T) {
 	assert.Equal(t, []string{"workloads.api", "services.unavailable", "system.disk"}, []string{findings[0].ID, findings[1].ID, findings[2].ID})
 	assert.Equal(t, platform.SeverityUnknown, findings[1].Severity)
 	assert.Equal(t, "/services", findings[1].Path)
+}
+
+func TestSummaryAndPageRenderChevronIcons(t *testing.T) {
+	findings := []platform.Finding{{
+		ID:       "attention.disk",
+		Severity: platform.SeverityWarning,
+		Source:   "System",
+		Title:    "Disk space is low",
+		Detail:   "Only 10% remains.",
+		Path:     "/attention/disk",
+	}}
+
+	var summaryOutput strings.Builder
+	require.NoError(t, Summary(findings).Render(context.Background(), &summaryOutput))
+	summaryHTML := summaryOutput.String()
+	assert.Contains(t, summaryHTML, "View all")
+	assert.Contains(t, summaryHTML, "m9 18 6-6-6-6")
+	assert.NotContains(t, summaryHTML, "@web.Icon")
+
+	var pageOutput strings.Builder
+	require.NoError(t, Page(findings).Render(context.Background(), &pageOutput))
+	pageHTML := pageOutput.String()
+	assert.Contains(t, pageHTML, "Review")
+	assert.Contains(t, pageHTML, "m9 18 6-6-6-6")
+	assert.NotContains(t, pageHTML, "@web.Icon")
 }
