@@ -41,8 +41,17 @@ templ Summary(state State) {
 
 templ Page(state State, csrf string, admin bool) {
 	<div class="page-stack">
-		<div class="page-intro">
-			<p>Containers and virtual machines from the local Incus daemon's default project. Pilothouse uses the official SDK over the local Unix socket and never reads configured remotes.</p>
+		<div class="page-intro incus-project-bar">
+			<div><p>Containers and virtual machines from the selected local Incus project. Pilothouse uses the official SDK over the local Unix socket and never reads configured remotes.</p></div>
+			<form method="get" action="/incus">
+				<label for="incus-project">Project</label>
+				<select id="incus-project" name="project" onchange="this.form.submit()">
+					for _, project := range state.Projects {
+						<option value={ project.Name } selected?={ project.Name == state.Project }>{ project.Name }</option>
+					}
+				</select>
+				<noscript><button class="button secondary" type="submit">Select</button></noscript>
+			</form>
 			if admin {
 				<span class="badge active">Administrator</span>
 			} else {
@@ -60,7 +69,7 @@ templ Page(state State, csrf string, admin bool) {
 			if len(state.Instances) == 0 {
 				<div class="empty-state">
 					<span class="card-icon orange">@web.Icon("incus")</span>
-					No instances were found in the default project.
+					No instances were found in the { state.Project } project.
 				</div>
 			} else {
 				<table class="data-table">
@@ -82,11 +91,11 @@ templ Page(state State, csrf string, admin bool) {
 										if !admin {
 											<span class="card-subtle">No permission</span>
 										} else if instance.Running {
-											@instanceAction(instance.Name, "restart", "Restart", csrf, "secondary")
-											@instanceAction(instance.Name, "stop", "Stop", csrf, "danger")
+											@instanceAction(state.Project, instance.Name, "restart", "Restart", csrf, "secondary")
+											@instanceAction(state.Project, instance.Name, "stop", "Stop", csrf, "danger")
 										} else {
-											@instanceAction(instance.Name, "start", "Start", csrf, "")
-											@instanceAction(instance.Name, "remove", "Remove", csrf, "danger")
+											@instanceAction(state.Project, instance.Name, "start", "Start", csrf, "")
+											@instanceAction(state.Project, instance.Name, "remove", "Remove", csrf, "danger")
 										}
 									</div>
 								</td>
@@ -99,7 +108,7 @@ templ Page(state State, csrf string, admin bool) {
 		<article class="card table-card">
 			<div class="table-toolbar"><h2>Images</h2><span>{ formatBytes(imageBytes(state)) } local</span></div>
 			if len(state.Images) == 0 {
-				<div class="empty-state">No images were found in the default project.</div>
+				<div class="empty-state">No images were found in the { state.Project } project.</div>
 			} else {
 				<table class="data-table"><thead><tr><th>Image</th><th>Fingerprint</th><th>Type</th><th>Instances</th><th>Size</th></tr></thead><tbody>
 					for _, image := range state.Images {
@@ -111,9 +120,10 @@ templ Page(state State, csrf string, admin bool) {
 	</div>
 }
 
-templ instanceAction(name, action, label, csrf, class string) {
+templ instanceAction(project, name, action, label, csrf, class string) {
 	<form method="post" action={ templ.SafeURL("/incus/instances/" + name + "/" + action) }>
 		<input type="hidden" name="csrf" value={ csrf }/>
+		<input type="hidden" name="project" value={ project }/>
 		<button class={ "button", class } type="submit">{ label }</button>
 	</form>
 }

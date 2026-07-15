@@ -16,24 +16,31 @@ type fakeClient struct {
 	actions   []string
 	images    []api.Image
 	instances []api.Instance
+	projects  []api.Project
 	version   string
 }
 
-func (client *fakeClient) Images(context.Context) ([]api.Image, error) {
+func (client *fakeClient) Images(_ context.Context, project string) ([]api.Image, error) {
+	client.actions = append(client.actions, "images "+project)
 	return client.images, nil
 }
 
-func (client *fakeClient) Instances(context.Context) ([]api.Instance, error) {
+func (client *fakeClient) Instances(_ context.Context, project string) ([]api.Instance, error) {
+	client.actions = append(client.actions, "instances "+project)
 	return client.instances, nil
 }
 
-func (client *fakeClient) Remove(_ context.Context, name string) error {
-	client.actions = append(client.actions, "remove "+name)
+func (client *fakeClient) Projects(context.Context) ([]api.Project, error) {
+	return client.projects, nil
+}
+
+func (client *fakeClient) Remove(_ context.Context, project, name string) error {
+	client.actions = append(client.actions, "remove "+project+" "+name)
 	return nil
 }
 
-func (client *fakeClient) Restart(_ context.Context, name string, timeout int) error {
-	client.actions = append(client.actions, fmt.Sprintf("restart %d %s", timeout, name))
+func (client *fakeClient) Restart(_ context.Context, project, name string, timeout int) error {
+	client.actions = append(client.actions, fmt.Sprintf("restart %d %s %s", timeout, project, name))
 	return nil
 }
 
@@ -41,21 +48,23 @@ func (client *fakeClient) Server(context.Context) (*api.Server, error) {
 	return &api.Server{Environment: api.ServerEnvironment{ServerVersion: client.version}}, nil
 }
 
-func (client *fakeClient) Start(_ context.Context, name string) error {
-	client.actions = append(client.actions, "start "+name)
+func (client *fakeClient) Start(_ context.Context, project, name string) error {
+	client.actions = append(client.actions, "start "+project+" "+name)
 	return nil
 }
 
-func (client *fakeClient) Stop(_ context.Context, name string, timeout int) error {
-	client.actions = append(client.actions, fmt.Sprintf("stop %d %s", timeout, name))
+func (client *fakeClient) Stop(_ context.Context, project, name string, timeout int) error {
+	client.actions = append(client.actions, fmt.Sprintf("stop %d %s %s", timeout, project, name))
 	return nil
 }
 
 func TestSystemManagerBuildsCanonicalState(t *testing.T) {
 	client := stateClient()
-	state, err := NewSystemManager(client).State(context.Background())
+	state, err := NewSystemManager(client).State(context.Background(), "production")
 	require.NoError(t, err)
 	assert.Equal(t, "6.11", state.Version)
+	assert.Equal(t, "production", state.Project)
+	assert.Equal(t, []Project{{Name: "default"}, {Name: "production"}}, state.Projects)
 	require.Len(t, state.Instances, 2)
 	assert.Equal(t, "api", state.Instances[0].Name)
 	assert.True(t, state.Instances[0].Running)
@@ -71,25 +80,28 @@ func TestInstanceActionsValidateStateAndName(t *testing.T) {
 	client := stateClient()
 	manager := NewSystemManager(client)
 
-	require.NoError(t, manager.Stop(context.Background(), "api"))
-	assert.Equal(t, "stop 30 api", client.actions[len(client.actions)-1])
-	require.NoError(t, manager.Start(context.Background(), "worker-vm"))
-	assert.Equal(t, "start worker-vm", client.actions[len(client.actions)-1])
-	require.NoError(t, manager.Restart(context.Background(), "api"))
-	assert.Equal(t, "restart 30 api", client.actions[len(client.actions)-1])
-	require.NoError(t, manager.Remove(context.Background(), "worker-vm"))
-	assert.Equal(t, "remove worker-vm", client.actions[len(client.actions)-1])
+	require.NoError(t, manager.Stop(context.Background(), "production", "api"))
+	assert.Equal(t, "stop 30 production api", client.actions[len(client.actions)-1])
+	require.NoError(t, manager.Start(context.Background(), "production", "worker-vm"))
+	assert.Equal(t, "start production worker-vm", client.actions[len(client.actions)-1])
+	require.NoError(t, manager.Restart(context.Background(), "production", "api"))
+	assert.Equal(t, "restart 30 production api", client.actions[len(client.actions)-1])
+	require.NoError(t, manager.Remove(context.Background(), "production", "worker-vm"))
+	assert.Equal(t, "remove production worker-vm", client.actions[len(client.actions)-1])
 
-	err := manager.Remove(context.Background(), "api")
+	err := manager.Remove(context.Background(), "production", "api")
 	assert.EqualError(t, err, "stop the instance before removing it")
-	err = manager.Start(context.Background(), "../default/api")
+	err = manager.Start(context.Background(), "production", "../default/api")
 	assert.EqualError(t, err, "invalid instance name")
+	err = manager.Start(context.Background(), "missing", "worker-vm")
+	assert.EqualError(t, err, "project is not available")
 }
 
 func TestEmptyServerUsesInstalledVersionFallback(t *testing.T) {
-	state, err := NewSystemManager(&fakeClient{}).State(context.Background())
+	state, err := NewSystemManager(&fakeClient{projects: []api.Project{{Name: "default"}}}).State(context.Background(), "")
 	require.NoError(t, err)
 	assert.Equal(t, "installed", state.Version)
+	assert.Equal(t, "default", state.Project)
 	assert.Empty(t, state.Instances)
 	assert.Empty(t, state.Images)
 }
@@ -106,7 +118,8 @@ func TestValidInstanceName(t *testing.T) {
 func stateClient() *fakeClient {
 	containerConfig := api.ConfigMap{"volatile.base_image": imageFingerprint, "image.description": "Ubuntu 24.04"}
 	return &fakeClient{
-		version: "6.11",
+		version:  "6.11",
+		projects: []api.Project{{Name: "production"}, {Name: "default"}},
 		instances: []api.Instance{
 			{Name: "worker-vm", Status: "Stopped", StatusCode: api.Stopped, Type: "virtual-machine", ExpandedConfig: containerConfig},
 			{Name: "api", Status: "Running", StatusCode: api.Running, Type: "container", ExpandedConfig: containerConfig},

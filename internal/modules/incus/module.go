@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -18,7 +19,7 @@ func New() *Module {
 }
 
 func (m *Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.DashboardCard, error) {
-	state, err := queryState(ctx, host)
+	state, err := queryState(ctx, host, "default")
 	if err != nil {
 		return nil, err
 	}
@@ -40,8 +41,13 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 	mux.HandleFunc("GET /incus", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		state, err := queryState(ctx, host)
+		state, err := queryState(ctx, host, r.URL.Query().Get("project"))
 		if err != nil {
+			if r.URL.Query().Get("project") != "" && strings.Contains(err.Error(), "project is not available") {
+				values := url.Values{"kind": {"error"}, "notice": {"Selected project is no longer available"}}
+				http.Redirect(w, r, "/incus?"+values.Encode(), http.StatusSeeOther)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -71,21 +77,23 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
-		err := host.Execute(ctx, r, actionID, map[string]string{"name": name})
-		m.redirect(w, r, fmt.Sprintf("Instance %sd", r.PathValue("action")), err)
+		project := r.FormValue("project")
+		err := host.Execute(ctx, r, actionID, map[string]string{"name": name, "project": project})
+		m.redirect(w, r, project, fmt.Sprintf("Instance %sd", r.PathValue("action")), err)
 	})
 }
 
-func queryState(ctx context.Context, host platform.Host) (State, error) {
+func queryState(ctx context.Context, host platform.Host, project string) (State, error) {
 	var state State
-	if err := host.Query(ctx, broker.QueryIncusState, nil, &state); err != nil {
+	if err := host.Query(ctx, broker.QueryIncusState, map[string]string{"project": project}, &state); err != nil {
 		return State{}, err
 	}
 	return state, nil
 }
 
-func (m *Module) redirect(w http.ResponseWriter, r *http.Request, success string, err error) {
+func (m *Module) redirect(w http.ResponseWriter, r *http.Request, project, success string, err error) {
 	values := url.Values{}
+	values.Set("project", project)
 	if err != nil {
 		values.Set("kind", "error")
 		values.Set("notice", err.Error())

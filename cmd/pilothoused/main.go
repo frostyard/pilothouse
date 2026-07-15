@@ -222,13 +222,13 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 }
 
 func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager) error {
-	if err := queries.Register(broker.QueryIncusState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
-		return manager.State(ctx)
+	if err := queries.Register(broker.QueryIncusState, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.State(ctx, parameters["project"])
 	}); err != nil {
 		return err
 	}
 	registrations := []struct {
-		handler func(context.Context, string) error
+		handler func(context.Context, string, string) error
 		id      string
 	}{
 		{id: broker.ActionIncusRemove, handler: manager.Remove},
@@ -239,7 +239,7 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 	for _, registration := range registrations {
 		handler := registration.handler
 		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["name"])
+			return handler(ctx, parameters["project"], parameters["name"])
 		}); err != nil {
 			return err
 		}
