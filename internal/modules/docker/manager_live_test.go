@@ -18,7 +18,7 @@ func TestLiveSystemManagerState(t *testing.T) {
 	defer cancel()
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	require.NoError(t, err)
-	defer dockerClient.Close()
+	defer func() { _ = dockerClient.Close() }()
 	state, err := NewSystemManager(dockerClient).State(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, state.Version)

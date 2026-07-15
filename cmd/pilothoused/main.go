@@ -57,7 +57,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create Docker client: %w", err)
 	}
-	defer dockerClient.Close()
+	defer func() { _ = dockerClient.Close() }()
 	if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient)); err != nil {
 		return err
 	}
