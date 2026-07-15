@@ -48,7 +48,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 				http.Redirect(w, r, "/incus?"+values.Encode(), http.StatusSeeOther)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "Failed to load Incus state. Please check that the Incus daemon is running.", http.StatusServiceUnavailable)
 			return
 		}
 		_ = host.Render(w, r, platform.Page{
@@ -96,7 +96,7 @@ func (m *Module) redirect(w http.ResponseWriter, r *http.Request, project, succe
 	values.Set("project", project)
 	if err != nil {
 		values.Set("kind", "error")
-		values.Set("notice", err.Error())
+		values.Set("notice", "Action failed. Please try again.")
 	} else {
 		values.Set("notice", success)
 	}

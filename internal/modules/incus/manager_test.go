@@ -2,6 +2,7 @@ package incus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -13,11 +14,16 @@ import (
 const imageFingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type fakeClient struct {
-	actions   []string
-	images    []api.Image
-	instances []api.Instance
-	projects  []api.Project
-	version   string
+	actions      []string
+	bucketErrors map[string]error
+	buckets      map[string][]api.StorageBucket
+	images       []api.Image
+	instances    []api.Instance
+	pools        []api.StoragePool
+	projects     []api.Project
+	version      string
+	volumeErrors map[string]error
+	volumes      map[string][]api.StorageVolume
 }
 
 func (client *fakeClient) Images(_ context.Context, project string) ([]api.Image, error) {
@@ -53,6 +59,20 @@ func (client *fakeClient) Start(_ context.Context, project, name string) error {
 	return nil
 }
 
+func (client *fakeClient) StorageBuckets(_ context.Context, project, pool string) ([]api.StorageBucket, error) {
+	client.actions = append(client.actions, "buckets "+project+" "+pool)
+	return client.buckets[pool], client.bucketErrors[pool]
+}
+
+func (client *fakeClient) StoragePools(context.Context) ([]api.StoragePool, error) {
+	return client.pools, nil
+}
+
+func (client *fakeClient) StorageVolumes(_ context.Context, project, pool string) ([]api.StorageVolume, error) {
+	client.actions = append(client.actions, "volumes "+project+" "+pool)
+	return client.volumes[pool], client.volumeErrors[pool]
+}
+
 func (client *fakeClient) Stop(_ context.Context, project, name string, timeout int) error {
 	client.actions = append(client.actions, fmt.Sprintf("stop %d %s %s", timeout, project, name))
 	return nil
@@ -74,6 +94,27 @@ func TestSystemManagerBuildsCanonicalState(t *testing.T) {
 	assert.Equal(t, "ubuntu/24.04", state.Images[0].Name)
 	assert.Equal(t, 2, state.Images[0].Instances)
 	assert.Equal(t, uint64(1048576), state.Images[0].Size)
+	assert.Equal(t, []StoragePool{
+		{Driver: "zfs", Name: "fast", Status: "created", UsedBy: 1},
+		{Driver: "dir", Name: "slow", Status: "Created", UsedBy: 2},
+	}, state.Pools)
+	assert.Equal(t, []StorageVolume{
+		{ContentType: "filesystem", Name: "data", Pool: "fast", Type: "custom", UsedBy: 1},
+		{ContentType: "block", Name: "backup", Pool: "slow", Type: "custom", UsedBy: 0},
+	}, state.Volumes)
+	assert.Equal(t, []StorageBucket{{Name: "assets", Pool: "fast", S3URL: "https://s3.example/assets"}}, state.Buckets)
+}
+
+func TestStorageBucketErrors(t *testing.T) {
+	client := stateClient()
+	client.bucketErrors["slow"] = errors.New("driver does not support storage buckets")
+	state, err := NewSystemManager(client).State(context.Background(), "production")
+	require.NoError(t, err)
+	assert.Len(t, state.Buckets, 1)
+
+	client.bucketErrors["slow"] = errors.New("connection failed")
+	_, err = NewSystemManager(client).State(context.Background(), "production")
+	assert.EqualError(t, err, "connection failed")
 }
 
 func TestInstanceActionsValidateStateAndName(t *testing.T) {
@@ -125,5 +166,18 @@ func stateClient() *fakeClient {
 			{Name: "api", Status: "Running", StatusCode: api.Running, Type: "container", ExpandedConfig: containerConfig},
 		},
 		images: []api.Image{{Fingerprint: imageFingerprint, Size: 1048576, Type: "container", Aliases: []api.ImageAlias{{Name: "ubuntu/24.04"}}}},
+		pools: []api.StoragePool{
+			{Name: "slow", Driver: "dir", Status: "Created", UsedBy: []string{"a", "b"}},
+			{Name: "fast", Driver: "zfs", UsedBy: []string{"a"}},
+		},
+		volumes: map[string][]api.StorageVolume{
+			"fast": {{Name: "data", Type: "custom", ContentType: "filesystem", UsedBy: []string{"a"}}, {Name: "instance-root", Type: "container"}},
+			"slow": {{Name: "backup", Type: "custom", ContentType: "block"}},
+		},
+		buckets: map[string][]api.StorageBucket{
+			"fast": {{Name: "assets", S3URL: "https://s3.example/assets"}},
+		},
+		bucketErrors: map[string]error{},
+		volumeErrors: map[string]error{},
 	}
 }

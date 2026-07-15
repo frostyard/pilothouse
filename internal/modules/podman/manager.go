@@ -15,6 +15,7 @@ import (
 )
 
 const apiPrefix = "/v5.0.0/libpod"
+const defaultTimeout = 10
 
 type Container struct {
 	ID      string `json:"id"`
@@ -204,7 +205,7 @@ func (m *SystemManager) Restart(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	return m.client.Restart(ctx, id, 10)
+	return m.client.Restart(ctx, id, defaultTimeout)
 }
 
 func (m *SystemManager) Start(ctx context.Context, id string) error {
@@ -226,7 +227,7 @@ func (m *SystemManager) Stop(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	return m.client.Stop(ctx, id, 10)
+	return m.client.Stop(ctx, id, defaultTimeout)
 }
 
 func (m *SystemManager) container(ctx context.Context, id string) (Container, error) {
