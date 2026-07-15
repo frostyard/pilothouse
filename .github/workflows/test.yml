@@ -143,12 +143,12 @@ jobs:
         with:
           go-version: "1.26.5"
 
-      # pilothoused links libpam via cgo. Install libpam headers for the native
-      # build, plus the aarch64 cross toolchain and arm64 libpam for arm64.
+      # pilothoused links libpam and libsystemd via cgo. Install headers for the
+      # native build, plus the aarch64 cross toolchain and arm64 libraries.
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpam0g-dev
+          sudo apt-get install -y libpam0g-dev libsystemd-dev
           if [ "${{ matrix.goarch }}" = "arm64" ]; then
             sudo dpkg --add-architecture arm64
             # Pin existing repositories to amd64 so apt does not try to fetch
@@ -163,7 +163,7 @@ jobs:
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
             sudo apt-get update
-            sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64
+            sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64 libsystemd-dev:arm64
           fi
 
       - name: Generate templ
@@ -176,5 +176,5 @@ jobs:
             export CC=aarch64-linux-gnu-gcc CGO_LDFLAGS=-L/usr/lib/aarch64-linux-gnu
           fi
           go build -buildvcs=false -o bin/pilothouse ./cmd/pilothouse
-          go build -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
+          go build -tags sdjournal -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
           ls -lh bin/

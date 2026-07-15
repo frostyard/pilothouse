@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-systemd/v22/dbus"
 )
@@ -36,14 +38,38 @@ type State struct {
 	Units   []Unit  `json:"units"`
 }
 
+type JournalEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Priority  int       `json:"priority"`
+	Severity  string    `json:"severity"`
+	Message   string    `json:"message"`
+	Unit      string    `json:"unit"`
+}
+
+type Journal struct {
+	Unit        string         `json:"unit"`
+	Description string         `json:"description"`
+	Entries     []JournalEntry `json:"entries"`
+}
+
 type Manager interface {
 	Disable(context.Context, string) error
 	Enable(context.Context, string) error
+	Journal(context.Context, string) (Journal, error)
 	ResetFailed(context.Context, string) error
 	Restart(context.Context, string) error
 	Start(context.Context, string) error
 	State(context.Context) (State, error)
 	Stop(context.Context, string) error
+}
+
+type JournalRecord struct {
+	Timestamp time.Time
+	Fields    map[string]string
+}
+
+type JournalReader interface {
+	Read(context.Context, string, time.Time, int) ([]JournalRecord, error)
 }
 
 type systemdClient interface {
@@ -57,17 +83,87 @@ type systemdClient interface {
 	StopUnitContext(context.Context, string, string, chan<- string) (int, error)
 }
 
-type SystemManager struct{ client systemdClient }
+type SystemManager struct {
+	client  systemdClient
+	journal JournalReader
+}
 
-func NewSystemManager() (*SystemManager, error) {
+const (
+	journalLimit    = 200
+	journalMaxBytes = 256 * 1024
+	journalTimeout  = 5 * time.Second
+	journalWindow   = time.Hour
+)
+
+var errJournalUnavailable = errors.New("recent service diagnostics are unavailable")
+
+func NewSystemManager(journal JournalReader) (*SystemManager, error) {
 	client, err := dbus.NewSystemConnectionContext(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("connect to systemd: %w", err)
 	}
-	return &SystemManager{client: client}, nil
+	return &SystemManager{client: client, journal: journal}, nil
 }
 
 func newSystemManager(client systemdClient) *SystemManager { return &SystemManager{client: client} }
+
+func newSystemManagerWithJournal(client systemdClient, journal JournalReader) *SystemManager {
+	return &SystemManager{client: client, journal: journal}
+}
+
+func (m *SystemManager) Journal(ctx context.Context, name string) (Journal, error) {
+	if !validUnitName(name) {
+		return Journal{}, errors.New("invalid systemd unit name")
+	}
+	unit, err := m.resolveUnit(ctx, name)
+	if err != nil {
+		return Journal{}, err
+	}
+	readCtx, cancel := context.WithTimeout(ctx, journalTimeout)
+	defer cancel()
+	since := time.Now().Add(-journalWindow)
+	records, err := m.journal.Read(readCtx, name, since, journalLimit)
+	if err != nil {
+		return Journal{}, errJournalUnavailable
+	}
+	if len(records) > journalLimit {
+		records = records[:journalLimit]
+	}
+	result := Journal{Unit: name, Description: unit.Description, Entries: make([]JournalEntry, 0, len(records))}
+	totalBytes := 0
+	for _, record := range records {
+		if record.Timestamp.Before(since) {
+			continue
+		}
+		entry, ok := parseJournalRecord(record, name)
+		if !ok {
+			return Journal{}, errJournalUnavailable
+		}
+		totalBytes += len(entry.Message) + len(entry.Unit) + 64
+		if totalBytes > journalMaxBytes {
+			return Journal{}, errJournalUnavailable
+		}
+		result.Entries = append(result.Entries, entry)
+	}
+	return result, nil
+}
+
+var journalSeverities = [...]string{"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"}
+
+// parseJournalRecord validates a raw journal record against the field whitelist
+// and maps it to a JournalEntry. Any missing or malformed field, or a unit
+// mismatch, reports ok as false so the caller fails closed instead of leaking
+// partial or unexpected journal data.
+func parseJournalRecord(record JournalRecord, unit string) (entry JournalEntry, ok bool) {
+	priorityText, hasPriority := record.Fields["PRIORITY"]
+	message, hasMessage := record.Fields["MESSAGE"]
+	recordUnit, hasUnit := record.Fields["_SYSTEMD_UNIT"]
+	priority, parseErr := strconv.Atoi(priorityText)
+	if !hasPriority || !hasMessage || !hasUnit || parseErr != nil || priority < 0 || priority > 7 || record.Timestamp.IsZero() || recordUnit != unit {
+		return JournalEntry{}, false
+	}
+	return JournalEntry{Timestamp: record.Timestamp, Priority: priority, Severity: journalSeverities[priority], Message: message, Unit: recordUnit}, true
+}
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
 	statuses, err := m.client.ListUnitsByPatternsContext(ctx, nil, []string{"*.service", "*.socket", "*.timer"})
@@ -133,7 +229,7 @@ func (m *SystemManager) ResetFailed(ctx context.Context, name string) error {
 	if err := validateUnit(name, "reset-failed"); err != nil {
 		return err
 	}
-	if err := m.resolve(ctx, name); err != nil {
+	if _, err := m.resolveUnit(ctx, name); err != nil {
 		return err
 	}
 	return m.client.ResetFailedUnitContext(ctx, name)
@@ -143,7 +239,7 @@ func (m *SystemManager) Enable(ctx context.Context, name string) error {
 	if err := validateUnit(name, "enable"); err != nil {
 		return err
 	}
-	if err := m.resolve(ctx, name); err != nil {
+	if _, err := m.resolveUnit(ctx, name); err != nil {
 		return err
 	}
 	_, _, err := m.client.EnableUnitFilesContext(ctx, []string{name}, false, false)
@@ -154,7 +250,7 @@ func (m *SystemManager) Disable(ctx context.Context, name string) error {
 	if err := validateUnit(name, "disable"); err != nil {
 		return err
 	}
-	if err := m.resolve(ctx, name); err != nil {
+	if _, err := m.resolveUnit(ctx, name); err != nil {
 		return err
 	}
 	_, err := m.client.DisableUnitFilesContext(ctx, []string{name}, false)
@@ -165,7 +261,7 @@ func (m *SystemManager) job(ctx context.Context, name, action string) error {
 	if err := validateUnit(name, action); err != nil {
 		return err
 	}
-	if err := m.resolve(ctx, name); err != nil {
+	if _, err := m.resolveUnit(ctx, name); err != nil {
 		return err
 	}
 	var err error
@@ -180,26 +276,26 @@ func (m *SystemManager) job(ctx context.Context, name, action string) error {
 	return err
 }
 
-func (m *SystemManager) resolve(ctx context.Context, name string) error {
+func (m *SystemManager) resolveUnit(ctx context.Context, name string) (Unit, error) {
 	files, err := m.client.ListUnitFilesContext(ctx)
 	if err != nil {
-		return err
+		return Unit{}, err
 	}
 	for _, file := range files {
 		if filepath.Base(file.Path) == name {
-			return nil
+			return Unit{Name: name, Description: name, UnitFileState: file.Type}, nil
 		}
 	}
 	statuses, err := m.client.ListUnitsByPatternsContext(ctx, nil, []string{name})
 	if err != nil {
-		return err
+		return Unit{}, err
 	}
 	for _, status := range statuses {
 		if status.Name == name {
-			return nil
+			return Unit{Name: name, Description: status.Description, LoadState: status.LoadState, ActiveState: status.ActiveState, SubState: status.SubState}, nil
 		}
 	}
-	return fmt.Errorf("systemd unit %s does not exist", name)
+	return Unit{}, fmt.Errorf("systemd unit %s does not exist", name)
 }
 
 func validateUnit(name, action string) error {

@@ -99,6 +99,10 @@ var state State
 err := host.Query(ctx, broker.QueryPodmanState, nil, &state)
 ```
 
+Services diagnostics use the fixed `org.frostyard.pilothouse.services.journal`
+query. The daemon validates and resolves one supported unit, then returns only a
+bounded hour of whitelisted journal fields; the web process never opens journald.
+
 Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, instance environment variables, secrets, or root-equivalent sockets. Managers must rediscover resources and validate identifiers or names before every mutation.
 
 ## Design conventions

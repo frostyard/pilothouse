@@ -6,7 +6,7 @@ GOFILES := $(shell find . -type f -name '*.go' -not -name '*_templ.go')
 
 build: generate
 	$(GO) build -buildvcs=false -o bin/pilothouse ./cmd/pilothouse
-	$(GO) build -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
+	$(GO) build -tags sdjournal -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
 
 generate:
 	$(GO) tool templ generate

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,32 @@ func TestPageRendersUnitActionsAndProtectsBrokerUnits(t *testing.T) {
 	assert.Contains(t, html, "/services/backup.timer/disable")
 	assert.NotContains(t, html, "/services/pilothouse.service/stop")
 	assert.NotContains(t, html, "/services/pilothouse.service/disable")
+	assert.Contains(t, html, "/services/backup.timer/logs")
+	assert.Contains(t, html, "/services/pilothouse.service/logs")
+}
+
+func TestLogsRendersEntriesDisclosureAndBackLink(t *testing.T) {
+	journal := Journal{Unit: "backup.timer", Description: "Nightly backup", Entries: []JournalEntry{{Timestamp: time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC), Priority: 3, Severity: "err", Message: "backup failed", Unit: "backup.timer"}}}
+	var output strings.Builder
+	require.NoError(t, Logs(journal, false).Render(context.Background(), &output))
+	html := output.String()
+	assert.Contains(t, html, "Last hour, up to 200 entries")
+	assert.Contains(t, html, "Nightly backup")
+	assert.Contains(t, html, "backup failed")
+	assert.Contains(t, html, "datetime=\"2026-07-15T12:30:00Z\"")
+	assert.Contains(t, html, "href=\"/services\"")
+	assert.NotContains(t, html, "<script")
+}
+
+func TestLogsRendersEmptyAndUnavailableStates(t *testing.T) {
+	for _, tc := range []struct {
+		unavailable bool
+		want        string
+	}{{false, "No journal entries were found in the last hour."}, {true, "Recent diagnostics are unavailable. Try again later."}} {
+		var output strings.Builder
+		require.NoError(t, Logs(Journal{Unit: "backup.timer"}, tc.unavailable).Render(context.Background(), &output))
+		assert.Contains(t, output.String(), tc.want)
+	}
 }
 
 func TestSummaryCardRendersChevronIcon(t *testing.T) {
