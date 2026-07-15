@@ -238,7 +238,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	response, err := s.broker.Login(ctx, username, password, remoteHost(r.RemoteAddr))
 	cancel()
 	r.Form.Set("password", "")
-	password = ""
 	if err != nil {
 		if errors.Is(err, broker.ErrUnavailable) {
 			s.renderLoginStatus(w, r, "Sign-in service is temporarily unavailable.", username, http.StatusServiceUnavailable)

@@ -112,20 +112,20 @@ func listenUnix(path, groupName string) (net.Listener, error) {
 	}
 	group, err := user.LookupGroup(groupName)
 	if err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("resolve broker socket group: %w", err)
 	}
 	gid, err := strconv.Atoi(group.Gid)
 	if err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("parse broker socket group: %w", err)
 	}
 	if err := os.Chown(path, os.Geteuid(), gid); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("set broker socket owner: %w", err)
 	}
 	if err := os.Chmod(path, 0o660); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("set broker socket mode: %w", err)
 	}
 	return listener, nil

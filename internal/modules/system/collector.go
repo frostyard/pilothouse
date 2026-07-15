@@ -223,7 +223,7 @@ func (c *LinuxCollector) readMemory() (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("read proc/meminfo: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	values := map[string]uint64{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -252,7 +252,7 @@ func (c *LinuxCollector) readNetwork() (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("read proc/net/dev: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var receive uint64
 	var send uint64
 	scanner := bufio.NewScanner(file)
