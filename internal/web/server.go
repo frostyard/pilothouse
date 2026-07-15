@@ -24,6 +24,7 @@ const sessionCookie = "pilothouse_session"
 
 type BrokerClient interface {
 	Action(context.Context, string, string, map[string]string) error
+	Health(context.Context) error
 	Login(context.Context, string, string, string) (broker.LoginResponse, error)
 	Logout(context.Context, string) error
 	Query(context.Context, string, string, map[string]string, any) error
@@ -79,6 +80,7 @@ func NewServer(registry *platform.Registry, brokerClient BrokerClient, logger *s
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /login", s.loginPage)
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("POST /logout", s.logout)
@@ -219,6 +221,17 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	s.renderLogin(w, r, "", "")
 }
 
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.broker.Health(ctx); err != nil {
+		http.Error(w, "privileged broker unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ready\n"))
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	if err := r.ParseForm(); err != nil {
@@ -316,7 +329,7 @@ func greeting() string {
 }
 
 func publicPath(path string) bool {
-	return path == "/healthz" || path == "/login" || strings.HasPrefix(path, "/static/")
+	return path == "/healthz" || path == "/readyz" || path == "/login" || strings.HasPrefix(path, "/static/")
 }
 
 func remoteHost(address string) string {

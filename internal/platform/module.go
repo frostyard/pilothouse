@@ -14,6 +14,24 @@ type DashboardCard struct {
 	Span      Span
 }
 
+type Severity string
+
+const (
+	SeverityCritical Severity = "critical"
+	SeverityInfo     Severity = "info"
+	SeverityUnknown  Severity = "unknown"
+	SeverityWarning  Severity = "warning"
+)
+
+type Finding struct {
+	Detail   string
+	ID       string
+	Path     string
+	Severity Severity
+	Source   string
+	Title    string
+}
+
 type Host interface {
 	CSRFToken(*http.Request) string
 	Execute(context.Context, *http.Request, string, map[string]string) error
@@ -36,6 +54,13 @@ type Module interface {
 	Dashboard(context.Context, Host) ([]DashboardCard, error)
 	Manifest() Manifest
 	Mount(*http.ServeMux, Host)
+}
+
+// HealthProvider is optional so modules can expose operational findings without
+// expanding the core module contract.
+type HealthProvider interface {
+	Health(context.Context, Host) ([]Finding, error)
+	Manifest() Manifest
 }
 
 type Page struct {

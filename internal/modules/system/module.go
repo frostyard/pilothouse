@@ -30,6 +30,35 @@ func (m *Module) Dashboard(ctx context.Context, _ platform.Host) ([]platform.Das
 	}, nil
 }
 
+func (m *Module) Health(ctx context.Context, _ platform.Host) ([]platform.Finding, error) {
+	snapshot, err := m.collector.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	findings := make([]platform.Finding, 0, 3)
+	if snapshot.DiskPercent >= 90 {
+		findings = append(findings, resourceFinding("disk", platform.SeverityCritical, "Persistent storage is nearly full", fmt.Sprintf("/var is %.0f%% used", snapshot.DiskPercent)))
+	} else if snapshot.DiskPercent >= 80 {
+		findings = append(findings, resourceFinding("disk", platform.SeverityWarning, "Persistent storage is filling up", fmt.Sprintf("/var is %.0f%% used", snapshot.DiskPercent)))
+	}
+	if snapshot.MemoryPercent >= 95 {
+		findings = append(findings, resourceFinding("memory", platform.SeverityCritical, "Memory pressure is critical", fmt.Sprintf("Memory is %.0f%% used", snapshot.MemoryPercent)))
+	} else if snapshot.MemoryPercent >= 85 {
+		findings = append(findings, resourceFinding("memory", platform.SeverityWarning, "Memory pressure is high", fmt.Sprintf("Memory is %.0f%% used", snapshot.MemoryPercent)))
+	}
+	loadRatio := snapshot.Load1 / float64(snapshot.CPUs)
+	if loadRatio >= 2 {
+		findings = append(findings, resourceFinding("load", platform.SeverityCritical, "System load is critical", fmt.Sprintf("1 minute load %.2f across %d CPUs", snapshot.Load1, snapshot.CPUs)))
+	} else if loadRatio >= 1 {
+		findings = append(findings, resourceFinding("load", platform.SeverityWarning, "System load is elevated", fmt.Sprintf("1 minute load %.2f across %d CPUs", snapshot.Load1, snapshot.CPUs)))
+	}
+	return findings, nil
+}
+
+func resourceFinding(id string, severity platform.Severity, title, detail string) platform.Finding {
+	return platform.Finding{ID: "system." + id, Source: "System", Severity: severity, Title: title, Detail: detail, Path: "/system"}
+}
+
 func (m *Module) Manifest() platform.Manifest {
 	return platform.Manifest{
 		Description: "CPU, memory, storage, network, and host identity",

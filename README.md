@@ -8,6 +8,8 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 
 - Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics
 - Automatic dashboard refresh every 15 seconds
+- Live attention view for disk, memory, load, failed systemd units, and unavailable status sources
+- Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
 - Discovery of both shared `/usr/lib/sysupdate.d` and component-scoped `/usr/lib/sysupdate.<name>.d` Snosi definitions
 - Installed and merged state from `systemd-sysext`
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
@@ -19,6 +21,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
+- Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Responsive desktop and mobile layouts
 
 ## Develop

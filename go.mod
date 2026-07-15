@@ -7,7 +7,10 @@ require (
 	github.com/stretchr/testify v1.11.1
 )
 
-require github.com/lxc/incus/v7 v7.2.0
+require (
+	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/lxc/incus/v7 v7.2.0
+)
 
 require (
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
@@ -18,6 +21,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
