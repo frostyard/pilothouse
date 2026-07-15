@@ -6,7 +6,7 @@ Requires=pilothoused.service
 [Service]
 Type=simple
 EnvironmentFile=-/etc/pilothouse/pilothouse.env
-ExecStart=/usr/local/bin/pilothouse --listen 127.0.0.1:8888 --broker-socket /run/pilothouse/broker.sock
+ExecStart=/usr/bin/pilothouse --listen 127.0.0.1:8888 --broker-socket /run/pilothouse/broker.sock
 Restart=on-failure
 RestartSec=3
 User=pilothouse

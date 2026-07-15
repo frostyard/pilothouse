@@ -5,7 +5,7 @@ Before=pilothouse.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/libexec/pilothoused --socket /run/pilothouse/broker.sock --socket-group pilothouse --admin-group sudo
+ExecStart=/usr/bin/pilothoused --socket /run/pilothouse/broker.sock --socket-group pilothouse --admin-group sudo
 Restart=on-failure
 RestartSec=3
 User=root
