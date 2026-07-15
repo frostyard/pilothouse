@@ -1,0 +1,103 @@
+package docker
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/platform"
+)
+
+type Module struct{}
+
+func New() *Module {
+	return &Module{}
+}
+
+func (m *Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.DashboardCard, error) {
+	state, err := queryState(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	return []platform.DashboardCard{{Component: Summary(state), Order: 33, Span: platform.SpanHalf}}, nil
+}
+
+func (m *Module) Manifest() platform.Manifest {
+	return platform.Manifest{
+		Description: "Inspect and manage system Docker containers and images",
+		Icon:        "docker",
+		ID:          "docker",
+		Name:        "Docker",
+		Order:       40,
+		Path:        "/docker",
+	}
+}
+
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+	mux.HandleFunc("GET /docker", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		state, err := queryState(ctx, host)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		_ = host.Render(w, r, platform.Page{
+			Active: "docker", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin),
+			Eyebrow: "Moby workloads", Title: "Docker",
+		})
+	})
+	mux.HandleFunc("POST /docker/containers/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+		if !host.ValidateAction(w, r) {
+			return
+		}
+		id := r.PathValue("id")
+		action := r.PathValue("action")
+		var actionID string
+		switch action {
+		case "remove":
+			actionID = broker.ActionDockerRemove
+		case "restart":
+			actionID = broker.ActionDockerRestart
+		case "start":
+			actionID = broker.ActionDockerStart
+		case "stop":
+			actionID = broker.ActionDockerStop
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
+		m.redirect(w, r, fmt.Sprintf("Container %sd", action), err)
+	})
+}
+
+func queryState(ctx context.Context, host platform.Host) (State, error) {
+	var state State
+	if err := host.Query(ctx, broker.QueryDockerState, nil, &state); err != nil {
+		return State{}, err
+	}
+	return state, nil
+}
+
+func (m *Module) redirect(w http.ResponseWriter, r *http.Request, success string, err error) {
+	values := url.Values{}
+	if err != nil {
+		values.Set("kind", "error")
+		values.Set("notice", err.Error())
+	} else {
+		values.Set("notice", success)
+	}
+	destination := "/docker?" + values.Encode()
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", destination)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
+}

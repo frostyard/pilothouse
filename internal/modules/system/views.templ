@@ -1,0 +1,91 @@
+package system
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Hero(snapshot Snapshot) {
+	<article class="card hero-card">
+		<div class="hero-content">
+			<div class="hero-kicker"><span></span> All systems operational</div>
+			<h2>{ snapshot.Hostname }</h2>
+			<p>{ snapshot.OS } is online and responding normally.<br/>Uptime { formatUptime(int64(snapshot.Uptime.Seconds())) }.</p>
+		</div>
+		<div class="hero-facts">
+			<div><strong>{ fmt.Sprintf("%.2f", snapshot.Load1) }</strong><span>1 min load</span></div>
+			<div><strong>{ snapshot.Kernel }</strong><span>Kernel</span></div>
+		</div>
+	</article>
+}
+
+templ Metric(icon, title string, value float64, display, detail, tone string) {
+	<article class="card metric-card">
+		<div class="card-heading">
+			<span class={ "card-icon", tone }>@web.Icon(icon)</span>
+			<div><h2>{ title }</h2><p>Current utilization</p></div>
+		</div>
+		<div class="metric-value"><strong>{ display }</strong></div>
+		<div class={ "meter", tone }><span style={ fmt.Sprintf("width: %.1f%%", value) }></span></div>
+		<div class="metric-foot"><span>{ detail }</span><span>{ fmt.Sprintf("%.0f%%", value) }</span></div>
+	</article>
+}
+
+templ Resources(snapshot Snapshot) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>Resource summary</h2><p>Live host telemetry</p></div>
+			<a class="card-link" href="/system">
+				Details
+				@web.Icon("chevron")
+			</a>
+		</div>
+		<div class="resource-list">
+			@ResourceRow("cpu", "CPU", fmt.Sprintf("%.1f%%", snapshot.CPUPercent), snapshot.CPUPercent, "")
+			@ResourceRow("memory", "Memory", formatBytes(snapshot.MemoryUsed)+" / "+formatBytes(snapshot.MemoryTotal), snapshot.MemoryPercent, "orange")
+			@ResourceRow("disk", "Persistent storage", formatBytes(snapshot.DiskUsed)+" / "+formatBytes(snapshot.DiskTotal), snapshot.DiskPercent, "blue")
+		</div>
+	</article>
+}
+
+templ ResourceRow(icon, name, value string, percent float64, tone string) {
+	<div class="resource-row">
+		<div class="resource-icon">@web.Icon(icon)</div>
+		<strong>{ name }</strong><span>{ value }</span>
+		<div class={ "meter", tone }><span style={ fmt.Sprintf("width: %.1f%%", percent) }></span></div>
+	</div>
+}
+
+templ SystemPage(snapshot Snapshot) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>Live operating-system metrics collected directly from procfs and the root filesystem. The overview refreshes automatically every fifteen seconds.</p>
+		</div>
+		<div class="dashboard-grid">
+			<div class="dashboard-slot span-full">@Hero(snapshot)</div>
+			<div class="dashboard-slot span-third">@Metric("cpu", "CPU load", snapshot.CPUPercent, fmt.Sprintf("%.1f%%", snapshot.CPUPercent), fmt.Sprintf("load %.2f / %.2f / %.2f", snapshot.Load1, snapshot.Load5, snapshot.Load15), "green")</div>
+			<div class="dashboard-slot span-third">@Metric("memory", "Memory", snapshot.MemoryPercent, formatBytes(snapshot.MemoryUsed), "of "+formatBytes(snapshot.MemoryTotal), "orange")</div>
+			<div class="dashboard-slot span-third">@Metric("disk", "Persistent storage", snapshot.DiskPercent, formatBytes(snapshot.DiskUsed), formatBytes(snapshot.DiskFree)+" free", "blue")</div>
+			<div class="dashboard-slot span-half">
+				<article class="card">
+					<div class="card-heading"><span class="card-icon blue">@web.Icon("network")</span><div><h2>Network totals</h2><p>Excludes loopback traffic</p></div></div>
+					<div class="mini-list">
+						<div class="mini-row"><div><strong>Received</strong><small>Since boot</small></div><span class="version">{ formatBytes(snapshot.NetworkReceive) }</span></div>
+						<div class="mini-row"><div><strong>Sent</strong><small>Since boot</small></div><span class="version">{ formatBytes(snapshot.NetworkSend) }</span></div>
+					</div>
+				</article>
+			</div>
+			<div class="dashboard-slot span-half">
+				<article class="card">
+					<div class="card-heading"><span class="card-icon">@web.Icon("server")</span><div><h2>Host identity</h2><p>Runtime environment</p></div></div>
+					<div class="mini-list">
+						<div class="mini-row"><div><strong>Operating system</strong></div><span class="version">{ snapshot.OS }</span></div>
+						<div class="mini-row"><div><strong>Kernel</strong></div><span class="version">{ snapshot.Kernel }</span></div>
+						<div class="mini-row"><div><strong>Logical CPUs</strong></div><span class="version">{ fmt.Sprintf("%d", snapshot.CPUs) }</span></div>
+					</div>
+				</article>
+			</div>
+		</div>
+	</div>
+}

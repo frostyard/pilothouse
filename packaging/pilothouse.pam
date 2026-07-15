@@ -1,0 +1,4 @@
+#%PAM-1.0
+@include common-auth
+account required pam_nologin.so
+@include common-account

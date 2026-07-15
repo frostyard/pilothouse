@@ -1,0 +1,110 @@
+package sysext
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(features []Feature) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>System extensions</h2><p>{ fmt.Sprintf("%d active · %d available", mergedCount(features), len(features)) }</p></div>
+			<a class="card-link" href="/sysext">
+				Manage
+				@web.Icon("chevron")
+			</a>
+		</div>
+		<div class="mini-list">
+			for index, feature := range activeFirst(features) {
+				if index < 4 {
+					<div class="mini-row">
+						<div><strong>{ feature.Name }</strong><small>{ feature.Description }</small></div>
+						if feature.Merged {
+							<span class="badge active">Active</span>
+						} else if feature.Enabled {
+							<span class="badge update">Enabled</span>
+						} else {
+							<span class="badge">Available</span>
+						}
+					</div>
+				}
+			}
+		</div>
+	</article>
+}
+
+templ Page(features []Feature, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>Optional Snosi software layers managed through updex. Enabling downloads and merges the newest extension; removing an active extension disables it now and takes effect on reboot.</p>
+			if admin {
+				<div class="actions">
+					<form method="post" action="/sysext/actions/refresh">
+						<input type="hidden" name="csrf" value={ csrf }/>
+						<button class="button secondary" type="submit">
+							@web.Icon("refresh")
+							Refresh merge
+						</button>
+					</form>
+					<form method="post" action="/sysext/actions/update">
+						<input type="hidden" name="csrf" value={ csrf }/>
+						<button class="button" type="submit">Update enabled</button>
+					</form>
+				</div>
+			} else {
+				<span class="badge">Read only</span>
+			}
+		</div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Available extensions</h2><span>{ fmt.Sprintf("%d enabled", enabledCount(features)) }</span></div>
+			if len(features) == 0 {
+				<div class="empty-state"><span class="card-icon">@web.Icon("sysext")</span>No feature definitions were found.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Extension</th><th>Status</th><th>Version</th><th></th></tr></thead>
+					<tbody>
+						for _, feature := range features {
+							<tr>
+								<td>
+									<div class="extension-name"><span class="card-icon">@web.Icon("sysext")</span><div><strong>{ feature.Name }</strong><small>{ feature.Description }</small></div></div>
+								</td>
+								<td>
+									if feature.Merged {
+										<span class="badge active">Active</span>
+									} else if feature.Enabled {
+										<span class="badge update">Enabled</span>
+									} else {
+										<span class="badge">Available</span>
+									}
+								</td>
+								<td><span class="version">{ feature.Version }</span></td>
+								<td>
+									<div class="actions">
+										if !admin {
+											<span class="card-subtle">No permission</span>
+										} else if feature.Enabled || feature.Installed {
+											<form method="post" action={ templ.SafeURL("/sysext/" + feature.Name + "/disable") }>
+												<input type="hidden" name="csrf" value={ csrf }/>
+												if feature.Merged {
+													<button class="button danger" type="submit">Remove at reboot</button>
+												} else {
+													<button class="button danger" type="submit">Remove</button>
+												}
+											</form>
+										} else {
+											<form method="post" action={ templ.SafeURL("/sysext/" + feature.Name + "/enable") }>
+												<input type="hidden" name="csrf" value={ csrf }/>
+												<button class="button" type="submit">Install</button>
+											</form>
+										}
+									</div>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+	</div>
+}

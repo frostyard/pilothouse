@@ -1,0 +1,23 @@
+[Unit]
+Description=Pilothouse Snosi web console
+After=network.target pilothoused.service
+Requires=pilothoused.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/pilothouse/pilothouse.env
+ExecStart=/usr/local/bin/pilothouse --listen 127.0.0.1:8888 --broker-socket /run/pilothouse/broker.sock
+Restart=on-failure
+RestartSec=3
+User=pilothouse
+Group=pilothouse
+UMask=0077
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

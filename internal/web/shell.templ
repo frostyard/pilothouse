@@ -1,0 +1,203 @@
+package web
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/frostyard/pilothouse/internal/auth"
+	"github.com/frostyard/pilothouse/internal/platform"
+)
+
+type LayoutData struct {
+	Active    string
+	CSRF      string
+	Eyebrow   string
+	Flash     string
+	FlashKind string
+	Identity  auth.Identity
+	Modules   []platform.Manifest
+	Path      string
+	Title     string
+}
+
+templ Layout(data LayoutData, body templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="color-scheme" content="light"/>
+			<meta name="theme-color" content="#15221d"/>
+			<title>{ data.Title } · Pilothouse</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+			<script src="/static/htmx.min.js" defer></script>
+		</head>
+		<body hx-boost="true">
+			<div class="app-shell">
+				<aside class="sidebar">
+					<a class="brand" href="/" aria-label="Pilothouse dashboard">
+						<span class="brand-mark">P</span>
+						<span><strong>Pilothouse</strong><small>Snosi console</small></span>
+					</a>
+					<nav class="nav" aria-label="Primary navigation">
+						<a href="/" class={ "nav-link", templ.KV("active", data.Active == "dashboard") }>
+							<span class="nav-icon">@Icon("dashboard")</span>
+							<span>Overview</span>
+						</a>
+						<div class="nav-group">Management</div>
+						for _, module := range data.Modules {
+							<a href={ templ.SafeURL(module.Path) } class={ "nav-link", templ.KV("active", data.Active == module.ID) }>
+								<span class="nav-icon">@Icon(module.Icon)</span>
+								<span>{ module.Name }</span>
+							</a>
+						}
+					</nav>
+					<div class="sidebar-foot">
+						<span class="user-avatar">{ userInitial(data.Identity.Username) }</span>
+						<span class="sidebar-user"><strong>{ data.Identity.Username }</strong><small>{ roleLabel(data.Identity) }</small></span>
+						<form method="post" action="/logout">
+							<input type="hidden" name="csrf" value={ data.CSRF }/>
+							<button class="logout-button" type="submit" aria-label="Sign out">@Icon("logout")</button>
+						</form>
+					</div>
+				</aside>
+				<main class="main">
+					<header class="topbar">
+						<div>
+							<div class="eyebrow">{ data.Eyebrow }</div>
+							<h1>{ data.Title }</h1>
+						</div>
+						<div class="topbar-actions">
+							<span class="live-pill"><span></span> Live</span>
+							<a class="icon-button" href={ templ.SafeURL(data.Path) } aria-label="Refresh page">@Icon("refresh")</a>
+						</div>
+					</header>
+					if data.Flash != "" {
+						<div class={ "flash", templ.KV("error", data.FlashKind == "error") } role="status">
+							@Icon(flashIcon(data.FlashKind))
+							<span>{ data.Flash }</span>
+						</div>
+					}
+					@body
+				</main>
+			</div>
+		</body>
+	</html>
+}
+
+templ Dashboard(cards []platform.DashboardCard) {
+	<section id="dashboard" class="dashboard-grid" hx-boost="false" hx-get="/" hx-trigger="every 15s" hx-select="#dashboard" hx-swap="outerHTML">
+		for _, card := range cards {
+			<div class={ "dashboard-slot", "span-" + string(card.Span) }>
+				@card.Component
+			</div>
+		}
+	</section>
+}
+
+templ ModuleErrorCard(name, message string) {
+	<article class="card error-card">
+		<div class="card-heading">
+			<span class="card-icon danger">@Icon("alert")</span>
+			<div><h2>{ name }</h2><p>Module unavailable</p></div>
+		</div>
+		<p>{ message }</p>
+	</article>
+}
+
+templ Icon(name string) {
+	switch name {
+		case "alert":
+			@svg(`<path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`)
+		case "check":
+			@svg(`<path d="m20 6-11 11-5-5"/>`)
+		case "chevron":
+			@svg(`<path d="m9 18 6-6-6-6"/>`)
+		case "cpu":
+			@svg(`<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>`)
+		case "dashboard":
+			@svg(`<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>`)
+		case "disk":
+			@svg(`<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>`)
+		case "docker":
+			@svg(`<path d="M4 10h3v3H4zM8 10h3v3H8zM12 10h3v3h-3zM8 6h3v3H8zM12 6h3v3h-3zM16 10h3v3h-3z"/><path d="M3 14c.7 3 3.2 5 7.5 5 5.6 0 8.6-2.9 9.5-7 1.1.1 2-.3 2.8-1.1-.4-1.7-1.5-2.5-3.2-2.5-.4 0-.8.1-1.2.2"/>`)
+		case "memory":
+			@svg(`<path d="M6 19v2M10 19v2M14 19v2M18 19v2M6 3v2M10 3v2M14 3v2M18 3v2"/><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10v6H7z"/>`)
+		case "network":
+			@svg(`<path d="M5 12.6a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 20h.01M2 9a15 15 0 0 1 20 0"/>`)
+		case "containers":
+			@svg(`<path d="m12 2 8 4.5v9L12 20l-8-4.5v-9L12 2Z"/><path d="m4.3 6.7 7.7 4.4 7.7-4.4M12 20v-8.9"/><path d="m8 4.3 8 4.6"/>`)
+		case "refresh":
+			@svg(`<path d="M20 11a8.1 8.1 0 1 0 2 5"/><path d="M20 4v7h-7"/>`)
+		case "server":
+			@svg(`<rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 7h.01M6 18h.01"/>`)
+		case "sysext":
+			@svg(`<path d="m12 2 8 4.5v9L12 20l-8-4.5v-9L12 2Z"/><path d="m4.3 6.7 7.7 4.4 7.7-4.4M12 20v-8.9"/>`)
+		case "logout":
+			@svg(`<path d="M10 17l5-5-5-5M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>`)
+		default:
+			@svg(`<circle cx="12" cy="12" r="9"/>`)
+	}
+}
+
+templ svg(paths string) {
+	@templ.Raw(fmt.Sprintf(`<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">%s</svg>`, paths))
+}
+
+func flashIcon(kind string) string {
+	if kind == "error" {
+		return "alert"
+	}
+	return "check"
+}
+
+func roleLabel(identity auth.Identity) string {
+	if identity.Admin {
+		return "Administrator"
+	}
+	return "Read-only access"
+}
+
+func userInitial(username string) string {
+	if username == "" {
+		return "?"
+	}
+	return strings.ToUpper(username[:1])
+}
+
+templ Login(message, username, csrf string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="color-scheme" content="light"/>
+			<meta name="theme-color" content="#15221d"/>
+			<title>Sign in · Pilothouse</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+		</head>
+		<body class="login-body">
+			<main class="login-shell">
+				<section class="login-panel">
+					<div class="login-brand"><span class="brand-mark">P</span><span><strong>Pilothouse</strong><small>Snosi console</small></span></div>
+					<div class="login-copy">
+						<div class="eyebrow">System authentication</div>
+						<h1>Welcome aboard.</h1>
+						<p>Sign in with your Snow account. Pilothouse authenticates against the system's PAM policy.</p>
+					</div>
+					<form class="login-form" method="post" action="/login" autocomplete="on">
+						<input type="hidden" name="csrf" value={ csrf }/>
+						if message != "" {
+							<div class="login-error" role="alert">{ message }</div>
+						}
+						<label>Username<input name="username" value={ username } autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus/></label>
+						<label>Password<input type="password" name="password" autocomplete="current-password" required/></label>
+						<button class="button login-submit" type="submit">Sign in</button>
+					</form>
+					<p class="login-foot">Direct root login is disabled.</p>
+				</section>
+				<section class="login-art" aria-hidden="true"><div><span>Local system</span><strong>Secure access<br/>to Snow.</strong></div></section>
+			</main>
+		</body>
+	</html>
+}

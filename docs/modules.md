@@ -1,0 +1,106 @@
+# Adding management modules
+
+Pilothouse modules are vertical slices. Keep the collector or manager, HTTP actions, views, and tests together under `internal/modules/<id>`.
+
+## Contract
+
+Implement `platform.Module`:
+
+```go
+type Module interface {
+    Dashboard(context.Context, Host) ([]DashboardCard, error)
+    Manifest() Manifest
+    Mount(*http.ServeMux, Host)
+}
+```
+
+`Manifest` gives the shell everything it needs for navigation. `Dashboard` contributes reusable templ components to the overview without coupling the overview to a concrete module. `Mount` registers standard-library Go 1.22 method-and-path patterns and receives a `Host` for common layout rendering and action validation.
+
+## Recommended shape
+
+```text
+internal/modules/network/
+├── collector.go       domain types and a Collector interface
+├── collector_linux.go Linux implementation
+├── module.go          manifest, dashboard cards, routes
+├── views.templ        module-specific presentation
+└── collector_test.go  parser and behavior tests
+```
+
+Keep shell-level primitives generic. A network-specific table belongs in the network module; a generally useful badge or button belongs in `internal/web`.
+
+## Minimal module
+
+```go
+type Module struct {
+    service Service
+}
+
+func (m *Module) Manifest() platform.Manifest {
+    return platform.Manifest{
+        ID: "network",
+        Name: "Network",
+        Path: "/network",
+        Icon: "network",
+        Order: 30,
+    }
+}
+
+func (m *Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.DashboardCard, error) {
+    state, err := m.service.State(ctx)
+    if err != nil {
+        return nil, err
+    }
+    return []platform.DashboardCard{{
+        Component: Summary(state),
+        Order: 40,
+        Span: platform.SpanHalf,
+    }}, nil
+}
+
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+    mux.HandleFunc("GET /network", m.page(host))
+}
+```
+
+Register one constructor in `cmd/pilothouse/main.go`; navigation and dashboard placement then happen automatically.
+
+## Rules for actions
+
+- Use POST for mutations and call `host.ValidateAction` before doing work.
+- Submit a fixed action ID with `host.Execute`; never execute a privileged command in a web module.
+- Submit privileged reads through a fixed `host.Query`; never grant the web process access to a root-equivalent API socket.
+- Register the privileged implementation in `cmd/pilothoused`, marking whether it requires an administrator.
+- Validate identifiers again inside the broker-side domain manager.
+- Pass command arguments separately with `exec.CommandContext`; never invoke a shell.
+- Put a timeout around external work.
+- Test web handlers with a fake host and broker actions with fake domain managers.
+- Return an `HX-Redirect` for HTMX requests and a 303 redirect for normal forms.
+
+Example web action:
+
+```go
+if !host.ValidateAction(w, r) {
+    return
+}
+err := host.Execute(r.Context(), r, "org.frostyard.pilothouse.network.configure", map[string]string{"interface": name})
+```
+
+The corresponding broker action is registered once in `cmd/pilothoused`. The action registry rechecks the user's current system groups before dispatch.
+
+## Privileged reads
+
+Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker or Podman API socket is effectively root access, and Podman's rootless and rootful stores are different inventories.
+
+Register a fixed broker query and call it through `host.Query` from both `Dashboard` and page handlers:
+
+```go
+var state State
+err := host.Query(ctx, broker.QueryPodmanState, nil, &state)
+```
+
+Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, container environment variables, secrets, or root-equivalent sockets. Both container modules list full IDs and then use inspect JSON to avoid parsing localized display output.
+
+## Design conventions
+
+Use cards for discrete resources, quiet badges for state, and reserve red actions for destructive work. Pages must remain usable without JavaScript; HTMX is progressive enhancement. No module should require a network-loaded stylesheet, font, script, or icon.

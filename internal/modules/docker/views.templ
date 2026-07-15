@@ -1,0 +1,121 @@
+package docker
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(state State) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>Docker</h2><p>{ fmt.Sprintf("%d running · %d containers", runningCount(state), len(state.Containers)) }</p></div>
+			<a class="card-link" href="/docker">
+				Manage
+				@web.Icon("chevron")
+			</a>
+		</div>
+		if len(state.Containers) == 0 {
+			<div class="empty-state compact">
+				<span class="card-icon blue">@web.Icon("docker")</span>
+				No Docker containers.
+			</div>
+		} else {
+			<div class="mini-list">
+				for index, container := range state.Containers {
+					if index < 4 {
+						<div class="mini-row">
+							<div><strong>{ container.Name }</strong><small>{ container.Image }</small></div>
+							if container.Running {
+								<span class="badge active">Running</span>
+							} else {
+								<span class="badge">{ stateLabel(container) }</span>
+							}
+						</div>
+					}
+				}
+			</div>
+		}
+	</article>
+}
+
+templ Page(state State, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>System-wide workloads managed by the Docker Engine. Pilothouse exposes narrow inventory through the authenticated broker and never grants the web process access to the root-equivalent Docker socket.</p>
+			if admin {
+				<span class="badge active">Administrator</span>
+			} else {
+				<span class="badge">Read only</span>
+			}
+		</div>
+		<section class="engine-stats" aria-label="Docker summary">
+			<div class="engine-stat"><span>Running</span><strong>{ fmt.Sprint(runningCount(state)) }</strong><small>of { fmt.Sprint(len(state.Containers)) } containers</small></div>
+			<div class="engine-stat"><span>Stopped</span><strong>{ fmt.Sprint(len(state.Containers) - runningCount(state)) }</strong><small>containers</small></div>
+			<div class="engine-stat"><span>Images</span><strong>{ fmt.Sprint(len(state.Images)) }</strong><small>{ formatBytes(imageBytes(state)) } reported</small></div>
+			<div class="engine-stat"><span>Engine</span><strong class="version">{ state.Version }</strong><small>Docker</small></div>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Containers</h2><span>{ fmt.Sprintf("%d total", len(state.Containers)) }</span></div>
+			if len(state.Containers) == 0 {
+				<div class="empty-state">
+					<span class="card-icon blue">@web.Icon("docker")</span>
+					No containers were found in the Docker daemon.
+				</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Container</th><th>Status</th><th></th></tr></thead>
+					<tbody>
+						for _, container := range state.Containers {
+							<tr>
+								<td><div class="extension-name"><span class="card-icon blue">@web.Icon("docker")</span><div><strong>{ container.Name }</strong><small>{ container.Image } · <span class="version">{ shortID(container.ID) }</span></small></div></div></td>
+								<td>
+									if container.Running {
+										<span class="badge active">Running</span>
+									} else {
+										<span class="badge">{ stateLabel(container) }</span>
+									}
+									if container.Status != "" {
+										<small class="table-detail">{ container.Status }</small>
+									}
+								</td>
+								<td>
+									<div class="actions">
+										if !admin {
+											<span class="card-subtle">No permission</span>
+										} else if container.Running {
+											@containerAction(container.ID, "restart", "Restart", csrf, "secondary")
+											@containerAction(container.ID, "stop", "Stop", csrf, "danger")
+										} else {
+											@containerAction(container.ID, "start", "Start", csrf, "")
+											@containerAction(container.ID, "remove", "Remove", csrf, "danger")
+										}
+									</div>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Images</h2><span>{ formatBytes(imageBytes(state)) } reported</span></div>
+			if len(state.Images) == 0 {
+				<div class="empty-state">No images were found in the Docker daemon.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Image</th><th>ID</th><th>Containers</th><th>Size</th></tr></thead><tbody>
+					for _, image := range state.Images {
+						<tr><td><strong>{ image.Name }</strong></td><td><span class="version">{ shortID(image.ID) }</span></td><td>{ fmt.Sprint(image.Containers) }</td><td>{ formatBytes(image.Size) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+	</div>
+}
+
+templ containerAction(id, action, label, csrf, class string) {
+	<form method="post" action={ templ.SafeURL("/docker/containers/" + id + "/" + action) }>
+		<input type="hidden" name="csrf" value={ csrf }/>
+		<button class={ "button", class } type="submit">{ label }</button>
+	</form>
+}
