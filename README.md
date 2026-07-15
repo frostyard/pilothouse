@@ -14,7 +14,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - System Podman inventory for containers, pods, images, engine version, and reported image storage
 - Administrator-only container start, stop, restart, and safe removal actions
 - System Docker Engine inventory with the same container lifecycle controls and socket isolation
-- Local Incus default-project inventory for containers, virtual machines, and images with lifecycle controls
+- Local Incus project inventory for containers, virtual machines, and images with lifecycle controls
 - PAM authentication using Snow's users and account policy
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
@@ -58,7 +58,7 @@ The central contract is deliberately small. Every management module provides:
 
 The shell knows only about `platform.Module`; it does not import concrete modules. The web composition root registers presentation modules. The broker composition root separately registers privileged queries and action implementations. Modules submit fixed query and action identifiers through `platform.Host`; they never execute privileged commands or connect to root-equivalent service sockets in the web process.
 
-The Podman module intentionally manages the root/system store used for host services through the Podman 5.0 or newer Libpod API. Enable the rootful API socket with `sudo systemctl enable --now podman.socket`; use `--podman-socket` to select a different Unix socket. The Docker module targets the system Docker daemon. The Incus module uses the official SDK against `/var/lib/incus/unix.socket` and is fixed to the local daemon's `default` project; it never reads configured Incus remotes. Rootless and remote workloads remain isolated from this system administration surface.
+The Podman module intentionally manages the root/system store used for host services through the Podman 5.0 or newer Libpod API. Enable the rootful API socket with `sudo systemctl enable --now podman.socket`; use `--podman-socket` to select a different Unix socket. The Docker module targets the system Docker daemon. The Incus module uses the official SDK against `/var/lib/incus/unix.socket` and allows selection from projects reported by that local daemon; it never reads configured Incus remotes. Rootless and remote workloads remain isolated from this system administration surface.
 
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 

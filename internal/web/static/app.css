@@ -118,6 +118,10 @@ svg { display: block; height: 1.15rem; width: 1.15rem; }
 .page-stack { display: grid; gap: 18px; }
 .page-intro { align-items: center; display: flex; justify-content: space-between; }
 .page-intro p { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0; max-width: 620px; }
+.incus-project-bar { gap: 18px; }
+.incus-project-bar form { align-items: center; display: flex; gap: 8px; margin-left: auto; }
+.incus-project-bar label { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.incus-project-bar select { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font: inherit; min-width: 150px; padding: 8px 30px 8px 10px; }
 .button { align-items: center; background: var(--sidebar); border: 0; border-radius: 9px; color: white; cursor: pointer; display: inline-flex; font-size: 11px; font-weight: 700; gap: 7px; min-height: 36px; padding: 0 14px; text-decoration: none; }
 .button:hover { background: #29483b; }
 .button.secondary { background: white; border: 1px solid var(--line); color: #44534c; }

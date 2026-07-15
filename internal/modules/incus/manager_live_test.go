@@ -16,8 +16,9 @@ func TestLiveSystemManagerState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	client := NewLocalClient()
-	state, err := NewSystemManager(client).State(ctx)
+	state, err := NewSystemManager(client).State(ctx, "default")
 	require.NoError(t, err)
 	require.NotEmpty(t, state.Version)
-	t.Logf("Incus %s: %d instances, %d images", state.Version, len(state.Instances), len(state.Images))
+	require.NotEmpty(t, state.Projects)
+	t.Logf("Incus %s: project %s of %d, %d instances, %d images", state.Version, state.Project, len(state.Projects), len(state.Instances), len(state.Images))
 }
