@@ -2,35 +2,15 @@ package docker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
+	imagetypes "github.com/docker/docker/api/types/image"
 )
-
-type CommandRunner interface {
-	Run(context.Context, string, ...string) ([]byte, error)
-}
-
-type ExecRunner struct{}
-
-func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, name, args...)
-	command.Env = os.Environ()
-	output, err := command.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return output, fmt.Errorf("%s: %s", filepath.Base(name), message)
-	}
-	return output, nil
-}
 
 type Container struct {
 	ID      string `json:"id"`
@@ -62,32 +42,43 @@ type Manager interface {
 	Stop(context.Context, string) error
 }
 
-type SystemManager struct {
-	binary string
-	runner CommandRunner
+type Client interface {
+	ContainerInspect(context.Context, string) (containertypes.InspectResponse, error)
+	ContainerList(context.Context, containertypes.ListOptions) ([]containertypes.Summary, error)
+	ContainerRemove(context.Context, string, containertypes.RemoveOptions) error
+	ContainerRestart(context.Context, string, containertypes.StopOptions) error
+	ContainerStart(context.Context, string, containertypes.StartOptions) error
+	ContainerStop(context.Context, string, containertypes.StopOptions) error
+	ImageList(context.Context, imagetypes.ListOptions) ([]imagetypes.Summary, error)
+	ServerVersion(context.Context) (types.Version, error)
 }
 
-func NewSystemManager(runner CommandRunner, binary string) *SystemManager {
-	if binary == "" {
-		binary = "docker"
-	}
-	return &SystemManager{binary: binary, runner: runner}
+type SystemManager struct {
+	client Client
+}
+
+func NewSystemManager(client Client) *SystemManager {
+	return &SystemManager{client: client}
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
-	versionOutput, err := m.runner.Run(ctx, m.binary, "version", "--format", "{{json .}}")
+	version, err := m.client.ServerVersion(ctx)
 	if err != nil {
 		return State{}, err
 	}
-	containers, rawContainers, err := m.containers(ctx)
+	containers, inspected, err := m.containers(ctx)
 	if err != nil {
 		return State{}, err
 	}
-	images, err := m.images(ctx, rawContainers)
+	images, err := m.images(ctx, inspected)
 	if err != nil {
 		return State{}, err
 	}
-	return State{Containers: containers, Images: images, Version: parseVersion(versionOutput)}, nil
+	engineVersion := version.Version
+	if engineVersion == "" {
+		engineVersion = "installed"
+	}
+	return State{Containers: containers, Images: images, Version: engineVersion}, nil
 }
 
 func (m *SystemManager) Remove(ctx context.Context, id string) error {
@@ -98,8 +89,7 @@ func (m *SystemManager) Remove(ctx context.Context, id string) error {
 	if container.Running {
 		return errors.New("stop the container before removing it")
 	}
-	_, err = m.runner.Run(ctx, m.binary, "container", "rm", id)
-	return err
+	return m.client.ContainerRemove(ctx, id, containertypes.RemoveOptions{})
 }
 
 func (m *SystemManager) Restart(ctx context.Context, id string) error {
@@ -110,8 +100,8 @@ func (m *SystemManager) Restart(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	_, err = m.runner.Run(ctx, m.binary, "container", "restart", "--timeout", "10", id)
-	return err
+	timeout := 10
+	return m.client.ContainerRestart(ctx, id, containertypes.StopOptions{Timeout: &timeout})
 }
 
 func (m *SystemManager) Start(ctx context.Context, id string) error {
@@ -122,8 +112,7 @@ func (m *SystemManager) Start(ctx context.Context, id string) error {
 	if container.Running {
 		return errors.New("container is already running")
 	}
-	_, err = m.runner.Run(ctx, m.binary, "container", "start", id)
-	return err
+	return m.client.ContainerStart(ctx, id, containertypes.StartOptions{})
 }
 
 func (m *SystemManager) Stop(ctx context.Context, id string) error {
@@ -134,8 +123,8 @@ func (m *SystemManager) Stop(ctx context.Context, id string) error {
 	if !container.Running {
 		return errors.New("container is not running")
 	}
-	_, err = m.runner.Run(ctx, m.binary, "container", "stop", "--timeout", "10", id)
-	return err
+	timeout := 10
+	return m.client.ContainerStop(ctx, id, containertypes.StopOptions{Timeout: &timeout})
 }
 
 func (m *SystemManager) container(ctx context.Context, id string) (Container, error) {
@@ -154,54 +143,39 @@ func (m *SystemManager) container(ctx context.Context, id string) (Container, er
 	return Container{}, errors.New("container no longer exists")
 }
 
-func (m *SystemManager) containers(ctx context.Context) ([]Container, []rawContainer, error) {
-	idsOutput, err := m.runner.Run(ctx, m.binary, "container", "ls", "--all", "--quiet", "--no-trunc")
+func (m *SystemManager) containers(ctx context.Context) ([]Container, []containertypes.InspectResponse, error) {
+	summaries, err := m.client.ContainerList(ctx, containertypes.ListOptions{All: true})
 	if err != nil {
 		return nil, nil, err
 	}
-	ids := uniqueLines(idsOutput)
-	if len(ids) == 0 {
-		return []Container{}, []rawContainer{}, nil
-	}
-	output, err := m.runner.Run(ctx, m.binary, append([]string{"container", "inspect"}, ids...)...)
-	if err != nil {
-		return nil, nil, err
-	}
-	var raw []rawContainer
-	if err := json.Unmarshal(output, &raw); err != nil {
-		return nil, nil, fmt.Errorf("parse docker containers: %w", err)
-	}
-	containers := make([]Container, 0, len(raw))
-	for _, item := range raw {
-		status := item.State.Status
-		if !item.State.Running && status == "exited" {
+	containers := make([]Container, 0, len(summaries))
+	inspected := make([]containertypes.InspectResponse, 0, len(summaries))
+	for _, summary := range summaries {
+		item, err := m.client.ContainerInspect(ctx, summary.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if item.ContainerJSONBase == nil || item.State == nil || item.Config == nil {
+			return nil, nil, fmt.Errorf("docker returned incomplete inspect data for container %s", summary.ID)
+		}
+		status := string(item.State.Status)
+		if !item.State.Running && item.State.Status == containertypes.StateExited {
 			status = fmt.Sprintf("exited (%d)", item.State.ExitCode)
 		}
 		containers = append(containers, Container{
 			ID: item.ID, Image: item.Config.Image, Name: strings.TrimPrefix(item.Name, "/"),
-			Running: item.State.Running, State: item.State.Status, Status: status,
+			Running: item.State.Running, State: string(item.State.Status), Status: status,
 		})
+		inspected = append(inspected, item)
 	}
 	slices.SortFunc(containers, func(a, b Container) int { return strings.Compare(a.Name, b.Name) })
-	return containers, raw, nil
+	return containers, inspected, nil
 }
 
-func (m *SystemManager) images(ctx context.Context, containers []rawContainer) ([]Image, error) {
-	idsOutput, err := m.runner.Run(ctx, m.binary, "image", "ls", "--quiet", "--no-trunc")
+func (m *SystemManager) images(ctx context.Context, containers []containertypes.InspectResponse) ([]Image, error) {
+	raw, err := m.client.ImageList(ctx, imagetypes.ListOptions{})
 	if err != nil {
 		return nil, err
-	}
-	ids := uniqueLines(idsOutput)
-	if len(ids) == 0 {
-		return []Image{}, nil
-	}
-	output, err := m.runner.Run(ctx, m.binary, append([]string{"image", "inspect"}, ids...)...)
-	if err != nil {
-		return nil, err
-	}
-	var raw []rawImage
-	if err := json.Unmarshal(output, &raw); err != nil {
-		return nil, fmt.Errorf("parse docker images: %w", err)
 	}
 	counts := map[string]int{}
 	for _, container := range containers {
@@ -209,57 +183,19 @@ func (m *SystemManager) images(ctx context.Context, containers []rawContainer) (
 	}
 	images := make([]Image, 0, len(raw))
 	for _, item := range raw {
+		size := uint64(0)
+		if item.Size > 0 {
+			size = uint64(item.Size)
+		}
 		images = append(images, Image{
-			Containers: counts[item.ID], ID: item.ID, Name: imageName(item), Size: item.Size,
+			Containers: counts[item.ID], ID: item.ID, Name: imageName(item), Size: size,
 		})
 	}
 	slices.SortFunc(images, func(a, b Image) int { return strings.Compare(a.Name, b.Name) })
 	return images, nil
 }
 
-type rawContainer struct {
-	Config struct {
-		Image string `json:"Image"`
-	} `json:"Config"`
-	ID    string `json:"Id"`
-	Image string `json:"Image"`
-	Name  string `json:"Name"`
-	State struct {
-		ExitCode int    `json:"ExitCode"`
-		Running  bool   `json:"Running"`
-		Status   string `json:"Status"`
-	} `json:"State"`
-}
-
-type rawImage struct {
-	ID          string   `json:"Id"`
-	RepoDigests []string `json:"RepoDigests"`
-	RepoTags    []string `json:"RepoTags"`
-	Size        uint64   `json:"Size"`
-}
-
-func parseVersion(output []byte) string {
-	var value struct {
-		Client struct {
-			Version string `json:"Version"`
-		} `json:"Client"`
-		Server struct {
-			Version string `json:"Version"`
-		} `json:"Server"`
-	}
-	if json.Unmarshal(output, &value) != nil {
-		return "installed"
-	}
-	if value.Server.Version != "" {
-		return value.Server.Version
-	}
-	if value.Client.Version != "" {
-		return value.Client.Version
-	}
-	return "installed"
-}
-
-func imageName(image rawImage) string {
+func imageName(image imagetypes.Summary) string {
 	if len(image.RepoTags) > 0 {
 		return image.RepoTags[0]
 	}
@@ -267,19 +203,6 @@ func imageName(image rawImage) string {
 		return image.RepoDigests[0]
 	}
 	return shortID(image.ID)
-}
-
-func uniqueLines(output []byte) []string {
-	seen := map[string]bool{}
-	var values []string
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !seen[line] {
-			seen[line] = true
-			values = append(values, line)
-		}
-	}
-	return values
 }
 
 func validContainerID(id string) bool {

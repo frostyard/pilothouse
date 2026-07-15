@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	dockerclient "github.com/docker/docker/client"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -32,7 +33,6 @@ func main() {
 func run() error {
 	adminGroup := flag.String("admin-group", "sudo", "system group allowed to perform privileged actions")
 	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
-	dockerBinary := flag.String("docker", "docker", "path to the Docker executable")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
 	podmanBinary := flag.String("podman", "podman", "path to the Podman executable")
@@ -53,7 +53,12 @@ func run() error {
 	if err := registerPodman(actions, queries, podman.NewSystemManager(podman.ExecRunner{}, *podmanBinary)); err != nil {
 		return err
 	}
-	if err := registerDocker(actions, queries, docker.NewSystemManager(docker.ExecRunner{}, *dockerBinary)); err != nil {
+	dockerClient, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("create Docker client: %w", err)
+	}
+	defer dockerClient.Close()
+	if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient)); err != nil {
 		return err
 	}
 	sessions := broker.NewSessionStore(15*time.Minute, 8*time.Hour)

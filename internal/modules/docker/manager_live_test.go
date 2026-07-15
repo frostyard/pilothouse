@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,10 @@ func TestLiveSystemManagerState(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	state, err := NewSystemManager(ExecRunner{}, "docker").State(ctx)
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	require.NoError(t, err)
+	defer dockerClient.Close()
+	state, err := NewSystemManager(dockerClient).State(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, state.Version)
 	t.Logf("Docker %s: %d containers, %d images", state.Version, len(state.Containers), len(state.Images))
