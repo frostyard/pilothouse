@@ -151,6 +151,9 @@ jobs:
           sudo apt-get install -y libpam0g-dev
           if [ "${{ matrix.goarch }}" = "arm64" ]; then
             sudo dpkg --add-architecture arm64
+            # Pin existing repositories to amd64 so apt does not try to fetch
+            # arm64 from mirrors that don't serve it (e.g. security.ubuntu.com).
+            sudo sed -i 's|^Types: deb|Types: deb\nArchitectures: amd64|' /etc/apt/sources.list.d/ubuntu.sources
             sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
           Types: deb
           URIs: http://ports.ubuntu.com/ubuntu-ports
@@ -159,7 +162,6 @@ jobs:
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-            sudo sed -i 's/^Architectures: .*/Architectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources || true
             sudo apt-get update
             sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64
           fi

@@ -30,6 +30,11 @@ jobs:
       - name: Install cross toolchain
         run: |
           sudo dpkg --add-architecture arm64
+          # Pin the runner's existing repositories to amd64 so apt does not try
+          # to fetch arm64 from mirrors that don't serve it (e.g. 404s from
+          # security.ubuntu.com).
+          sudo sed -i 's|^Types: deb|Types: deb\nArchitectures: amd64|' /etc/apt/sources.list.d/ubuntu.sources
+          # Provide arm64 packages from ports.ubuntu.com.
           sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
           Types: deb
           URIs: http://ports.ubuntu.com/ubuntu-ports
@@ -38,7 +43,6 @@ jobs:
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          sudo sed -i 's/^Architectures: .*/Architectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources || true
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev libpam0g-dev:arm64
       # More assembly might be required: Docker logins, GPG, etc.
