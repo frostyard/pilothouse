@@ -300,11 +300,23 @@ func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookie || r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, s.newSessionCookie(r, token, 0))
 }
 
 func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureCookie || r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, s.newSessionCookie(r, "", -1))
+}
+
+func (s *Server) newSessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookie,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   maxAge,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   s.secureCookie || r.TLS != nil,
+	}
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

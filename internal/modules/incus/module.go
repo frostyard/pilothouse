@@ -43,7 +43,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		defer cancel()
 		state, err := queryState(ctx, host, r.URL.Query().Get("project"))
 		if err != nil {
-			if r.URL.Query().Get("project") != "" && strings.Contains(err.Error(), "project is not available") {
+			if r.URL.Query().Get("project") != "" && projectUnavailable(err) {
 				values := url.Values{"kind": {"error"}, "notice": {"Selected project is no longer available"}}
 				http.Redirect(w, r, "/incus?"+values.Encode(), http.StatusSeeOther)
 				return
@@ -105,6 +105,10 @@ func queryState(ctx context.Context, host platform.Host, project string) (State,
 		return State{}, err
 	}
 	return state, nil
+}
+
+func projectUnavailable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "project is not available")
 }
 
 func (m *Module) redirect(w http.ResponseWriter, r *http.Request, project, success string, err error) {

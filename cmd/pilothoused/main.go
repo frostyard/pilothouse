@@ -151,14 +151,16 @@ func listenUnix(path, groupName string) (net.Listener, error) {
 	return listener, nil
 }
 
-func registerContainerActions(registry *broker.ActionRegistry, registrations []struct {
-	handler func(context.Context, string) error
+type actionRegistration struct {
 	id      string
-}) error {
+	handler func(context.Context, string) error
+}
+
+func registerNamedActions(registry *broker.ActionRegistry, parameter string, registrations []actionRegistration) error {
 	for _, registration := range registrations {
 		handler := registration.handler
 		if err := registry.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["id"])
+			return handler(ctx, parameters[parameter])
 		}); err != nil {
 			return err
 		}
@@ -167,24 +169,27 @@ func registerContainerActions(registry *broker.ActionRegistry, registrations []s
 }
 
 func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager) error {
-	actions := []struct {
+	if err := registerNamedActions(registry, "name", []actionRegistration{
+		{id: broker.ActionSysextDisable, handler: func(ctx context.Context, name string) error {
+			return manager.Disable(ctx, name)
+		}},
+		{id: broker.ActionSysextEnable, handler: func(ctx context.Context, name string) error {
+			return manager.Enable(ctx, name)
+		}},
+	}); err != nil {
+		return err
+	}
+	for _, action := range []struct {
 		handler broker.ActionHandler
 		id      string
 	}{
-		{id: broker.ActionSysextDisable, handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return manager.Disable(ctx, parameters["name"])
-		}},
-		{id: broker.ActionSysextEnable, handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return manager.Enable(ctx, parameters["name"])
-		}},
 		{id: broker.ActionSysextRefresh, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Refresh(ctx)
 		}},
 		{id: broker.ActionSysextUpdate, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Update(ctx)
 		}},
-	}
-	for _, action := range actions {
+	} {
 		if err := registry.Register(action.id, true, action.handler); err != nil {
 			return err
 		}
@@ -198,21 +203,14 @@ func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegis
 	}); err != nil {
 		return err
 	}
-	registrations := []struct {
-		id      string
-		handler func(context.Context, string) error
-	}{
-		{broker.ActionServicesDisable, manager.Disable}, {broker.ActionServicesEnable, manager.Enable}, {broker.ActionServicesResetFailed, manager.ResetFailed}, {broker.ActionServicesRestart, manager.Restart}, {broker.ActionServicesStart, manager.Start}, {broker.ActionServicesStop, manager.Stop},
-	}
-	for _, registration := range registrations {
-		handler := registration.handler
-		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["unit"])
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return registerNamedActions(actions, "unit", []actionRegistration{
+		{id: broker.ActionServicesDisable, handler: manager.Disable},
+		{id: broker.ActionServicesEnable, handler: manager.Enable},
+		{id: broker.ActionServicesResetFailed, handler: manager.ResetFailed},
+		{id: broker.ActionServicesRestart, handler: manager.Restart},
+		{id: broker.ActionServicesStart, handler: manager.Start},
+		{id: broker.ActionServicesStop, handler: manager.Stop},
+	})
 }
 
 func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager) error {
@@ -221,10 +219,7 @@ func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	}); err != nil {
 		return err
 	}
-	return registerContainerActions(actions, []struct {
-		handler func(context.Context, string) error
-		id      string
-	}{
+	return registerNamedActions(actions, "id", []actionRegistration{
 		{id: broker.ActionPodmanRemove, handler: manager.Remove},
 		{id: broker.ActionPodmanRemoveImage, handler: manager.RemoveImage},
 		{id: broker.ActionPodmanRestart, handler: manager.Restart},
@@ -239,10 +234,7 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	}); err != nil {
 		return err
 	}
-	return registerContainerActions(actions, []struct {
-		handler func(context.Context, string) error
-		id      string
-	}{
+	return registerNamedActions(actions, "id", []actionRegistration{
 		{id: broker.ActionDockerRemove, handler: manager.Remove},
 		{id: broker.ActionDockerRemoveImage, handler: manager.RemoveImage},
 		{id: broker.ActionDockerRestart, handler: manager.Restart},
@@ -257,21 +249,26 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 	}); err != nil {
 		return err
 	}
-	registrations := []struct {
-		handler   func(context.Context, string, string) error
-		id        string
-		parameter string
-	}{
+	return registerProjectActions(actions, []projectActionRegistration{
 		{id: broker.ActionIncusRemove, handler: manager.Remove, parameter: "name"},
 		{id: broker.ActionIncusRemoveImage, handler: manager.RemoveImage, parameter: "fingerprint"},
 		{id: broker.ActionIncusRestart, handler: manager.Restart, parameter: "name"},
 		{id: broker.ActionIncusStart, handler: manager.Start, parameter: "name"},
 		{id: broker.ActionIncusStop, handler: manager.Stop, parameter: "name"},
-	}
+	})
+}
+
+type projectActionRegistration struct {
+	id        string
+	handler   func(context.Context, string, string) error
+	parameter string
+}
+
+func registerProjectActions(registry *broker.ActionRegistry, registrations []projectActionRegistration) error {
 	for _, registration := range registrations {
 		handler := registration.handler
 		parameter := registration.parameter
-		if err := actions.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+		if err := registry.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
 			return handler(ctx, parameters["project"], parameters[parameter])
 		}); err != nil {
 			return err
