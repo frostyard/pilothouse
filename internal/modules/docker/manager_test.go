@@ -1,8 +1,12 @@
 package docker
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 
 	containertypes "github.com/moby/moby/api/types/container"
@@ -22,6 +26,15 @@ type fakeClient struct {
 	inspectErr error
 	images     []imagetypes.Summary
 	version    string
+	logs       string
+	logsCalls  int
+	logOptions client.ContainerLogsOptions
+}
+
+func (fake *fakeClient) ContainerLogs(_ context.Context, _ string, options client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
+	fake.logsCalls++
+	fake.logOptions = options
+	return io.NopCloser(strings.NewReader(fake.logs)), nil
 }
 
 func (fake *fakeClient) ContainerList(_ context.Context, options client.ContainerListOptions) (client.ContainerListResult, error) {
@@ -152,6 +165,97 @@ func TestStatePropagatesContainerInspectError(t *testing.T) {
 
 	_, err := NewSystemManager(client).State(context.Background())
 	assert.EqualError(t, err, "container disappeared")
+}
+
+func TestLogsValidatesIdentifierAndContainerExists(t *testing.T) {
+	client := stateClient()
+	manager := NewSystemManager(client)
+	_, err := manager.Logs(context.Background(), "short")
+	assert.EqualError(t, err, "invalid container identifier")
+	_, err = manager.Logs(context.Background(), strings.Repeat("c", 64))
+	assert.EqualError(t, err, "container no longer exists")
+	assert.Zero(t, client.logsCalls)
+}
+
+func TestLogsDemultiplexesAndParsesTimestamps(t *testing.T) {
+	client := stateClient()
+	client.logs = framedLog(1, "2026-07-16T12:00:00.123456789Z ready\n") + framedLog(2, "2026-07-16T12:00:01Z warning\n")
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	assert.Equal(t, "api", logs.Name)
+	assert.Equal(t, []LogLine{
+		{Timestamp: "2026-07-16T12:00:00.123456789Z", Stream: "stdout", Message: "ready"},
+		{Timestamp: "2026-07-16T12:00:01Z", Stream: "stderr", Message: "warning"},
+	}, logs.Lines)
+	assert.Equal(t, "200", client.logOptions.Tail)
+	assert.True(t, client.logOptions.Timestamps)
+}
+
+func TestLogsReadsTTYAndBoundsLines(t *testing.T) {
+	client := stateClient()
+	client.containers[0].Config.Tty = true
+	var raw strings.Builder
+	for index := range logsTailLines + 10 {
+		fmt.Fprintf(&raw, "line %d\n", index)
+	}
+	client.logs = raw.String()
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	require.Len(t, logs.Lines, logsTailLines)
+	assert.Equal(t, "line 10", logs.Lines[0].Message)
+	assert.Equal(t, "line 209", logs.Lines[len(logs.Lines)-1].Message)
+	assert.Equal(t, "stdout", logs.Lines[0].Stream)
+}
+
+func TestLogsBoundsBytes(t *testing.T) {
+	client := stateClient()
+	client.containers[0].Config.Tty = true
+	client.logs = strings.Repeat("x", logsMaxBytes+100)
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(logs.Lines), logsTailLines)
+	if len(logs.Lines) > 0 {
+		assert.LessOrEqual(t, len(logs.Lines[0].Message), logsMaxBytes)
+	}
+}
+
+func TestLogsByteLimitKeepsNewestCompleteLines(t *testing.T) {
+	client := stateClient()
+	client.containers[0].Config.Tty = true
+	large := strings.Repeat("x", 100*1024)
+	client.logs = "old " + large + "\nnewer " + large + "\nnewest " + large + "\n"
+
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	require.Len(t, logs.Lines, 2)
+	assert.True(t, strings.HasPrefix(logs.Lines[0].Message, "newer "))
+	assert.True(t, strings.HasPrefix(logs.Lines[1].Message, "newest "))
+}
+
+func TestLogsByteLimitKeepsNewestCompleteMultiplexedFrames(t *testing.T) {
+	client := stateClient()
+	large := strings.Repeat("x", 100*1024)
+	client.logs = framedLog(1, "old "+large+"\n") +
+		framedLog(2, "newer "+large+"\n") +
+		framedLog(1, "newest "+large+"\n")
+
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	require.Len(t, logs.Lines, 2)
+	assert.Equal(t, "stderr", logs.Lines[0].Stream)
+	assert.True(t, strings.HasPrefix(logs.Lines[0].Message, "newer "))
+	assert.Equal(t, "stdout", logs.Lines[1].Stream)
+	assert.True(t, strings.HasPrefix(logs.Lines[1].Message, "newest "))
+}
+
+func framedLog(stream byte, payload string) string {
+	var buffer bytes.Buffer
+	header := make([]byte, 8)
+	header[0] = stream
+	binary.BigEndian.PutUint32(header[4:], uint32(len(payload)))
+	buffer.Write(header)
+	buffer.WriteString(payload)
+	return buffer.String()
 }
 
 func stateClient() *fakeClient {

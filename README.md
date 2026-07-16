@@ -15,7 +15,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - System Podman inventory for containers, pods, images, engine version, and reported image storage
 - Administrator-only container start, stop, restart, and safe removal actions
-- System Docker Engine inventory with the same container lifecycle controls and socket isolation
+- System Docker Engine inventory with container lifecycle controls, bounded log viewing, and socket isolation
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls
 - PAM authentication using Snow's users and account policy
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
