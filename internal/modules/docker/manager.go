@@ -1,18 +1,26 @@
 package docker
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
+	"time"
 
 	containertypes "github.com/moby/moby/api/types/container"
 	imagetypes "github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/client"
 )
 
-const defaultTimeout = 10
+const (
+	defaultTimeout = 10
+	logsTailLines  = 200
+	logsMaxBytes   = 256 * 1024
+)
 
 type Container struct {
 	ID      string `json:"id"`
@@ -21,6 +29,19 @@ type Container struct {
 	Running bool   `json:"running"`
 	State   string `json:"state"`
 	Status  string `json:"status"`
+	tty     bool
+}
+
+type LogLine struct {
+	Timestamp string `json:"timestamp"`
+	Stream    string `json:"stream"`
+	Message   string `json:"message"`
+}
+
+type Logs struct {
+	ID    string    `json:"id"`
+	Name  string    `json:"name"`
+	Lines []LogLine `json:"lines"`
 }
 
 type Image struct {
@@ -37,6 +58,7 @@ type State struct {
 }
 
 type Manager interface {
+	Logs(context.Context, string) (Logs, error)
 	Remove(context.Context, string) error
 	RemoveImage(context.Context, string) error
 	Restart(context.Context, string) error
@@ -48,6 +70,7 @@ type Manager interface {
 type Client interface {
 	ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error)
 	ContainerList(context.Context, client.ContainerListOptions) (client.ContainerListResult, error)
+	ContainerLogs(context.Context, string, client.ContainerLogsOptions) (client.ContainerLogsResult, error)
 	ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
 	ContainerRestart(context.Context, string, client.ContainerRestartOptions) (client.ContainerRestartResult, error)
 	ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error)
@@ -63,6 +86,123 @@ type SystemManager struct {
 
 func NewSystemManager(client Client) *SystemManager {
 	return &SystemManager{client: client}
+}
+
+func (m *SystemManager) Logs(ctx context.Context, id string) (Logs, error) {
+	container, err := m.container(ctx, id)
+	if err != nil {
+		return Logs{}, err
+	}
+	stream, err := m.client.ContainerLogs(ctx, id, client.ContainerLogsOptions{
+		ShowStdout: true, ShowStderr: true, Timestamps: true, Tail: fmt.Sprint(logsTailLines), Follow: false,
+	})
+	if err != nil {
+		return Logs{}, err
+	}
+	defer func() { _ = stream.Close() }()
+
+	result := Logs{ID: id, Name: container.Name}
+	if container.tty {
+		lines := newLogLines()
+		lines.read(stream, "stdout")
+		result.Lines = lines.lines
+	} else {
+		result.Lines = readMultiplexedLogLines(stream)
+	}
+	return result, nil
+}
+
+func readMultiplexedLogLines(reader io.Reader) []LogLine {
+	lines := newLogLines()
+	header := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(reader, header); err != nil {
+			break
+		}
+		stream := "stdout"
+		if header[0] == 2 {
+			stream = "stderr"
+		} else if header[0] != 1 {
+			break
+		}
+		size := int64(binary.BigEndian.Uint32(header[4:]))
+		payload := &io.LimitedReader{R: reader, N: size}
+		frameLines := newLogLines()
+		frameLines.read(payload, stream)
+		if payload.N != 0 {
+			break
+		}
+		for _, line := range frameLines.lines {
+			lines.add(line)
+		}
+	}
+	return lines.lines
+}
+
+type boundedLogLines struct {
+	lines []LogLine
+	bytes int
+}
+
+func newLogLines() *boundedLogLines {
+	return &boundedLogLines{lines: make([]LogLine, 0, logsTailLines)}
+}
+
+func (lines *boundedLogLines) read(reader io.Reader, stream string) {
+	buffered := bufio.NewReader(reader)
+	var raw strings.Builder
+	discard := false
+	for {
+		fragment, err := buffered.ReadSlice('\n')
+		if !discard {
+			if raw.Len()+len(fragment) <= logsMaxBytes {
+				_, _ = raw.Write(fragment)
+			} else {
+				raw.Reset()
+				discard = true
+			}
+		}
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			if !discard {
+				lines.add(parseLogLine(strings.TrimRight(raw.String(), "\r\n"), stream))
+			}
+			raw.Reset()
+			discard = false
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			if errors.Is(err, io.EOF) && !discard && raw.Len() > 0 {
+				lines.add(parseLogLine(strings.TrimRight(raw.String(), "\r\n"), stream))
+			}
+			return
+		}
+	}
+}
+
+func (lines *boundedLogLines) add(line LogLine) {
+	size := logLineSize(line)
+	if size > logsMaxBytes {
+		return
+	}
+	lines.lines = append(lines.lines, line)
+	lines.bytes += size
+	for len(lines.lines) > logsTailLines || lines.bytes > logsMaxBytes {
+		lines.bytes -= logLineSize(lines.lines[0])
+		lines.lines = lines.lines[1:]
+	}
+}
+
+func logLineSize(line LogLine) int {
+	return len(line.Timestamp) + len(line.Stream) + len(line.Message)
+}
+
+func parseLogLine(raw, stream string) LogLine {
+	line := LogLine{Stream: stream, Message: raw}
+	if timestamp, message, found := strings.Cut(raw, " "); found {
+		if _, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+			line.Timestamp, line.Message = timestamp, message
+		}
+	}
+	return line
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
@@ -197,7 +337,7 @@ func (m *SystemManager) containers(ctx context.Context) ([]Container, []containe
 		}
 		containers = append(containers, Container{
 			ID: item.ID, Image: item.Config.Image, Name: strings.TrimPrefix(item.Name, "/"),
-			Running: item.State.Running, State: string(item.State.Status), Status: status,
+			Running: item.State.Running, State: string(item.State.Status), Status: status, tty: item.Config.Tty,
 		})
 		inspected = append(inspected, item)
 	}

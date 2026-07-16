@@ -50,6 +50,21 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			Eyebrow: "Moby workloads", Title: "Docker",
 		})
 	})
+	mux.HandleFunc("GET /docker/containers/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validContainerID(id) {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		logs, err := queryLogs(ctx, host, id)
+		unavailable := err != nil
+		if unavailable {
+			logs = Logs{ID: id, Name: id}
+		}
+		_ = host.Render(w, r, platform.Page{Active: "docker", Body: LogsView(logs, unavailable), Eyebrow: "container diagnostics", Title: logs.Name + " logs"})
+	})
 	mux.HandleFunc("POST /docker/containers/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
@@ -88,6 +103,12 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		err := host.Execute(ctx, r, broker.ActionDockerRemoveImage, map[string]string{"id": r.PathValue("id")})
 		m.redirect(w, r, "Image removed", err)
 	})
+}
+
+func queryLogs(ctx context.Context, host platform.Host, id string) (Logs, error) {
+	var logs Logs
+	err := host.Query(ctx, broker.QueryDockerLogs, map[string]string{"id": id}, &logs)
+	return logs, err
 }
 
 func queryState(ctx context.Context, host platform.Host) (State, error) {
