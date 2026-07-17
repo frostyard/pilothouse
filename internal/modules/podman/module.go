@@ -13,6 +13,13 @@ import (
 
 type Module struct{}
 
+var actionIDs = map[string]string{
+	"remove":  broker.ActionPodmanRemove,
+	"restart": broker.ActionPodmanRestart,
+	"start":   broker.ActionPodmanStart,
+	"stop":    broker.ActionPodmanStop,
+}
+
 func New() *Module {
 	return &Module{}
 }
@@ -50,30 +57,35 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			Eyebrow: "OCI workloads", Title: "Podman",
 		})
 	})
+	mux.HandleFunc("GET /podman/containers/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validContainerID(id) {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		logs, err := queryLogs(ctx, host, id)
+		unavailable := err != nil
+		if unavailable {
+			logs = Logs{ID: id, Name: id}
+		}
+		_ = host.Render(w, r, platform.Page{Active: "podman", Body: LogsView(logs, unavailable), Eyebrow: "container diagnostics", Title: logs.Name + " logs"})
+	})
 	mux.HandleFunc("POST /podman/containers/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
 		id := r.PathValue("id")
-		action := r.PathValue("action")
-		var actionID string
-		switch action {
-		case "remove":
-			actionID = broker.ActionPodmanRemove
-		case "restart":
-			actionID = broker.ActionPodmanRestart
-		case "start":
-			actionID = broker.ActionPodmanStart
-		case "stop":
-			actionID = broker.ActionPodmanStop
-		default:
+		actionID, ok := actionIDs[r.PathValue("action")]
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
-		m.redirect(w, r, fmt.Sprintf("Container %sd", action), err)
+		m.redirect(w, r, fmt.Sprintf("Container %sd", r.PathValue("action")), err)
 	})
 	mux.HandleFunc("POST /podman/images/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
@@ -96,6 +108,14 @@ func queryState(ctx context.Context, host platform.Host) (State, error) {
 		return State{}, err
 	}
 	return state, nil
+}
+
+func queryLogs(ctx context.Context, host platform.Host, id string) (Logs, error) {
+	var logs Logs
+	if err := host.Query(ctx, broker.QueryPodmanLogs, map[string]string{"id": id}, &logs); err != nil {
+		return Logs{}, err
+	}
+	return logs, nil
 }
 
 func (m *Module) redirect(w http.ResponseWriter, r *http.Request, success string, err error) {

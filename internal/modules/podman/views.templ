@@ -81,8 +81,9 @@ templ Page(state State, csrf string, admin bool) {
 								</td>
 								<td><span class="version">{ container.Pod }</span></td>
 								<td>
-									<div class="actions">
-										if !admin {
+					<div class="actions">
+						<a class="button secondary" href={ templ.SafeURL("/podman/containers/" + container.ID + "/logs") }>Logs</a>
+						if !admin {
 											<span class="card-subtle">No permission</span>
 										} else if container.Running {
 											@containerAction(container.ID, "restart", "Restart", csrf, "secondary")
@@ -127,6 +128,32 @@ templ Page(state State, csrf string, admin bool) {
 						</td></tr>
 					}
 				</tbody></table>
+			}
+		</article>
+	</div>
+}
+
+templ LogsView(logs Logs, unavailable bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div><h2>{ logs.Name }</h2></div>
+			<a class="button secondary" href="/podman">Back to Podman</a>
+		</div>
+		<article id="container-logs" class="card table-card" hx-get={ templ.SafeURL("/podman/containers/" + logs.ID + "/logs") } hx-trigger="every 5s" hx-select="#container-logs" hx-target="#container-logs" hx-swap="outerHTML">
+			<div class="table-toolbar"><h2>Recent container logs</h2><span>Last 200 lines</span></div>
+			if unavailable {
+				<div class="empty-state">Recent container logs are unavailable. Try again later.</div>
+			} else if len(logs.Lines) == 0 {
+				<div class="empty-state">No log output.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Timestamp</th><th>Stream</th><th>Message</th></tr></thead>
+					<tbody>
+						for _, line := range logs.Lines {
+							<tr><td><time datetime={ line.Timestamp }>{ line.Timestamp }</time></td><td><span class="badge">{ line.Stream }</span></td><td>{ line.Message }</td></tr>
+						}
+					</tbody>
+				</table>
 			}
 		</article>
 	</div>

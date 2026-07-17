@@ -108,6 +108,11 @@ Docker container diagnostics use the fixed read-only
 `/docker/containers/{id}/logs` page polls for a bounded 200-line tail; only the
 broker daemon accesses the root-equivalent Docker socket.
 
+Podman container diagnostics likewise use the fixed read-only
+`org.frostyard.pilothouse.podman.logs` query. The
+`/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the
+broker daemon accesses the root-equivalent Podman socket.
+
 Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, instance environment variables, secrets, or root-equivalent sockets. Managers must rediscover resources and validate identifiers or names before every mutation.
 
 ## Design conventions

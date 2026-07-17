@@ -1,7 +1,9 @@
 package podman
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +17,12 @@ import (
 )
 
 const apiPrefix = "/v5.0.0/libpod"
-const defaultTimeout = 10
+
+const (
+	defaultTimeout = 10
+	logsTailLines  = 200
+	logsMaxBytes   = 256 * 1024
+)
 
 type Container struct {
 	ID      string `json:"id"`
@@ -25,6 +32,18 @@ type Container struct {
 	Running bool   `json:"running"`
 	State   string `json:"state"`
 	Status  string `json:"status"`
+}
+
+type LogLine struct {
+	Timestamp string `json:"timestamp"`
+	Stream    string `json:"stream"`
+	Message   string `json:"message"`
+}
+
+type Logs struct {
+	ID    string    `json:"id"`
+	Name  string    `json:"name"`
+	Lines []LogLine `json:"lines"`
 }
 
 type Image struct {
@@ -49,6 +68,7 @@ type State struct {
 }
 
 type Manager interface {
+	Logs(context.Context, string) (Logs, error)
 	Remove(context.Context, string) error
 	RemoveImage(context.Context, string) error
 	Restart(context.Context, string) error
@@ -59,6 +79,7 @@ type Manager interface {
 
 type Client interface {
 	Containers(context.Context) ([]apiContainer, error)
+	Logs(context.Context, string) (io.ReadCloser, error)
 	Images(context.Context) ([]apiImage, error)
 	Pods(context.Context) ([]apiPod, error)
 	Remove(context.Context, string) error
@@ -97,6 +118,27 @@ func (c *APIClient) Images(ctx context.Context) ([]apiImage, error) {
 	var values []apiImage
 	err := c.do(ctx, http.MethodGet, "/images/json", &values)
 	return values, err
+}
+
+func (c *APIClient) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
+	path := "/containers/" + url.PathEscape(id) + "/logs?stdout=true&stderr=true&timestamps=true&tail=200&follow=false"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://podman"+apiPrefix+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		defer func() { _ = response.Body.Close() }()
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		if detail := strings.TrimSpace(string(message)); detail != "" {
+			return nil, fmt.Errorf("podman API %s: %s", response.Status, detail)
+		}
+		return nil, fmt.Errorf("podman API %s", response.Status)
+	}
+	return response.Body, nil
 }
 
 func (c *APIClient) Pods(ctx context.Context) ([]apiPod, error) {
@@ -167,6 +209,123 @@ type SystemManager struct {
 
 func NewSystemManager(client Client) *SystemManager {
 	return &SystemManager{client: client}
+}
+
+func (m *SystemManager) Logs(ctx context.Context, id string) (Logs, error) {
+	container, err := m.container(ctx, id)
+	if err != nil {
+		return Logs{}, err
+	}
+	stream, err := m.client.Logs(ctx, id)
+	if err != nil {
+		return Logs{}, err
+	}
+	defer func() { _ = stream.Close() }()
+	return Logs{ID: id, Name: container.Name, Lines: readLogLines(stream)}, nil
+}
+
+func readLogLines(reader io.Reader) []LogLine {
+	buffered := bufio.NewReader(reader)
+	header, err := buffered.Peek(8)
+	if err == nil && (header[0] == 1 || header[0] == 2) && header[1] == 0 && header[2] == 0 && header[3] == 0 {
+		return readMultiplexedLogLines(buffered)
+	}
+	lines := newLogLines()
+	lines.read(buffered, "stdout")
+	return lines.lines
+}
+
+func readMultiplexedLogLines(reader io.Reader) []LogLine {
+	lines := newLogLines()
+	header := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(reader, header); err != nil {
+			break
+		}
+		stream := "stdout"
+		if header[0] == 2 {
+			stream = "stderr"
+		} else if header[0] != 1 {
+			break
+		}
+		size := int64(binary.BigEndian.Uint32(header[4:]))
+		payload := &io.LimitedReader{R: reader, N: size}
+		frameLines := newLogLines()
+		frameLines.read(payload, stream)
+		if payload.N != 0 {
+			break
+		}
+		for _, line := range frameLines.lines {
+			lines.add(line)
+		}
+	}
+	return lines.lines
+}
+
+type boundedLogLines struct {
+	lines []LogLine
+	bytes int
+}
+
+func newLogLines() *boundedLogLines {
+	return &boundedLogLines{lines: make([]LogLine, 0, logsTailLines)}
+}
+
+func (lines *boundedLogLines) read(reader io.Reader, stream string) {
+	buffered := bufio.NewReader(reader)
+	var raw strings.Builder
+	discard := false
+	for {
+		fragment, err := buffered.ReadSlice('\n')
+		if !discard {
+			if raw.Len()+len(fragment) <= logsMaxBytes {
+				_, _ = raw.Write(fragment)
+			} else {
+				raw.Reset()
+				discard = true
+			}
+		}
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			if !discard {
+				lines.add(parseLogLine(strings.TrimRight(raw.String(), "\r\n"), stream))
+			}
+			raw.Reset()
+			discard = false
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			if errors.Is(err, io.EOF) && !discard && raw.Len() > 0 {
+				lines.add(parseLogLine(strings.TrimRight(raw.String(), "\r\n"), stream))
+			}
+			return
+		}
+	}
+}
+
+func (lines *boundedLogLines) add(line LogLine) {
+	size := logLineSize(line)
+	if size > logsMaxBytes {
+		return
+	}
+	lines.lines = append(lines.lines, line)
+	lines.bytes += size
+	for len(lines.lines) > logsTailLines || lines.bytes > logsMaxBytes {
+		lines.bytes -= logLineSize(lines.lines[0])
+		lines.lines = lines.lines[1:]
+	}
+}
+
+func logLineSize(line LogLine) int {
+	return len(line.Timestamp) + len(line.Stream) + len(line.Message)
+}
+
+func parseLogLine(raw, stream string) LogLine {
+	line := LogLine{Stream: stream, Message: raw}
+	if timestamp, message, found := strings.Cut(raw, " "); found {
+		if _, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+			line.Timestamp, line.Message = timestamp, message
+		}
+	}
+	return line
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
