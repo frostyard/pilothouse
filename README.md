@@ -13,7 +13,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Discovery of both shared `/usr/lib/sysupdate.d` and component-scoped `/usr/lib/sysupdate.<name>.d` Snosi definitions
 - Installed and merged state from `systemd-sysext`
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
-- System Podman inventory for containers, pods, images, engine version, and reported image storage
+- System Podman inventory for containers, pods, images, engine version, reported image storage, and bounded log viewing
 - Administrator-only container start, stop, restart, and safe removal actions
 - System Docker Engine inventory with container lifecycle controls, bounded log viewing, and socket isolation
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls

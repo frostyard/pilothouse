@@ -220,6 +220,11 @@ func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegis
 }
 
 func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager) error {
+	if err := queries.Register(broker.QueryPodmanLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.Logs(ctx, parameters["id"])
+	}); err != nil {
+		return err
+	}
 	if err := queries.Register(broker.QueryPodmanState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	}); err != nil {

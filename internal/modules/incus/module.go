@@ -14,6 +14,13 @@ import (
 
 type Module struct{}
 
+var actionIDs = map[string]string{
+	"remove":  broker.ActionIncusRemove,
+	"restart": broker.ActionIncusRestart,
+	"start":   broker.ActionIncusStart,
+	"stop":    broker.ActionIncusStop,
+}
+
 func New() *Module {
 	return &Module{}
 }
@@ -61,17 +68,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		name := r.PathValue("name")
-		var actionID string
-		switch r.PathValue("action") {
-		case "remove":
-			actionID = broker.ActionIncusRemove
-		case "restart":
-			actionID = broker.ActionIncusRestart
-		case "start":
-			actionID = broker.ActionIncusStart
-		case "stop":
-			actionID = broker.ActionIncusStop
-		default:
+		actionID, ok := actionIDs[r.PathValue("action")]
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}

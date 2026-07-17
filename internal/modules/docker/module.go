@@ -13,6 +13,13 @@ import (
 
 type Module struct{}
 
+var actionIDs = map[string]string{
+	"remove":  broker.ActionDockerRemove,
+	"restart": broker.ActionDockerRestart,
+	"start":   broker.ActionDockerStart,
+	"stop":    broker.ActionDockerStop,
+}
+
 func New() *Module {
 	return &Module{}
 }
@@ -70,25 +77,15 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		id := r.PathValue("id")
-		action := r.PathValue("action")
-		var actionID string
-		switch action {
-		case "remove":
-			actionID = broker.ActionDockerRemove
-		case "restart":
-			actionID = broker.ActionDockerRestart
-		case "start":
-			actionID = broker.ActionDockerStart
-		case "stop":
-			actionID = broker.ActionDockerStop
-		default:
+		actionID, ok := actionIDs[r.PathValue("action")]
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
-		m.redirect(w, r, fmt.Sprintf("Container %sd", action), err)
+		m.redirect(w, r, fmt.Sprintf("Container %sd", r.PathValue("action")), err)
 	})
 	mux.HandleFunc("POST /docker/images/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {

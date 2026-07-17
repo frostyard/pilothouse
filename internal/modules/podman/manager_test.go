@@ -1,10 +1,14 @@
 package podman
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,6 +24,8 @@ type fakeClient struct {
 	images     []apiImage
 	pods       []apiPod
 	version    string
+	logs       []byte
+	logsCalls  int
 }
 
 func (client *fakeClient) Containers(context.Context) ([]apiContainer, error) {
@@ -28,6 +34,11 @@ func (client *fakeClient) Containers(context.Context) ([]apiContainer, error) {
 
 func (client *fakeClient) Images(context.Context) ([]apiImage, error) {
 	return client.images, nil
+}
+
+func (client *fakeClient) Logs(context.Context, string) (io.ReadCloser, error) {
+	client.logsCalls++
+	return io.NopCloser(bytes.NewReader(client.logs)), nil
 }
 
 func (client *fakeClient) Pods(context.Context) ([]apiPod, error) {
@@ -78,6 +89,79 @@ func TestSystemManagerBuildsCanonicalState(t *testing.T) {
 	assert.Equal(t, 2, state.Pods[0].Containers)
 	require.Len(t, state.Images, 1)
 	assert.Equal(t, "quay.io/example/api:latest", state.Images[0].Name)
+}
+
+func TestLogsValidatesIdentifierAndContainerExists(t *testing.T) {
+	client := stateClient()
+	manager := NewSystemManager(client)
+	_, err := manager.Logs(context.Background(), "invalid")
+	assert.EqualError(t, err, "invalid container identifier")
+	assert.Zero(t, client.logsCalls)
+	_, err = manager.Logs(context.Background(), strings.Repeat("c", 64))
+	assert.EqualError(t, err, "container no longer exists")
+	assert.Zero(t, client.logsCalls)
+}
+
+func TestLogsDemultiplexesAndParsesTimestamps(t *testing.T) {
+	client := stateClient()
+	client.logs = append(framedLog(1, "2026-01-02T03:04:05.123456789Z hello\n"), framedLog(2, "2026-01-02T03:04:06Z bad\n")...)
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	assert.Equal(t, "api", logs.Name)
+	assert.Equal(t, []LogLine{{Timestamp: "2026-01-02T03:04:05.123456789Z", Stream: "stdout", Message: "hello"}, {Timestamp: "2026-01-02T03:04:06Z", Stream: "stderr", Message: "bad"}}, logs.Lines)
+}
+
+func TestLogsReadsPlainStreamWhenUnframed(t *testing.T) {
+	client := stateClient()
+	client.logs = []byte("2026-01-02T03:04:05Z plain\nnext\n")
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	assert.Equal(t, []LogLine{{Timestamp: "2026-01-02T03:04:05Z", Stream: "stdout", Message: "plain"}, {Stream: "stdout", Message: "next"}}, logs.Lines)
+}
+
+func TestLogsBoundsLines(t *testing.T) {
+	client := stateClient()
+	var raw strings.Builder
+	for index := 0; index < 205; index++ {
+		fmt.Fprintf(&raw, "line-%03d\n", index)
+	}
+	client.logs = []byte(raw.String())
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	require.Len(t, logs.Lines, logsTailLines)
+	assert.Equal(t, "line-005", logs.Lines[0].Message)
+	assert.Equal(t, "line-204", logs.Lines[199].Message)
+}
+
+func TestLogsBoundsBytes(t *testing.T) {
+	client := stateClient()
+	line := strings.Repeat("x", 2000)
+	client.logs = []byte(strings.Repeat(line+"\n", 200))
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	total := 0
+	for _, value := range logs.Lines {
+		total += logLineSize(value)
+	}
+	assert.LessOrEqual(t, total, logsMaxBytes)
+	assert.NotEmpty(t, logs.Lines)
+}
+
+func TestLogsDetectsMultiplexedStreamWhenFirstFrameExceedsByteBound(t *testing.T) {
+	client := stateClient()
+	largePayload := strings.Repeat("x", logsMaxBytes+1) + "\n"
+	client.logs = append(framedLog(1, largePayload), framedLog(2, "2026-01-02T03:04:06Z newest\n")...)
+
+	logs, err := NewSystemManager(client).Logs(context.Background(), runningID)
+	require.NoError(t, err)
+	assert.Equal(t, []LogLine{{Timestamp: "2026-01-02T03:04:06Z", Stream: "stderr", Message: "newest"}}, logs.Lines)
+}
+
+func framedLog(stream byte, payload string) []byte {
+	header := make([]byte, 8)
+	header[0] = stream
+	binary.BigEndian.PutUint32(header[4:], uint32(len(payload)))
+	return append(header, []byte(payload)...)
 }
 
 func TestContainerActionsValidateStateAndIdentifier(t *testing.T) {
