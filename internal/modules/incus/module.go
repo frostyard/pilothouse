@@ -68,7 +68,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		name := r.PathValue("name")
-		actionID, ok := actionIDs[r.PathValue("action")]
+		action := r.PathValue("action")
+		actionID, ok := actionIDs[action]
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -76,6 +77,9 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		project := r.FormValue("project")
+		if (action == "stop" || action == "remove") && !host.ConfirmAction(w, r, strings.ToUpper(action[:1])+action[1:]+" Incus instance", "incus/instance/"+project+"/"+name) {
+			return
+		}
 		err := host.Execute(ctx, r, actionID, map[string]string{"name": name, "project": project})
 		m.redirect(w, r, project, fmt.Sprintf("Instance %sd", r.PathValue("action")), err)
 	})
@@ -90,8 +94,12 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		project := r.FormValue("project")
+		fingerprint := r.PathValue("fingerprint")
+		if !host.ConfirmAction(w, r, "Remove Incus image", "incus/image/"+project+"/"+fingerprint) {
+			return
+		}
 		err := host.Execute(ctx, r, broker.ActionIncusRemoveImage, map[string]string{
-			"fingerprint": r.PathValue("fingerprint"), "project": project,
+			"fingerprint": fingerprint, "project": project,
 		})
 		m.redirect(w, r, project, "Image removed", err)
 	})

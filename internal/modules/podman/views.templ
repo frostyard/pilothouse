@@ -160,14 +160,14 @@ templ LogsView(logs Logs, unavailable bool) {
 }
 
 templ imageAction(id, action, csrf string, disabled bool, title string) {
-	<form method="post" action={ templ.SafeURL("/podman/images/" + id + "/" + action) }>
+	<form method="post" action={ templ.SafeURL("/podman/images/" + id + "/" + action) } hx-boost="false">
 		<input type="hidden" name="csrf" value={ csrf }/>
 		<button class="icon-button danger" type="submit" disabled?={ disabled } title={ title } aria-label="Delete image">@web.Icon("trash")</button>
 	</form>
 }
 
 templ containerAction(id, action, label, csrf, class string) {
-	<form method="post" action={ templ.SafeURL("/podman/containers/" + id + "/" + action) }>
+	<form method="post" action={ templ.SafeURL("/podman/containers/" + id + "/" + action) } hx-boost="false">
 		<input type="hidden" name="csrf" value={ csrf }/>
 		<button class={ "button", class } type="submit">{ label }</button>
 	</form>

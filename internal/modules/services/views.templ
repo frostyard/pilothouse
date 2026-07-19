@@ -98,5 +98,5 @@ templ Logs(journal Journal, unavailable bool) {
 }
 
 templ unitAction(unit, action, label, csrf, class string) {
-	<form method="post" action={ templ.SafeURL("/services/" + unit + "/" + action) }><input type="hidden" name="csrf" value={ csrf }/><button class={ "button", class } type="submit">{ label }</button></form>
+	<form method="post" action={ templ.SafeURL("/services/" + unit + "/" + action) } hx-boost="false"><input type="hidden" name="csrf" value={ csrf }/><button class={ "button", class } type="submit">{ label }</button></form>
 }

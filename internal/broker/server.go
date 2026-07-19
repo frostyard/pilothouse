@@ -106,7 +106,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if err := s.actions.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters); err != nil {
+	if err := s.actions.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters, request.Confirmation); err != nil {
 		s.logger.Warn("broker action denied or failed", "action", r.PathValue("id"), "error", err, "user", session.Identity.Username)
 		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: err.Error()})
 		return

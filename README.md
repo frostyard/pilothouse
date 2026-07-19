@@ -21,6 +21,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
+- Durable privileged-action history, destructive confirmations, and per-resource action serialization
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Responsive desktop and mobile layouts
 

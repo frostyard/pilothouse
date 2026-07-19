@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/a-h/templ v0.3.1020
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.4.3
 )
 
 require (

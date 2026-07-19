@@ -20,6 +20,11 @@ type LayoutData struct {
 	Title     string
 }
 
+type ConfirmationField struct {
+	Name  string
+	Value string
+}
+
 templ Layout(data LayoutData, body templ.Component) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -105,8 +110,30 @@ templ ModuleErrorCard(name, message string) {
 	</article>
 }
 
+templ Confirmation(action, cancel, title, resource, csrf string, fields []ConfirmationField) {
+	<div class="page-stack">
+		<article class="card">
+			<div class="card-heading"><span class="card-icon danger">@Icon("alert")</span><div><h2>{ title }</h2><p>Review this operation before continuing.</p></div></div>
+			<div class="mini-list"><div class="mini-row"><div><strong>Target</strong><small>{ resource }</small></div><span class="badge">Destructive</span></div></div>
+			<div class="actions">
+				<a class="button secondary" href={ templ.SafeURL(cancel) }>Cancel</a>
+				<form method="post" action={ templ.SafeURL(action) } hx-boost="false">
+					<input type="hidden" name="csrf" value={ csrf }/>
+					<input type="hidden" name="confirmation" value={ resource }/>
+					for _, field := range fields {
+						<input type="hidden" name={ field.Name } value={ field.Value }/>
+					}
+					<button class="button danger" type="submit">Confirm</button>
+				</form>
+			</div>
+		</article>
+	</div>
+}
+
 templ Icon(name string) {
 	switch name {
+		case "activity":
+			@svg(`<path d="M3 12h4l2-7 4 14 2-7h6"/><path d="M3 4v16h18"/>`)
 		case "alert":
 			@svg(`<path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`)
 		case "check":

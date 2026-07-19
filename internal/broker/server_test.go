@@ -40,9 +40,13 @@ func TestBrokerClientLoginSessionAndAuthorizedAction(t *testing.T) {
 	actions := NewActionRegistry()
 	queries := NewQueryRegistry()
 	called := false
-	require.NoError(t, actions.Register("test.manage", true, func(_ context.Context, identity auth.Identity, parameters map[string]string) error {
-		called = identity.Username == "snow" && parameters["value"] == "yes"
-		return nil
+	require.NoError(t, actions.RegisterDefinition(ActionDefinition{
+		ID: "test.manage", Admin: true, Parameters: []string{"value"},
+		Resource: func(parameters map[string]string) (string, error) { return "test/" + parameters["value"], nil },
+		Handler: func(_ context.Context, identity auth.Identity, parameters map[string]string) error {
+			called = identity.Username == "snow" && parameters["value"] == "yes"
+			return nil
+		},
 	}))
 	require.NoError(t, queries.Register("test.read", false, func(_ context.Context, identity auth.Identity, parameters map[string]string) (any, error) {
 		return map[string]string{"user": identity.Username, "value": parameters["value"]}, nil
@@ -64,7 +68,7 @@ func TestBrokerClientLoginSessionAndAuthorizedAction(t *testing.T) {
 	session, err := client.Session(context.Background(), login.Token)
 	require.NoError(t, err)
 	assert.Equal(t, "snow", session.Identity.Username)
-	require.NoError(t, client.Action(context.Background(), login.Token, "test.manage", map[string]string{"value": "yes"}))
+	require.NoError(t, client.Action(context.Background(), login.Token, "test.manage", map[string]string{"value": "yes"}, ""))
 	assert.True(t, called)
 	var queryResult map[string]string
 	require.NoError(t, client.Query(context.Background(), login.Token, "test.read", map[string]string{"value": "visible"}, &queryResult))

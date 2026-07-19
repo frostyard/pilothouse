@@ -165,7 +165,7 @@ templ Page(state State, csrf string, admin bool) {
 }
 
 templ imageAction(project, fingerprint, action, csrf string, disabled bool, title string) {
-	<form method="post" action={ templ.SafeURL("/incus/images/" + fingerprint + "/" + action) }>
+	<form method="post" action={ templ.SafeURL("/incus/images/" + fingerprint + "/" + action) } hx-boost="false">
 		<input type="hidden" name="csrf" value={ csrf }/>
 		<input type="hidden" name="project" value={ project }/>
 		<button class="icon-button danger" type="submit" disabled?={ disabled } title={ title } aria-label="Delete image">@web.Icon("trash")</button>
@@ -173,7 +173,7 @@ templ imageAction(project, fingerprint, action, csrf string, disabled bool, titl
 }
 
 templ instanceAction(project, name, action, label, csrf, class string) {
-	<form method="post" action={ templ.SafeURL("/incus/instances/" + name + "/" + action) }>
+	<form method="post" action={ templ.SafeURL("/incus/instances/" + name + "/" + action) } hx-boost="false">
 		<input type="hidden" name="csrf" value={ csrf }/>
 		<input type="hidden" name="project" value={ project }/>
 		<button class={ "button", class } type="submit">{ label }</button>
