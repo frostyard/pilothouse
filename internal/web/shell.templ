@@ -31,8 +31,8 @@ templ Layout(data LayoutData, body templ.Component) {
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<meta name="color-scheme" content="light"/>
-			<meta name="theme-color" content="#15221d"/>
+			<meta name="color-scheme" content="dark"/>
+			<meta name="theme-color" content="#06111d"/>
 			<title>{ data.Title } · Pilothouse</title>
 			<link rel="stylesheet" href="/static/app.css"/>
 			<script src="/static/htmx.min.js" defer></script>
@@ -41,20 +41,26 @@ templ Layout(data LayoutData, body templ.Component) {
 			<div class="app-shell">
 				<aside class="sidebar">
 					<a class="brand" href="/" aria-label="Pilothouse dashboard">
-						<span class="brand-mark">P</span>
-						<span><strong>Pilothouse</strong><small>Snosi console</small></span>
+						<span class="brand-mark">❄</span>
+						<span><strong>Pilothouse</strong><small>frostyard admin</small></span>
 					</a>
+					<div class="system-picker"><span>System</span><a href="/fleet"><strong>local</strong><small>connected · this host</small></a></div>
 					<nav class="nav" aria-label="Primary navigation">
+						<div class="nav-group">Console</div>
 						<a href="/" class={ "nav-link", templ.KV("active", data.Active == "dashboard") }>
-							<span class="nav-icon">@Icon("dashboard")</span>
+							<span class="nav-number">01</span>
 							<span>Overview</span>
 						</a>
-						<div class="nav-group">Management</div>
 						for _, module := range data.Modules {
-							<a href={ templ.SafeURL(module.Path) } class={ "nav-link", templ.KV("active", data.Active == module.ID) }>
-								<span class="nav-icon">@Icon(module.Icon)</span>
-								<span>{ module.Name }</span>
-							</a>
+							if module.ID == "fleet" {
+								<a href={ templ.SafeURL(module.Path) } class={ "nav-link", templ.KV("active", data.Active == module.ID) }><span class="nav-number">02</span><span>{ module.Name }</span></a>
+							}
+						}
+						<div class="nav-group">Modules</div>
+						for index, module := range data.Modules {
+							if module.ID != "fleet" {
+								<a href={ templ.SafeURL(module.Path) } class={ "nav-link", templ.KV("active", data.Active == module.ID) }><span class="nav-number">{ navNumber(index + 2) }</span><span>{ module.Name }</span></a>
+							}
 						}
 					</nav>
 					<div class="sidebar-foot">
@@ -73,8 +79,8 @@ templ Layout(data LayoutData, body templ.Component) {
 							<h1>{ data.Title }</h1>
 						</div>
 						<div class="topbar-actions">
-							<span class="live-pill"><span></span> Live</span>
-							<a class="icon-button" href={ templ.SafeURL(data.Path) } aria-label="Refresh page">@Icon("refresh")</a>
+							<span class="live-pill"><span></span> Live · 15s</span>
+							<a class="button secondary refresh-button" href={ templ.SafeURL(data.Path) }>Refresh</a>
 						</div>
 					</header>
 					if data.Flash != "" {
@@ -196,25 +202,29 @@ func userInitial(username string) string {
 	return strings.ToUpper(username[:1])
 }
 
+func navNumber(value int) string {
+	return fmt.Sprintf("%02d", value)
+}
+
 templ Login(message, username, csrf string) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<meta name="color-scheme" content="light"/>
-			<meta name="theme-color" content="#15221d"/>
+			<meta name="color-scheme" content="dark"/>
+			<meta name="theme-color" content="#06111d"/>
 			<title>Sign in · Pilothouse</title>
 			<link rel="stylesheet" href="/static/app.css"/>
 		</head>
 		<body class="login-body">
 			<main class="login-shell">
 				<section class="login-panel">
-					<div class="login-brand"><span class="brand-mark">P</span><span><strong>Pilothouse</strong><small>Snosi console</small></span></div>
+					<div class="login-brand"><span class="brand-mark">❄</span><span><strong>Pilothouse</strong><small>frostyard admin</small></span></div>
 					<div class="login-copy">
 						<div class="eyebrow">System authentication</div>
-						<h1>Welcome aboard.</h1>
-						<p>Sign in with your Snow account. Pilothouse authenticates against the system's PAM policy.</p>
+						<h1>Sign in to the <em>quiet cockpit.</em></h1>
+						<p>Pilothouse uses this machine's own accounts and policy. Operators can inspect the system; administrators can act on services, extensions, and workloads.</p>
 					</div>
 					<form class="login-form" method="post" action="/login" autocomplete="on">
 						<input type="hidden" name="csrf" value={ csrf }/>
@@ -225,9 +235,9 @@ templ Login(message, username, csrf string) {
 						<label>Password<input type="password" name="password" autocomplete="current-password" required/></label>
 						<button class="button login-submit" type="submit">Sign in</button>
 					</form>
-					<p class="login-foot">Direct root login is disabled.</p>
+					<p class="login-foot">Loopback-only by default. Cold systems. Clear boundaries.</p>
 				</section>
-				<section class="login-art" aria-hidden="true"><div><span>Local system</span><strong>Secure access<br/>to Snow.</strong></div></section>
+				<section class="login-art" aria-hidden="true"><img src="/static/frozen-reflection.png" alt=""/><div><span>cayo · local system</span><strong>Keep the base still. Move with intent.</strong></div></section>
 			</main>
 		</body>
 	</html>
