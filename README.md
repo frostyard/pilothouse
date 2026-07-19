@@ -39,6 +39,18 @@ sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
 ```
 
+Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
+
+```bash
+make docker-generate
+make docker-fmt
+make docker-build
+make docker-test
+make docker-lint
+```
+
+Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
+
 Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext, Podman, and Docker mutations.
 
 The default is intentionally loopback-only. Terminate TLS at a reverse proxy and add `--secure-cookie` to the web service before exposing it to another machine.
