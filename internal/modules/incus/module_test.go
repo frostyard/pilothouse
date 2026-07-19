@@ -23,6 +23,8 @@ type fakeHost struct {
 	queryParameters  map[string]string
 }
 
+func (*fakeHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }
+
 func (host *fakeHost) CSRFToken(*http.Request) string { return "token" }
 
 func (host *fakeHost) Execute(_ context.Context, _ *http.Request, action string, parameters map[string]string) error {

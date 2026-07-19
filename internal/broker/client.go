@@ -32,8 +32,8 @@ func NewClient(socket string) *Client {
 	return &Client{baseURL: "http://unix", http: &http.Client{Transport: transport}, socket: socket}
 }
 
-func (c *Client) Action(ctx context.Context, token, id string, parameters map[string]string) error {
-	return c.do(ctx, http.MethodPost, "/v1/actions/"+id, token, ActionRequest{Parameters: parameters}, nil)
+func (c *Client) Action(ctx context.Context, token, id string, parameters map[string]string, confirmation string) error {
+	return c.do(ctx, http.MethodPost, "/v1/actions/"+id, token, ActionRequest{Parameters: parameters, Confirmation: confirmation}, nil)
 }
 
 func (c *Client) Health(ctx context.Context) error {

@@ -36,6 +36,7 @@ const (
 )
 
 const (
+	QueryActivity        = "org.frostyard.pilothouse.activity.list"
 	QueryDockerLogs      = "org.frostyard.pilothouse.docker.logs"
 	QueryDockerState     = "org.frostyard.pilothouse.docker.state"
 	QueryIncusState      = "org.frostyard.pilothouse.incus.state"
@@ -46,7 +47,8 @@ const (
 )
 
 type ActionRequest struct {
-	Parameters map[string]string `json:"parameters"`
+	Confirmation string            `json:"confirmation,omitempty"`
+	Parameters   map[string]string `json:"parameters"`
 }
 
 type ErrorResponse struct {

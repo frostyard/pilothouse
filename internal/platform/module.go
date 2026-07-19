@@ -33,6 +33,7 @@ type Finding struct {
 }
 
 type Host interface {
+	ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool
 	CSRFToken(*http.Request) string
 	Execute(context.Context, *http.Request, string, map[string]string) error
 	Identity(*http.Request) auth.Identity

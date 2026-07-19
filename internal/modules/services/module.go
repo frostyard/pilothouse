@@ -81,6 +81,9 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.NotFound(w, r)
 			return
 		}
+		if (action == "stop" || action == "disable") && !host.ConfirmAction(w, r, fmt.Sprintf("%s %s", action, unit), "services/unit/"+unit) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"unit": unit})
@@ -106,7 +109,7 @@ func (*Module) redirect(w http.ResponseWriter, r *http.Request, success string, 
 	values := url.Values{}
 	if err != nil {
 		values.Set("kind", "error")
-		values.Set("notice", err.Error())
+		values.Set("notice", "Action failed. Review Activity for the recorded outcome.")
 	} else {
 		values.Set("notice", success)
 	}

@@ -23,7 +23,7 @@ import (
 const sessionCookie = "pilothouse_session"
 
 type BrokerClient interface {
-	Action(context.Context, string, string, map[string]string) error
+	Action(context.Context, string, string, map[string]string, string) error
 	Health(context.Context) error
 	Login(context.Context, string, string, string) (broker.LoginResponse, error)
 	Logout(context.Context, string) error
@@ -95,12 +95,43 @@ func (s *Server) CSRFToken(r *http.Request) string {
 	return sessionFromContext(r.Context()).data.CSRF
 }
 
+func (s *Server) ConfirmAction(w http.ResponseWriter, r *http.Request, title, resource string) bool {
+	if subtle.ConstantTimeCompare([]byte(r.FormValue("confirmation")), []byte(resource)) == 1 {
+		return true
+	}
+	fields := make([]ConfirmationField, 0, len(r.Form))
+	for name, values := range r.Form {
+		if name == "csrf" || name == "confirmation" {
+			continue
+		}
+		for _, value := range values {
+			fields = append(fields, ConfirmationField{Name: name, Value: value})
+		}
+	}
+	slices.SortStableFunc(fields, func(a, b ConfirmationField) int { return strings.Compare(a.Name, b.Name) })
+	_ = s.Render(w, r, platform.Page{
+		Active:  "",
+		Body:    Confirmation(r.URL.Path, moduleRoot(r.URL.Path), title, resource, s.CSRFToken(r), fields),
+		Eyebrow: "Action confirmation",
+		Title:   "Confirm action",
+	})
+	return false
+}
+
+func moduleRoot(path string) string {
+	segment := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)[0]
+	if segment == "" {
+		return "/"
+	}
+	return "/" + segment
+}
+
 func (s *Server) Execute(ctx context.Context, r *http.Request, action string, parameters map[string]string) error {
 	session := sessionFromContext(r.Context())
 	if session.token == "" {
 		return broker.ErrUnauthorized
 	}
-	return s.broker.Action(ctx, session.token, action, parameters)
+	return s.broker.Action(ctx, session.token, action, parameters, r.FormValue("confirmation"))
 }
 
 func (s *Server) Handler() http.Handler {

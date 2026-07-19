@@ -1,0 +1,47 @@
+package activity
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/frostyard/pilothouse/internal/audit"
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ AccessDenied() {
+	<div class="page-stack"><article class="card error-card"><div class="card-heading"><span class="card-icon danger">@web.Icon("alert")</span><div><h2>Administrator access required</h2><p>Activity records contain sensitive operational details.</p></div></div></article></div>
+}
+
+templ Page(records []audit.Record, outcome string) {
+	<div class="page-stack">
+		<div class="page-intro"><p>Durable history of privileged actions. Backend error details and credentials are never retained.</p></div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Recent actions</h2><form method="get" action="/activity"><label>Outcome <select name="outcome"><option value="">All</option><option value="succeeded" selected?={ outcome == "succeeded" }>Succeeded</option><option value="failed" selected?={ outcome == "failed" }>Failed</option><option value="unknown" selected?={ outcome == "unknown" }>Unknown</option></select></label><button class="button secondary" type="submit">Filter</button></form></div>
+			if len(records) == 0 {
+				<div class="empty-state"><span class="card-icon">@web.Icon("activity")</span>No action records match this filter.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Outcome</th><th>Duration</th></tr></thead><tbody>
+					for _, record := range records {
+						<tr><td><time datetime={ record.StartedAt.Format(time.RFC3339) }>{ record.StartedAt.Local().Format("Jan 02 15:04:05") }</time></td><td><strong>{ record.Username }</strong><small class="table-detail">UID { fmt.Sprint(record.UID) }</small></td><td><span class="version">{ actionLabel(record.Action) }</span></td><td>{ record.Resource }</td><td><span class={ "badge", templ.KV("active", record.Outcome == audit.OutcomeSucceeded) }>{ record.Outcome }</span><small class="table-detail">{ record.ErrorCategory }</small></td><td>{ duration(record.DurationMS) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+	</div>
+}
+
+func actionLabel(action string) string {
+	parts := strings.Split(action, ".")
+	if len(parts) < 2 {
+		return action
+	}
+	return strings.ReplaceAll(parts[len(parts)-2]+" "+parts[len(parts)-1], "_", " ")
+}
+
+func duration(milliseconds int64) string {
+	if milliseconds < 1000 {
+		return fmt.Sprintf("%d ms", milliseconds)
+	}
+	return (time.Duration(milliseconds) * time.Millisecond).Round(100 * time.Millisecond).String()
+}

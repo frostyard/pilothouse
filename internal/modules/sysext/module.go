@@ -67,6 +67,9 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		var err error
 		switch action {
 		case "disable":
+			if !host.ConfirmAction(w, r, "Disable system extension "+name, "sysext/feature/"+name) {
+				return
+			}
 			err = host.Execute(ctx, r, broker.ActionSysextDisable, map[string]string{"name": name})
 		case "enable":
 			err = host.Execute(ctx, r, broker.ActionSysextEnable, map[string]string{"name": name})
@@ -86,8 +89,14 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		var err error
 		switch action {
 		case "refresh":
+			if !host.ConfirmAction(w, r, "Refresh system extensions", "sysext/global") {
+				return
+			}
 			err = host.Execute(ctx, r, broker.ActionSysextRefresh, nil)
 		case "update":
+			if !host.ConfirmAction(w, r, "Update system extensions", "sysext/global") {
+				return
+			}
 			err = host.Execute(ctx, r, broker.ActionSysextUpdate, nil)
 		default:
 			http.NotFound(w, r)
@@ -101,7 +110,7 @@ func (m *Module) redirect(w http.ResponseWriter, r *http.Request, success string
 	values := url.Values{}
 	if err != nil {
 		values.Set("kind", "error")
-		values.Set("notice", err.Error())
+		values.Set("notice", "Action failed. Review Activity for the recorded outcome.")
 	} else {
 		values.Set("notice", success)
 	}

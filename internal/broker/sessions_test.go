@@ -40,9 +40,9 @@ func TestActionRegistryRequiresAdmin(t *testing.T) {
 		return nil
 	}))
 
-	err := registry.Execute(context.Background(), auth.Identity{Username: "viewer"}, "manage", nil)
+	err := registry.Execute(context.Background(), auth.Identity{Username: "viewer"}, "manage", nil, "")
 	assert.Error(t, err)
 	assert.False(t, called)
-	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, "manage", nil))
+	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, "manage", nil, ""))
 	assert.True(t, called)
 }

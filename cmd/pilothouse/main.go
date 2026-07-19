@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/modules/activity"
 	"github.com/frostyard/pilothouse/internal/modules/attention"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
@@ -48,6 +49,7 @@ func run() error {
 	serviceModule := services.New()
 	registry, err := platform.NewRegistry(
 		attention.New(system, serviceModule),
+		activity.New(),
 		system,
 		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
 		podman.New(),

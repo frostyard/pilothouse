@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -35,6 +37,7 @@ func main() {
 
 func run() error {
 	adminGroup := flag.String("admin-group", "sudo", "system group allowed to perform privileged actions")
+	auditDB := flag.String("audit-db", "/var/lib/pilothouse/audit.db", "durable action audit database")
 	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
@@ -48,8 +51,19 @@ func run() error {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	actions := broker.NewActionRegistry()
+	if err := os.MkdirAll(filepath.Dir(*auditDB), 0o750); err != nil {
+		return fmt.Errorf("create audit directory: %w", err)
+	}
+	auditStore, err := audit.Open(*auditDB, 10_000)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = auditStore.Close() }()
+	actions := broker.NewActionRegistry(auditStore)
 	queries := broker.NewQueryRegistry()
+	if err := registerActivity(queries, auditStore); err != nil {
+		return err
+	}
 	servicesManager, err := services.NewSystemManager(servicejournal.New())
 	if err != nil {
 		return err
@@ -116,6 +130,25 @@ func run() error {
 	return nil
 }
 
+func registerActivity(queries *broker.QueryRegistry, store *audit.Store) error {
+	return queries.Register(broker.QueryActivity, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		for name := range parameters {
+			if name != "action" && name != "outcome" && name != "limit" {
+				return nil, fmt.Errorf("unsupported activity filter %q", name)
+			}
+		}
+		limit := 50
+		if value := parameters["limit"]; value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 1 || parsed > 100 {
+				return nil, fmt.Errorf("activity limit must be between 1 and 100")
+			}
+			limit = parsed
+		}
+		return store.List(ctx, audit.Filter{Action: parameters["action"], Outcome: parameters["outcome"], Limit: limit})
+	})
+}
+
 func listenUnix(path, groupName string) (net.Listener, error) {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -153,15 +186,29 @@ func listenUnix(path, groupName string) (net.Listener, error) {
 }
 
 type actionRegistration struct {
-	id      string
-	handler func(context.Context, string) error
+	confirmation bool
+	global       bool
+	handler      func(context.Context, string) error
+	id           string
+	resource     string
 }
 
 func registerNamedActions(registry *broker.ActionRegistry, parameter string, registrations []actionRegistration) error {
 	for _, registration := range registrations {
 		handler := registration.handler
-		if err := registry.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters[parameter])
+		prefix := registration.resource
+		global := registration.global
+		var lockResource func(map[string]string) (string, error)
+		if global {
+			lockResource = func(map[string]string) (string, error) { return "sysext/global", nil }
+		}
+		if err := registry.RegisterDefinition(broker.ActionDefinition{
+			ID: registration.id, Admin: true, Parameters: []string{parameter}, ConfirmationRequired: registration.confirmation,
+			Resource:     func(parameters map[string]string) (string, error) { return prefix + "/" + parameters[parameter], nil },
+			LockResource: lockResource,
+			Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+				return handler(ctx, parameters[parameter])
+			},
 		}); err != nil {
 			return err
 		}
@@ -171,27 +218,28 @@ func registerNamedActions(registry *broker.ActionRegistry, parameter string, reg
 
 func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager) error {
 	if err := registerNamedActions(registry, "name", []actionRegistration{
-		{id: broker.ActionSysextDisable, handler: func(ctx context.Context, name string) error {
+		{id: broker.ActionSysextDisable, resource: "sysext/feature", global: true, confirmation: true, handler: func(ctx context.Context, name string) error {
 			return manager.Disable(ctx, name)
 		}},
-		{id: broker.ActionSysextEnable, handler: func(ctx context.Context, name string) error {
+		{id: broker.ActionSysextEnable, resource: "sysext/feature", global: true, handler: func(ctx context.Context, name string) error {
 			return manager.Enable(ctx, name)
 		}},
 	}); err != nil {
 		return err
 	}
 	for _, action := range []struct {
-		handler broker.ActionHandler
-		id      string
+		confirmation bool
+		handler      broker.ActionHandler
+		id           string
 	}{
-		{id: broker.ActionSysextRefresh, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextRefresh, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Refresh(ctx)
 		}},
-		{id: broker.ActionSysextUpdate, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextUpdate, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Update(ctx)
 		}},
 	} {
-		if err := registry.Register(action.id, true, action.handler); err != nil {
+		if err := registry.RegisterDefinition(broker.ActionDefinition{ID: action.id, Admin: true, ConfirmationRequired: action.confirmation, Resource: func(map[string]string) (string, error) { return "sysext/global", nil }, Handler: action.handler}); err != nil {
 			return err
 		}
 	}
@@ -210,12 +258,12 @@ func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegis
 		return err
 	}
 	return registerNamedActions(actions, "unit", []actionRegistration{
-		{id: broker.ActionServicesDisable, handler: manager.Disable},
-		{id: broker.ActionServicesEnable, handler: manager.Enable},
-		{id: broker.ActionServicesResetFailed, handler: manager.ResetFailed},
-		{id: broker.ActionServicesRestart, handler: manager.Restart},
-		{id: broker.ActionServicesStart, handler: manager.Start},
-		{id: broker.ActionServicesStop, handler: manager.Stop},
+		{id: broker.ActionServicesDisable, resource: "services/unit", confirmation: true, handler: manager.Disable},
+		{id: broker.ActionServicesEnable, resource: "services/unit", handler: manager.Enable},
+		{id: broker.ActionServicesResetFailed, resource: "services/unit", handler: manager.ResetFailed},
+		{id: broker.ActionServicesRestart, resource: "services/unit", handler: manager.Restart},
+		{id: broker.ActionServicesStart, resource: "services/unit", handler: manager.Start},
+		{id: broker.ActionServicesStop, resource: "services/unit", confirmation: true, handler: manager.Stop},
 	})
 }
 
@@ -231,11 +279,11 @@ func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 		return err
 	}
 	return registerNamedActions(actions, "id", []actionRegistration{
-		{id: broker.ActionPodmanRemove, handler: manager.Remove},
-		{id: broker.ActionPodmanRemoveImage, handler: manager.RemoveImage},
-		{id: broker.ActionPodmanRestart, handler: manager.Restart},
-		{id: broker.ActionPodmanStart, handler: manager.Start},
-		{id: broker.ActionPodmanStop, handler: manager.Stop},
+		{id: broker.ActionPodmanRemove, resource: "podman/container", confirmation: true, handler: manager.Remove},
+		{id: broker.ActionPodmanRemoveImage, resource: "podman/image", confirmation: true, handler: manager.RemoveImage},
+		{id: broker.ActionPodmanRestart, resource: "podman/container", handler: manager.Restart},
+		{id: broker.ActionPodmanStart, resource: "podman/container", handler: manager.Start},
+		{id: broker.ActionPodmanStop, resource: "podman/container", confirmation: true, handler: manager.Stop},
 	})
 }
 
@@ -251,11 +299,11 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 		return err
 	}
 	return registerNamedActions(actions, "id", []actionRegistration{
-		{id: broker.ActionDockerRemove, handler: manager.Remove},
-		{id: broker.ActionDockerRemoveImage, handler: manager.RemoveImage},
-		{id: broker.ActionDockerRestart, handler: manager.Restart},
-		{id: broker.ActionDockerStart, handler: manager.Start},
-		{id: broker.ActionDockerStop, handler: manager.Stop},
+		{id: broker.ActionDockerRemove, resource: "docker/container", confirmation: true, handler: manager.Remove},
+		{id: broker.ActionDockerRemoveImage, resource: "docker/image", confirmation: true, handler: manager.RemoveImage},
+		{id: broker.ActionDockerRestart, resource: "docker/container", handler: manager.Restart},
+		{id: broker.ActionDockerStart, resource: "docker/container", handler: manager.Start},
+		{id: broker.ActionDockerStop, resource: "docker/container", confirmation: true, handler: manager.Stop},
 	})
 }
 
@@ -266,26 +314,35 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 		return err
 	}
 	return registerProjectActions(actions, []projectActionRegistration{
-		{id: broker.ActionIncusRemove, handler: manager.Remove, parameter: "name"},
-		{id: broker.ActionIncusRemoveImage, handler: manager.RemoveImage, parameter: "fingerprint"},
-		{id: broker.ActionIncusRestart, handler: manager.Restart, parameter: "name"},
-		{id: broker.ActionIncusStart, handler: manager.Start, parameter: "name"},
-		{id: broker.ActionIncusStop, handler: manager.Stop, parameter: "name"},
+		{id: broker.ActionIncusRemove, resource: "incus/instance", confirmation: true, handler: manager.Remove, parameter: "name"},
+		{id: broker.ActionIncusRemoveImage, resource: "incus/image", confirmation: true, handler: manager.RemoveImage, parameter: "fingerprint"},
+		{id: broker.ActionIncusRestart, resource: "incus/instance", handler: manager.Restart, parameter: "name"},
+		{id: broker.ActionIncusStart, resource: "incus/instance", handler: manager.Start, parameter: "name"},
+		{id: broker.ActionIncusStop, resource: "incus/instance", confirmation: true, handler: manager.Stop, parameter: "name"},
 	})
 }
 
 type projectActionRegistration struct {
-	id        string
-	handler   func(context.Context, string, string) error
-	parameter string
+	confirmation bool
+	id           string
+	handler      func(context.Context, string, string) error
+	parameter    string
+	resource     string
 }
 
 func registerProjectActions(registry *broker.ActionRegistry, registrations []projectActionRegistration) error {
 	for _, registration := range registrations {
 		handler := registration.handler
 		parameter := registration.parameter
-		if err := registry.Register(registration.id, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
-			return handler(ctx, parameters["project"], parameters[parameter])
+		prefix := registration.resource
+		if err := registry.RegisterDefinition(broker.ActionDefinition{
+			ID: registration.id, Admin: true, Parameters: []string{"project", parameter}, ConfirmationRequired: registration.confirmation,
+			Resource: func(parameters map[string]string) (string, error) {
+				return prefix + "/" + parameters["project"] + "/" + parameters[parameter], nil
+			},
+			Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+				return handler(ctx, parameters["project"], parameters[parameter])
+			},
 		}); err != nil {
 			return err
 		}

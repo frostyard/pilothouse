@@ -20,6 +20,10 @@ type moduleHost struct {
 	page            platform.Page
 }
 
+func (*moduleHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool {
+	return true
+}
+
 func (*moduleHost) CSRFToken(*http.Request) string { return "token" }
 func (h *moduleHost) Execute(_ context.Context, _ *http.Request, action string, parameters map[string]string) error {
 	h.action, h.parameters = action, parameters

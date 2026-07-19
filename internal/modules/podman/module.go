@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -77,9 +78,13 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		id := r.PathValue("id")
-		actionID, ok := actionIDs[r.PathValue("action")]
+		action := r.PathValue("action")
+		actionID, ok := actionIDs[action]
 		if !ok {
 			http.NotFound(w, r)
+			return
+		}
+		if (action == "stop" || action == "remove") && !host.ConfirmAction(w, r, strings.ToUpper(action[:1])+action[1:]+" container", "podman/container/"+id) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
@@ -95,9 +100,13 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.NotFound(w, r)
 			return
 		}
+		id := r.PathValue("id")
+		if !host.ConfirmAction(w, r, "Remove Podman image", "podman/image/"+id) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
-		err := host.Execute(ctx, r, broker.ActionPodmanRemoveImage, map[string]string{"id": r.PathValue("id")})
+		err := host.Execute(ctx, r, broker.ActionPodmanRemoveImage, map[string]string{"id": id})
 		m.redirect(w, r, "Image removed", err)
 	})
 }
@@ -122,7 +131,7 @@ func (m *Module) redirect(w http.ResponseWriter, r *http.Request, success string
 	values := url.Values{}
 	if err != nil {
 		values.Set("kind", "error")
-		values.Set("notice", err.Error())
+		values.Set("notice", "Action failed. Review Activity for the recorded outcome.")
 	} else {
 		values.Set("notice", success)
 	}

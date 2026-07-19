@@ -17,12 +17,16 @@ import (
 )
 
 type fakeBroker struct {
-	healthErr error
-	session   broker.SessionResponse
+	confirmation string
+	healthErr    error
+	session      broker.SessionResponse
 }
 
-func (b *fakeBroker) Action(context.Context, string, string, map[string]string) error { return nil }
-func (b *fakeBroker) Health(context.Context) error                                    { return b.healthErr }
+func (b *fakeBroker) Action(_ context.Context, _, _ string, _ map[string]string, confirmation string) error {
+	b.confirmation = confirmation
+	return nil
+}
+func (b *fakeBroker) Health(context.Context) error { return b.healthErr }
 func (b *fakeBroker) Login(context.Context, string, string, string) (broker.LoginResponse, error) {
 	return broker.LoginResponse{Session: b.session, Token: "token"}, nil
 }
@@ -50,6 +54,35 @@ func TestServerHealthAndSecurityHeaders(t *testing.T) {
 	assert.Equal(t, "ok\n", response.Body.String())
 	assert.Contains(t, response.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'")
 	assert.Equal(t, "nosniff", response.Header().Get("X-Content-Type-Options"))
+}
+
+func TestConfirmActionRendersReviewAndAcceptsExactResource(t *testing.T) {
+	server := newTestServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/services/backup.timer/stop", strings.NewReader("csrf=csrf&project=default"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request = request.WithContext(context.WithValue(request.Context(), sessionContextKey{}, requestSession{data: broker.SessionResponse{CSRF: "csrf"}, token: "token"}))
+	require.NoError(t, request.ParseForm())
+	response := httptest.NewRecorder()
+
+	assert.False(t, server.ConfirmAction(response, request, "Stop backup.timer", "services/unit/backup.timer"))
+	assert.Contains(t, response.Body.String(), "Stop backup.timer")
+	assert.Contains(t, response.Body.String(), `name="confirmation" value="services/unit/backup.timer"`)
+	assert.Contains(t, response.Body.String(), `name="project" value="default"`)
+	assert.NotContains(t, response.Body.String(), "@Icon(")
+
+	request.Form.Set("confirmation", "services/unit/backup.timer")
+	assert.True(t, server.ConfirmAction(httptest.NewRecorder(), request, "Stop backup.timer", "services/unit/backup.timer"))
+}
+
+func TestExecuteForwardsConfirmation(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	request := httptest.NewRequest(http.MethodPost, "/action", strings.NewReader("confirmation=resource%2Fone"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request = request.WithContext(context.WithValue(request.Context(), sessionContextKey{}, requestSession{token: "token"}))
+	require.NoError(t, request.ParseForm())
+	require.NoError(t, server.Execute(context.Background(), request, "action", nil))
+	assert.Equal(t, "resource/one", fake.confirmation)
 }
 
 func TestServerReadinessRequiresBroker(t *testing.T) {
