@@ -128,12 +128,22 @@ The link must not:
 
 The controller and target directions use distinct Unix socket roles:
 
-- The link owns `/run/pilothouse/link-client.sock`. The controller broker connects to it to request one bounded HTTPS exchange with a persisted target endpoint and broker-supplied TLS pin. The link returns the raw signed response in the same Unix request.
-- The broker owns `/run/pilothouse/fleet.sock`. The target link connects to it to submit one incoming signed envelope, pairing message, TLS peer fingerprint, or operation-status request and receive one broker-produced response.
+- The link owns `/run/pilothouse-link/client.sock`. The controller broker connects to it to request one bounded HTTPS exchange with a persisted target endpoint and broker-supplied TLS pin. The link returns the raw signed response in the same Unix request.
+- The broker owns `/run/pilothouse-link/fleet.sock`. The target link connects to it to submit one incoming signed envelope, pairing message, TLS peer fingerprint, or operation-status request and receive one broker-produced response.
 
 A machine acting as both controller and target may use both sockets. Periodic controller polling is scheduled by the controller broker, which invokes the local link-client socket; no queue or long-poll mechanism is required for version 1.
 
 Both local protocols are narrower than the browser broker socket. They must not expose PAM login, browser sessions, arbitrary local query dispatch, or arbitrary local action dispatch. Socket ownership and groups permit only the broker and `pilothouse-link` service account to use them.
+
+Use a distinct `pilothouse-link` group and runtime directory. The required ownership matrix is:
+
+| Path | Owner | Mode | Intended clients |
+| --- | --- | --- | --- |
+| `/run/pilothouse/broker.sock` | `root:pilothouse` | `0660` | `pilothouse` web process only |
+| `/run/pilothouse-link/fleet.sock` | `root:pilothouse-link` | `0660` | `pilothouse-link` submitting inbound envelopes |
+| `/run/pilothouse-link/client.sock` | `pilothouse-link:pilothouse-link` | `0660` | root broker requesting outbound exchanges |
+
+The `pilothouse-link` account is not a member of the existing `pilothouse` group, and the web account is not a member of `pilothouse-link`. Runtime directories must preserve the same separation. Packaging tests must execute under the real service credentials and prove that the link can use only the two fleet sockets and receives permission denied for `broker.sock`.
 
 The target fleet socket maps a verified envelope through a separate compiled fleet capability table. It must never use an envelope capability string as an unrestricted key into the existing `ActionRegistry` or `QueryRegistry`. A valid local broker action that has not been explicitly mapped as a fleet capability remains unreachable through this socket.
 
@@ -228,6 +238,8 @@ initial capability bundle identifier
 ```
 
 Use a recognizable prefix such as `ph1_` followed by base64url-encoded structured data. The value must not be placed in a URL query string, command argument that may be logged, audit record, or HTML response after initial display.
+
+A QR code encodes the same `ph1_` token directly as text. It must not encode an `https://` URL, query string, redirect, or third-party scanner endpoint.
 
 The initial bundle is the maximum capability set the target is willing to offer through that invitation. The controller may request the entire set or a subset; requesting a capability outside the offered set rejects pairing. The target administrator approves the exact requested subset.
 
@@ -353,6 +365,7 @@ The link may expose a small fixed surface such as:
 ```text
 GET  /v1/fleet/hello
 POST /v1/fleet/pair
+POST /v1/fleet/challenges
 POST /v1/fleet/query
 POST /v1/fleet/action
 POST /v1/fleet/operations/status
@@ -360,7 +373,13 @@ POST /v1/fleet/operations/status
 
 These endpoints carry typed fleet envelopes. They are not generic broker endpoints. Each endpoint has an independent body limit, timeout, rate limit, and allowed message type.
 
-`/v1/fleet/hello`, query, action, and operation-status endpoints require pinned mutual TLS. `/v1/fleet/pair` is enabled only while at least one unexpired invitation exists and reveals no rich hello metadata before invitation proof.
+`/v1/fleet/hello`, challenges, query, action, and operation-status endpoints require pinned mutual TLS. `/v1/fleet/pair` is enabled only while at least one unexpired invitation exists and reveals no rich hello metadata before invitation proof.
+
+### Challenge concurrency
+
+The challenge endpoint returns between one and eight target-broker-signed challenges per request. Each challenge is bound to the controller machine ID, target machine ID, grant ID and epoch, protocol major, intended purpose (`query`, `preview`, `action`, or `status`), and a short expiry. The target stores only the challenge ID, nonce digest, binding fields, expiry, and consumed state.
+
+Each peer may have at most 32 unexpired challenges outstanding. Issuance beyond that limit returns `rate-limited`; it does not evict a live challenge. Challenges default to a 30-second lifetime, are consumed atomically only after the complete signed request verifies, and cannot be used for a different purpose. Concurrent pollers obtain separate challenges or bounded batches. Cancellation does not make a challenge reusable, and expiry cleanup is transactional and bounded.
 
 ### Request requirements
 
@@ -379,6 +398,10 @@ Every authenticated query or action payload includes:
 - Signature over all preceding fields.
 
 The target broker creates a signed, short-lived, one-time challenge and returns it through the hello exchange. The controller broker includes that challenge in its signed request, and the target broker atomically consumes it during verification. This proves broker-to-broker freshness; it does not claim TLS channel binding because neither broker terminates TLS. A durable operation ID deduplicates mutations across connections and restarts. Read-only queries use request IDs and one-time broker challenges but do not enter the durable mutation ledger. Wall-clock expiry limits exposure but is not the only replay defense. Implement and test a bounded clock-skew allowance.
+
+For concurrency, normal requests obtain challenges from the dedicated challenge endpoint; the hello challenge is used only to authenticate initial post-pairing negotiation. Challenge issuance, request dispatch, and response receipt may be pipelined, but a signed request is associated with exactly one challenge.
+
+Every target-signed response includes the original request ID, challenge ID, SHA-256 digest of the exact signed request payload bytes, response creation time, sender and target IDs, stable outcome, and bounded result. The controller retains this request context until completion and rejects a response when any binding differs, when the challenge was not issued for that request, or when the response is outside its permitted response window. A valid signature alone is not sufficient to accept a delayed response from an older request.
 
 ### Error model
 
@@ -402,6 +425,14 @@ Return stable categories rather than backend error strings:
 Detailed backend errors remain in protected local logs when appropriate and are not transported to the controller by default.
 
 ## Read-only inventory
+
+The initial capabilities require new broker-owned producers. Today `system.Snapshot` and the composed attention findings are collected in the unprivileged web process; they are not broker queries and cannot be signed authoritatively by the target broker as-is.
+
+- `system.summary@1` uses a broker-registered, bounded Linux summary collector instantiated in `cmd/pilothoused`. It may reuse parsing and domain types from the system module, but it returns a dedicated fleet wire schema rather than templ presentation data.
+- `attention.summary@1` uses a broker-owned aggregator over explicitly registered local health producers. It does not call the target web process or scrape the attention page.
+- `maintenance.state@1` maps to a fixed broker-owned producer with a dedicated bounded fleet schema.
+
+Each producer defines field-level sensitivity, maximum encoded size, collection timeout, and failure semantics. Tests compare its output to known local fixtures and prove that web-process availability is not required.
 
 The controller polls each active target directly. Recommended defaults are a lightweight hello every 30 seconds and a summary inventory every two minutes, with jitter. Detailed views perform bounded on-demand queries.
 
@@ -466,29 +497,44 @@ Before exposing queries remotely, evolve `QueryRegistry` toward action-like exac
 ### Target processing
 
 1. Verify mutual TLS pin, machine signature, sender, target, protocol version, expiry, one-time broker challenge, grant, epoch, capability, and exact parameters.
-2. Atomically insert `(controller machine ID, operation ID)` into the durable replay ledger.
+2. Atomically insert `(controller machine ID, operation ID)` into the durable replay ledger in `reserved` state.
 3. Return the existing stored state without executing if the same operation was previously accepted.
 4. Derive a validated lock key from the fixed action and immutable request parameters, then acquire the same target-local resource lock used by local actions.
 5. Under the lock, rediscover live state and recompute the canonical target resource.
 6. Verify the preview ID is unexpired and bound to the same controller, target, action, and resource.
 7. Compare destructive confirmation with the newly target-derived canonical resource and reject if state changed since preview.
 8. Write target audit intent before mutation.
-9. Execute the existing fixed manager operation while retaining the lock.
-10. Durably record success, failure, or unknown outcome.
-11. Sign and return the stored operation state.
+9. Update the operation to `prepared` with the audit record ID.
+10. Follow the durable execution branch defined below: synchronous actions become `running`, background jobs become `accepted`, and connection-breaking actions become `effect-pending`.
+11. Execute or enqueue the existing fixed manager operation while retaining the lock according to that branch.
+12. Durably record success, failure, or unknown outcome in the fleet database, then complete the audit record.
+13. Sign and return the stored operation state.
+
+Any validation, grant, confirmation, or lock failure after initial insertion records a terminal `rejected` state and retains the replay tombstone. Re-delivery of that operation ID returns the stored rejection; it does not restart preparation.
 
 Phase 1 must refactor the common action execution core so mutable resource validation and confirmation occur under the resource lock for both local and remote paths. Lock-key derivation may validate syntax before locking but must not trust mutable resource state.
 
 ### Operation states
 
 ```text
-created -> submitted -> accepted -> running -> succeeded
-                                     |       -> failed
-                                     |       -> effect-pending -> observed-succeeded
-                                     |                          -> unknown
-                                     |       -> unknown
-                                     -> rejected
+controller:  created -> submitted
+
+target sync: reserved -> prepared -> running -> succeeded
+                 |                       |     -> failed
+                 |                       -> unknown
+                 -> rejected
+
+target background: reserved -> prepared -> accepted -> succeeded
+                       |                       |       -> failed
+                       |                       -> unknown
+                       -> rejected
+
+target reboot: reserved -> prepared -> effect-pending -> observed-succeeded
+                   |                             |     -> unknown
+                   -> rejected
 ```
+
+`created` and `submitted` are controller-side pre-dispatch states. The target begins at `reserved`. `prepared` means audit intent is durable but no handler or background job has started. `accepted` means a target background job has been durably queued. `effect-pending` is reserved for connection-breaking actions with an action-specific reconciliation mechanism.
 
 The controller may query the same operation ID after a timeout. It must not generate a replacement operation automatically. A target crash after the underlying mutation but before result persistence produces `unknown`, even when the controller can infer a likely outcome later.
 
@@ -597,11 +643,36 @@ InventorySnapshot
   bounded_payload
 ```
 
-Private keys, invitation verifiers, grants, and replay records remain broker-only. The web module receives sanitized models through fixed queries. Database startup must recover accepted or running operations as `unknown`, never replay them.
+Private keys, invitation verifiers, grants, and replay records remain broker-only. The web module receives sanitized models through fixed queries. Database startup must recover accepted or running operations without replaying them.
 
-Startup recovery must reconcile both sides of an interrupted mutation: the remote operation becomes `unknown`, and its associated open audit record is completed with the existing unknown outcome. Operation and audit state must not diverge after reboot.
+### Cross-database write and recovery protocol
 
-Reboot operations in `effect-pending` use boot-ID reconciliation before generic unknown recovery. Their operation and audit records transition together to `observed-succeeded` or `unknown`.
+Fleet operations and audit records reside in separate bbolt files and cannot commit atomically. The operation ID is stored in both databases as the durable correlation key. The fleet operation record is authoritative for delivery, replay, and remote status; the audit record is authoritative for operator-facing activity history.
+
+Before mutation, writes occur in this order:
+
+1. Insert the replay tombstone and operation in `reserved` state in the fleet database.
+2. Begin the audit record with the same operation ID.
+3. Update the operation to `prepared` with the audit record ID.
+4. Select the execution branch: synchronous actions become `running`; background actions durably enqueue the local job, store its ID, and become `accepted` before the goroutine starts; reboot records its pre-boot ID and becomes `effect-pending` before invoking the command.
+5. Execute the synchronous or reboot handler, or start the already accepted background job.
+6. Persist the final operation state in the fleet database.
+7. Complete the audit record with the corresponding outcome.
+
+The handler cannot run before both the replay tombstone and audit intent are durable. Recovery follows a fixed matrix:
+
+- `reserved` with no audit record: mark the operation `rejected` with `preparation-interrupted`; no mutation ran.
+- `reserved` with a started audit record: complete both as failed preparation; no mutation ran.
+- `prepared` with a started audit record and no queued job: complete both as failed before execution; no mutation ran.
+- `prepared` with a queued background job that was not yet accepted: mark the never-started job, operation, and audit record failed with `preparation-interrupted`; no mutation ran.
+- `running` with no final fleet result: complete both as `unknown`; never replay.
+- `accepted` with no final fleet result: reconcile from the linked target job; if the job was queued or running when interrupted, complete the job, operation, and audit record as `unknown`; never replay.
+- Final fleet result with a started audit record: copy the fleet outcome to the audit record.
+- Missing or contradictory correlation: quarantine the operation, report a recovery error, and do not execute or discard it automatically.
+
+Broker startup must coordinate fleet and audit recovery before the audit store generically converts started records to unknown. Crash-injection tests cover every boundary between these writes. Temporary cross-database divergence is expected; deterministic startup reconciliation, not impossible atomicity, is the guarantee.
+
+Reboot operations in `effect-pending` use boot-ID reconciliation before generic unknown recovery. Their operation and audit records are reconciled to `observed-succeeded` or `unknown` using the same operation ID.
 
 ### Replay retention and garbage collection
 
@@ -618,8 +689,8 @@ Possible configuration:
 ```text
 PILOTHOUSE_FLEET_LISTEN=100.80.10.4:9443
 PILOTHOUSE_FLEET_PUBLIC_ENDPOINT=https://host.tailnet.ts.net:9443
-PILOTHOUSE_FLEET_SOCKET=/run/pilothouse/fleet.sock
-PILOTHOUSE_LINK_CLIENT_SOCKET=/run/pilothouse/link-client.sock
+PILOTHOUSE_FLEET_SOCKET=/run/pilothouse-link/fleet.sock
+PILOTHOUSE_LINK_CLIENT_SOCKET=/run/pilothouse-link/client.sock
 PILOTHOUSE_FLEET_CONNECT_TIMEOUT=5s
 PILOTHOUSE_FLEET_REQUEST_TIMEOUT=30s
 ```
@@ -713,7 +784,7 @@ Exit criteria:
 
 - Protocol major version 1 is fully specified.
 - Security invariants and non-goals are accepted.
-- Every trust-boundary decision in the open-decision list is resolved and recorded.
+- Every item in Open decisions before Phase 0 exits is resolved in the protocol ADR; Phase 1 does not begin with deferred protocol, retention, recovery, or authorization choices.
 
 ### Phase 1: Broker safety foundations
 
@@ -730,6 +801,7 @@ Work:
 - Add a compiled remote capability mapping; do not accept browser-supplied action IDs.
 - Add fleet bbolt schema and transactional helpers.
 - Add durable operation insertion, lookup, transition, and restart recovery.
+- Implement the ordered fleet-operation/audit write protocol and correlation IDs across the separate databases.
 - Add replay-tombstone retention and transactional garbage collection.
 - Add grant epoch and capability intersection logic.
 
@@ -742,6 +814,8 @@ Tests and review gates:
 - Duplicate operation insertion cannot execute twice under concurrency.
 - Garbage collection cannot make an unexpired signed mutation replayable.
 - Restart converts accepted/running simulated operations and their open audit records to unknown.
+- Crash injection at every cross-database write boundary produces the documented deterministic recovery state and never executes an unprepared operation.
+- `reserved`, `prepared`, `running`, `accepted`, `effect-pending`, final, and rejected operation states enforce valid transitions after restart.
 - A signed envelope naming a real local broker action that is absent from the fleet capability table is rejected.
 
 Exit criteria:
@@ -786,6 +860,7 @@ Work:
 
 - Add `pilothouse-link` and hardened systemd packaging.
 - Add the broker-owned fleet socket, link-owned client socket, and their fixed local protocols.
+- Add the distinct `pilothouse-link` group, runtime directory, ownership matrix, and negative broker-socket access test.
 - Implement explicit listen and public-endpoint configuration.
 - Implement TLS 1.3, transport-key creation, and certificate pinning.
 - Implement broker-authoritative pin lookup, outbound pin delivery, pin-set generation, and live refresh.
@@ -793,8 +868,9 @@ Work:
 - Implement controller invitation parsing and endpoint validation.
 - Implement controller and target peer approval views.
 - Implement a minimal pre-pairing response and rich signed hello only after pinned mutual TLS.
-- Implement broker-issued one-time challenges without claiming TLS channel binding.
+- Implement bounded broker-issued challenge batches, peer and purpose binding, TTL, one-time consumption, cleanup, and backpressure without claiming TLS channel binding.
 - Return target responses to the controller broker only through the same bounded link-client Unix request/response exchange that initiated the network call.
+- Bind every target response to the original request ID, challenge ID, and exact request-payload digest.
 - Add per-source and per-invitation rate limits.
 - Refuse redirects and key changes outside the approved rotation flow.
 
@@ -809,6 +885,9 @@ Tests and review gates:
 - An unauthenticated client cannot retrieve build version, capability inventory, grant state, or rich machine metadata.
 - Pairing interruption resumes only with matching keys and an unexpired invitation.
 - Link pin state updates after approval, revocation, and rotation without process restart.
+- Concurrent polls and on-demand requests cannot share, exceed, evict, or reuse broker challenges.
+- Delayed or mismatched signed responses are rejected even when their target signature is valid.
+- QR payloads contain the direct `ph1_` token and no URL or query string.
 - Fuzz invitation and pairing parsers.
 
 Exit criteria:
@@ -833,6 +912,7 @@ maintenance.state@1
 
 Work:
 
+- Add dedicated broker-owned producers and bounded wire schemas for system, attention, and maintenance summaries; do not depend on the web-process collectors at runtime.
 - Implement signed summary inventory production at the target broker.
 - Implement direct controller polling with jitter and bounded concurrency.
 - Verify target identity and signature before accepting a snapshot.
@@ -847,6 +927,7 @@ Work:
 Tests and review gates:
 
 - A snapshot signed by the wrong target is rejected.
+- Summary production succeeds with the target web process stopped and matches bounded broker-side fixtures.
 - Endpoint changes do not change target identity.
 - A new endpoint remains untrusted until the existing target identity and transport pin authenticate there.
 - Stale and offline data are visibly distinct from current data.
@@ -902,6 +983,8 @@ Outcome: one carefully selected action proves the complete remote operation mode
 
 Use service restart as the first action. Restrict the initial grant to an explicit allowlist of service units. Do not begin with reboot, image deletion, or a broad container action.
 
+Before exposing service lifecycle remotely, extend the target manager's protected-unit rule from the current exact `pilothouse.service` and `pilothoused.service` entries to all packaged Pilothouse control-plane units, including `pilothouse-link.service` and future `pilothouse*` service, socket, or timer units. Protected units remain denied even if a grant or allowlist names them.
+
 Work:
 
 - Add one fixed controller fleet action mapped to one fixed target action.
@@ -923,6 +1006,7 @@ Tests and review gates:
 - Concurrent local and remote operations serialize through the same target lock.
 - Controller group removal takes effect before the next remote action.
 - Grant revocation prevents new actions immediately.
+- Local and remote attempts to restart, stop, disable, or otherwise disrupt any `pilothouse*` control-plane unit are rejected.
 - Link compromise simulation cannot forge a broker signature.
 - Target audit failure blocks execution even after controller audit succeeds.
 - Disconnect before response produces status lookup, not retry.
@@ -946,6 +1030,16 @@ Suggested order:
 4. Reboot with exact target-qualified confirmation.
 5. Destructive container or image removal only after separate review.
 
+Before extension refresh or update is exposed, define the remote background-action lifecycle:
+
+- The target creates the existing durable local job only after fleet operation and audit preparation succeeds.
+- The fleet operation stores the target job ID and reports `accepted` while the job is queued or running.
+- The target action registry retains the canonical resource lock through job completion exactly as it does for local background actions.
+- Controller disconnect does not cancel an accepted target job; the controller polls the same operation ID for status.
+- Target restart converts an interrupted local job, fleet operation, and audit record to correlated `unknown` outcomes and never retries the handler.
+- Grant revocation blocks new operations but does not cancel an accepted job unless that fixed action later defines a separately authorized safe cancellation capability.
+- Job completion updates fleet operation state first and audit state second using the cross-database recovery protocol.
+
 Each added action requires:
 
 - A unique controller capability mapping and semantic revision.
@@ -954,6 +1048,7 @@ Each added action requires:
 - Stable error categories and timeout semantics.
 - Replay, lock, revocation, dual-audit, and uncertain-outcome tests.
 - UI tests proving disabled or absent controls when capability is not granted.
+- Background-action tests cover queued, running, completed, disconnected-controller, revoked-grant, target-restart, and lock-contention states.
 
 Reboot additionally requires durable pre-boot ID recording and startup reconciliation to `observed-succeeded` or `unknown` before it can ship.
 
@@ -994,15 +1089,17 @@ Exit criteria:
 
 | Area | Required coverage |
 | --- | --- |
-| Pairing | Expiry, single use, reservation, cancellation, wrong key, stolen secret, interruption, rate limit. |
-| Authentication | mTLS pinning, machine signatures, key generation, target binding, downgrade rejection. |
+| Pairing | Expiry, single use, reservation, cancellation, wrong key, stolen secret, interruption, rate limit, QR without URL disclosure. |
+| Authentication | mTLS pinning, machine signatures, key generation, target binding, response-to-request binding, downgrade rejection. |
 | Authorization | Current controller user, target grant, epoch, exact capability, resource restriction, revocation. |
-| Replay | Duplicate requests, duplicate operations, broker restart, target restore, one-time challenge reuse, retention-boundary garbage collection. |
+| Replay | Duplicate requests, duplicate operations, broker restart, target restore, challenge concurrency/reuse, retention-boundary garbage collection. |
 | Validation | Unknown fields, extra parameters, malformed IDs, stale resources, oversized payloads. |
 | Confirmation | Target-derived resource, mismatched controller resource, destructive confirmation omission. |
 | Concurrency | Local versus remote mutation, two remote requests, per-target and fleet-wide limits. |
-| Failure | DNS failure, timeout before acceptance, timeout after acceptance, link crash, broker crash, audit failure. |
-| Audit | Issuer-qualified actor, operation correlation, no secrets, stable errors, unknown recovery. |
+| Failure | DNS failure, timeout before acceptance, timeout after acceptance, link crash, broker crash, audit failure, every cross-database crash boundary. |
+| Audit | Issuer-qualified actor, operation correlation, no secrets, stable errors, cross-database reconciliation, unknown recovery. |
+| Background | Queued/running/final status, retained target lock, controller disconnect, revocation, target restart, no replay. |
+| Packaging | Separate socket groups, runtime directory modes, and link credentials denied access to `broker.sock`. |
 | Lifecycle | Key rotation, grant renewal, revocation, reinstall, clone conflict, decommission. |
 | Compatibility | Minor-version intersection, capability revision mismatch, major-version refusal. |
 | UI | No literal templ calls, stale timestamps, disabled capabilities, no-JavaScript flows, mobile layout. |
