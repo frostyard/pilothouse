@@ -2,6 +2,7 @@ package sysext
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +14,89 @@ import (
 
 type fakeRunner struct {
 	calls   [][]string
+	errors  map[string]error
 	outputs map[string][]byte
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := append([]string{name}, args...)
 	r.calls = append(r.calls, call)
-	return r.outputs[strings.Join(call, " ")], nil
+	key := strings.Join(call, " ")
+	return r.outputs[key], r.errors[key]
+}
+
+func TestParseUpdexCheckAcceptsMessageAndArrayStream(t *testing.T) {
+	output := []byte(`{"type":"message","message":"checking"}
+[{"feature":"docker","results":[{"component":"rootfs","current_version":"1","newest_version":"2","update_available":true}]}]`)
+
+	updates, err := parseUpdexCheck(output)
+
+	require.NoError(t, err)
+	assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "rootfs", Current: "1", Newest: "2"}}, updates)
+}
+
+func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
+	output := []byte(`[{"feature":"docker","results":[
+		{"component":"cli","current_version":"2","newest_version":"2","update_available":false},
+		{"component":"engine","current_version":"1","newest_version":"2","update_available":true}
+	]}]`)
+
+	updates, err := parseUpdexCheck(output)
+
+	require.NoError(t, err)
+	assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
+}
+
+func TestParseUpdexCheckRejectsMalformedOrMissingArray(t *testing.T) {
+	t.Run("malformed", func(t *testing.T) {
+		_, err := parseUpdexCheck([]byte(`{"type":"message"}
+[`))
+		require.Error(t, err)
+	})
+	t.Run("missing", func(t *testing.T) {
+		_, err := parseUpdexCheck([]byte(`{"type":"message","message":"done"}`))
+		require.ErrorContains(t, err, "update check array missing")
+	})
+}
+
+func TestSystemManagerCheckCombinesDirectoriesAndSortsUpdates(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "sysupdate.d")
+	component := filepath.Join(root, "sysupdate.docker.d")
+	require.NoError(t, os.MkdirAll(shared, 0o755))
+	require.NoError(t, os.MkdirAll(component, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shared, "dev.feature"), []byte("[Feature]"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(component, "docker.feature"), []byte("[Feature]"), 0o644))
+	runner := &fakeRunner{outputs: map[string][]byte{
+		strings.Join([]string{"updex", "-C", shared, "--json", "features", "check"}, " "):    []byte(`[{"feature":"zinc","results":[{"component":"base","current_version":"1","newest_version":"2","update_available":true}]}]`),
+		strings.Join([]string{"updex", "-C", component, "--json", "features", "check"}, " "): []byte(`[{"feature":"docker","results":[{"component":"engine","current_version":"3","newest_version":"4","update_available":true},{"component":"cli","current_version":"4","newest_version":"4","update_available":false}]}]`),
+	}}
+
+	updates, err := NewSystemManager(runner, root, "updex").Check(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []AvailableUpdate{
+		{Feature: "docker", Component: "engine", Current: "3", Newest: "4"},
+		{Feature: "zinc", Component: "base", Current: "1", Newest: "2"},
+	}, updates)
+	assert.Equal(t, [][]string{
+		{"updex", "-C", shared, "--json", "features", "check"},
+		{"updex", "-C", component, "--json", "features", "check"},
+	}, runner.calls)
+}
+
+func TestSystemManagerCheckReturnsCommandError(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "sysupdate.d")
+	require.NoError(t, os.MkdirAll(directory, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "dev.feature"), []byte("[Feature]"), 0o644))
+	key := strings.Join([]string{"updex", "-C", directory, "--json", "features", "check"}, " ")
+	commandErr := errors.New("check failed")
+	runner := &fakeRunner{errors: map[string]error{key: commandErr}}
+
+	_, err := NewSystemManager(runner, root, "updex").Check(context.Background())
+
+	require.ErrorIs(t, err, commandErr)
 }
 
 func TestParseUpdexFeaturesAcceptsMessageStream(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/jobs"
+	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	servicejournal "github.com/frostyard/pilothouse/internal/modules/services/journal"
@@ -38,6 +42,10 @@ func main() {
 func run() error {
 	adminGroup := flag.String("admin-group", "sudo", "system group allowed to perform privileged actions")
 	auditDB := flag.String("audit-db", "/var/lib/pilothouse/audit.db", "durable action audit database")
+	jobsDB := flag.String("jobs-db", "/var/lib/pilothouse/jobs.db", "durable maintenance job database")
+	backupMaxAge := flag.Duration("backup-max-age", 48*time.Hour, "maximum acceptable age of a successful configured backup")
+	var backupTimers stringListFlag
+	flag.Var(&backupTimers, "backup-timer", "exact systemd backup timer to monitor; repeatable")
 	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
@@ -46,6 +54,7 @@ func run() error {
 	socketGroup := flag.String("socket-group", "pilothouse", "group allowed to connect to the broker")
 	updex := flag.String("updex", "updex", "path to the updex executable")
 	flag.Parse()
+	backupTimers.addCommaSeparated(os.Getenv("PILOTHOUSE_BACKUP_TIMERS"))
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("pilothoused must run as root")
 	}
@@ -54,14 +63,34 @@ func run() error {
 	if err := os.MkdirAll(filepath.Dir(*auditDB), 0o750); err != nil {
 		return fmt.Errorf("create audit directory: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(*jobsDB), 0o750); err != nil {
+		return fmt.Errorf("create jobs directory: %w", err)
+	}
 	auditStore, err := audit.Open(*auditDB, 10_000)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = auditStore.Close() }()
 	actions := broker.NewActionRegistry(auditStore)
+	jobStore, err := jobs.Open(*jobsDB, 1_000)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = jobStore.Close() }()
+	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
 	if err := registerActivity(queries, auditStore); err != nil {
+		return err
+	}
+	if err := registerJobs(queries, jobStore); err != nil {
+		return err
+	}
+	backupManager, err := backups.NewSystemManager(backupTimers, *backupMaxAge)
+	if err != nil {
+		return err
+	}
+	defer backupManager.Close()
+	if err := registerBackups(queries, backupManager); err != nil {
 		return err
 	}
 	servicesManager, err := services.NewSystemManager(servicejournal.New())
@@ -71,7 +100,12 @@ func run() error {
 	if err := registerServices(actions, queries, servicesManager); err != nil {
 		return err
 	}
-	if err := registerSysextActions(actions, sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)); err != nil {
+	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
+	if err := registerSysextActions(actions, sysextManager); err != nil {
+		return err
+	}
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/")
+	if err := registerMaintenance(actions, queries, maintenanceManager); err != nil {
 		return err
 	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
@@ -124,10 +158,72 @@ func run() error {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 	logger.Info("privileged broker listening", "admin_group", *adminGroup, "login_group", *loginGroup, "socket", *socket)
-	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("serve broker: %w", err)
+	serveErr := server.Serve(listener)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer waitCancel()
+	_ = actions.Shutdown(waitCtx)
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		return fmt.Errorf("serve broker: %w", serveErr)
 	}
 	return nil
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string { return fmt.Sprint([]string(*values)) }
+func (values *stringListFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("value cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}
+
+func (values *stringListFlag) addCommaSeparated(input string) {
+	for _, value := range strings.Split(input, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			*values = append(*values, value)
+		}
+	}
+}
+
+func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
+	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
+	})
+}
+
+func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager) error {
+	if err := queries.Register(broker.QueryMaintenanceState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
+	}); err != nil {
+		return err
+	}
+	return actions.RegisterDefinition(broker.ActionDefinition{
+		ID: broker.ActionMaintenanceReboot, Admin: true, ConfirmationRequired: true, NonBlocking: true,
+		Resource:     func(map[string]string) (string, error) { return "maintenance/reboot", nil },
+		LockResource: func(map[string]string) (string, error) { return "sysext/global", nil },
+		Handler:      func(ctx context.Context, _ auth.Identity, _ map[string]string) error { return manager.Reboot(ctx) },
+	})
+}
+
+func registerJobs(queries *broker.QueryRegistry, store *jobs.Store) error {
+	return queries.Register(broker.QueryJobs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		for name := range parameters {
+			if name != "action" && name != "status" && name != "limit" {
+				return nil, fmt.Errorf("unsupported job filter %q", name)
+			}
+		}
+		limit := 50
+		if value := parameters["limit"]; value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 1 || parsed > 100 {
+				return nil, fmt.Errorf("job limit must be between 1 and 100")
+			}
+			limit = parsed
+		}
+		return store.List(ctx, jobs.Filter{Action: parameters["action"], Status: parameters["status"], Limit: limit})
+	})
 }
 
 func registerActivity(queries *broker.QueryRegistry, store *audit.Store) error {
@@ -228,18 +324,20 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 		return err
 	}
 	for _, action := range []struct {
+		background   bool
 		confirmation bool
 		handler      broker.ActionHandler
 		id           string
+		reboot       bool
 	}{
-		{id: broker.ActionSysextRefresh, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextRefresh, background: true, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Refresh(ctx)
 		}},
-		{id: broker.ActionSysextUpdate, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextUpdate, background: true, confirmation: true, reboot: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Update(ctx)
 		}},
 	} {
-		if err := registry.RegisterDefinition(broker.ActionDefinition{ID: action.id, Admin: true, ConfirmationRequired: action.confirmation, Resource: func(map[string]string) (string, error) { return "sysext/global", nil }, Handler: action.handler}); err != nil {
+		if err := registry.RegisterDefinition(broker.ActionDefinition{ID: action.id, Admin: true, Background: action.background, ConfirmationRequired: action.confirmation, RebootRequired: action.reboot, Timeout: 20 * time.Minute, Resource: func(map[string]string) (string, error) { return "sysext/global", nil }, Handler: action.handler}); err != nil {
 			return err
 		}
 	}

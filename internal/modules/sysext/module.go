@@ -102,7 +102,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.NotFound(w, r)
 			return
 		}
-		m.redirect(w, r, fmt.Sprintf("Extensions %sd", action), err)
+		m.redirect(w, r, fmt.Sprintf("Extension %s queued", action), err)
 	})
 }
 

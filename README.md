@@ -22,6 +22,9 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
 - Durable privileged-action history, destructive confirmations, and per-resource action serialization
+- Durable background jobs for extension update and refresh operations
+- Extension update availability, reboot-required posture, and confirmed host reboot
+- Exact systemd backup timer monitoring with freshness and last-result health
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Responsive desktop and mobile layouts
 
@@ -50,6 +53,12 @@ The packaged service also reads comma-separated origins from `/etc/pilothouse/pi
 
 ```ini
 PILOTHOUSE_ALLOWED_ORIGINS=https://admin.example.test
+```
+
+Configure exact backup timers for the privileged broker in `/etc/pilothouse/pilothoused.env`. Pilothouse deliberately does not infer backups from unit names.
+
+```ini
+PILOTHOUSE_BACKUP_TIMERS=restic.timer,borg.timer
 ```
 
 ## Module architecture

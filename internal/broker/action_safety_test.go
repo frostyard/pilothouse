@@ -3,12 +3,14 @@ package broker
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
+	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,6 +78,9 @@ func TestAuditBeginFailurePreventsMutation(t *testing.T) {
 	err := registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.stop", map[string]string{"id": "web"}, "container/web")
 	assert.ErrorContains(t, err, "record action intent")
 	assert.False(t, called)
+	registry.locks.mu.Lock()
+	assert.Empty(t, registry.locks.locks)
+	registry.locks.mu.Unlock()
 }
 
 func TestActionsSerializeSameResourceAndAllowDifferentResources(t *testing.T) {
@@ -124,4 +129,101 @@ func TestResourceLockWaitHonorsCancellationAndReclaimsEntry(t *testing.T) {
 	locks.mu.Lock()
 	assert.Empty(t, locks.locks)
 	locks.mu.Unlock()
+}
+
+func TestBlockingLockAcquiresAfterTryLockRelease(t *testing.T) {
+	locks := newResourceLocks()
+	backgroundUnlock, acquired := locks.tryLock("resource")
+	require.True(t, acquired)
+	acquiredByWaiter := make(chan func(), 1)
+	go func() {
+		unlock, err := locks.lock(context.Background(), "resource")
+		if err == nil {
+			acquiredByWaiter <- unlock
+		}
+	}()
+	select {
+	case <-acquiredByWaiter:
+		t.Fatal("blocking lock overlapped try lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	backgroundUnlock()
+	select {
+	case unlock := <-acquiredByWaiter:
+		unlock()
+	case <-time.After(time.Second):
+		t.Fatal("blocking lock did not acquire after try lock release")
+	}
+}
+
+func TestBackgroundActionOutlivesRequestAndCompletesAudit(t *testing.T) {
+	jobStore, err := jobs.Open(filepath.Join(t.TempDir(), "jobs.db"), 10)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, jobStore.Close()) })
+	auditStore := &memoryAudit{}
+	registry := NewActionRegistry(auditStore)
+	registry.UseJobs(jobStore)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+		ID: "test.update", Admin: true, Background: true, RebootRequired: true, Timeout: time.Second,
+		Resource: func(map[string]string) (string, error) { return "updates/global", nil },
+		Handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+			close(started)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-release:
+				return nil
+			}
+		},
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	require.NoError(t, registry.Execute(ctx, auth.Identity{Admin: true, Username: "admin"}, "test.update", nil, ""))
+	cancel()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background action did not start")
+	}
+	err = registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.update", nil, "")
+	assert.ErrorContains(t, err, "already has a maintenance job")
+	close(release)
+	require.NoError(t, registry.Wait(context.Background()))
+	records, err := jobStore.List(context.Background(), jobs.Filter{})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, jobs.StatusSucceeded, records[0].Status)
+	assert.True(t, records[0].RebootRequired)
+	require.Len(t, auditStore.completed, 1)
+	assert.Equal(t, audit.OutcomeSucceeded, auditStore.completed[0].Outcome)
+}
+
+func TestShutdownCancelsBackgroundAction(t *testing.T) {
+	jobStore, err := jobs.Open(filepath.Join(t.TempDir(), "jobs.db"), 10)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, jobStore.Close()) })
+	auditStore := &memoryAudit{}
+	registry := NewActionRegistry(auditStore)
+	registry.UseJobs(jobStore)
+	started := make(chan struct{})
+	require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+		ID: "test.update", Admin: true, Background: true, Timeout: time.Minute,
+		Resource: func(map[string]string) (string, error) { return "updates/global", nil },
+		Handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}))
+	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.update", nil, ""))
+	<-started
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, registry.Shutdown(shutdownCtx))
+	records, err := jobStore.List(context.Background(), jobs.Filter{})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, jobs.StatusFailed, records[0].Status)
+	assert.Equal(t, "cancelled", records[0].ErrorCategory)
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -39,6 +40,11 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.Error(w, "Activity history is unavailable.", http.StatusServiceUnavailable)
 			return
 		}
-		_ = host.Render(w, r, platform.Page{Active: "activity", Body: Page(records, parameters["outcome"]), Eyebrow: "Action audit", Title: "Activity"})
+		var jobRecords []jobs.Job
+		if err := host.Query(ctx, broker.QueryJobs, map[string]string{"limit": "100"}, &jobRecords); err != nil {
+			http.Error(w, "Maintenance job history is unavailable.", http.StatusServiceUnavailable)
+			return
+		}
+		_ = host.Render(w, r, platform.Page{Active: "activity", Body: Page(records, jobRecords, parameters["outcome"]), Eyebrow: "Action audit", Title: "Activity"})
 	})
 }

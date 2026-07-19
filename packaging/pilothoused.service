@@ -6,6 +6,7 @@ Before=pilothouse.service
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/pilothouse/pilothoused.env
 ExecStart=/usr/bin/pilothoused --socket /run/pilothouse/broker.sock --socket-group pilothouse --admin-group sudo
 Restart=on-failure
 RestartSec=3

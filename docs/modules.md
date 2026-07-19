@@ -74,6 +74,7 @@ Register one constructor in `cmd/pilothouse/main.go`; navigation and dashboard p
 - Validate identifiers again inside the broker-side domain manager.
 - Pass command arguments separately with `exec.CommandContext`; never invoke a shell.
 - Put a timeout around external work.
+- Run long privileged mutations through the broker's durable background-action definition; never launch detached goroutines from a web module.
 - Test web handlers with a fake host and broker actions with fake domain managers.
 - Return an `HX-Redirect` for HTMX requests and a 303 redirect for normal forms.
 

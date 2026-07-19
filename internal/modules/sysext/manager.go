@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +44,15 @@ type Feature struct {
 	Version     string
 }
 
+type AvailableUpdate struct {
+	Feature   string
+	Component string
+	Current   string
+	Newest    string
+}
+
 type Manager interface {
+	Check(context.Context) ([]AvailableUpdate, error)
 	Disable(context.Context, string) error
 	Enable(context.Context, string) error
 	List(context.Context) ([]Feature, error)
@@ -64,6 +73,16 @@ type updexFeature struct {
 	Source      string `json:"source"`
 }
 
+type updexCheck struct {
+	Feature string `json:"feature"`
+	Results []struct {
+		Component       string `json:"component"`
+		CurrentVersion  string `json:"current_version"`
+		NewestVersion   string `json:"newest_version"`
+		UpdateAvailable bool   `json:"update_available"`
+	} `json:"results"`
+}
+
 type installedExtension struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -82,6 +101,32 @@ func NewSystemManager(runner CommandRunner, definitionsRoot, updex string) *Syst
 		updex = "updex"
 	}
 	return &SystemManager{definitionsRoot: definitionsRoot, runner: runner, updex: updex}
+}
+
+func (m *SystemManager) Check(ctx context.Context) ([]AvailableUpdate, error) {
+	directories, err := m.definitionDirectories()
+	if err != nil {
+		return nil, err
+	}
+	var updates []AvailableUpdate
+	for _, directory := range directories {
+		output, runErr := m.runner.Run(ctx, m.updex, "-C", directory, "--json", "features", "check")
+		if runErr != nil {
+			return nil, runErr
+		}
+		parsed, parseErr := parseUpdexCheck(output)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse update check in %s: %w", directory, parseErr)
+		}
+		updates = append(updates, parsed...)
+	}
+	slices.SortFunc(updates, func(a, b AvailableUpdate) int {
+		if order := strings.Compare(a.Feature, b.Feature); order != 0 {
+			return order
+		}
+		return strings.Compare(a.Component, b.Component)
+	})
+	return updates, nil
 }
 
 func (m *SystemManager) Disable(ctx context.Context, name string) error {
@@ -288,4 +333,39 @@ func parseUpdexFeatures(output []byte) ([]updexFeature, error) {
 		}
 	}
 	return nil, fmt.Errorf("feature array missing from updex output")
+}
+
+func parseUpdexCheck(output []byte) ([]AvailableUpdate, error) {
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for {
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			if err == io.EOF {
+				return nil, fmt.Errorf("update check array missing from updex output")
+			}
+			return nil, err
+		}
+		trimmed := bytes.TrimSpace(value)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			continue
+		}
+		var checks []updexCheck
+		if err := json.Unmarshal(trimmed, &checks); err != nil {
+			return nil, err
+		}
+		var updates []AvailableUpdate
+		for _, check := range checks {
+			for _, result := range check.Results {
+				if result.UpdateAvailable {
+					updates = append(updates, AvailableUpdate{
+						Feature:   check.Feature,
+						Component: result.Component,
+						Current:   result.CurrentVersion,
+						Newest:    result.NewestVersion,
+					})
+				}
+			}
+		}
+		return updates, nil
+	}
 }
