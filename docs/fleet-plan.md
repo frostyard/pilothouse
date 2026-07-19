@@ -79,6 +79,7 @@ controller pilothoused
   |  enforce controller policy
   |  record intent
   |  sign remote envelope
+  |  local Unix RPC to link-owned client socket
   v
 controller pilothouse-link
   |
@@ -86,7 +87,7 @@ controller pilothouse-link
   v
 target pilothouse-link
   |
-  | dedicated local fleet socket
+  | local Unix RPC to broker-owned fleet socket
   v
 target pilothoused
      verify machine signature and target binding
@@ -99,7 +100,7 @@ target pilothoused
 
 The existing browser-facing `pilothouse` process and root `pilothoused` broker retain their current boundary. The existing `/run/pilothouse/broker.sock` protocol must never be exposed or transparently forwarded over the network.
 
-On the controller, link requests and target responses travel over the dedicated local fleet Unix socket as one bounded request/response exchange. The controller broker never dials the target or reads a network response directly.
+On the controller, the broker initiates polling, queries, and actions by making a local Unix RPC to a link-owned client socket. The link performs the network request and returns the target's unchanged signed response over that same local RPC. The controller broker verifies the response. The broker never opens a TCP connection or reads from a network socket.
 
 ### New link process
 
@@ -123,13 +124,27 @@ The link must not:
 - Decode a privileged payload and synthesize a different broker operation.
 - Follow redirects supplied by a target or controller.
 
-### Dedicated local fleet socket
+### Local link sockets
 
-Add a second root-owned Unix socket, for example `/run/pilothouse/fleet.sock`, accessible only to the `pilothouse-link` service account. Its protocol should contain a small fixed set of operations for pairing, signed-envelope verification, inventory production, remote dispatch, and operation-result lookup.
+The controller and target directions use distinct Unix socket roles:
 
-The socket is a narrower interface than the browser broker socket. It must not expose PAM login, browser sessions, arbitrary local query dispatch, or arbitrary local action dispatch.
+- The link owns `/run/pilothouse/link-client.sock`. The controller broker connects to it to request one bounded HTTPS exchange with a persisted target endpoint and broker-supplied TLS pin. The link returns the raw signed response in the same Unix request.
+- The broker owns `/run/pilothouse/fleet.sock`. The target link connects to it to submit one incoming signed envelope, pairing message, TLS peer fingerprint, or operation-status request and receive one broker-produced response.
+
+A machine acting as both controller and target may use both sockets. Periodic controller polling is scheduled by the controller broker, which invokes the local link-client socket; no queue or long-poll mechanism is required for version 1.
+
+Both local protocols are narrower than the browser broker socket. They must not expose PAM login, browser sessions, arbitrary local query dispatch, or arbitrary local action dispatch. Socket ownership and groups permit only the broker and `pilothouse-link` service account to use them.
 
 The target fleet socket maps a verified envelope through a separate compiled fleet capability table. It must never use an envelope capability string as an unrestricted key into the existing `ActionRegistry` or `QueryRegistry`. A valid local broker action that has not been explicitly mapped as a fleet capability remains unreachable through this socket.
+
+### Pin distribution
+
+Peer pins remain authoritative in the broker database:
+
+- For an outbound request, the controller broker passes the persisted endpoint, expected target TLS pin, request bytes, and limits to the link-client socket.
+- For inbound paired traffic, the target link obtains a versioned allowed-controller transport-pin set from the fleet socket at startup and polls for changes. The target broker still verifies the machine signature, grant, and target binding, so the link's pin check is not an authorization decision.
+- Pairing is the only mode in which an unpinned controller transport key may reach the broker, and only while a matching active invitation is presented.
+- Grant changes and transport-key rotation increment the pin-set generation so a running link refreshes without restart.
 
 ## Security invariants
 
@@ -150,10 +165,15 @@ The implementation is not acceptable unless all of these remain true:
 13. Capability negotiation is the intersection of locally compiled identifiers; peers cannot create methods dynamically.
 14. One target's credential cannot authenticate to another target.
 15. Revocation is enforceable locally by the target without contacting the controller.
+16. A replay tombstone outlives the maximum signed-envelope validity plus permitted clock skew.
 
 ### Residual controller risk
 
 A target authorizes the controller machine, not the controller's individual human accounts. The actor attestation identifies who the controller claims initiated an operation, but a compromised controller can forge that claim and exercise every capability in its active target grant. Version 1 contains this risk through narrow grants, short mutation-grant expiration, target-local revocation, and independent target audit; it does not cryptographically prove the human identity to the target.
+
+### Residual target risk
+
+A paired target can send controller-authenticated but malicious payload bytes to the controller. The controller root broker therefore still parses network-originated data, although only after size checks, transport pinning, and target signature verification by the bounded link/broker path. All target-authored payloads require dedicated concrete structs, strict decoding, unknown-field rejection, semantic validation, and fuzzing. Pairing a target extends trust to that target as a bounded input producer; signatures prove authorship, not safety.
 
 ## Machine identity
 
@@ -170,6 +190,8 @@ The link maintains a separate TLS transport key. Its certificate is self-issued 
 
 Routine transport-key rotation requires an overlap in which the old pinned transport key remains valid long enough to carry the machine-signed new-key authorization. If the old key is unavailable or suspected compromised, in-band rotation is not allowed and the systems must pair again.
 
+Routine machine-signing-key rotation requires a rotation statement signed by both the old and new machine keys, increments key generation, and is delivered while the old identity remains trusted. Peers retain the old public key only for historical audit verification. If the old signing key is unavailable or suspected compromised, the peer must be revoked and paired again.
+
 Hostname, Tailscale name, IP address, operating-system image, and role are mutable metadata associated with a machine ID.
 
 ### Cloning, restore, and reinstall
@@ -180,6 +202,12 @@ Hostname, Tailscale name, IP address, operating-system image, and role are mutab
 - A restored disk snapshot may contain stale grants and replay state; documented recovery requires identity reset and re-pairing unless continuity can be proven.
 - A reinstalled host with the same name or address but a different key is a new machine and requires explicit pairing.
 - Provide a local administrative identity-reset command that revokes local grants before deleting identity material.
+
+### Controller loss and recovery
+
+Without a protected controller-identity backup, loss of the controller requires a new controller identity and a complete two-administrator re-pairing ceremony for every target. That is the safe version 1 recovery path and must be stated in operator documentation.
+
+Phase 8 should evaluate an encrypted controller recovery export containing machine identity, peer pins, grants, and correlation metadata. Import must prevent two simultaneously active controllers from using one identity and must not restore stale replay or operation state silently. Until that design is approved, private identity export is unsupported.
 
 ## Pairing design
 
@@ -200,6 +228,8 @@ initial capability bundle identifier
 ```
 
 Use a recognizable prefix such as `ph1_` followed by base64url-encoded structured data. The value must not be placed in a URL query string, command argument that may be logged, audit record, or HTML response after initial display.
+
+The initial bundle is the maximum capability set the target is willing to offer through that invitation. The controller may request the entire set or a subset; requesting a capability outside the offered set rejects pairing. The target administrator approves the exact requested subset.
 
 The target stores only a verifier derived from the random secret. The full invitation is displayed once. Expiration should default to ten minutes and never exceed one hour.
 
@@ -239,12 +269,13 @@ An invitation reserved by one controller key cannot be completed by another key.
 7. The controller pins the target TLS key from the invitation before sending the secret.
 8. The controller broker supplies its machine identity, transport key, requested capabilities, and a signed pairing statement.
 9. The target verifies the secret and signature, reserves the invitation to that controller key, and records a pending peer.
-10. The target UI shows the controller fingerprint, endpoint metadata, and exact requested capabilities.
-11. An authenticated target administrator approves or rejects the request.
-12. Approval creates a target-side grant and signed response.
-13. The controller verifies the target response and stores the pinned target identity, transport key, and accepted grant.
-14. The target atomically consumes the invitation.
-15. All later requests require mutual TLS, pinned keys, signed payloads, and an active grant.
+10. The controller enrollment UI displays the controller's own machine fingerprint for out-of-band comparison.
+11. The target UI shows the proposed controller fingerprint, endpoint metadata, and exact requested capability subset and instructs the administrator to compare the controller fingerprint through a separate trusted channel.
+12. An authenticated target administrator approves or rejects the request only after comparison.
+13. Approval creates a target-side grant and signed response.
+14. The controller verifies the target response and stores the pinned target identity, transport key, and accepted grant.
+15. The target atomically consumes the invitation.
+16. All later requests require mutual TLS, pinned keys, signed payloads, and an active grant.
 
 Pairing is incomplete until both sides have durable matching peer records. Interrupted pairing may resume only with the same invitation ID and controller key while the invitation remains valid.
 
@@ -300,7 +331,7 @@ If the protocol later adopts Protobuf or another encoding, it must specify deter
 
 ### Version negotiation
 
-The signed hello response includes:
+The rich signed hello response is available only after pinned mutual TLS authentication. It includes:
 
 - Machine ID and key generation.
 - Protocol major and supported minor range.
@@ -312,6 +343,8 @@ The signed hello response includes:
 - Active grant ID, epoch, expiration, and capability digest when paired.
 
 Different protocol majors are incompatible. Minor features are selected by intersection. There is no fallback to unsigned requests, bearer-only authentication, or an older pairing protocol below the configured security floor.
+
+Before pairing, the link exposes no rich hello. An active invitation already contains the target ID, target keys, endpoint, expiry, and pairing format version. The pairing endpoint may return only a bounded generic incompatibility category before secret proof; it does not disclose build version, capabilities, grant state, or additional machine metadata to unauthenticated clients.
 
 ### Network endpoints
 
@@ -327,6 +360,8 @@ POST /v1/fleet/operations/status
 
 These endpoints carry typed fleet envelopes. They are not generic broker endpoints. Each endpoint has an independent body limit, timeout, rate limit, and allowed message type.
 
+`/v1/fleet/hello`, query, action, and operation-status endpoints require pinned mutual TLS. `/v1/fleet/pair` is enabled only while at least one unexpired invitation exists and reveals no rich hello metadata before invitation proof.
+
 ### Request requirements
 
 Every authenticated query or action payload includes:
@@ -339,11 +374,11 @@ Every authenticated query or action payload includes:
 - Capability ID and revision.
 - Exact typed parameters.
 - Creation and expiration times.
-- TLS connection challenge or session nonce.
+- Target-broker challenge ID and nonce.
 - Actor attestation when initiated by a human.
 - Signature over all preceding fields.
 
-The hello challenge establishes handshake freshness. A TLS-session nonce binds each request to that negotiated connection. A durable operation ID deduplicates mutations across connections and restarts. Read-only queries use request IDs and session binding but do not enter the durable mutation ledger. Wall-clock expiry limits exposure but is not the only replay defense. Implement and test a bounded clock-skew allowance.
+The target broker creates a signed, short-lived, one-time challenge and returns it through the hello exchange. The controller broker includes that challenge in its signed request, and the target broker atomically consumes it during verification. This proves broker-to-broker freshness; it does not claim TLS channel binding because neither broker terminates TLS. A durable operation ID deduplicates mutations across connections and restarts. Read-only queries use request IDs and one-time broker challenges but do not enter the durable mutation ledger. Wall-clock expiry limits exposure but is not the only replay defense. Implement and test a bounded clock-skew allowance.
 
 ### Error model
 
@@ -420,7 +455,7 @@ Before exposing queries remotely, evolve `QueryRegistry` toward action-like exac
 2. The target derives the canonical resource from live state and returns a signed, short-lived preview ID and confirmation value.
 3. The controller broker verifies the preview signature and the UI displays that target-derived value.
 4. The browser submits POST with the existing CSRF and origin protections, the preview ID, and exact confirmation.
-5. The fleet handler calls `ValidateAction` and compares against the verified preview value.
+5. The fleet handler calls `ValidateAction`, then uses `ConfirmAction` with the broker-verified preview value. `ValidateAction` itself checks authentication, CSRF, and origin but does not compare confirmation.
 6. The controller broker re-resolves the current human identity and authorizes the compiled fleet action.
 7. The controller validates the paired target and cached grant, but does not assume the target will accept it.
 8. The controller creates a random 256-bit operation ID.
@@ -430,30 +465,42 @@ Before exposing queries remotely, evolve `QueryRegistry` toward action-like exac
 
 ### Target processing
 
-1. Verify mutual TLS pin, machine signature, sender, target, protocol version, expiry, connection nonce, grant, epoch, capability, and exact parameters.
+1. Verify mutual TLS pin, machine signature, sender, target, protocol version, expiry, one-time broker challenge, grant, epoch, capability, and exact parameters.
 2. Atomically insert `(controller machine ID, operation ID)` into the durable replay ledger.
 3. Return the existing stored state without executing if the same operation was previously accepted.
-4. Recompute the canonical target resource from live target state.
-5. Verify the preview ID is unexpired and bound to the same controller, target, action, and resource.
-6. Compare destructive confirmation with the newly target-derived canonical resource and reject if state changed since preview.
-7. Acquire the same target-local resource lock used by local actions.
+4. Derive a validated lock key from the fixed action and immutable request parameters, then acquire the same target-local resource lock used by local actions.
+5. Under the lock, rediscover live state and recompute the canonical target resource.
+6. Verify the preview ID is unexpired and bound to the same controller, target, action, and resource.
+7. Compare destructive confirmation with the newly target-derived canonical resource and reject if state changed since preview.
 8. Write target audit intent before mutation.
-9. Execute the existing fixed manager operation.
+9. Execute the existing fixed manager operation while retaining the lock.
 10. Durably record success, failure, or unknown outcome.
 11. Sign and return the stored operation state.
+
+Phase 1 must refactor the common action execution core so mutable resource validation and confirmation occur under the resource lock for both local and remote paths. Lock-key derivation may validate syntax before locking but must not trust mutable resource state.
 
 ### Operation states
 
 ```text
 created -> submitted -> accepted -> running -> succeeded
                                      |       -> failed
+                                     |       -> effect-pending -> observed-succeeded
+                                     |                          -> unknown
                                      |       -> unknown
                                      -> rejected
 ```
 
 The controller may query the same operation ID after a timeout. It must not generate a replacement operation automatically. A target crash after the underlying mutation but before result persistence produces `unknown`, even when the controller can infer a likely outcome later.
 
-Reboot and other connection-breaking actions acknowledge durable acceptance before execution. Reconnection may provide evidence of completion, but the audit record retains any period of uncertainty.
+### Connection-breaking action reconciliation
+
+Before invoking reboot, the target durably records the current Linux boot ID, operation ID, audit ID, and `effect-pending` state. If the reboot command returns an error before shutdown, the operation fails normally. On the next broker start, recovery compares the current boot ID with the recorded value:
+
+- A changed boot ID completes the operation and audit record as `observed-succeeded`, making clear that success was established by post-boot evidence.
+- An unchanged boot ID recovers the operation and audit record as `unknown` because the broker restarted without evidence of a reboot.
+- A target that never reconnects remains `effect-pending` at the controller until the configured observation deadline, then becomes `unknown` there without rewriting target history.
+
+Other connection-breaking actions require an action-specific durable evidence mechanism before they may report success. Durable acceptance alone is not reported as completed effect.
 
 ## Audit and attribution
 
@@ -482,7 +529,7 @@ Inventory polling and routine heartbeats should produce metrics and bounded oper
 
 ## Persistence model
 
-Use a root-owned bbolt database under `/var/lib/pilothouse`, separate from browser sessions. Suggested records are:
+Use a root-owned bbolt database under `/var/lib/pilothouse`, independent of the in-memory browser session store and the existing audit and job databases. Suggested records are:
 
 ```text
 MachineIdentity
@@ -554,9 +601,17 @@ Private keys, invitation verifiers, grants, and replay records remain broker-onl
 
 Startup recovery must reconcile both sides of an interrupted mutation: the remote operation becomes `unknown`, and its associated open audit record is completed with the existing unknown outcome. Operation and audit state must not diverge after reboot.
 
+Reboot operations in `effect-pending` use boot-ID reconciliation before generic unknown recovery. Their operation and audit records transition together to `observed-succeeded` or `unknown`.
+
+### Replay retention and garbage collection
+
+Mutation envelopes have a fixed maximum validity selected in Phase 0. A replay tombstone for `(controller machine ID, operation ID)` must remain until at least the envelope expiration plus the maximum permitted clock skew. Full operation results may be retained longer for status lookup and audit correlation. Garbage collection may discard result detail after the configured status-retention period, but it cannot remove the replay tombstone while a signed envelope could still be accepted.
+
+Garbage collection is bounded, transactional, and tested across restart. The fleet database exposes counts and oldest-record age so retention failures are observable. Restoring an old database snapshot is not assumed replay-safe and requires identity reset and re-pairing under the version 1 recovery policy.
+
 ## Configuration and packaging
 
-Add a dedicated system account and unit for `pilothouse-link` with systemd hardening equivalent to the web process. The service requires network access and access to the dedicated fleet socket, but not the browser broker socket or root-equivalent engine sockets.
+Add a dedicated system account and unit for `pilothouse-link` with systemd hardening equivalent to the web process. The service requires network access, owns the link-client socket, and may connect to the broker-owned fleet socket, but it cannot access the browser broker socket or root-equivalent engine sockets.
 
 Possible configuration:
 
@@ -564,6 +619,7 @@ Possible configuration:
 PILOTHOUSE_FLEET_LISTEN=100.80.10.4:9443
 PILOTHOUSE_FLEET_PUBLIC_ENDPOINT=https://host.tailnet.ts.net:9443
 PILOTHOUSE_FLEET_SOCKET=/run/pilothouse/fleet.sock
+PILOTHOUSE_LINK_CLIENT_SOCKET=/run/pilothouse/link-client.sock
 PILOTHOUSE_FLEET_CONNECT_TIMEOUT=5s
 PILOTHOUSE_FLEET_REQUEST_TIMEOUT=30s
 ```
@@ -579,7 +635,7 @@ Firewall and VPN policy remain deployment responsibilities. Documentation should
 Replace static records with:
 
 - Pinned machine identity and editable display name.
-- Endpoint and transport status.
+- Editable endpoint and transport status.
 - Current, stale, offline, revoked, incompatible, or conflict state.
 - Last seen and last observed timestamps.
 - Image, kernel, update, reboot, and attention summaries.
@@ -594,6 +650,7 @@ Provide:
 - Create invitation action with expiration and initial read-only bundle.
 - One-time invitation display and explicit secrecy warning.
 - Pending controller fingerprint and requested capability review.
+- Out-of-band fingerprint comparison instructions.
 - Approve, reject, revoke, rotate, and reset-identity actions.
 - History of pairing and grant changes.
 
@@ -601,8 +658,9 @@ Provide:
 
 Provide:
 
-- Paste or scan invitation input.
+- Paste invitation input that works without JavaScript; camera scanning is optional progressive enhancement.
 - Parsed target endpoint, machine ID, and fingerprint preview.
+- Controller machine fingerprint shown for comparison on the target.
 - Requested capability selection from compiled bundles.
 - Pairing progress with stable failure categories.
 - Explicit confirmation before storing the paired target.
@@ -620,6 +678,8 @@ Deliver sections incrementally:
 
 All pages continue to work without JavaScript. Pairing and mutations use POST, CSRF validation, origin checks, 303 redirects, and broker authorization. HTMX remains progressive enhancement.
 
+Changing a target endpoint is a controller-local administrative action. It never changes the pinned machine identity or transport key. The next connection must authenticate the existing pins at the new address before the target returns to `current`; redirects and automatic endpoint replacement remain prohibited. A target may advertise a signed endpoint suggestion, but the controller requires explicit local approval before storing it.
+
 ## Delivery phases
 
 ### Phase 0: Architecture decision and protocol specification
@@ -630,11 +690,12 @@ Work:
 
 - Record the routed LAN/VPN requirement and one-controller constraint.
 - Define machine identity, transport key, grant, actor, and operation semantics.
+- Specify controller broker-to-link Unix RPC and target link-to-broker Unix RPC, including ownership and failure behavior.
 - Specify invitation and peer state machines.
 - Specify exact message schemas, limits, signatures, and stable errors.
 - Choose initial read-only capabilities and first mutation.
 - Document key storage, backup, restore, cloning, and reinstallation behavior.
-- Threat-model controller compromise, target compromise, link compromise, token theft, replay, downgrade, and stale state.
+- Threat-model controller compromise, malicious paired-target payloads, link compromise, token theft, replay, downgrade, and stale state.
 - Prototype Go TLS pinning and raw-payload signing in an isolated test package.
 
 Automated tests:
@@ -664,10 +725,12 @@ Work:
 - Preserve current NSS re-resolution and `Admin` behavior for local operations.
 - Extend audit records with optional issuer, machine, grant, and operation fields.
 - Add target-qualified canonical resource helpers.
-- Evolve every existing query registration and local caller to exact parameter names and response-size policy, with compatibility tests for all current queries.
+- Evolve the current eleven query registrations and their local callers to exact parameter names and response-size policy, with compatibility tests for every query.
+- Refactor common action execution so mutable resource validation and confirmation occur under the resource lock.
 - Add a compiled remote capability mapping; do not accept browser-supplied action IDs.
 - Add fleet bbolt schema and transactional helpers.
 - Add durable operation insertion, lookup, transition, and restart recovery.
+- Add replay-tombstone retention and transactional garbage collection.
 - Add grant epoch and capability intersection logic.
 
 Tests and review gates:
@@ -677,6 +740,7 @@ Tests and review gates:
 - Old audit records remain readable.
 - Audit-store failure blocks simulated remote mutation.
 - Duplicate operation insertion cannot execute twice under concurrency.
+- Garbage collection cannot make an unexpired signed mutation replayable.
 - Restart converts accepted/running simulated operations and their open audit records to unknown.
 - A signed envelope naming a real local broker action that is absent from the fleet capability table is rejected.
 
@@ -721,14 +785,16 @@ Outcome: two directly routed systems can pair securely, but no remote inventory 
 Work:
 
 - Add `pilothouse-link` and hardened systemd packaging.
-- Add the dedicated fleet Unix socket and fixed local link protocol.
+- Add the broker-owned fleet socket, link-owned client socket, and their fixed local protocols.
 - Implement explicit listen and public-endpoint configuration.
 - Implement TLS 1.3, transport-key creation, and certificate pinning.
+- Implement broker-authoritative pin lookup, outbound pin delivery, pin-set generation, and live refresh.
 - Implement target invitation creation, expiration, reservation, approval, consumption, and cancellation.
 - Implement controller invitation parsing and endpoint validation.
 - Implement controller and target peer approval views.
-- Implement signed hello and protocol negotiation.
-- Return target responses to the controller broker only through the same bounded fleet Unix socket request/response exchange.
+- Implement a minimal pre-pairing response and rich signed hello only after pinned mutual TLS.
+- Implement broker-issued one-time challenges without claiming TLS channel binding.
+- Return target responses to the controller broker only through the same bounded link-client Unix request/response exchange that initiated the network call.
 - Add per-source and per-invitation rate limits.
 - Refuse redirects and key changes outside the approved rotation flow.
 
@@ -737,9 +803,12 @@ Tests and review gates:
 - Invitation is rejected after expiry, cancellation, consumption, or excessive failures.
 - Invitation reserved to one controller key rejects another key.
 - A stolen secret without the pinned target key cannot complete pairing through a substituted endpoint.
+- A stolen invitation reserved by an attacker is detectable because target and controller administrators compare the controller machine fingerprint out of band.
 - TLS key substitution and protocol downgrade are rejected.
 - Unknown JSON fields, oversized bodies, slow requests, and malformed certificates are rejected.
+- An unauthenticated client cannot retrieve build version, capability inventory, grant state, or rich machine metadata.
 - Pairing interruption resumes only with matching keys and an unexpired invitation.
+- Link pin state updates after approval, revocation, and rotation without process restart.
 - Fuzz invitation and pairing parsers.
 
 Exit criteria:
@@ -770,6 +839,7 @@ Work:
 - Cache only the latest bounded snapshot per target.
 - Replace static fleet preview data with fixed broker query results.
 - Implement current, stale, offline, never-seen, revoked, incompatible, and conflict states.
+- Implement explicit controller-admin endpoint editing with pin verification at the new address.
 - Add target detail identity and summary sections.
 - Add per-target and fleet-wide request budgets.
 - Expose last-seen, last-observed, latency, and stable connection errors.
@@ -778,6 +848,7 @@ Tests and review gates:
 
 - A snapshot signed by the wrong target is rejected.
 - Endpoint changes do not change target identity.
+- A new endpoint remains untrusted until the existing target identity and transport pin authenticate there.
 - Stale and offline data are visibly distinct from current data.
 - One slow or malicious target cannot block other target refreshes.
 - Snapshot and fleet cardinality limits prevent memory or database growth without bounds.
@@ -838,6 +909,7 @@ Work:
 - Bind preview IDs to controller, target, action, resource, and a short expiration.
 - Implement actor attestation, controller audit, and signed operation envelope.
 - Implement target replay insertion before execution.
+- Implement short mutation-grant expiration, renewal warnings, and renewal before enabling the action.
 - Reuse target-side resource derivation, manager rediscovery, confirmation, lock, and audit.
 - Implement operation status lookup by the same operation ID.
 - Display accepted, running, succeeded, failed, rejected, and unknown states.
@@ -854,6 +926,7 @@ Tests and review gates:
 - Link compromise simulation cannot forge a broker signature.
 - Target audit failure blocks execution even after controller audit succeeds.
 - Disconnect before response produces status lookup, not retry.
+- Mutable target state is rediscovered and confirmation is rechecked while holding the resource lock.
 
 Exit criteria:
 
@@ -882,6 +955,10 @@ Each added action requires:
 - Replay, lock, revocation, dual-audit, and uncertain-outcome tests.
 - UI tests proving disabled or absent controls when capability is not granted.
 
+Reboot additionally requires durable pre-boot ID recording and startup reconciliation to `observed-succeeded` or `unknown` before it can ship.
+
+Reboot tests must cover a changed boot ID after successful restart, an unchanged boot ID after broker-only restart, command failure before shutdown, controller observation timeout, and operation/audit reconciliation to the same outcome.
+
 Exit criteria:
 
 - No action is enabled by a broad transport or module wildcard.
@@ -893,8 +970,8 @@ Outcome: fleet operation is supportable through normal upgrades and failure scen
 
 Work:
 
-- Complete machine and transport key rotation, including old-key overlap for routine transport rotation and mandatory re-pairing when the old key is unavailable.
-- Add grant expiration warnings and renewal workflow.
+- Complete cross-signed machine-key and transport-key rotation, including old-key overlap and mandatory re-pairing when an old key is unavailable.
+- Complete grant-expiration policy and renewal lifecycle beyond the warnings and renewal path required before Phase 6.
 - Add explicit decommission, revoke, forget, and re-pair flows.
 - Add duplicate-identity quarantine recovery.
 - Exercise clock skew and certificate validity failures.
@@ -904,6 +981,7 @@ Work:
 - Test mixed-version rolling upgrades and hard protocol-major rejection.
 - Verify startup reconciliation keeps remote operation and audit unknown outcomes consistent after connection-breaking actions such as reboot.
 - Document backup, restore, clone, reinstall, controller loss, and target replacement procedures.
+- Evaluate encrypted controller recovery export; retain full re-pairing as the default until duplicate-controller prevention is approved.
 - Add packaging upgrade tests for users, groups, sockets, state directories, and systemd hardening.
 
 Exit criteria:
@@ -919,7 +997,7 @@ Exit criteria:
 | Pairing | Expiry, single use, reservation, cancellation, wrong key, stolen secret, interruption, rate limit. |
 | Authentication | mTLS pinning, machine signatures, key generation, target binding, downgrade rejection. |
 | Authorization | Current controller user, target grant, epoch, exact capability, resource restriction, revocation. |
-| Replay | Duplicate requests, duplicate operations, broker restart, target restore, connection nonce reuse. |
+| Replay | Duplicate requests, duplicate operations, broker restart, target restore, one-time challenge reuse, retention-boundary garbage collection. |
 | Validation | Unknown fields, extra parameters, malformed IDs, stale resources, oversized payloads. |
 | Confirmation | Target-derived resource, mismatched controller resource, destructive confirmation omission. |
 | Concurrency | Local versus remote mutation, two remote requests, per-target and fleet-wide limits. |
@@ -960,7 +1038,7 @@ Keep reviews narrow. A reasonable sequence is:
 2. Strict query definitions and actor/audit schema.
 3. Fleet database, operation ledger, and grant model.
 4. Machine identity lifecycle.
-5. Fleet socket and link process skeleton.
+5. Broker-owned fleet socket, link-owned client socket, and link process skeleton.
 6. Pairing invitation and approval state machine.
 7. TLS pinning, signed hello, and version negotiation.
 8. Read-only inventory transport.
@@ -978,8 +1056,10 @@ Every pull request must run `make build`, `make test`, `make fmt`, and `make lin
 - JSON raw-payload signing versus a deterministic binary encoding for protocol version 1.
 - TLS certificate validity and routine rotation intervals.
 - Transport-key overlap duration and re-pairing procedure when the old key is unavailable.
+- Machine-signing-key overlap and historical verification retention.
 - Grant default expiration and renewal policy.
 - Permitted clock skew.
-- Whether target invitation generation itself is sufficient local intent or final target approval is always mandatory. This plan recommends final approval.
-- Whether read-only fleet access remains administrator-only in version 1. This plan recommends administrator-only access.
+- Maximum mutation-envelope validity, replay-tombstone retention, and operation-result retention.
+- Reboot observation deadline before the controller reports unknown outcome.
+- Whether an encrypted controller recovery export can prevent fleet-wide re-pairing without allowing duplicate active controllers.
 - Whether restored fleet identity is ever supported. This plan recommends reset and re-pairing for restored or cloned identity state.
