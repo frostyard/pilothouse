@@ -16,8 +16,10 @@ import (
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/modules/activity"
 	"github.com/frostyard/pilothouse/internal/modules/attention"
+	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
@@ -47,8 +49,10 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
 	serviceModule := services.New()
+	backupModule := backups.New()
+	maintenanceModule := maintenance.New()
 	registry, err := platform.NewRegistry(
-		attention.New(system, serviceModule),
+		attention.New(system, serviceModule, maintenanceModule, backupModule),
 		activity.New(),
 		system,
 		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
@@ -56,6 +60,8 @@ func run() error {
 		docker.New(),
 		incus.New(),
 		serviceModule,
+		maintenanceModule,
+		backupModule,
 	)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)

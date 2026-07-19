@@ -34,6 +34,8 @@ The web process submits fixed query or action IDs and structured parameters. Bef
 
 Privileged action attempts are recorded by the broker in a root-owned bbolt database under `/var/lib/pilothouse`. The intent record is committed before the mutation begins, so an unavailable audit store prevents the action. Completion records contain the actor, fixed action ID, canonical resource, timing, outcome, and a stable error category; credentials, raw parameters, and backend error text are not retained. Interrupted records are marked unknown when the broker restarts. Only administrators can query the bounded activity history.
 
+Long-running extension updates and refreshes are accepted into a separate root-owned durable job store. The canonical resource lock and original audit record remain active until the detached job finishes. Browser disconnects do not cancel accepted work; broker restarts mark interrupted jobs unknown rather than retrying an uncertain mutation.
+
 ## PAM policy
 
 `packaging/pilothouse.pam` follows the system's common authentication and account policy and honors `/etc/nologin`. Snow currently delegates these common stacks to local Unix accounts, while future SSSD, LDAP, Kerberos, smart-card, or other PAM modules can participate without changes to Pilothouse.

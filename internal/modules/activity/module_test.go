@@ -10,6 +10,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,8 +32,12 @@ func (*activityHost) Execute(context.Context, *http.Request, string, map[string]
 func (h *activityHost) Identity(*http.Request) auth.Identity { return auth.Identity{Admin: h.admin} }
 func (h *activityHost) Query(_ context.Context, id string, parameters map[string]string, target any) error {
 	h.queryID, h.parameters = id, parameters
-	records := target.(*[]audit.Record)
-	*records = []audit.Record{{ID: 1, Action: broker.ActionServicesStop, Resource: "services/unit/demo.service", Username: "admin", UID: 1000, StartedAt: time.Now(), Outcome: audit.OutcomeSucceeded}}
+	switch records := target.(type) {
+	case *[]audit.Record:
+		*records = []audit.Record{{ID: 1, Action: broker.ActionServicesStop, Resource: "services/unit/demo.service", Username: "admin", UID: 1000, StartedAt: time.Now(), Outcome: audit.OutcomeSucceeded}}
+	case *[]jobs.Job:
+		*records = []jobs.Job{{ID: 2, AuditID: 1, Action: broker.ActionSysextUpdate, Resource: "sysext/global", Username: "admin", CreatedAt: time.Now(), Status: jobs.StatusSucceeded}}
+	}
 	return nil
 }
 func (*activityHost) Render(w http.ResponseWriter, r *http.Request, page platform.Page) error {
@@ -47,9 +52,10 @@ func TestActivityPageUsesAdminOnlyFixedQuery(t *testing.T) {
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/activity?outcome=succeeded", nil))
 	require.Equal(t, http.StatusOK, response.Code)
-	assert.Equal(t, broker.QueryActivity, host.queryID)
-	assert.Equal(t, map[string]string{"limit": "100", "outcome": "succeeded"}, host.parameters)
+	assert.Equal(t, broker.QueryJobs, host.queryID)
+	assert.Equal(t, map[string]string{"limit": "100"}, host.parameters)
 	assert.Contains(t, response.Body.String(), "services/unit/demo.service")
+	assert.Contains(t, response.Body.String(), "sysext/global")
 	assert.NotContains(t, response.Body.String(), "@web.")
 }
 

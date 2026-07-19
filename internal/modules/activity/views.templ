@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/audit"
+	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/web"
 )
 
@@ -13,9 +14,21 @@ templ AccessDenied() {
 	<div class="page-stack"><article class="card error-card"><div class="card-heading"><span class="card-icon danger">@web.Icon("alert")</span><div><h2>Administrator access required</h2><p>Activity records contain sensitive operational details.</p></div></div></article></div>
 }
 
-templ Page(records []audit.Record, outcome string) {
+templ Page(records []audit.Record, jobRecords []jobs.Job, outcome string) {
 	<div class="page-stack">
 		<div class="page-intro"><p>Durable history of privileged actions. Backend error details and credentials are never retained.</p></div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Maintenance jobs</h2><span>{ fmt.Sprintf("%d recent", len(jobRecords)) }</span></div>
+			if len(jobRecords) == 0 {
+				<div class="empty-state"><span class="card-icon">@web.Icon("activity")</span>No maintenance jobs have been submitted.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Queued</th><th>Actor</th><th>Job</th><th>Resource</th><th>Status</th><th>Duration</th></tr></thead><tbody>
+					for _, job := range jobRecords {
+						<tr><td><time datetime={ job.CreatedAt.Format(time.RFC3339) }>{ job.CreatedAt.Local().Format("Jan 02 15:04:05") }</time></td><td>{ job.Username }</td><td><strong>{ actionLabel(job.Action) }</strong><small class="table-detail">Job #{ fmt.Sprint(job.ID) } · Audit #{ fmt.Sprint(job.AuditID) }</small></td><td>{ job.Resource }</td><td><span class={ "badge", templ.KV("active", job.Status == jobs.StatusSucceeded) }>{ job.Status }</span><small class="table-detail">{ job.ErrorCategory }</small></td><td>{ duration(job.DurationMS) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
 		<article class="card table-card">
 			<div class="table-toolbar"><h2>Recent actions</h2><form method="get" action="/activity"><label>Outcome <select name="outcome"><option value="">All</option><option value="succeeded" selected?={ outcome == "succeeded" }>Succeeded</option><option value="failed" selected?={ outcome == "failed" }>Failed</option><option value="unknown" selected?={ outcome == "unknown" }>Unknown</option></select></label><button class="button secondary" type="submit">Filter</button></form></div>
 			if len(records) == 0 {

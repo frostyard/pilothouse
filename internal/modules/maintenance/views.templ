@@ -1,0 +1,106 @@
+package maintenance
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/jobs"
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(state State) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>Maintenance</h2><p>{ maintenanceSummary(state) }</p></div>
+			<a class="card-link" href="/maintenance">
+				Details
+				@web.Icon("chevron")
+			</a>
+		</div>
+		<div class="mini-list">
+			<div class="mini-row"><div><strong>Updates</strong><small>Enabled system extensions</small></div><span class="badge">{ fmt.Sprint(len(state.Updates)) }</span></div>
+			<div class="mini-row"><div><strong>Reboot</strong><small>{ rebootSummary(state) }</small></div><span class={ "badge", templ.KV("active", !state.RebootRequired) }>{ rebootLabel(state) }</span></div>
+		</div>
+	</article>
+}
+
+templ Page(state State, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro"><p>Update availability, durable maintenance jobs, and host reboot posture.</p></div>
+		<section class="engine-stats" aria-label="Maintenance summary"><div class="engine-stat"><span>System</span><strong class="version">{ state.OSVersion }</strong><small>running image</small></div><div class="engine-stat"><span>Updates</span><strong>{ fmt.Sprint(len(state.Updates)) }</strong><small>available components</small></div><div class="engine-stat"><span>Jobs</span><strong>{ fmt.Sprint(activeJobs(state)) }</strong><small>queued or running</small></div></section>
+		if state.RebootRequired {
+			<article class="card error-card">
+				<div class="card-heading"><span class="card-icon danger">@web.Icon("alert")</span><div><h2>Reboot required</h2><p>Installed changes are not fully active.</p></div></div>
+				<div class="mini-list">
+					for _, reason := range state.RebootReasons {
+						<div class="mini-row"><div><strong>{ reason }</strong></div></div>
+					}
+				</div>
+				if admin {
+					<form method="post" action="/maintenance/reboot" hx-boost="false"><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Reboot host</button></form>
+				}
+			</article>
+		}
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Available updates</h2><a class="card-link" href="/sysext">
+				Manage updates
+				@web.Icon("chevron")
+			</a></div>
+			if len(state.Updates) == 0 {
+				<div class="empty-state"><span class="card-icon green">@web.Icon("check")</span>Enabled extensions are up to date.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Feature</th><th>Component</th><th>Current</th><th>Newest</th></tr></thead><tbody>
+					for _, update := range state.Updates {
+						<tr><td><strong>{ update.Feature }</strong></td><td>{ update.Component }</td><td>{ update.Current }</td><td>{ update.Newest }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Recent maintenance jobs</h2><a class="card-link" href="/activity">View activity</a></div>
+			if len(state.Jobs) == 0 {
+				<div class="empty-state">No maintenance jobs have run.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Job</th><th>Resource</th><th>Status</th><th>Reboot</th></tr></thead><tbody>
+					for _, job := range state.Jobs {
+						<tr><td><strong>#{ fmt.Sprint(job.ID) }</strong><small class="table-detail">{ job.Action }</small></td><td>{ job.Resource }</td><td><span class={ "badge", templ.KV("active", job.Status == jobs.StatusSucceeded) }>{ job.Status }</span></td><td>{ rebootJobLabel(job) }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+	</div>
+}
+
+func maintenanceSummary(state State) string {
+	if state.RebootRequired {
+		return "Reboot required"
+	}
+	if len(state.Updates) > 0 {
+		return plural(len(state.Updates), "update") + " available"
+	}
+	return "Up to date"
+}
+
+func rebootSummary(state State) string {
+	if state.RebootRequired && len(state.RebootReasons) > 0 {
+		return state.RebootReasons[0]
+	}
+	return "No pending activation"
+}
+
+func rebootLabel(state State) string {
+	if state.RebootRequired { return "Required" }
+	return "Current"
+}
+
+func activeJobs(state State) int {
+	count := 0
+	for _, job := range state.Jobs {
+		if job.Status == jobs.StatusQueued || job.Status == jobs.StatusRunning { count++ }
+	}
+	return count
+}
+
+func rebootJobLabel(job Job) string {
+	if job.RebootRequired { return "Required" }
+	return "No"
+}

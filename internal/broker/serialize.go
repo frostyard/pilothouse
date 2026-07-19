@@ -19,6 +19,21 @@ func newResourceLocks() *resourceLocks {
 	return &resourceLocks{locks: make(map[string]*resourceLock)}
 }
 
+func (l *resourceLocks) tryLock(resource string) (func(), bool) {
+	l.mu.Lock()
+	if _, exists := l.locks[resource]; exists {
+		l.mu.Unlock()
+		return nil, false
+	}
+	entry := &resourceLock{ready: make(chan struct{}, 1), refs: 1}
+	l.locks[resource] = entry
+	l.mu.Unlock()
+	return func() {
+		entry.ready <- struct{}{}
+		l.releaseReference(resource, entry)
+	}, true
+}
+
 func (l *resourceLocks) lock(ctx context.Context, resource string) (func(), error) {
 	l.mu.Lock()
 	entry := l.locks[resource]

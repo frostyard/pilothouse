@@ -11,6 +11,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
+	"github.com/frostyard/pilothouse/internal/jobs"
 )
 
 type ActionHandler func(context.Context, auth.Identity, map[string]string) error
@@ -19,8 +20,12 @@ type QueryHandler func(context.Context, auth.Identity, map[string]string) (any, 
 type ActionRegistry struct {
 	actions map[string]registeredAction
 	audit   auditStore
+	jobCtx  context.Context
+	jobStop context.CancelFunc
+	jobs    jobStore
 	locks   *resourceLocks
 	mu      sync.RWMutex
+	wg      sync.WaitGroup
 }
 
 type registeredAction struct {
@@ -29,17 +34,27 @@ type registeredAction struct {
 
 type ActionDefinition struct {
 	Admin                bool
+	Background           bool
 	ConfirmationRequired bool
 	Handler              ActionHandler
 	ID                   string
 	LockResource         func(map[string]string) (string, error)
+	NonBlocking          bool
 	Parameters           []string
+	RebootRequired       bool
 	Resource             func(map[string]string) (string, error)
+	Timeout              time.Duration
 }
 
 type auditStore interface {
 	Begin(context.Context, audit.Attempt) (audit.Record, error)
 	Complete(context.Context, uint64, string, string) error
+}
+
+type jobStore interface {
+	Complete(context.Context, uint64, string, string, bool) error
+	Enqueue(context.Context, jobs.Attempt) (jobs.Job, error)
+	Start(context.Context, uint64) error
 }
 
 var ErrConfirmationRequired = errors.New("action confirmation required")
@@ -59,11 +74,16 @@ func NewActionRegistry(stores ...auditStore) *ActionRegistry {
 	if len(stores) > 0 {
 		store = stores[0]
 	}
-	return &ActionRegistry{actions: map[string]registeredAction{}, audit: store, locks: newResourceLocks()}
+	jobCtx, jobStop := context.WithCancel(context.Background())
+	return &ActionRegistry{actions: map[string]registeredAction{}, audit: store, jobCtx: jobCtx, jobStop: jobStop, locks: newResourceLocks()}
 }
 
 func NewQueryRegistry() *QueryRegistry {
 	return &QueryRegistry{queries: map[string]registeredQuery{}}
+}
+
+func (r *ActionRegistry) UseJobs(store jobStore) {
+	r.jobs = store
 }
 
 func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id string, parameters map[string]string, confirmation string) error {
@@ -97,19 +117,46 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 			return fmt.Errorf("action lock resource is invalid")
 		}
 	}
-	unlock, err := r.locks.lock(ctx, lockResource)
-	if err != nil {
-		return fmt.Errorf("wait for resource action: %w", err)
+	var unlock func()
+	if definition.Background || definition.NonBlocking {
+		var acquired bool
+		unlock, acquired = r.locks.tryLock(lockResource)
+		if !acquired {
+			return fmt.Errorf("resource already has a maintenance job")
+		}
+	} else {
+		unlock, err = r.locks.lock(ctx, lockResource)
+		if err != nil {
+			return fmt.Errorf("wait for resource action: %w", err)
+		}
 	}
-	defer unlock()
-
 	var record audit.Record
 	if r.audit != nil {
 		record, err = r.audit.Begin(ctx, audit.Attempt{Action: id, Resource: resource, Username: identity.Username, UID: identity.UID})
 		if err != nil {
+			unlock()
 			return fmt.Errorf("record action intent: %w", err)
 		}
 	}
+	if definition.Background {
+		if r.jobs == nil || r.audit == nil {
+			unlock()
+			return fmt.Errorf("background action storage is unavailable")
+		}
+		job, enqueueErr := r.jobs.Enqueue(ctx, jobs.Attempt{Action: id, AuditID: record.ID, Resource: resource, Username: identity.Username, UID: identity.UID})
+		if enqueueErr != nil {
+			unlock()
+			completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			_ = r.audit.Complete(completeCtx, record.ID, audit.OutcomeFailed, "enqueue_failed")
+			return fmt.Errorf("queue background action: %w", enqueueErr)
+		}
+		parameters = cloneParameters(parameters)
+		r.wg.Add(1)
+		go r.runBackground(definition, identity, parameters, record, job, unlock)
+		return nil
+	}
+	defer unlock()
 	actionErr := definition.Handler(ctx, identity, parameters)
 	if r.audit != nil {
 		outcome := audit.OutcomeSucceeded
@@ -125,6 +172,67 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 		}
 	}
 	return actionErr
+}
+
+func (r *ActionRegistry) runBackground(definition ActionDefinition, identity auth.Identity, parameters map[string]string, record audit.Record, job jobs.Job, unlock func()) {
+	defer r.wg.Done()
+	defer unlock()
+	timeout := definition.Timeout
+	if timeout <= 0 {
+		timeout = 20 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.jobCtx, timeout)
+	defer cancel()
+	if err := r.jobs.Start(ctx, job.ID); err != nil {
+		completeCtx, completeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer completeCancel()
+		_ = r.audit.Complete(completeCtx, record.ID, audit.OutcomeUnknown, "job_start_failed")
+		return
+	}
+	actionErr := definition.Handler(ctx, identity, parameters)
+	status := jobs.StatusSucceeded
+	outcome := audit.OutcomeSucceeded
+	category := ""
+	if actionErr != nil {
+		status = jobs.StatusFailed
+		outcome = audit.OutcomeFailed
+		category = errorCategory(actionErr)
+	}
+	completeCtx, completeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer completeCancel()
+	rebootRequired := actionErr == nil && definition.RebootRequired
+	if err := r.jobs.Complete(completeCtx, job.ID, status, category, rebootRequired); err != nil {
+		outcome = audit.OutcomeUnknown
+		category = "job_completion_failed"
+	}
+	_ = r.audit.Complete(completeCtx, record.ID, outcome, category)
+}
+
+func (r *ActionRegistry) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
+}
+
+func (r *ActionRegistry) Shutdown(ctx context.Context) error {
+	r.jobStop()
+	return r.Wait(ctx)
+}
+
+func cloneParameters(parameters map[string]string) map[string]string {
+	cloned := make(map[string]string, len(parameters))
+	for name, value := range parameters {
+		cloned[name] = value
+	}
+	return cloned
 }
 
 func (r *ActionRegistry) Register(id string, admin bool, handler ActionHandler) error {

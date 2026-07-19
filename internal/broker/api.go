@@ -18,6 +18,7 @@ const (
 	ActionIncusRestart        = "org.frostyard.pilothouse.incus.restart"
 	ActionIncusStart          = "org.frostyard.pilothouse.incus.start"
 	ActionIncusStop           = "org.frostyard.pilothouse.incus.stop"
+	ActionMaintenanceReboot   = "org.frostyard.pilothouse.maintenance.reboot"
 	ActionPodmanRemove        = "org.frostyard.pilothouse.podman.remove"
 	ActionPodmanRemoveImage   = "org.frostyard.pilothouse.podman.remove_image"
 	ActionPodmanRestart       = "org.frostyard.pilothouse.podman.restart"
@@ -36,14 +37,17 @@ const (
 )
 
 const (
-	QueryActivity        = "org.frostyard.pilothouse.activity.list"
-	QueryDockerLogs      = "org.frostyard.pilothouse.docker.logs"
-	QueryDockerState     = "org.frostyard.pilothouse.docker.state"
-	QueryIncusState      = "org.frostyard.pilothouse.incus.state"
-	QueryPodmanLogs      = "org.frostyard.pilothouse.podman.logs"
-	QueryPodmanState     = "org.frostyard.pilothouse.podman.state"
-	QueryServicesJournal = "org.frostyard.pilothouse.services.journal"
-	QueryServicesState   = "org.frostyard.pilothouse.services.state"
+	QueryActivity         = "org.frostyard.pilothouse.activity.list"
+	QueryBackupsState     = "org.frostyard.pilothouse.backups.state"
+	QueryDockerLogs       = "org.frostyard.pilothouse.docker.logs"
+	QueryDockerState      = "org.frostyard.pilothouse.docker.state"
+	QueryIncusState       = "org.frostyard.pilothouse.incus.state"
+	QueryJobs             = "org.frostyard.pilothouse.jobs.list"
+	QueryMaintenanceState = "org.frostyard.pilothouse.maintenance.state"
+	QueryPodmanLogs       = "org.frostyard.pilothouse.podman.logs"
+	QueryPodmanState      = "org.frostyard.pilothouse.podman.state"
+	QueryServicesJournal  = "org.frostyard.pilothouse.services.journal"
+	QueryServicesState    = "org.frostyard.pilothouse.services.state"
 )
 
 type ActionRequest struct {
