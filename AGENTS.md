@@ -23,3 +23,5 @@ When composing templ components with text, put the component invocation in its o
 For any new or changed templ component invocation, add or update a rendering test that asserts the rendered HTML contains the component output and does not contain the literal `@web.` call syntax.
 
 Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
+
+If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
