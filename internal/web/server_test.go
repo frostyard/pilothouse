@@ -56,6 +56,16 @@ func TestServerHealthAndSecurityHeaders(t *testing.T) {
 	assert.Equal(t, "nosniff", response.Header().Get("X-Content-Type-Options"))
 }
 
+func TestServerServesEmbeddedFrostyardArtwork(t *testing.T) {
+	server := newTestServer(t)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/static/frozen-reflection.png", nil))
+
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "image/png", response.Header().Get("Content-Type"))
+	assert.NotEmpty(t, response.Body.Bytes())
+}
+
 func TestConfirmActionRendersReviewAndAcceptsExactResource(t *testing.T) {
 	server := newTestServer(t)
 	request := httptest.NewRequest(http.MethodPost, "/services/backup.timer/stop", strings.NewReader("csrf=csrf&project=default"))

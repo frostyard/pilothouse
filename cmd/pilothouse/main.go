@@ -18,6 +18,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/attention"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
+	"github.com/frostyard/pilothouse/internal/modules/fleet"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
@@ -52,6 +53,7 @@ func run() error {
 	backupModule := backups.New()
 	maintenanceModule := maintenance.New()
 	registry, err := platform.NewRegistry(
+		fleet.New(),
 		attention.New(system, serviceModule, maintenanceModule, backupModule),
 		activity.New(),
 		system,

@@ -1,0 +1,85 @@
+package fleet
+
+import "fmt"
+
+templ Page(systems []System) {
+	<div class="page-stack fleet-page">
+		<section class="fleet-intro">
+			<div><span class="preview-label">Interface preview</span><h2>One cockpit. <em>Every quiet system.</em></h2><p>See deployment posture, attention, and updates across connected Pilothouse hosts. Remote enrollment and control are not enabled in this preview.</p></div>
+			<a class="button" href="/fleet/enroll">Connect a system →</a>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Fleet</h2><span>{ fmt.Sprintf("%d systems · preview data", len(systems)) }</span></div>
+			<table class="data-table fleet-table">
+				<thead><tr><th>System</th><th>Image</th><th>Deployment</th><th>State</th><th>Actions</th></tr></thead>
+				<tbody>
+					for _, system := range systems {
+						<tr class={ templ.KV("fleet-current", system.Connected) }>
+							<td>
+								<div class="fleet-name">
+									<strong>{ system.ID }</strong>
+									if system.Connected {
+										<span class="connected-label">connected</span>
+									}
+									<small>{ system.Role } · { system.Uptime }</small>
+								</div>
+							</td>
+							<td><span class="version">{ system.Image }</span></td>
+							<td>
+								<span class="version">{ system.Kernel }</span>
+								if system.Updates > 0 {
+									<span class="badge update">{ fmt.Sprintf("%d updates", system.Updates) }</span>
+								}
+							</td>
+							<td>
+								<span class={ "badge", fleetStateClass(system.State) }>{ system.State }</span>
+								if system.Attention > 0 {
+									<small class="table-detail">{ fmt.Sprintf("%d findings", system.Attention) }</small>
+								}
+							</td>
+							<td><a class="button secondary" href={ templ.SafeURL("/fleet/systems/" + system.ID) }>Open →</a></td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</article>
+	</div>
+}
+
+templ SystemPage(system System) {
+	<div class="page-stack">
+		<div class="preview-banner"><span class="preview-label">Interface preview</span><strong>Remote data and controls are stubbed.</strong><a href="/fleet">Back to fleet →</a></div>
+		<section class="engine-stats">
+			<div class="engine-stat"><span>Image</span><strong class="version">{ system.Image }</strong><small>{ system.Role }</small></div>
+			<div class="engine-stat"><span>Kernel</span><strong class="version">{ system.Kernel }</strong><small>reported deployment</small></div>
+			<div class="engine-stat"><span>Uptime</span><strong>{ system.Uptime }</strong><small>last inventory</small></div>
+			<div class="engine-stat"><span>State</span><strong>{ system.State }</strong><small>{ fmt.Sprintf("%d findings", system.Attention) }</small></div>
+		</section>
+		<div class="dashboard-grid">
+			<div class="dashboard-slot span-half"><article class="card"><div class="card-heading"><div><h2>Resources</h2><p>Remote telemetry</p></div></div><div class="stub-chart" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div><p class="stub-copy">CPU, memory, storage, and network history will appear after a system is enrolled.</p></article></div>
+			<div class="dashboard-slot span-half"><article class="card"><div class="card-heading"><div><h2>Remote actions</h2><p>Broker-mediated control</p></div></div><div class="fleet-action-grid"><button class="button" disabled>Update extensions</button><button class="button secondary" disabled>Restart service</button><button class="button danger" disabled>Reboot system</button></div><p class="stub-copy">Actions will use fixed remote capabilities, per-system authorization, confirmation, and audit records.</p></article></div>
+		</div>
+	</div>
+}
+
+templ Enroll() {
+	<div class="page-stack enroll-page">
+		<div class="preview-banner"><span class="preview-label">Interface preview</span><strong>Enrollment is not active.</strong><a href="/fleet">Back to fleet →</a></div>
+		<section class="enroll-grid">
+			<article class="card enroll-step"><span class="step-number">01</span><h2>Name the system</h2><p>Choose the stable identity operators will use across deployments.</p><label>System name<input value="cayo-03" disabled/></label></article>
+			<article class="card enroll-step"><span class="step-number">02</span><h2>Establish trust</h2><p>Exchange a short-lived invitation. Pin the remote Pilothouse identity; never proxy an arbitrary socket.</p><label>Invitation token<input value="ph_invite_••••••••" disabled/></label></article>
+			<article class="card enroll-step"><span class="step-number">03</span><h2>Approve capabilities</h2><p>Grant fixed read and action capabilities. Remote shell and generic filesystem access remain outside the protocol.</p><div class="capability-list"><span>Host telemetry</span><span>Service lifecycle</span><span>Extension updates</span><span>Container inventory</span></div></article>
+		</section>
+		<div class="enroll-footer"><p>Fleet transport, identity, revocation, and remote audit semantics require a separate security design before implementation.</p><button class="button" disabled>Generate invitation</button></div>
+	</div>
+}
+
+func fleetStateClass(state string) string {
+	if state == "healthy" {
+		return "active"
+	}
+	if state == "attention" {
+		return "update"
+	}
+	return "danger"
+}
