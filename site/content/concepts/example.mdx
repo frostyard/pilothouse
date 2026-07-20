@@ -1,0 +1,28 @@
+---
+title: Callouts and code
+description: MDX example showing the Callout component and code blocks.
+group: Concepts
+order: 10
+---
+
+import Callout from "../../src/components/Callout.astro";
+
+Plain Markdown covers most pages. Reach for MDX only when a page needs a component.
+
+## Callout
+
+<Callout label="Boundary">
+  The scaffold never touches your application code. Docs live in `site/` and ship as static files.
+</Callout>
+
+## Code
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("cold systems, clear boundaries")
+}
+```

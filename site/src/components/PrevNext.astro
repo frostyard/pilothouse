@@ -1,0 +1,9 @@
+---
+const { prev = null, next = null } = Astro.props;
+---
+{(prev || next) && (
+  <div class="dk-next">
+    <span>{prev && <a href={`/${prev.id}/`}>← {prev.data.title}</a>}</span>
+    <span>{next && <a href={`/${next.id}/`}>{next.data.title} →</a>}</span>
+  </div>
+)}

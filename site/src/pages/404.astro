@@ -1,0 +1,9 @@
+---
+import DocsLayout from "../layouts/DocsLayout.astro";
+import { orderedDocs, groupDocs } from "../lib/nav";
+
+const groups = groupDocs(await orderedDocs());
+---
+<DocsLayout title="Page not found" groups={groups} noSearchIndex={true}>
+  <p>Nothing lives at this address. The section tree covers everything published.</p>
+</DocsLayout>

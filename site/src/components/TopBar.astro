@@ -1,0 +1,14 @@
+---
+import { site } from "../site.config";
+import Search from "./Search.astro";
+---
+<header class="dk-topbar">
+  <div class="dk-brand">
+    <a href="/"><span class="dk-flake">❄</span> frostyard</a>
+    <span class="dk-crumb">/ docs</span>
+  </div>
+  <div class="dk-topbar-right">
+    <Search />
+    <a class="dk-source" href={site.sourceUrl}>Source <span>↗</span></a>
+  </div>
+</header>

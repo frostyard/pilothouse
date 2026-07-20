@@ -1,0 +1,65 @@
+<div class="dk-search">
+  <input id="dk-search-input" type="search" placeholder="Search docs" aria-label="Search docs" autocomplete="off" />
+  <div id="dk-search-results" class="dk-search-results" hidden></div>
+</div>
+<script>
+  const input = document.getElementById("dk-search-input") as HTMLInputElement | null;
+  const panel = document.getElementById("dk-search-results");
+  let pagefind: any = null;
+  let failed = false;
+
+  async function ensurePagefind() {
+    if (pagefind || failed) return pagefind;
+    try {
+      const pagefindUrl = "/pagefind/pagefind.js";
+      pagefind = await import(/* @vite-ignore */ pagefindUrl);
+      await pagefind.init();
+    } catch {
+      failed = true;
+      if (panel) {
+        panel.hidden = false;
+        panel.innerHTML =
+          '<p class="dk-search-note">The search index is built with the site — run npm run build.</p>';
+      }
+    }
+    return pagefind;
+  }
+
+  input?.addEventListener("input", async () => {
+    if (!panel) return;
+    const q = input.value.trim();
+    if (!q) {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    const pf = await ensurePagefind();
+    if (!pf) return;
+    const search = await pf.debouncedSearch(q);
+    if (!search) return; // superseded by a newer keystroke
+    const results = await Promise.all(
+      search.results.slice(0, 8).map((r: any) => r.data())
+    );
+    panel.hidden = false;
+    panel.innerHTML = results.length
+      ? results
+          .map(
+            (r: any) =>
+              `<a href="${r.url}"><b>${r.meta.title}</b><span>${r.excerpt}</span></a>`
+          )
+          .join("")
+      : '<p class="dk-search-note">No pages match.</p>';
+  });
+
+  document.addEventListener("click", (e) => {
+    if (panel && e.target instanceof Element && !e.target.closest(".dk-search")) {
+      panel.hidden = true;
+    }
+  });
+
+  input?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && panel) {
+      panel.hidden = true;
+    }
+  });
+</script>

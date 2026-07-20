@@ -1,0 +1,10 @@
+:root{
+/* Layout */
+--container-max:1240px;--container-pad:32px;--container-pad-mobile:20px;--nav-height:92px;--nav-height-mobile:72px;
+/* Section rhythm */
+--section-pad:8rem;--section-pad-mobile:5rem;--panel-pad:3.5rem;--card-pad:1.35rem;--tool-pad:2.2rem 2.4rem;
+/* Radii — nearly square; pills only for nav source link */
+--radius-tag:2px;--radius-node:3px;--radius-button:4px;--radius-pill:100px;
+/* Rules */
+--eyebrow-dash-w:24px;
+}

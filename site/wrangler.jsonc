@@ -1,0 +1,8 @@
+{
+  // "name" is set by the frostyard-docs-site skill from the repo name.
+  "name": "pilothouse-docs",
+  "compatibility_date": "2026-07-01",
+  "assets": {
+    "directory": "./dist"
+  }
+}

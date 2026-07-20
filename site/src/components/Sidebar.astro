@@ -1,0 +1,17 @@
+---
+const { groups, current } = Astro.props;
+---
+<nav class="dk-nav">
+  {groups.map(([group, entries]) => (
+    <div>
+      <div class="dk-group">{group}</div>
+      {entries.map((e) => (
+        <a
+          href={`/${e.id}/`}
+          class={e.id === current ? "active" : undefined}
+          aria-current={e.id === current ? "page" : undefined}
+        >{e.data.title}</a>
+      ))}
+    </div>
+  ))}
+</nav>

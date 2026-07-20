@@ -1,0 +1,12 @@
+---
+const { headings = [] } = Astro.props;
+const items = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+{items.length > 0 && (
+  <>
+    <p>On this page</p>
+    {items.map((h) => (
+      <a href={`#${h.slug}`} class={h.depth === 3 ? "dk-toc-sub" : undefined}>{h.text}</a>
+    ))}
+  </>
+)}

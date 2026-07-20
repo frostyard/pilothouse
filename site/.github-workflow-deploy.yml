@@ -1,0 +1,30 @@
+# Optional CI deploy for the docs site.
+# To enable: move this file to .github/workflows/deploy-docs.yml at the repo
+# root, uncomment everything below, and add CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID as repository secrets. The paths filter means docs
+# deploy from the same PRs as code without triggering on unrelated commits.
+#
+# name: deploy docs
+#
+# on:
+#   push:
+#     branches: [main]
+#     paths: ["site/**"]
+#
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#       - run: npm ci
+#         working-directory: site
+#       - run: npm run build
+#         working-directory: site
+#       - uses: cloudflare/wrangler-action@v3
+#         with:
+#           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#           workingDirectory: site

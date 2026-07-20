@@ -1,0 +1,82 @@
+/* ── shell (from ui_kits/docs/docs.css) ─────────────────────────── */
+.dk-shell{display:grid;grid-template-columns:230px minmax(0,1fr) 180px;gap:0;max-width:1240px;margin:auto;padding:0 32px}
+.dk-topbar{height:64px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);max-width:1240px;margin:auto;padding:0 32px}
+.dk-side{border-right:1px solid var(--line);padding:2rem 1.5rem 2rem 0;position:sticky;top:0;height:calc(100vh - 64px);overflow-y:auto}
+.dk-group{font:700 .62rem var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:#7cbddc;margin:1.6rem 0 .6rem}
+.dk-group:first-child{margin-top:0}
+.dk-nav a{display:block;font-size:.82rem;color:#b7d0df;padding:.38rem 0 .38rem .75rem;border-left:1px solid var(--line);text-decoration:none}
+.dk-nav a:hover{color:var(--ice)}
+.dk-nav a.active{color:var(--ice);border-left:1px solid var(--sky)}
+.dk-main{padding:2.5rem 3rem;min-width:0}
+.dk-toc{padding:2.5rem 0 2rem 1.5rem;border-left:1px solid var(--line);position:sticky;top:0;height:calc(100vh - 64px);font-size:.75rem}
+.dk-toc p{font:700 .62rem var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:#7cbddc;margin:0 0 .7rem}
+.dk-toc a{display:block;color:#91b8cb;padding:.28rem 0;text-decoration:none}
+.dk-toc a:hover{color:var(--ice)}
+.dk-toc a.dk-toc-sub{padding-left:.9rem}
+
+/* ── topbar pieces (were inline JSX styles in the kit) ──────────── */
+.dk-brand{display:flex;align-items:baseline;gap:1rem}
+.dk-brand>a{font-weight:var(--brand-weight);letter-spacing:var(--brand-ls);font-size:1.1rem;color:var(--text-body);text-decoration:none;white-space:nowrap}
+.dk-flake{color:var(--ice);font-size:1.35rem;margin-right:.3rem}
+.dk-crumb{color:var(--text-footer);font-size:.85rem}
+.dk-topbar-right{display:flex;align-items:center;gap:1rem}
+.dk-source{font-size:.78rem;border:1px solid var(--line);padding:.45rem .7rem;border-radius:var(--radius-pill);color:#d9f2ff;text-decoration:none;white-space:nowrap}
+.dk-source span{color:var(--ice)}
+
+/* ── sidebar header (were inline JSX styles in the kit) ─────────── */
+.dk-label{font:700 .62rem var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ice);margin-bottom:.2rem}
+.dk-kicker{font-size:.72rem;color:var(--text-footer);margin-bottom:1.2rem}
+
+/* ── prose ──────────────────────────────────────────────────────── */
+.dk-prose .dk-eyebrow{font:700 .62rem var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--text-eyebrow);margin:0 0 .8rem}
+.dk-dash{width:var(--eyebrow-dash-w);height:1px;background:var(--sky);display:inline-block;vertical-align:middle;margin-right:.6rem}
+.dk-prose h1{font-size:2.6rem;letter-spacing:-.06em;line-height:1;margin:0 0 1rem}
+.dk-prose h2{font-size:1.4rem;letter-spacing:-.04em;margin:2.4rem 0 .8rem;padding-top:1.4rem;border-top:1px solid var(--line)}
+.dk-prose h3{font-size:1.05rem;letter-spacing:-.02em;margin:1.8rem 0 .6rem}
+.dk-prose p{font-size:.9rem;color:var(--text-muted);line-height:1.65;margin:0 0 1rem;max-width:640px}
+.dk-prose ul,.dk-prose ol{font-size:.9rem;color:var(--text-muted);line-height:1.65;margin:0 0 1rem;max-width:640px;padding-left:1.2rem}
+.dk-prose ul{list-style:none;padding-left:0}
+.dk-prose ul>li{position:relative;padding-left:1.2rem;margin-bottom:.35rem}
+.dk-prose ul>li::before{content:"✦";position:absolute;left:0;top:.28em;color:var(--sky);font-size:.7rem}
+.dk-prose ol>li{margin-bottom:.35rem}
+.dk-prose strong{color:var(--text-body)}
+.dk-prose code{font-family:var(--font-mono);font-size:.78em;color:#8ee3ff;background:var(--surface-code);padding:.15rem .35rem}
+.dk-prose pre{background:var(--surface-code);border:1px solid var(--line);padding:1rem 1.2rem;overflow-x:auto;margin:0 0 1rem;max-width:640px;border-radius:0}
+.dk-prose pre code{background:none;padding:0;font-size:.76rem;line-height:1.6}
+.dk-prose table{border-collapse:collapse;font-size:.84rem;margin:0 0 1rem;max-width:640px;width:100%}
+.dk-prose th{font:700 .62rem var(--font-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--text-eyebrow);text-align:left;padding:.5rem .8rem .5rem 0;border-bottom:1px solid var(--line-strong)}
+.dk-prose td{color:var(--text-muted);padding:.5rem .8rem .5rem 0;border-bottom:1px solid var(--line)}
+.dk-prose blockquote{border-left:2px solid var(--sky);margin:0 0 1rem;padding:.2rem 0 .2rem 1.1rem;max-width:640px}
+.dk-prose hr{border:none;border-top:1px solid var(--line);margin:2rem 0}
+.dk-prose img{max-width:100%}
+
+/* ── callout + prev/next (from the kit) ─────────────────────────── */
+.dk-callout{border:1px solid var(--line);border-left:2px solid var(--sky);background:var(--gradient-panel);padding:.9rem 1.1rem;font-size:.84rem;color:var(--text-muted);margin:0 0 1rem;max-width:640px}
+.dk-callout b{color:#93dff7;font:700 .62rem var(--font-mono);letter-spacing:.12em;text-transform:uppercase;display:block;margin-bottom:.35rem}
+.dk-callout p{font-size:inherit;margin:0}
+.dk-next{display:flex;justify-content:space-between;gap:1rem;margin-top:3rem;border-top:1px solid var(--line);padding-top:1.2rem}
+.dk-next a{font-size:.8rem;color:#93e0fb;text-decoration:none}
+
+/* ── mobile nav disclosure (CSS-only) ───────────────────────────── */
+.dk-disclosure{display:none;border:1px solid var(--line);margin-bottom:1.6rem}
+.dk-disclosure summary{font:700 .62rem var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--text-eyebrow);padding:.6rem .9rem;cursor:pointer;list-style:none}
+.dk-disclosure summary::before{content:"→ ";color:var(--sky)}
+.dk-disclosure summary::-webkit-details-marker{display:none}
+.dk-disclosure[open] summary::before{content:"↓ "}
+.dk-disclosure .dk-nav{padding:0 .9rem .9rem}
+
+/* ── search (used by Task 4's Search.astro) ─────────────────────── */
+.dk-search{position:relative}
+.dk-search input{background:var(--surface-code);border:1px solid var(--line);color:var(--text-body);font:inherit;font-size:.8rem;padding:.4rem .6rem;border-radius:var(--radius-tag);width:180px}
+.dk-search input:focus{outline:1px solid var(--sky);outline-offset:1px;border-color:var(--line-strong)}
+.dk-search-results{position:absolute;top:calc(100% + 8px);right:0;width:340px;max-height:60vh;overflow-y:auto;background:var(--gradient-panel);border:1px solid var(--line);padding:.4rem;z-index:10}
+.dk-search-results a{display:block;padding:.55rem .6rem;text-decoration:none;border-bottom:1px solid var(--line)}
+.dk-search-results a:last-child{border-bottom:none}
+.dk-search-results a b{display:block;font-size:.8rem;color:var(--text-body)}
+.dk-search-results a span{font-size:.72rem;color:var(--text-dim)}
+.dk-search-results a span mark{background:none;color:var(--ice)}
+.dk-search-note{font-size:.75rem;color:var(--text-dim);margin:.4rem .6rem}
+
+/* ── breakpoints (from the kit; disclosure appears when side hides) ─ */
+@media(max-width:1020px){.dk-shell{grid-template-columns:220px minmax(0,1fr)}.dk-toc{display:none}.dk-main{padding:2rem 0 2rem 2rem}}
+@media(max-width:700px){.dk-shell{grid-template-columns:1fr}.dk-side{display:none}.dk-main{padding:2rem 0}.dk-disclosure{display:block}.dk-search input{width:130px}}
