@@ -1,0 +1,21 @@
+---
+import { orderedDocs } from "../lib/nav";
+
+const docs = await orderedDocs();
+if (docs.length === 0) {
+  throw new Error("No docs content found: add at least one page under content/ with title/group/order frontmatter.");
+}
+const target = `/${docs[0].id}/`;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="refresh" content={`0;url=${target}`} />
+    <link rel="canonical" href={new URL(target, Astro.site)} />
+    <title>Redirecting</title>
+  </head>
+  <body>
+    <a href={target}>Continue to the docs</a>
+  </body>
+</html>

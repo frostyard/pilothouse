@@ -1,0 +1,20 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap");
+:root{
+--font-sans:"Inter",ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+--font-serif-accent:Georgia,serif; /* italic <em> inside display headings only */
+--font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+/* Display (hero h1) */
+--text-display-size:clamp(3.4rem,6.4vw,6.4rem);--text-display-lh:.94;--text-display-ls:-.072em;--text-display-weight:700;
+/* Section heading (h2) */
+--text-h2-size:clamp(2.5rem,4vw,4.25rem);--text-h2-lh:1;--text-h2-ls:-.06em;
+/* Sub-section heading (panel h2) */
+--text-h2-compact-size:clamp(2.3rem,3.8vw,3.8rem);
+/* Eyebrow kicker */
+--text-eyebrow-size:.7rem;--text-eyebrow-ls:.17em;--text-eyebrow-weight:700;
+/* Body */
+--text-lede-size:1.08rem;--text-body-size:.93rem;--text-small-size:.87rem;--text-caption-size:.82rem;
+/* Mono details */
+--text-mono-size:.72rem;--text-tag-size:.68rem;
+/* Brand wordmark */
+--brand-weight:720;--brand-ls:-.04em;--brand-size:1.25rem;
+}

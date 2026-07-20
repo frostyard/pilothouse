@@ -1,0 +1,55 @@
+---
+import "../styles/global.css";
+import "../styles/docs.css";
+import { site } from "../site.config";
+import TopBar from "../components/TopBar.astro";
+import Sidebar from "../components/Sidebar.astro";
+import Toc from "../components/Toc.astro";
+import PrevNext from "../components/PrevNext.astro";
+
+const {
+  title,
+  description,
+  headings = [],
+  current = "",
+  groups,
+  prev = null,
+  next = null,
+  noSearchIndex = false
+} = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    {description && <meta name="description" content={description} />}
+    <title>{title} — {site.name} docs</title>
+  </head>
+  <body>
+    <TopBar />
+    <div class="dk-shell">
+      <aside class="dk-side">
+        <div class="dk-label">{site.name}</div>
+        <div class="dk-kicker">{site.kicker}</div>
+        <Sidebar groups={groups} current={current} />
+      </aside>
+      <main class="dk-main">
+        <details class="dk-disclosure">
+          <summary>Contents</summary>
+          <Sidebar groups={groups} current={current} />
+        </details>
+        <div class="dk-prose" data-pagefind-body={noSearchIndex ? undefined : true}>
+          <p class="dk-eyebrow"><span class="dk-dash"></span>{site.name} docs</p>
+          <h1>{title}</h1>
+          <slot />
+          <PrevNext prev={prev} next={next} />
+        </div>
+      </main>
+      <aside class="dk-toc">
+        <Toc headings={headings} />
+      </aside>
+    </div>
+  </body>
+</html>

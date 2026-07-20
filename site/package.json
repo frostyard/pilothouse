@@ -1,0 +1,19 @@
+{
+  "name": "frostyard-docs-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.3.0",
+    "astro": "^5.12.0"
+  },
+  "devDependencies": {
+    "pagefind": "^1.3.0",
+    "wrangler": "^4.0.0"
+  }
+}
