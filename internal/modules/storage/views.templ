@@ -31,6 +31,9 @@ templ Page(snapshot Snapshot, unavailable bool) {
 			<div class="empty-state">Storage status is unavailable.</div>
 		} else {
 			<div class="page-intro"><p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p></div>
+			for _, anchor := range snapshotAnchors(snapshot) {
+				<span id={ anchor }></span>
+			}
 			<article class="card table-card">
 				<div class="table-toolbar"><h2>Mounted storage</h2><span>{ healthLabel(snapshot.Summary.HighestHealth) }</span></div>
 				if len(snapshot.Mounts) == 0 {
@@ -39,8 +42,8 @@ templ Page(snapshot Snapshot, unavailable bool) {
 					<table class="data-table">
 						<thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th></tr></thead>
 						<tbody>
-							for _, mount := range snapshot.Mounts {
-								<tr id={ storageAnchor(mount.ID) }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td>{ mount.State }</td></tr>
+							for index, mount := range snapshot.Mounts {
+								<tr id={ mountAnchors(snapshot)[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td>{ mount.State }</td></tr>
 							}
 						</tbody>
 					</table>
@@ -65,4 +68,44 @@ func healthLabel(health Health) string {
 	default:
 		return "Healthy"
 	}
+}
+
+func snapshotAnchors(snapshot Snapshot) []string {
+	seen := make(map[string]struct{}, len(snapshot.Resources)+len(snapshot.Findings))
+	anchors := make([]string, 0, len(snapshot.Resources)+len(snapshot.Findings))
+	add := func(resourceID string) {
+		anchor := storageAnchor(resourceID)
+		if _, exists := seen[anchor]; exists {
+			return
+		}
+		seen[anchor] = struct{}{}
+		anchors = append(anchors, anchor)
+	}
+	for _, resource := range snapshot.Resources {
+		add(resource.ID)
+	}
+	for _, finding := range snapshot.Findings {
+		add(finding.ResourceID)
+	}
+	return anchors
+}
+
+func mountAnchors(snapshot Snapshot) []string {
+	used := make(map[string]struct{}, len(snapshot.Resources)+len(snapshot.Findings)+len(snapshot.Mounts))
+	for _, anchor := range snapshotAnchors(snapshot) {
+		used[anchor] = struct{}{}
+	}
+	anchors := make([]string, len(snapshot.Mounts))
+	for index, mount := range snapshot.Mounts {
+		anchor := "mount-" + storageAnchor(mount.ID)
+		for {
+			if _, exists := used[anchor]; !exists {
+				break
+			}
+			anchor += "-"
+		}
+		used[anchor] = struct{}{}
+		anchors[index] = anchor
+	}
+	return anchors
 }

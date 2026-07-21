@@ -66,8 +66,10 @@ func storageSeverity(health Health) platform.Severity {
 		return platform.SeverityWarning
 	case HealthUnknown:
 		return platform.SeverityUnknown
-	default:
+	case HealthHealthy:
 		return platform.SeverityInfo
+	default:
+		return platform.SeverityUnknown
 	}
 }
 

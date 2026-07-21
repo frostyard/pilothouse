@@ -41,3 +41,20 @@ func TestPageEscapesMountValues(t *testing.T) {
 	assert.NotContains(t, html, "<script>alert(1)</script>")
 	assert.NotContains(t, html, "@web.")
 }
+
+func TestPageRendersUniqueResourceAndFindingAnchors(t *testing.T) {
+	snapshot := Snapshot{
+		Resources: []Resource{{ID: "disk:abc"}, {ID: "volume:one"}, {ID: "mount:disk:abc"}},
+		Findings:  []Finding{{ResourceID: "disk:abc"}, {ResourceID: "alert:only"}},
+		Mounts:    []Mount{{ID: "disk:abc", Target: "/data"}},
+	}
+	var output strings.Builder
+	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
+
+	html := output.String()
+	assert.Equal(t, 1, strings.Count(html, `id="disk-abc"`))
+	assert.Equal(t, 1, strings.Count(html, `id="volume-one"`))
+	assert.Equal(t, 1, strings.Count(html, `id="alert-only"`))
+	assert.Equal(t, 1, strings.Count(html, `id="mount-disk-abc"`))
+	assert.Equal(t, 1, strings.Count(html, `id="mount-disk-abc-"`))
+}

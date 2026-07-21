@@ -72,11 +72,28 @@ func TestHealthMapsAllStorageSeverities(t *testing.T) {
 		{ResourceID: "healthy", Severity: HealthHealthy},
 		{ResourceID: "warning", Severity: HealthWarning},
 		{ResourceID: "unknown", Severity: HealthUnknown},
+		{ResourceID: "unrecognized", Severity: Health("unexpected")},
+		{ResourceID: "empty", Severity: ""},
 	}}}
 	findings, err := New().Health(context.Background(), host)
 	require.NoError(t, err)
-	require.Len(t, findings, 3)
-	assert.Equal(t, []platform.Severity{platform.SeverityInfo, platform.SeverityWarning, platform.SeverityUnknown}, []platform.Severity{findings[0].Severity, findings[1].Severity, findings[2].Severity})
+	require.Len(t, findings, 5)
+	assert.Equal(t, []platform.Severity{platform.SeverityInfo, platform.SeverityWarning, platform.SeverityUnknown, platform.SeverityUnknown, platform.SeverityUnknown}, []platform.Severity{findings[0].Severity, findings[1].Severity, findings[2].Severity, findings[3].Severity, findings[4].Severity})
+}
+
+func TestHealthFindingPathHasExactlyOnePageAnchor(t *testing.T) {
+	snapshot := Snapshot{
+		Resources: []Resource{{ID: "disk:abc"}},
+		Findings:  []Finding{{ResourceID: "disk:abc", Severity: HealthCritical}},
+	}
+	findings, err := New().Health(context.Background(), &fakeHost{snapshot: snapshot})
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "/storage#disk-abc", findings[0].Path)
+
+	var output strings.Builder
+	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
+	assert.Equal(t, 1, strings.Count(output.String(), `id="disk-abc"`))
 }
 
 func TestManifest(t *testing.T) {
