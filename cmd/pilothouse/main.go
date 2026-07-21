@@ -23,6 +23,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
+	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	systemmodule "github.com/frostyard/pilothouse/internal/modules/system"
 	"github.com/frostyard/pilothouse/internal/platform"
@@ -52,11 +53,13 @@ func run() error {
 	serviceModule := services.New()
 	backupModule := backups.New()
 	maintenanceModule := maintenance.New()
+	storageModule := storage.New()
 	registry, err := platform.NewRegistry(
 		fleet.New(),
-		attention.New(system, serviceModule, maintenanceModule, backupModule),
+		attention.New(system, serviceModule, maintenanceModule, backupModule, storageModule),
 		activity.New(),
 		system,
+		storageModule,
 		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
 		podman.New(),
 		docker.New(),

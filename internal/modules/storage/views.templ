@@ -1,0 +1,68 @@
+package storage
+
+import (
+	"fmt"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ SummaryCard(snapshot Snapshot) {
+	<article class="card">
+		<div class="card-heading split">
+			<div>
+				<h2>Storage</h2>
+				<p>{ fmt.Sprintf("%d active mounts", snapshot.Summary.ActiveMounts) }</p>
+			</div>
+			<a class="card-link" href="/storage">
+				Details
+				@web.Icon("chevron")
+			</a>
+		</div>
+		<div class="mini-list">
+			<div class="mini-row"><span>Capacity</span><strong>{ capacity(snapshot.Summary.UsableBytes) } usable · { capacity(snapshot.Summary.UsedBytes) } used</strong></div>
+			<div class="mini-row"><span>Highest health</span><strong>{ healthLabel(snapshot.Summary.HighestHealth) }</strong></div>
+		</div>
+	</article>
+}
+
+templ Page(snapshot Snapshot, unavailable bool) {
+	<div class="page-stack">
+		if unavailable {
+			<div class="empty-state">Storage status is unavailable.</div>
+		} else {
+			<div class="page-intro"><p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p></div>
+			<article class="card table-card">
+				<div class="table-toolbar"><h2>Mounted storage</h2><span>{ healthLabel(snapshot.Summary.HighestHealth) }</span></div>
+				if len(snapshot.Mounts) == 0 {
+					<div class="empty-state">No mounted storage was reported.</div>
+				} else {
+					<table class="data-table">
+						<thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th></tr></thead>
+						<tbody>
+							for _, mount := range snapshot.Mounts {
+								<tr id={ storageAnchor(mount.ID) }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td>{ mount.State }</td></tr>
+							}
+						</tbody>
+					</table>
+				}
+			</article>
+		}
+	</div>
+}
+
+func capacity(bytes uint64) string {
+	return fmt.Sprintf("%.1f GiB", float64(bytes)/(1024*1024*1024))
+}
+
+func healthLabel(health Health) string {
+	switch health {
+	case HealthCritical:
+		return "Critical"
+	case HealthWarning:
+		return "Warning"
+	case HealthUnknown:
+		return "Unknown"
+	default:
+		return "Healthy"
+	}
+}
