@@ -36,7 +36,7 @@ Add a self-contained vertical slice under `internal/modules/logs`:
 - `journal/journal_stub.go` reports journal access as unavailable when systemd development support is absent.
 - Tests remain in the module and cover handlers, rendering, manager behavior, and broker registration.
 
-Register the module in `cmd/pilothouse`. Its manifest uses ID `logs`, path `/logs`, and an order after Services and Backups. `Dashboard` returns no cards.
+Register the module in `cmd/pilothouse`. Its manifest uses ID `logs`, path `/logs`, and order `37`, after Services and Backups. `Dashboard` returns no cards.
 
 Add one fixed query ID, `broker.QueryLogs`, and register its implementation only in `cmd/pilothoused`. The query requires an administrator. The web process never opens journald or the systemd D-Bus connection.
 
@@ -50,11 +50,11 @@ The Logs module owns its broad journal reader and all-unit inventory. Services k
 
 1. Check `host.Identity(r).Admin` before issuing a broker query. A non-administrator receives an in-page access-denied view, matching Activity's existing behavior.
 2. Parse and normalize `query`, `priority`, `unit`, and `window` from the URL.
-3. Reject an oversized text query with `400 Bad Request`.
+3. Normalize the text query to at most 200 Unicode code points and 1 KiB of UTF-8 data.
 4. Send only the four named filter parameters through `host.Query` using `broker.QueryLogs`.
 5. Render the full page. HTMX polling selects and replaces only the results article from subsequent full-page responses.
 
-Invalid priority, unit, and window URL values normalize to their safe defaults for the page. The privileged manager validates all values independently, so direct broker clients cannot bypass the allowed filter grammar.
+Invalid priority and window URL values normalize to their safe defaults for the page. A unit is accepted only when it follows the bounded systemd unit-name grammar. The privileged manager validates all values independently and rejects oversized or malformed direct broker parameters, so direct clients cannot bypass the allowed filter grammar.
 
 ### Privileged Manager
 
@@ -63,14 +63,16 @@ The manager exposes one operation that accepts a filter value object and returns
 - Up to 200 journal entries.
 - A sorted list of all currently known systemd units for the unit filter.
 - The normalized active filters.
-- Whether the scan limit truncated coverage before reaching the requested window boundary.
+- Whether the entry, scan, or aggregate-size limit truncated coverage before reaching the requested window boundary.
 
 The manager depends on two narrow interfaces:
 
 - A systemd unit lister that returns all known unit names, including services, sockets, timers, scopes, mounts, targets, and other unit types.
 - A journal reader that accepts the validated filters and fixed resource limits.
 
-The selected unit must be empty or exactly match a freshly enumerated known unit. This check occurs inside the privileged process immediately before reading the journal.
+The unit inventory supplies dropdown options, but it is not an authorization boundary. A selected unit must be empty or pass the bounded systemd unit-name grammar, and the journal reader applies it only as an exact `_SYSTEMD_UNIT` match. This permits a bookmarked or transient unit that disappeared from the current inventory to retain access to its recent records without broadening the query. Records identified only by `_SYSTEMD_USER_UNIT` remain visible in unfiltered results but are treated as records without a system unit.
+
+The single fixed query re-enumerates units on every full request and five-second poll even though HTMX discards the refreshed filter form. This bounded cost is accepted for the initial implementation to avoid a cache, a second privileged query, or request-mode parameters; access is restricted to active administrator sessions. The implementation can optimize this later only with measured evidence.
 
 ### Journal Reader
 
@@ -79,10 +81,9 @@ The real reader opens the system journal, seeks to the current end, and walks ba
 - 200 matching entries have been collected.
 - The selected window boundary has been reached.
 - 10,000 records have been inspected.
-- The five-second reader timeout expires.
 - The aggregate result reaches 256 KiB.
 
-The reader returns entries newest-first. An unusually busy journal or rare text search may hit the 10,000-record scan cap before covering the entire selected window. The response marks this condition so the UI does not imply complete coverage.
+The reader returns entries newest-first. Reaching the 200-entry, 10,000-record, or 256 KiB aggregate limit before the window boundary returns the entries collected so far and marks coverage as truncated. The reader checks the aggregate size before appending an entry, so the returned model never exceeds 256 KiB. Expiration of the separate four-second reader timeout is an error and returns no partial records.
 
 Only these journal values are read into the presentation model:
 
@@ -94,7 +95,7 @@ Only these journal values are read into the presentation model:
 - `_COMM`.
 - `_TRANSPORT`.
 
-Display source is selected in that order after timestamp, priority, and message validation: `_SYSTEMD_UNIT`, then `SYSLOG_IDENTIFIER`, then `_COMM`, then `_TRANSPORT`. A missing systemd unit is valid because the module covers the entire system journal. Missing or malformed timestamp, priority, or message fields, oversized output, unexpected reader data, and invalid priorities fail closed without returning partial records.
+Display source is selected in that order after timestamp, priority, and message validation: `_SYSTEMD_UNIT`, then `SYSLOG_IDENTIFIER`, then `_COMM`, then `_TRANSPORT`. A missing systemd unit is valid because the module covers the entire system journal. `MESSAGE` is limited to 64 KiB, and each source field is limited to 4 KiB. Missing or malformed timestamp, priority, or message fields, an oversized individual field, unexpected reader data, and invalid priorities fail closed without returning partial records.
 
 ## Filter Semantics
 
@@ -102,12 +103,12 @@ The filter bar mirrors Services visually and functionally:
 
 | Control | Parameter | Behavior |
 | --- | --- | --- |
-| Find entries | `query` | Trimmed, bounded, case-insensitive substring match against `MESSAGE`. Empty means all messages. |
-| Priority | `priority` | Allowlisted journal priority. A selected priority includes it and every more-severe level. Empty means all priorities. |
+| Find entries | `query` | Trimmed, limited to 200 Unicode code points and 1 KiB of UTF-8 data, and matched case-insensitively against `MESSAGE`. Empty means all messages. |
+| Priority | `priority` | One of `emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, or `debug`. A selected priority includes it and every more-severe level. Empty means all priorities. |
 | Unit | `unit` | Dropdown of all known systemd units. Empty means all units and records without units. |
 | Time range | `window` | One of `15m`, `1h`, `6h`, or `24h`. Missing or invalid values normalize to `1h`. |
 
-Priority threshold behavior follows journal numeric ordering: priority `0` is most severe and `7` is least severe. For example, `warning` includes priorities `0` through `4`.
+Priority threshold behavior follows journal numeric ordering: `emerg=0`, `alert=1`, `crit=2`, `err=3`, `warning=4`, `notice=5`, `info=6`, and `debug=7`. For example, `warning` includes priorities `0` through `4`.
 
 The filter form uses a normal GET request. **Apply filters** submits the form, and **Reset filters** links to `/logs`. This remains usable without JavaScript.
 
@@ -133,14 +134,14 @@ The results toolbar shows:
 - The number of displayed records.
 - The selected time window.
 - An `updates every 5s` disclosure.
-- A coverage-truncated disclosure when the scan cap was reached before the time boundary.
+- A coverage-truncated disclosure when the entry, scan, or aggregate-size cap was reached before the time boundary.
 
 The table columns are Timestamp, Priority, Source, and Message. Priority uses existing badge styling. Messages are HTML-escaped, preserve line breaks, and wrap long content without widening the page. The existing horizontally scrollable table behavior supports narrow screens.
 
 The page distinguishes these states:
 
-- No records exist in the selected window.
-- Records exist, but none match the active filters.
+- No records exist in the selected window when no filters are active.
+- No records match the active filters.
 - The bounded scan produced no matches and truncated coverage.
 - Journal data is temporarily unavailable.
 - The current user lacks administrator access.
@@ -157,9 +158,9 @@ Messages and source values are rendered as escaped text. Errors shown to users a
 
 ## Error Handling
 
-The initial page and each poll use a bounded request context. If the broker or journal query fails, the handler renders the page with an unavailable results article rather than exposing the underlying error. The article continues polling so transient failures recover without a manual reload.
+The initial page and each poll use an eight-second broker request context, while the privileged journal read has its own four-second timeout. This leaves time to serialize and return the bounded response before the next five-second poll. If the broker or journal query fails, the handler renders the page with an unavailable results article rather than exposing the underlying error. The article continues polling so transient failures recover without a manual reload.
 
-Malformed privileged records, an oversized record, aggregate-size violations, and reader inconsistencies fail the query closed. The manager does not return a partial successful response in those cases.
+Malformed privileged records, an oversized individual field, reader timeouts, and reader inconsistencies fail the query closed. The manager does not return a partial successful response in those cases. Reaching the aggregate result cap is instead a successful truncated response that remains within the cap.
 
 Non-administrator HTTP requests render an access-denied page without contacting the broker. Direct non-administrator broker requests are rejected by query authorization.
 
@@ -168,13 +169,13 @@ Non-administrator HTTP requests render an access-denied page without contacting 
 Manager tests cover:
 
 - Default and allowlisted windows.
-- Exact known-unit validation across all systemd unit types.
+- All-unit inventory across systemd unit types and bounded unit-name validation.
 - Priority threshold semantics.
 - Case-insensitive message matching.
 - Newest-first ordering.
 - Source fallback order.
 - Records without `_SYSTEMD_UNIT`.
-- Count, scan, time, and byte limits.
+- Count, scan, timeout, per-field, and aggregate-byte limits.
 - Truncated-coverage reporting.
 - Missing, malformed, mismatched, and oversized records.
 - Reader and unit-inventory failures.
@@ -184,7 +185,7 @@ Handler and broker-registration tests cover:
 - Administrator access and non-administrator denial without a broker call.
 - Dispatch through only `broker.QueryLogs`.
 - Exact encoded filter parameters.
-- Normalization and oversized-query handling.
+- Normalization and text-query length handling.
 - Administrator-only query registration.
 - Rejection of unknown or malformed broker parameters.
 - Unavailable-state rendering without privileged error disclosure.
@@ -197,5 +198,7 @@ Rendering tests cover:
 - Empty, filtered-empty, truncated, unavailable, and access-denied states.
 - Generic filter-bar classes and responsive structure.
 - Rendered component output with no literal `@web.` syntax.
+
+Services rendering tests will also be updated to assert the renamed generic filter-bar classes, selected controls, and unchanged component output. The existing responsive breakpoints will remain behaviorally unchanged after the selector rename.
 
 After templ changes, run `make generate`. Before handoff, run `make build`, `make test`, `make fmt`, and `make lint`, using the matching Docker targets if native systemd dependencies are unavailable.
