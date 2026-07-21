@@ -39,7 +39,7 @@ func main() {
 func run() error {
 	listen := flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
 	brokerSocket := flag.String("broker-socket", "/run/pilothouse/broker.sock", "privileged broker Unix socket")
-	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
+	definitionsRoot := flag.String("definitions-root", "", "custom root containing sysupdate definition directories")
 	var allowedOrigins stringListFlag
 	flag.Var(&allowedOrigins, "allowed-origin", "trusted public HTTP(S) origin when behind a reverse proxy; repeatable")
 	secureCookie := flag.Bool("secure-cookie", false, "require HTTPS when sending the session cookie")

@@ -13,7 +13,7 @@ pilothouse ships two binaries. `pilothouse` is the unprivileged web process; `pi
 | --- | --- | --- |
 | `--listen` | `127.0.0.1:8888` | HTTP listen address |
 | `--broker-socket` | `/run/pilothouse/broker.sock` | Privileged broker Unix socket |
-| `--definitions-root` | `/usr/lib` | Directory containing sysupdate definition directories |
+| `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
 | `--allowed-origin` | — | Trusted public HTTP(S) origin when behind a reverse proxy; repeatable |
 | `--secure-cookie` | `false` | Require HTTPS when sending the session cookie |
 | `--updex` | `updex` | Path to the updex executable |
@@ -31,7 +31,7 @@ pilothouse ships two binaries. `pilothouse` is the unprivileged web process; `pi
 | `--jobs-db` | `/var/lib/pilothouse/jobs.db` | Durable maintenance job database |
 | `--backup-timer` | — | Exact systemd backup timer to monitor; repeatable |
 | `--backup-max-age` | `48h` | Maximum acceptable age of a successful configured backup |
-| `--definitions-root` | `/usr/lib` | Directory containing sysupdate definition directories |
+| `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
 | `--podman-socket` | `/run/podman/podman.sock` | Podman API Unix socket path |
 | `--updex` | `updex` | Path to the updex executable |
 

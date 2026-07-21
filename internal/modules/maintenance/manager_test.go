@@ -83,6 +83,24 @@ func TestOldUpdateJobDoesNotRequireReboot(t *testing.T) {
 	assert.False(t, state.RebootRequired)
 }
 
+func TestEnabledMergedExtensionDoesNotRequireReboot(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "proc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
+	manager := NewSystemManager(
+		fakeUpdates{features: []sysext.Feature{{Name: "docker", Enabled: true, Merged: true}}},
+		fakeJobs{},
+		&fakeRunner{},
+		root,
+	)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.False(t, state.RebootRequired)
+	assert.Empty(t, state.RebootReasons)
+}
+
 func TestRebootUsesFixedSystemctlArguments(t *testing.T) {
 	runner := &fakeRunner{}
 	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, runner, t.TempDir())
