@@ -109,6 +109,11 @@ Docker container diagnostics use the fixed read-only
 `/docker/containers/{id}/logs` page polls for a bounded 200-line tail; only the
 broker daemon accesses the root-equivalent Docker socket.
 
+Storage inventory uses the fixed `broker.QueryStorageState` query. The web
+process never invokes storage tools; the broker collects each supported backend
+independently, so an unavailable optional backend does not prevent other
+inventory from being returned. This first phase is read-only.
+
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The
 `/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the
