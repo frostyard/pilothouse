@@ -27,34 +27,146 @@ templ SummaryCard(snapshot Snapshot) {
 
 templ Page(snapshot Snapshot, unavailable bool) {
 	<div class="page-stack">
+		<div class="page-intro"><p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p></div>
+		@SnapshotRegion(snapshot, unavailable)
+	</div>
+}
+
+templ SnapshotRegion(snapshot Snapshot, unavailable bool) {
+	@SnapshotContents(snapshot, unavailable, snapshotAnchorSet(snapshot))
+}
+
+templ SnapshotContents(snapshot Snapshot, unavailable bool, anchors anchorSet) {
+	<section id="storage-snapshot" class="storage-snapshot" hx-get="/storage" hx-trigger="every 30s" hx-select="#storage-snapshot" hx-target="#storage-snapshot" hx-swap="outerHTML">
 		if unavailable {
 			<div class="empty-state">Storage status is unavailable.</div>
 		} else {
-			<div class="page-intro"><p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p></div>
-			for _, anchor := range snapshotAnchors(snapshot) {
+			for _, anchor := range anchors.resources {
 				<span id={ anchor }></span>
 			}
-			<article class="card table-card">
-				<div class="table-toolbar"><h2>Mounted storage</h2><span>{ healthLabel(snapshot.Summary.HighestHealth) }</span></div>
-				if len(snapshot.Mounts) == 0 {
-					<div class="empty-state">No mounted storage was reported.</div>
-				} else {
-					<table class="data-table">
-						<thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th></tr></thead>
-						<tbody>
-							for index, mount := range snapshot.Mounts {
-								<tr id={ mountAnchors(snapshot)[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td>{ mount.State }</td></tr>
-							}
-						</tbody>
-					</table>
-				}
-			</article>
+			@StorageMetrics(snapshot.Summary)
+			@StorageAttention(snapshot.Findings, snapshot.Truncated)
+			@MountTable(snapshot.Mounts, anchors.mounts)
+			@Topology(snapshot.Resources, snapshot.Relations)
+			@Inventory(snapshot.Resources)
+			@BackendStates(snapshot.Backends)
 		}
+	</section>
+}
+
+templ StorageMetrics(summary Summary) {
+	<div class="storage-operations">
+		<article class="card metric-card">
+			<div class="card-heading"><div><h2>Usable capacity</h2><p>{ capacity(summary.FreeBytes) } free</p></div></div>
+			<div class="metric-value"><strong>{ capacity(summary.UsableBytes) }</strong><span>usable</span></div>
+			<div class="meter blue"><span style={ fmt.Sprintf("width: %.1f%%", usagePercent(summary.UsedBytes, summary.UsableBytes)) }></span></div>
+			<div class="metric-foot"><span>{ capacity(summary.UsedBytes) } used</span><span>{ fmt.Sprintf("%.0f%%", usagePercent(summary.UsedBytes, summary.UsableBytes)) }</span></div>
+		</article>
+		<article class="card metric-card">
+			<div class="card-heading"><div><h2>Storage health</h2><p>{ fmt.Sprintf("%d unhealthy resources", summary.UnhealthyResources) }</p></div></div>
+			<div class="metric-value"><strong>{ healthLabel(summary.HighestHealth) }</strong></div>
+			<div class="metric-details"><div><span>Active mounts</span><strong>{ fmt.Sprintf("%d", summary.ActiveMounts) }</strong></div><div><span>Unavailable backends</span><strong>{ fmt.Sprintf("%d", summary.UnavailableBackends) }</strong></div></div>
+		</article>
 	</div>
+}
+
+templ StorageAttention(findings []Finding, truncated bool) {
+	if truncated || len(findings) > 0 {
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Storage attention</h2><span>{ fmt.Sprintf("%d findings", len(findings)) }</span></div>
+			if truncated {
+				<div class="empty-state compact">Storage inventory was truncated.</div>
+			}
+			for _, finding := range findings {
+				<div class="mini-row storage-details"><div><strong>{ finding.Title }</strong><small>{ finding.Detail }</small></div><span class={ "badge", string(finding.Severity) }>{ healthLabel(finding.Severity) }</span></div>
+			}
+		</article>
+	}
+}
+
+templ MountTable(mounts []Mount, mountIDs []string) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Mounted storage</h2><span>{ fmt.Sprintf("%d mounts", len(mounts)) }</span></div>
+		if len(mounts) == 0 {
+			<div class="empty-state">No mounted storage was reported.</div>
+		} else {
+			<table class="data-table">
+				<thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th></tr></thead>
+				<tbody>
+					for index, mount := range mounts {
+						<tr id={ mountIDs[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td><span class={ "badge", string(mount.Health) }>{ mount.State }</span>
+							if mount.ReadOnly {
+								<span class="badge">Read-only</span>
+							}
+						</td></tr>
+					}
+				</tbody>
+			</table>
+		}
+	</article>
+}
+
+templ Topology(resources []Resource, relations []Relation) {
+	<article class="card table-card storage-topology">
+		<div class="table-toolbar"><h2>Storage topology</h2><span>{ fmt.Sprintf("%d relations", len(relations)) }</span></div>
+		if len(relations) == 0 {
+			<div class="empty-state">No storage relationships were reported.</div>
+		} else {
+			<div class="storage-tree">
+				for _, relation := range relations {
+					<div class="storage-node"><strong>{ storageAnchor(relation.From) } → { storageAnchor(relation.To) }</strong><small>{ relation.Kind }</small></div>
+				}
+			</div>
+		}
+	</article>
+}
+
+templ Inventory(resources []Resource) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Storage inventory</h2><span>{ fmt.Sprintf("%d resources", len(resources)) }</span></div>
+		if len(resources) == 0 {
+			<div class="empty-state">No storage resources were reported.</div>
+		} else {
+			<table class="data-table">
+				<thead><tr><th>Resource</th><th>Kind</th><th>Path</th><th>Capacity</th><th>Health</th></tr></thead>
+				<tbody>
+					for _, resource := range resources {
+						<tr><td><strong>{ resource.Name }</strong><small class="table-detail">{ resource.State }</small></td><td>{ resource.Kind }</td><td>{ resource.Path }</td><td>{ capacity(resource.SizeBytes) }</td><td><span class={ "badge", string(resource.Health) }>{ healthLabel(resource.Health) }</span><div class="storage-details">
+							for _, detail := range resource.Details {
+								<small>{ detail.Label }: { detail.Value }</small>
+							}
+						</div></td></tr>
+					}
+				</tbody>
+			</table>
+		}
+	</article>
+}
+
+templ BackendStates(backends []BackendStatus) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Collection backends</h2><span>{ fmt.Sprintf("%d backends", len(backends)) }</span></div>
+		if len(backends) == 0 {
+			<div class="empty-state">No backend status was reported.</div>
+		} else {
+			<div class="mini-list storage-details">
+				for _, backend := range backends {
+					<div class="mini-row"><strong>{ backend.Name }</strong><span class={ "badge", string(backend.Availability) }>Backend { backendLabel(backend.Availability) }</span></div>
+				}
+			</div>
+		}
+	</article>
 }
 
 func capacity(bytes uint64) string {
 	return fmt.Sprintf("%.1f GiB", float64(bytes)/(1024*1024*1024))
+}
+
+func usagePercent(used, usable uint64) float64 {
+	if usable == 0 {
+		return 0
+	}
+	return float64(used) / float64(usable) * 100
 }
 
 func healthLabel(health Health) string {
@@ -67,6 +179,21 @@ func healthLabel(health Health) string {
 		return "Unknown"
 	default:
 		return "Healthy"
+	}
+}
+
+func backendLabel(availability Availability) string {
+	switch availability {
+	case BackendUnavailable:
+		return "unavailable"
+	case BackendUnsupported:
+		return "unsupported"
+	case BackendTimedOut:
+		return "timed out"
+	case BackendTruncated:
+		return "truncated"
+	default:
+		return "available"
 	}
 }
 
@@ -90,9 +217,19 @@ func snapshotAnchors(snapshot Snapshot) []string {
 	return anchors
 }
 
-func mountAnchors(snapshot Snapshot) []string {
-	used := make(map[string]struct{}, len(snapshot.Resources)+len(snapshot.Findings)+len(snapshot.Mounts))
-	for _, anchor := range snapshotAnchors(snapshot) {
+type anchorSet struct {
+	mounts    []string
+	resources []string
+}
+
+func snapshotAnchorSet(snapshot Snapshot) anchorSet {
+	resources := snapshotAnchors(snapshot)
+	return anchorSet{resources: resources, mounts: mountAnchors(snapshot, resources)}
+}
+
+func mountAnchors(snapshot Snapshot, resourceAnchors []string) []string {
+	used := make(map[string]struct{}, len(resourceAnchors)+len(snapshot.Mounts))
+	for _, anchor := range resourceAnchors {
 		used[anchor] = struct{}{}
 	}
 	anchors := make([]string, len(snapshot.Mounts))

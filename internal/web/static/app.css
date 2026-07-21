@@ -193,6 +193,14 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
 .error-card { border-color: #e07a7255; }
 .error-card > p { color: var(--state-danger); font-size: 10px; line-height: 1.5; }
 .table-detail { color: #7a9cb0; display: block; font-size: 8.5px; margin-top: 3px; }
+.storage-snapshot { display: grid; gap: 10px; }
+.storage-operations { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.storage-topology { min-width: 0; }
+.storage-tree { display: grid; gap: 0; }
+.storage-node { border-top: 1px solid var(--line); display: grid; gap: 3px; padding: 10px 14px; }
+.storage-node strong { font-size: 10.5px; overflow-wrap: anywhere; }
+.storage-node small, .storage-details small { color: #7a9cb0; display: block; font-size: 8.5px; margin-top: 3px; overflow-wrap: anywhere; }
+.storage-details { min-width: 0; }
 .engine-stats { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .engine-stat { background: var(--gradient-card); border: 1px solid var(--line); display: grid; gap: 3px; padding: 11px 14px; }
 .engine-stat > span { color: #7cbddc; font: 750 8.5px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
@@ -271,6 +279,7 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
   .hero-content { max-width: 100%; }
   .hero-card::after { opacity: .2; }
   .engine-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .storage-operations { grid-template-columns: 1fr; }
   .data-table { display: block; overflow-x: auto; }
   .fleet-table, .fleet-table tbody { display: block; width: 100%; }
   .fleet-table thead { display: none; }
