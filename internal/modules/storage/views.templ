@@ -112,13 +112,29 @@ templ Topology(resources []Resource, relations []Relation) {
 		if len(relations) == 0 {
 			<div class="empty-state">No storage relationships were reported.</div>
 		} else {
-			<div class="storage-tree">
-				for _, relation := range relations {
-					<div class="storage-node"><strong>{ storageAnchor(relation.From) } → { storageAnchor(relation.To) }</strong><small>{ relation.Kind }</small></div>
-				}
-			</div>
+			@TopologyRelations(resourceIndex(resources), relations)
 		}
 	</article>
+}
+
+templ TopologyRelations(resources map[string]Resource, relations []Relation) {
+	<div class="storage-tree">
+		for _, relation := range relations {
+			<div class="storage-node"><strong>
+				@TopologyEndpoint(endpointFor(resources, relation.From))
+				→
+				@TopologyEndpoint(endpointFor(resources, relation.To))
+			</strong><small>{ relation.Kind }</small></div>
+		}
+	</div>
+}
+
+templ TopologyEndpoint(endpoint topologyEndpoint) {
+	if endpoint.found {
+		<a href={ "#" + endpoint.anchor }>{ endpoint.name }</a>
+	} else {
+		Unknown resource
+	}
 }
 
 templ Inventory(resources []Resource) {
@@ -166,7 +182,7 @@ func usagePercent(used, usable uint64) float64 {
 	if usable == 0 {
 		return 0
 	}
-	return float64(used) / float64(usable) * 100
+	return min(float64(used)/float64(usable)*100, 100)
 }
 
 func healthLabel(health Health) string {
@@ -195,6 +211,28 @@ func backendLabel(availability Availability) string {
 	default:
 		return "available"
 	}
+}
+
+type topologyEndpoint struct {
+	anchor string
+	found  bool
+	name   string
+}
+
+func resourceIndex(resources []Resource) map[string]Resource {
+	index := make(map[string]Resource, len(resources))
+	for _, resource := range resources {
+		index[resource.ID] = resource
+	}
+	return index
+}
+
+func endpointFor(resources map[string]Resource, id string) topologyEndpoint {
+	resource, found := resources[id]
+	if !found {
+		return topologyEndpoint{}
+	}
+	return topologyEndpoint{anchor: storageAnchor(resource.ID), found: true, name: resource.Name}
 }
 
 func snapshotAnchors(snapshot Snapshot) []string {

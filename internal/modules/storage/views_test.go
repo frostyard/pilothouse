@@ -90,7 +90,8 @@ func TestRenderStorageOperations(t *testing.T) {
 	assert.Contains(t, html, `server:/export`)
 	assert.Contains(t, html, `Backend unavailable`)
 	assert.Contains(t, html, `Disk attention`)
-	assert.Contains(t, html, `disk-sda → partition-sda1`)
+	assert.Contains(t, html, `sda`)
+	assert.Contains(t, html, `sda1`)
 	assert.Contains(t, html, `class="storage-snapshot"`)
 	assert.Contains(t, html, `class="storage-operations"`)
 	assert.Contains(t, html, `storage-topology`)
@@ -143,4 +144,31 @@ func TestRenderStorageOperationsReadOnlyBadge(t *testing.T) {
 	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
 
 	assert.Contains(t, output.String(), `Read-only`)
+}
+
+func TestRenderTopologyLinksFriendlyResourceNames(t *testing.T) {
+	resources := []Resource{
+		{ID: "disk:sda", Name: "Primary disk"},
+		{ID: "partition:sda1", Name: "<root>"},
+	}
+	relations := []Relation{
+		{From: "disk:sda", To: "partition:sda1", Kind: "contains"},
+		{From: "partition:sda1", To: "missing", Kind: "mounts"},
+	}
+	var output strings.Builder
+	require.NoError(t, Topology(resources, relations).Render(context.Background(), &output))
+
+	html := output.String()
+	assert.Contains(t, html, `<a href="#disk-sda">Primary disk</a>`)
+	assert.Contains(t, html, `<a href="#partition-sda1">&lt;root&gt;</a>`)
+	assert.Contains(t, html, `Unknown resource`)
+	assert.NotContains(t, html, `href="#missing"`)
+	assert.NotContains(t, html, `>disk-sda<`)
+	assert.NotContains(t, html, `>partition-sda1<`)
+}
+
+func TestUsagePercentClampsToRange(t *testing.T) {
+	assert.Equal(t, 0.0, usagePercent(0, 0))
+	assert.Equal(t, 0.0, usagePercent(0, 1))
+	assert.Equal(t, 100.0, usagePercent(2, 1))
 }
