@@ -1,0 +1,8 @@
+{
+  "filesystems": [
+    {"target":"/","source":"/dev/sda1","fstype":"ext4","options":"rw,relatime","size":"99900000000","used":"25000000000","avail":"74900000000","use%":"25%","maj:min":"8:1"},
+    {"target":"/mnt/nfs","source":"server:/export","fstype":"nfs4","options":"rw,nosuid,nodev","size":"1000000000","used":"100000000","avail":"900000000","use%":"10%","maj:min":null},
+    {"target":"/mnt/read-only","source":"/dev/sda1","fstype":"ext4","options":"ro,bind","size":"99900000000","used":"25000000000","avail":"74900000000","use%":"25%","maj:min":"8:1"},
+    {"target":"/overlay","source":"overlay","fstype":"overlay","options":"rw,relatime","size":"1000000000","used":"500000000","avail":"500000000","use%":"50%","maj:min":null}
+  ]
+}
