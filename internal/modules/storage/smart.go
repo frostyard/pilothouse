@@ -221,7 +221,9 @@ func parseSMART(input []byte, path string) (Resource, error) {
 		appendSMARTDetail(&details, "Media errors", strconv.FormatUint(log.MediaErrors, 10))
 		appendSMARTDetail(&details, "Error log entries", strconv.FormatUint(log.NumErrLogEntries, 10))
 		appendSMARTDetail(&details, "Power-on hours", strconv.FormatUint(log.PowerOnHours, 10))
-		if log.MediaErrors != 0 || log.Temperature >= 70 || log.PercentageUsed >= 80 {
+		if log.MediaErrors != 0 {
+			health = HealthCritical
+		} else if log.Temperature >= 70 || log.PercentageUsed >= 80 {
 			health = higherHealth(health, HealthWarning)
 		}
 	}

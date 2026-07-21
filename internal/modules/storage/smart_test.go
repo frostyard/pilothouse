@@ -22,14 +22,21 @@ func TestParseSMARTATAFailureIsCritical(t *testing.T) {
 	assert.Contains(t, health.Details, Detail{Label: "Pending sectors", Value: "2"})
 }
 
-func TestParseSMARTNVMeWarning(t *testing.T) {
+func TestParseSMARTNVMeMediaErrorsAreCritical(t *testing.T) {
 	health, err := parseSMART(mustFixture(t, "smart-nvme.json"), "/dev/nvme0n1")
 
 	require.NoError(t, err)
-	assert.Equal(t, HealthWarning, health.Health)
+	assert.Equal(t, HealthCritical, health.Health)
 	assert.Contains(t, health.Details, Detail{Label: "Temperature", Value: "71 C"})
 	assert.Contains(t, health.Details, Detail{Label: "Percentage used", Value: "82%"})
 	assert.Contains(t, health.Details, Detail{Label: "Media errors", Value: "4"})
+}
+
+func TestParseSMARTNVMeTemperatureAndWearAreWarning(t *testing.T) {
+	health, err := parseSMART([]byte(`{"device":{"name":"/dev/nvme0n1","info_name":"/dev/nvme0n1","protocol":"NVMe"},"smart_status":{"passed":true},"nvme_smart_health_information_log":{"temperature":71,"percentage_used":82,"media_errors":0,"num_err_log_entries":0,"power_on_hours":321}}`), "/dev/nvme0n1")
+
+	require.NoError(t, err)
+	assert.Equal(t, HealthWarning, health.Health)
 }
 
 func TestParseSMARTHealthyDevices(t *testing.T) {
