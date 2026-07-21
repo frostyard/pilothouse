@@ -346,6 +346,9 @@ func parseUpdexCheck(output []byte) ([]AvailableUpdate, error) {
 			return nil, err
 		}
 		trimmed := bytes.TrimSpace(value)
+		if bytes.Equal(trimmed, []byte("null")) {
+			return nil, nil
+		}
 		if len(trimmed) == 0 || trimmed[0] != '[' {
 			continue
 		}

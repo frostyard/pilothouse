@@ -47,6 +47,15 @@ func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
 	assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
 }
 
+func TestParseUpdexCheckAcceptsNullAsNoUpdates(t *testing.T) {
+	output := []byte(`{"type":"message","message":"checking"}
+null`)
+	updates, err := parseUpdexCheck(output)
+
+	require.NoError(t, err)
+	assert.Empty(t, updates)
+}
+
 func TestParseUpdexCheckRejectsMalformedOrMissingArray(t *testing.T) {
 	t.Run("malformed", func(t *testing.T) {
 		_, err := parseUpdexCheck([]byte(`{"type":"message"}
