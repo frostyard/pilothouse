@@ -32,6 +32,10 @@ type blockAdapter struct {
 	runner commandRunner
 }
 
+func NewBlockAdapter(path string) Adapter {
+	return newBlockAdapter(path)
+}
+
 func newBlockAdapter(path string) Adapter {
 	return blockAdapter{path: path, runner: commandRunner{limit: maxAdapterBytes}}
 }
@@ -50,6 +54,10 @@ func (blockAdapter) Name() string { return "block" }
 type mountAdapter struct {
 	path   string
 	runner commandRunner
+}
+
+func NewMountAdapter(path string) Adapter {
+	return newMountAdapter(path)
 }
 
 func newMountAdapter(path string) Adapter {

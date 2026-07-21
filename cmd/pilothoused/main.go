@@ -28,6 +28,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	servicejournal "github.com/frostyard/pilothouse/internal/modules/services/journal"
+	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	dockerclient "github.com/moby/moby/client"
 )
@@ -83,6 +84,17 @@ func run() error {
 		return err
 	}
 	if err := registerJobs(queries, jobStore); err != nil {
+		return err
+	}
+	storageTools, err := storage.NewToolset()
+	if err != nil {
+		return fmt.Errorf("resolve storage tools: %w", err)
+	}
+	storageManager := storage.NewSystemManager(
+		storage.NewBlockAdapter(storageTools.LSBLK),
+		storage.NewMountAdapter(storageTools.Findmnt),
+	)
+	if err := registerStorage(queries, storageManager); err != nil {
 		return err
 	}
 	backupManager, err := backups.NewSystemManager(backupTimers, *backupMaxAge)
@@ -189,6 +201,15 @@ func (values *stringListFlag) addCommaSeparated(input string) {
 
 func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
 	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
+	})
+}
+
+func registerStorage(queries *broker.QueryRegistry, manager storage.Manager) error {
+	return queries.Register(broker.QueryStorageState, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		if len(parameters) != 0 {
+			return nil, fmt.Errorf("storage state query does not accept parameters")
+		}
 		return manager.State(ctx)
 	})
 }

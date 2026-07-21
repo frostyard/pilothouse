@@ -12,6 +12,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/services"
+	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +20,10 @@ import (
 type fakeServicesManager struct{ journalUnit string }
 
 type fakeBackupsManager struct{}
+
+type fakeStorageManager struct{ snapshot storage.Snapshot }
+
+func (m fakeStorageManager) State(context.Context) (storage.Snapshot, error) { return m.snapshot, nil }
 
 func (fakeBackupsManager) State(context.Context) (backups.State, error) {
 	return backups.State{Configured: true}, nil
@@ -110,4 +115,22 @@ func TestRegisterServicesJournalAllowsReadOnlyIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "backup.timer", manager.journalUnit)
 	assert.Equal(t, services.Journal{Unit: "backup.timer"}, result)
+}
+
+func TestRegisterStorageAllowsAuthenticatedRead(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	expected := storage.Snapshot{Summary: storage.Summary{ActiveMounts: 2}}
+	require.NoError(t, registerStorage(queries, fakeStorageManager{snapshot: expected}))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
+	require.NoError(t, err)
+	assert.Equal(t, expected, result)
+}
+
+func TestRegisterStorageRejectsParameters(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerStorage(queries, fakeStorageManager{}))
+
+	_, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, map[string]string{"unexpected": "value"})
+	assert.EqualError(t, err, "storage state query does not accept parameters")
 }
