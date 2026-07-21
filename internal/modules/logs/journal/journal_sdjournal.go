@@ -21,7 +21,7 @@ func New() Reader {
 		if err != nil {
 			return nil, err
 		}
-		if err := journal.SetDataThreshold(messageMaxBytes + len("MESSAGE=") + 1); err != nil {
+		if err := journal.SetDataThreshold(uint64(messageMaxBytes + len("MESSAGE=") + 1)); err != nil {
 			_ = journal.Close()
 			return nil, err
 		}
