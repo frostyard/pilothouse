@@ -24,6 +24,8 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/logs"
+	logjournal "github.com/frostyard/pilothouse/internal/modules/logs/journal"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
@@ -98,6 +100,13 @@ func run() error {
 		return err
 	}
 	if err := registerServices(actions, queries, servicesManager); err != nil {
+		return err
+	}
+	logsManager, err := logs.NewSystemManager(logjournal.New())
+	if err != nil {
+		return err
+	}
+	if err := registerLogs(queries, logsManager); err != nil {
 		return err
 	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
@@ -190,6 +199,16 @@ func (values *stringListFlag) addCommaSeparated(input string) {
 func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
 	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
+	})
+}
+
+func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {
+	return queries.Register(broker.QueryLogs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		filters, err := logs.ParseBrokerFilters(parameters)
+		if err != nil {
+			return nil, err
+		}
+		return manager.Logs(ctx, filters)
 	})
 }
 
