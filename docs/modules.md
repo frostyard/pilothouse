@@ -104,6 +104,13 @@ Services diagnostics use the fixed `org.frostyard.pilothouse.services.journal`
 query. The daemon validates and resolves one supported unit, then returns only a
 bounded hour of whitelisted journal fields; the web process never opens journald.
 
+The administrator-only Logs module uses the fixed
+`org.frostyard.pilothouse.logs.list` query. The daemon accepts only bounded
+message, priority, unit, and recent-window filters, walks the system journal
+newest-first, and returns at most 200 entries from a capped scan. The web
+process never opens journald, and the query never accepts arbitrary journal
+fields, match expressions, date ranges, or command arguments.
+
 Docker container diagnostics use the fixed read-only
 `org.frostyard.pilothouse.docker.logs` query. The
 `/docker/containers/{id}/logs` page polls for a bounded 200-line tail; only the

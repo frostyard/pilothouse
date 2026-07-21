@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/frostyard/pilothouse/internal/audit"
@@ -10,6 +11,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
+	"github.com/frostyard/pilothouse/internal/modules/logs"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +19,17 @@ import (
 )
 
 type fakeServicesManager struct{ journalUnit string }
+
+type fakeLogsManager struct {
+	filters logs.Filters
+	calls   int
+}
+
+func (m *fakeLogsManager) Logs(_ context.Context, filters logs.Filters) (logs.State, error) {
+	m.calls++
+	m.filters = filters
+	return logs.State{Filters: filters, Entries: []logs.Entry{}, Units: []string{}}, nil
+}
 
 type fakeBackupsManager struct{}
 
@@ -110,4 +123,31 @@ func TestRegisterServicesJournalAllowsReadOnlyIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "backup.timer", manager.journalUnit)
 	assert.Equal(t, services.Journal{Unit: "backup.timer"}, result)
+}
+
+func TestRegisterLogsRequiresAdministratorAndValidatesParameters(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := &fakeLogsManager{}
+	require.NoError(t, registerLogs(queries, manager))
+	parameters := map[string]string{
+		"query": "panic", "priority": "warning", "unit": "sshd.service", "window": "6h",
+	}
+
+	_, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryLogs, parameters)
+	assert.Error(t, err)
+	assert.Zero(t, manager.calls)
+
+	_, err = queries.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, broker.QueryLogs, parameters)
+	require.NoError(t, err)
+	assert.Equal(t, logs.Filters{Query: "panic", Priority: "warning", Unit: "sshd.service", Window: "6h"}, manager.filters)
+
+	invalid := []map[string]string{
+		{"unexpected": "value"}, {"priority": "verbose"},
+		{"window": "7d"}, {"unit": "../bad.service"},
+		{"query": strings.Repeat("x", 1025)},
+	}
+	for _, values := range invalid {
+		_, err := queries.Execute(context.Background(), auth.Identity{Admin: true}, broker.QueryLogs, values)
+		assert.Error(t, err)
+	}
 }

@@ -43,6 +43,7 @@ const (
 	QueryDockerState      = "org.frostyard.pilothouse.docker.state"
 	QueryIncusState       = "org.frostyard.pilothouse.incus.state"
 	QueryJobs             = "org.frostyard.pilothouse.jobs.list"
+	QueryLogs             = "org.frostyard.pilothouse.logs.list"
 	QueryMaintenanceState = "org.frostyard.pilothouse.maintenance.state"
 	QueryPodmanLogs       = "org.frostyard.pilothouse.podman.logs"
 	QueryPodmanState      = "org.frostyard.pilothouse.podman.state"
