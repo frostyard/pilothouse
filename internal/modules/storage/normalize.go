@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 )
@@ -16,97 +18,80 @@ type collectedResult struct {
 	result AdapterResult
 }
 
+type aggregate struct {
+	dropped   map[string]bool
+	findings  []Finding
+	mounts    []Mount
+	relations map[string]Relation
+	resources map[string]Resource
+	truncated map[string]bool
+}
+
+func newAggregate() aggregate {
+	return aggregate{dropped: make(map[string]bool), relations: make(map[string]Relation), resources: make(map[string]Resource), truncated: make(map[string]bool)}
+}
+
+func (a aggregate) clone() aggregate {
+	a.dropped = maps.Clone(a.dropped)
+	a.findings = slices.Clone(a.findings)
+	a.mounts = slices.Clone(a.mounts)
+	a.relations = maps.Clone(a.relations)
+	a.resources = maps.Clone(a.resources)
+	a.truncated = maps.Clone(a.truncated)
+	return a
+}
+
 func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, error) {
-	snapshot := Snapshot{CollectedAt: collectedAt}
-	resources := make(map[string]Resource)
-	relations := make(map[string]Relation)
-	capacity := make(map[string]bool)
-	truncated := make(map[string]bool)
-
-	for _, collected := range results {
-		status := BackendAvailable
-		if collected.err != nil {
-			status = BackendUnavailable
-			if collected.err == context.DeadlineExceeded {
-				status = BackendTimedOut
+	statuses := make([]BackendStatus, len(results))
+	state := newAggregate()
+	for i, collected := range results {
+		statuses[i] = BackendStatus{Availability: availabilityFor(collected.err), CollectedAt: collectedAt, Name: collected.name}
+		if collected.core && collected.err == nil {
+			if err := state.apply(collected.name, collected.result); err != nil {
+				return Snapshot{}, err
 			}
-		}
-		if collected.result.Truncated {
-			truncated[collected.name] = true
-		}
-		snapshot.Backends = append(snapshot.Backends, BackendStatus{Availability: status, CollectedAt: collectedAt, Name: collected.name})
-
-		for _, resource := range collected.result.Resources {
-			if existing, ok := resources[resource.ID]; ok {
-				if !reflect.DeepEqual(existing, resource) {
-					return Snapshot{}, fmt.Errorf("conflicting resource %q", resource.ID)
-				}
-				continue
-			}
-			if len(resources) == maxResources {
-				truncated[collected.name] = true
-				continue
-			}
-			if len(resource.Details) > maxDetails {
-				resource.Details = resource.Details[:maxDetails]
-				truncated[collected.name] = true
-			}
-			resources[resource.ID] = resource
-		}
-		for _, relation := range collected.result.Relations {
-			key := relation.From + "\x00" + relation.Kind + "\x00" + relation.To
-			if _, ok := relations[key]; ok {
-				continue
-			}
-			if len(relations) == maxRelations {
-				truncated[collected.name] = true
-				continue
-			}
-			relations[key] = relation
-		}
-		for _, mount := range collected.result.Mounts {
-			if len(snapshot.Mounts) == maxMounts {
-				truncated[collected.name] = true
-				continue
-			}
-			if mount.UsedPercent >= 90 {
-				mount.Health = HealthCritical
-				appendFinding(&snapshot, &truncated, collected.name, Finding{ResourceID: mount.ResourceID, Severity: HealthCritical, Title: "Mount capacity is critical", Detail: mount.Target})
-			} else if mount.UsedPercent >= 80 {
-				mount.Health = HealthWarning
-				appendFinding(&snapshot, &truncated, collected.name, Finding{ResourceID: mount.ResourceID, Severity: HealthWarning, Title: "Mount capacity is high", Detail: mount.Target})
-			}
-			if mount.ReadOnly && !mount.Managed {
-				if healthRank(mount.Health) < healthRank(HealthWarning) {
-					mount.Health = HealthWarning
-				}
-				appendFinding(&snapshot, &truncated, collected.name, Finding{ResourceID: mount.ResourceID, Severity: HealthWarning, Title: "Mount is read-only", Detail: mount.Target})
-			}
-			snapshot.Mounts = append(snapshot.Mounts, mount)
-		}
-		for _, finding := range collected.result.Findings {
-			appendFinding(&snapshot, &truncated, collected.name, finding)
 		}
 	}
-
-	for _, relation := range relations {
-		if _, ok := resources[relation.From]; !ok {
-			return Snapshot{}, fmt.Errorf("relation has missing endpoint %q", relation.From)
-		}
-		if _, ok := resources[relation.To]; !ok {
-			return Snapshot{}, fmt.Errorf("relation has missing endpoint %q", relation.To)
-		}
-		snapshot.Relations = append(snapshot.Relations, relation)
-	}
-	for _, resource := range resources {
-		snapshot.Resources = append(snapshot.Resources, resource)
-	}
-	if err := validateGraph(snapshot.Resources, snapshot.Relations); err != nil {
+	if err := state.validate(); err != nil {
 		return Snapshot{}, err
 	}
+	for i, collected := range results {
+		if collected.core || collected.err != nil {
+			continue
+		}
+		candidate := state.clone()
+		if err := candidate.apply(collected.name, collected.result); err != nil || candidate.validate() != nil {
+			statuses[i].Availability = BackendUnavailable
+			continue
+		}
+		state = candidate
+	}
 
+	snapshot := Snapshot{Backends: statuses, CollectedAt: collectedAt, Findings: slices.Clone(state.findings), Mounts: slices.Clone(state.mounts), Truncated: len(state.truncated) > 0}
+	for _, relation := range state.relations {
+		snapshot.Relations = append(snapshot.Relations, relation)
+	}
+	for _, resource := range state.resources {
+		snapshot.Resources = append(snapshot.Resources, resource)
+	}
+	for i := range snapshot.Mounts {
+		mount := &snapshot.Mounts[i]
+		if mount.UsedPercent >= 90 {
+			mount.Health = HealthCritical
+			appendFinding(&snapshot, &state.truncated, "", Finding{ResourceID: mount.ResourceID, Severity: HealthCritical, Title: "Mount capacity is critical", Detail: mount.Target})
+		} else if mount.UsedPercent >= 80 {
+			mount.Health = HealthWarning
+			appendFinding(&snapshot, &state.truncated, "", Finding{ResourceID: mount.ResourceID, Severity: HealthWarning, Title: "Mount capacity is high", Detail: mount.Target})
+		}
+		if mount.ReadOnly && !mount.Managed {
+			if healthRank(mount.Health) < healthRank(HealthWarning) {
+				mount.Health = HealthWarning
+			}
+			appendFinding(&snapshot, &state.truncated, "", Finding{ResourceID: mount.ResourceID, Severity: HealthWarning, Title: "Mount is read-only", Detail: mount.Target})
+		}
+	}
 	for i := range snapshot.Backends {
-		if truncated[snapshot.Backends[i].Name] {
+		if state.truncated[snapshot.Backends[i].Name] {
 			snapshot.Backends[i].Availability = BackendTruncated
 			snapshot.Truncated = true
 		}
@@ -115,8 +100,98 @@ func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, erro
 	if err := enforceSnapshotLimit(&snapshot); err != nil {
 		return Snapshot{}, err
 	}
-	recalculateSummary(&snapshot, capacity)
+	recalculateSummary(&snapshot)
 	return snapshot, nil
+}
+
+func availabilityFor(err error) Availability {
+	if err == nil {
+		return BackendAvailable
+	}
+	if err == context.DeadlineExceeded {
+		return BackendTimedOut
+	}
+	return BackendUnavailable
+}
+
+func (a *aggregate) apply(backend string, result AdapterResult) error {
+	if result.Truncated {
+		a.truncated[backend] = true
+	}
+	for _, resource := range result.Resources {
+		if existing, ok := a.resources[resource.ID]; ok {
+			if !reflect.DeepEqual(existing, resource) {
+				return fmt.Errorf("conflicting resource %q", resource.ID)
+			}
+			continue
+		}
+		if len(a.resources) == maxResources {
+			a.dropped[resource.ID] = true
+			a.truncated[backend] = true
+			continue
+		}
+		if len(resource.Details) > maxDetails {
+			resource.Details = resource.Details[:maxDetails]
+			a.truncated[backend] = true
+		}
+		a.resources[resource.ID] = resource
+	}
+	for _, relation := range result.Relations {
+		if a.dropped[relation.From] || a.dropped[relation.To] {
+			continue
+		}
+		key := relationKey(relation)
+		if _, ok := a.relations[key]; ok {
+			continue
+		}
+		if len(a.relations) == maxRelations {
+			a.truncated[backend] = true
+			continue
+		}
+		a.relations[key] = relation
+	}
+	for _, mount := range result.Mounts {
+		if len(a.mounts) == maxMounts {
+			a.truncated[backend] = true
+			continue
+		}
+		if a.dropped[mount.ResourceID] {
+			mount.ResourceID = ""
+		}
+		a.mounts = append(a.mounts, mount)
+	}
+	for _, finding := range result.Findings {
+		if len(a.findings) == maxFindings {
+			a.truncated[backend] = true
+			continue
+		}
+		a.findings = append(a.findings, finding)
+	}
+	return nil
+}
+
+func (a aggregate) validate() error {
+	for _, relation := range a.relations {
+		if _, ok := a.resources[relation.From]; !ok {
+			return fmt.Errorf("relation has missing endpoint %q", relation.From)
+		}
+		if _, ok := a.resources[relation.To]; !ok {
+			return fmt.Errorf("relation has missing endpoint %q", relation.To)
+		}
+	}
+	resources := make([]Resource, 0, len(a.resources))
+	relations := make([]Relation, 0, len(a.relations))
+	for _, resource := range a.resources {
+		resources = append(resources, resource)
+	}
+	for _, relation := range a.relations {
+		relations = append(relations, relation)
+	}
+	return validateGraph(resources, relations)
+}
+
+func relationKey(relation Relation) string {
+	return relation.From + "\x00" + relation.Kind + "\x00" + relation.To
 }
 
 func appendFinding(snapshot *Snapshot, truncated *map[string]bool, backend string, finding Finding) {
@@ -216,11 +291,9 @@ func higherHealth(current, candidate Health) Health {
 	return current
 }
 
-func recalculateSummary(snapshot *Snapshot, capacity map[string]bool) {
-	summary := Summary{}
-	for id := range capacity {
-		delete(capacity, id)
-	}
+func recalculateSummary(snapshot *Snapshot) {
+	summary := Summary{HighestHealth: HealthHealthy}
+	capacity := make(map[string]bool)
 	for _, resource := range snapshot.Resources {
 		if healthRank(resource.Health) >= healthRank(HealthWarning) {
 			summary.UnhealthyResources++
@@ -257,14 +330,16 @@ func enforceSnapshotLimit(snapshot *Snapshot) error {
 	}
 	for len(encoded) > maxSnapshotBytes {
 		snapshot.Truncated = true
-		if len(snapshot.Findings) > 0 {
+		if len(snapshot.Resources) > 0 {
+			removed := snapshot.Resources[len(snapshot.Resources)/2:]
+			snapshot.Resources = snapshot.Resources[:len(snapshot.Resources)/2]
+			sanitizeSnapshotReferences(snapshot, removed)
+		} else if len(snapshot.Findings) > 0 {
 			snapshot.Findings = snapshot.Findings[:len(snapshot.Findings)/2]
 		} else if len(snapshot.Mounts) > 0 {
 			snapshot.Mounts = snapshot.Mounts[:len(snapshot.Mounts)/2]
 		} else if len(snapshot.Relations) > 0 {
 			snapshot.Relations = snapshot.Relations[:len(snapshot.Relations)/2]
-		} else if len(snapshot.Resources) > 0 {
-			snapshot.Resources = snapshot.Resources[:len(snapshot.Resources)/2]
 		} else {
 			return fmt.Errorf("snapshot metadata exceeds limit")
 		}
@@ -276,5 +351,24 @@ func enforceSnapshotLimit(snapshot *Snapshot) error {
 			return fmt.Errorf("serialize snapshot: %w", err)
 		}
 	}
-	return nil
+	return validateGraph(snapshot.Resources, snapshot.Relations)
+}
+
+func sanitizeSnapshotReferences(snapshot *Snapshot, removed []Resource) {
+	removedIDs := make(map[string]bool, len(removed))
+	for _, resource := range removed {
+		removedIDs[resource.ID] = true
+	}
+	relations := snapshot.Relations[:0]
+	for _, relation := range snapshot.Relations {
+		if !removedIDs[relation.From] && !removedIDs[relation.To] {
+			relations = append(relations, relation)
+		}
+	}
+	snapshot.Relations = relations
+	for i := range snapshot.Mounts {
+		if removedIDs[snapshot.Mounts[i].ResourceID] {
+			snapshot.Mounts[i].ResourceID = ""
+		}
+	}
 }
