@@ -108,6 +108,22 @@ func TestSystemManagerCheckReturnsCommandError(t *testing.T) {
 	require.ErrorIs(t, err, commandErr)
 }
 
+func TestSystemManagerUsesUpdexStandardSearchPathsByDefault(t *testing.T) {
+	runner := &fakeRunner{outputs: map[string][]byte{
+		"updex --json features list":                    []byte(`[{"name":"docker","description":"Docker","enabled":true}]`),
+		"systemd-sysext list --json=short --no-pager":   []byte(`[{"name":"docker","path":"/not-present/docker.raw"}]`),
+		"systemd-sysext status --json=short --no-pager": []byte(`[{"hierarchy":"/usr","extensions":["docker"]}]`),
+	}}
+
+	features, err := NewSystemManager(runner, "", "updex").List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, features, 1)
+	assert.True(t, features[0].Enabled)
+	assert.True(t, features[0].Merged)
+	assert.Equal(t, []string{"updex", "--json", "features", "list"}, runner.calls[0])
+}
+
 func TestParseUpdexFeaturesAcceptsMessageStream(t *testing.T) {
 	output := []byte("{\"type\":\"message\",\"message\":\"loading\"}\n[{\"name\":\"docker\",\"description\":\"Docker\",\"enabled\":true}]")
 	features, err := parseUpdexFeatures(output)

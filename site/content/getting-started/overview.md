@@ -14,7 +14,7 @@ The application is built from Go and templ on the server, HTMX for focused page 
 - Live CPU, memory, persistent storage, load, uptime, network, host, OS, and kernel metrics, refreshed every 15 seconds
 - An attention view for disk, memory, load, failed systemd units, and unavailable status sources
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
-- Discovery of shared `/usr/lib/sysupdate.d` and component-scoped `/usr/lib/sysupdate.<name>.d` snosi definitions
+- Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` snosi definitions through updex
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - System Podman, Docker Engine, and local Incus inventories with lifecycle controls and bounded log viewing
 - Extension update availability, reboot-required posture, and confirmed host reboot

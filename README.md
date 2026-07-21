@@ -10,7 +10,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Automatic dashboard refresh every 15 seconds
 - Live attention view for disk, memory, load, failed systemd units, and unavailable status sources
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
-- Discovery of both shared `/usr/lib/sysupdate.d` and component-scoped `/usr/lib/sysupdate.<name>.d` Snosi definitions
+- Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` Snosi definitions through updex
 - Installed and merged state from `systemd-sysext`
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - System Podman inventory for containers, pods, images, engine version, reported image storage, and bounded log viewing

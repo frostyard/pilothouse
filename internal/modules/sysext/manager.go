@@ -94,9 +94,6 @@ type mergeStatus struct {
 }
 
 func NewSystemManager(runner CommandRunner, definitionsRoot, updex string) *SystemManager {
-	if definitionsRoot == "" {
-		definitionsRoot = "/usr/lib"
-	}
 	if updex == "" {
 		updex = "updex"
 	}
@@ -110,13 +107,13 @@ func (m *SystemManager) Check(ctx context.Context) ([]AvailableUpdate, error) {
 	}
 	var updates []AvailableUpdate
 	for _, directory := range directories {
-		output, runErr := m.runner.Run(ctx, m.updex, "-C", directory, "--json", "features", "check")
+		output, runErr := m.runner.Run(ctx, m.updex, m.updexArgs(directory, "--json", "features", "check")...)
 		if runErr != nil {
 			return nil, runErr
 		}
 		parsed, parseErr := parseUpdexCheck(output)
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse update check in %s: %w", directory, parseErr)
+			return nil, fmt.Errorf("parse update check in %s: %w", definitionScope(directory), parseErr)
 		}
 		updates = append(updates, parsed...)
 	}
@@ -134,7 +131,7 @@ func (m *SystemManager) Disable(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"-C", feature.Definition, "--json", "features", "disable", name, "--now"}
+	args := m.updexArgs(feature.Definition, "--json", "features", "disable", name, "--now")
 	if feature.Merged {
 		args = append(args, "--force")
 	}
@@ -147,7 +144,7 @@ func (m *SystemManager) Enable(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	_, err = m.runner.Run(ctx, m.updex, "-C", feature.Definition, "--json", "features", "enable", name, "--now")
+	_, err = m.runner.Run(ctx, m.updex, m.updexArgs(feature.Definition, "--json", "features", "enable", name, "--now")...)
 	return err
 }
 
@@ -158,13 +155,13 @@ func (m *SystemManager) List(ctx context.Context) ([]Feature, error) {
 	}
 	featuresByName := map[string]Feature{}
 	for _, directory := range directories {
-		output, runErr := m.runner.Run(ctx, m.updex, "-C", directory, "--json", "features", "list")
+		output, runErr := m.runner.Run(ctx, m.updex, m.updexArgs(directory, "--json", "features", "list")...)
 		if runErr != nil {
 			return nil, runErr
 		}
 		parsed, parseErr := parseUpdexFeatures(output)
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse features in %s: %w", directory, parseErr)
+			return nil, fmt.Errorf("parse features in %s: %w", definitionScope(directory), parseErr)
 		}
 		for _, feature := range parsed {
 			featuresByName[feature.Name] = Feature{
@@ -208,7 +205,7 @@ func (m *SystemManager) Update(ctx context.Context) error {
 		return err
 	}
 	for _, directory := range directories {
-		if _, err := m.runner.Run(ctx, m.updex, "-C", directory, "--json", "features", "update"); err != nil {
+		if _, err := m.runner.Run(ctx, m.updex, m.updexArgs(directory, "--json", "features", "update")...); err != nil {
 			return err
 		}
 	}
@@ -216,6 +213,11 @@ func (m *SystemManager) Update(ctx context.Context) error {
 }
 
 func (m *SystemManager) definitionDirectories() ([]string, error) {
+	if m.definitionsRoot == "" {
+		// Let updex apply the standard /etc, /run, /usr/local, and /usr
+		// precedence across both legacy and component-scoped definitions.
+		return []string{""}, nil
+	}
 	patterns := []string{
 		filepath.Join(m.definitionsRoot, "sysupdate.d"),
 		filepath.Join(m.definitionsRoot, "sysupdate.*.d"),
@@ -240,6 +242,20 @@ func (m *SystemManager) definitionDirectories() ([]string, error) {
 	}
 	slices.Sort(directories)
 	return directories, nil
+}
+
+func (m *SystemManager) updexArgs(directory string, args ...string) []string {
+	if directory == "" {
+		return args
+	}
+	return append([]string{"-C", directory}, args...)
+}
+
+func definitionScope(directory string) string {
+	if directory == "" {
+		return "standard search paths"
+	}
+	return directory
 }
 
 func (m *SystemManager) featureFor(ctx context.Context, name string) (Feature, error) {

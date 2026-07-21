@@ -46,7 +46,7 @@ func run() error {
 	backupMaxAge := flag.Duration("backup-max-age", 48*time.Hour, "maximum acceptable age of a successful configured backup")
 	var backupTimers stringListFlag
 	flag.Var(&backupTimers, "backup-timer", "exact systemd backup timer to monitor; repeatable")
-	definitionsRoot := flag.String("definitions-root", "/usr/lib", "directory containing sysupdate definition directories")
+	definitionsRoot := flag.String("definitions-root", "", "custom root containing sysupdate definition directories")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
 	podmanSocket := flag.String("podman-socket", "/run/podman/podman.sock", "Podman API Unix socket path")
