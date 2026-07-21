@@ -43,6 +43,20 @@ Register the web module in `cmd/pilothouse` and privileged implementations only 
 
 The web process never reads block metadata, invokes storage tools, writes system configuration, opens a device, or reads stored credentials. It receives only the bounded presentation model from the privileged broker.
 
+### Broker Contract
+
+Use these exact broker IDs:
+
+- `broker.QueryStorageState`: `org.frostyard.pilothouse.storage.state`, with no parameters.
+- `broker.ActionStorageCreateNFS`: `org.frostyard.pilothouse.storage.create-nfs`, with `host`, `export`, `target`, `read_only`, and `version`.
+- `broker.ActionStorageCreateSMBGuest`: `org.frostyard.pilothouse.storage.create-smb-guest`, with `server`, `share`, `target`, `read_only`, and `version`.
+- `broker.ActionStorageCreateSMBCredentials`: `org.frostyard.pilothouse.storage.create-smb-credentials`, with `server`, `share`, `target`, `username`, `password`, `read_only`, and `version`.
+- `broker.ActionStorageMount`: `org.frostyard.pilothouse.storage.mount`, with `id`.
+- `broker.ActionStorageUnmount`: `org.frostyard.pilothouse.storage.unmount`, with `id`.
+- `broker.ActionStorageDelete`: `org.frostyard.pilothouse.storage.delete`, with `id`.
+
+The current broker requires every declared action parameter to be present and non-empty. Boolean values therefore use the exact strings `true` and `false`; automatic protocol-version selection uses `auto`. The privileged handlers reject unknown values even after the registry validates the parameter set.
+
 ## Adapter Model
 
 The privileged manager composes independent adapters for:
@@ -58,9 +72,11 @@ The privileged manager composes independent adapters for:
 
 Each adapter has one narrow interface and returns typed resources, typed relations, health observations, and its own availability state. Implementations use fixed executable paths or kernel/system APIs with fixed argument shapes. No executable, output field, match expression, path to inspect, or free-form argument comes from an HTTP or broker parameter.
 
-Adapters run concurrently under individual timeouts and one overall query deadline. Failure or absence of an optional adapter does not discard valid results from other adapters. Core block and mount discovery failure makes the snapshot unavailable because the manager cannot safely correlate or aggregate the remaining data.
+Adapters run concurrently under five-second individual timeouts and one twelve-second overall query deadline. Failure or absence of an optional adapter does not discard valid results from other adapters. Core block and mount discovery failure makes the snapshot unavailable because the manager cannot safely correlate or aggregate the remaining data.
 
 Each adapter applies explicit limits to records, field lengths, parser depth, and raw input. The aggregator applies a final aggregate response-size limit. Reaching a safe record or response cap returns a successful snapshot marked as truncated; malformed or internally inconsistent privileged output fails that adapter closed.
+
+Known executable dependencies are resolved from compile-time allowlists of absolute candidate paths when `pilothoused` starts and retained as absolute paths. Candidates must be regular root-owned files that are not group- or world-writable. An unresolved optional executable marks that backend unsupported. Requests cannot alter resolution or trigger lookup of another executable.
 
 ## Normalized Model
 
@@ -92,7 +108,7 @@ The model normalizes backend-specific observations into `healthy`, `warning`, `c
 - Btrfs: device completeness, allocation, and reported device error counters.
 - Filesystems and mounts: capacity thresholds, read-only transitions, inaccessible sources, and inactive managed definitions.
 
-Expensive health reads are cached briefly in the broker daemon. Each health result includes its collection time, and stale cached results are labeled. Capacity and mount state are recollected for each snapshot.
+Expensive health reads are cached for five minutes in the broker daemon. Each health result includes its collection time; a result older than five minutes is stale and remains labeled stale if a refresh attempt fails. Capacity and mount state are recollected for each snapshot.
 
 The module implements `platform.HealthProvider`. Critical and warning observations contribute findings to Attention and link to the affected resource anchor on `/storage`. Its dashboard card shows aggregate capacity, active mounts, and the highest current health severity.
 
@@ -122,7 +138,8 @@ NFS accepts:
 - A validated host name or IP literal.
 - An absolute exported path.
 - An absolute local target.
-- Values from a narrow NFS option allowlist.
+- Read-only or read-write mode.
+- Protocol version `auto`, `3`, `4`, `4.1`, or `4.2`.
 
 SMB accepts:
 
@@ -130,9 +147,10 @@ SMB accepts:
 - A validated share name.
 - Guest mode or a username and password.
 - An absolute local target.
-- Values from a narrow SMB option allowlist.
+- Read-only or read-write mode.
+- Protocol version `auto`, `2.1`, `3.0`, or `3.1.1`.
 
-Free-form comma-separated mount options are not accepted. The form exposes individual controls for supported behavior, and the broker constructs the final options from those typed values. Credentials, credential-file paths, executable paths, and systemd directives cannot be supplied as options.
+Free-form comma-separated mount options are not accepted. The generated unit applies network-online ordering and always adds `nosuid` and `nodev`, then adds only the selected read-only and protocol-version settings. Credentialed SMB also receives the manager-generated credentials path. Credentials, credential-file paths, executable paths, and systemd directives cannot be supplied as options. Domain authentication, custom ports, UID/GID mapping, file/directory modes, soft NFS mounts, Kerberos, and arbitrary mount options are outside v1.
 
 Every new definition defaults to an enabled on-demand automount. Creation enables and starts the `.automount` unit; it does not force network access to the share. An administrator can explicitly mount or unmount the definition from the inventory.
 
@@ -153,6 +171,7 @@ Administrators may choose any absolute target, subject to broker-side safety val
 - Symlinks in any existing component.
 - Non-directory targets.
 - Pseudo-filesystem and critical system trees, including `/proc`, `/sys`, `/dev`, `/run`, `/boot`, `/etc`, `/usr`, and their descendants.
+- Pilothouse state and configuration under `/var/lib/pilothouse` and `/etc/pilothouse`.
 - A target that contains an active nested mount.
 - A target already owned by another managed definition or an incompatible existing mount unit.
 
@@ -176,7 +195,7 @@ Creation performs these steps:
 2. Recheck target safety and conflicts against current mounts, units, and managed manifests.
 3. Allocate an opaque ID and construct deterministic manifest and unit content.
 4. Create the target if required.
-5. Atomically write the credential file when required, generated units, and manifest with root-only permissions as appropriate.
+5. Atomically write a required credential file with mode `0600`, generated units with mode `0644`, and the manifest with mode `0600`; all files are owned by root.
 6. Reload systemd, enable the automount, and start the automount unit.
 7. Roll back newly written artifacts if a later step fails.
 
@@ -200,6 +219,8 @@ The manager applies:
 - Maximum graph depth and aggregate serialized size.
 - Short bounded caching for expensive device-health reads.
 - Stable error categories that exclude privileged output and user-supplied secrets.
+
+Concrete initial limits are 4,096 resources, 8,192 relations, 1,024 mounts, 512 findings, 32 detail fields per resource, 4 KiB per text field, 4 MiB of raw input per adapter, graph depth 32, and 2 MiB of aggregate serialized snapshot data. A submitted source, target, username, or option value remains subject to the broker's existing 512-byte action-parameter cap; passwords use the same cap. The manager applies stricter protocol grammar limits where applicable.
 
 HTML rendering escapes all labels, paths, sources, and health details. The UI does not reveal stored passwords or credential-file contents to any user, including administrators.
 
