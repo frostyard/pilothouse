@@ -13,7 +13,7 @@ import (
 func TestPageRendersUnitActionsAndProtectsBrokerUnits(t *testing.T) {
 	state := State{Units: []Unit{{Name: "backup.timer", ActiveState: "active"}, {Name: "pilothouse.service", ActiveState: "active"}}}
 	var output strings.Builder
-	require.NoError(t, Page(state, "token", true).Render(context.Background(), &output))
+	require.NoError(t, Page(state, Filters{}, FilterOptions{}, "token", true).Render(context.Background(), &output))
 	html := output.String()
 	assert.Contains(t, html, "/services/backup.timer/stop")
 	assert.Contains(t, html, "/services/backup.timer/disable")
@@ -21,6 +21,29 @@ func TestPageRendersUnitActionsAndProtectsBrokerUnits(t *testing.T) {
 	assert.NotContains(t, html, "/services/pilothouse.service/disable")
 	assert.Contains(t, html, "/services/backup.timer/logs")
 	assert.Contains(t, html, "/services/pilothouse.service/logs")
+}
+
+func TestPageRendersFiltersAndUnitDescriptionSpacing(t *testing.T) {
+	state := State{
+		Summary: Summary{Total: 4},
+		Units:   []Unit{{Name: "backup.timer", Description: "Nightly backup", ActiveState: "failed", UnitFileState: "enabled"}},
+	}
+	filters := Filters{Query: "backup", Status: "failed", Type: "timer", UnitFileState: "enabled"}
+	options := FilterOptions{Statuses: []string{"active", "inactive", "failed", "activating"}, UnitFileStates: []string{"disabled", "enabled"}}
+	var output strings.Builder
+	require.NoError(t, Page(state, filters, options, "token", true).Render(context.Background(), &output))
+
+	html := output.String()
+	for _, value := range []string{`type="search"`, `value="backup"`, `value="failed" selected`, `value="timer" selected`, `value="enabled" selected`, `name="query" value="backup"`, `name="status" value="failed"`, `name="type" value="timer"`, `name="unit-file" value="enabled"`, `href="/services"`, "Reset filters", "1 of 4 shown", `<small class="table-detail">Nightly backup</small>`} {
+		assert.Contains(t, html, value)
+	}
+	assert.NotContains(t, html, "@web.")
+}
+
+func TestPageRendersFilteredEmptyState(t *testing.T) {
+	var output strings.Builder
+	require.NoError(t, Page(State{Summary: Summary{Total: 3}}, Filters{Status: "failed"}, FilterOptions{Statuses: []string{"failed"}}, "", false).Render(context.Background(), &output))
+	assert.Contains(t, output.String(), "No units match these filters.")
 }
 
 func TestLogsRendersEntriesDisclosureAndBackLink(t *testing.T) {

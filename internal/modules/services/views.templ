@@ -13,7 +13,7 @@ templ SummaryCard(state State) {
 		</a></div><div class="mini-list"><div class="mini-row"><div><strong>Active units</strong><small>services, sockets, and timers</small></div><span class="badge active">{ fmt.Sprint(state.Summary.Active) }</span></div><div class="mini-row"><div><strong>Failed units</strong></div><span class="badge">{ fmt.Sprint(state.Summary.Failed) }</span></div></div></article>
 }
 
-templ Page(state State, csrf string, admin bool) {
+templ Page(state State, filters Filters, options FilterOptions, csrf string, admin bool) {
 	<div class="page-stack">
 		<div class="page-intro">
 			<p>System-wide units managed by systemd through the authenticated broker. Only services, sockets, and timers are exposed.</p>
@@ -23,19 +23,47 @@ templ Page(state State, csrf string, admin bool) {
 				<span class="badge">Read only</span>
 			}
 		</div>
+		<form class="card service-filters" method="get" action="/services">
+			<label>Find unit<input type="search" name="query" value={ filters.Query } placeholder="Name or description"/></label>
+			<label>Status<select name="status">
+				<option value="">All statuses</option>
+				for _, status := range options.Statuses {
+					<option value={ status } selected?={ filters.Status == status }>{ filterLabel(status) }</option>
+				}
+			</select></label>
+			<label>Type<select name="type">
+				<option value="">All types</option>
+				<option value="service" selected?={ filters.Type == "service" }>Services</option>
+				<option value="socket" selected?={ filters.Type == "socket" }>Sockets</option>
+				<option value="timer" selected?={ filters.Type == "timer" }>Timers</option>
+			</select></label>
+			<label>Unit file<select name="unit-file">
+				<option value="">All unit files</option>
+				for _, state := range options.UnitFileStates {
+					<option value={ state } selected?={ filters.UnitFileState == state }>{ filterLabel(state) }</option>
+				}
+			</select></label>
+			<div class="service-filter-actions"><button class="button" type="submit">Apply filters</button><a class="button secondary" href="/services">Reset filters</a></div>
+		</form>
 		<section class="engine-stats" aria-label="Service summary"><div class="engine-stat"><span>Units</span><strong>{ fmt.Sprint(state.Summary.Total) }</strong><small>known systemd units</small></div><div class="engine-stat"><span>Active</span><strong>{ fmt.Sprint(state.Summary.Active) }</strong><small>currently active</small></div><div class="engine-stat"><span>Failed</span><strong>{ fmt.Sprint(state.Summary.Failed) }</strong><small>require attention</small></div></section>
 		<article class="card table-card">
-			<div class="table-toolbar"><h2>Units</h2><span>{ fmt.Sprintf("%d total", state.Summary.Total) }</span></div>
+			<div class="table-toolbar"><h2>Units</h2><span>{ fmt.Sprintf("%d of %d shown", len(state.Units), state.Summary.Total) }</span></div>
 			if len(state.Units) == 0 {
 				<div class="empty-state"><span class="card-icon blue">@web.Icon("server")
-</span>No supported systemd units were found.</div>
+				</span>
+					if filters.Active() {
+						No units match these filters.
+					} else {
+						No supported systemd units were found.
+					}
+				</div>
 			} else {
 				<table class="data-table">
 					<thead><tr><th>Unit</th><th>State</th><th>Unit file</th><th>Actions</th></tr></thead>
 					<tbody>
 						for _, unit := range state.Units {
 							<tr>
-								<td><div><strong>{ unit.Name }</strong><small>{ unit.Description }</small></div></td>
+								<td><div><strong>{ unit.Name }</strong><small class="table-detail">{ unit.Description }</small></div></td>
 								<td><span class="badge">{ unit.ActiveState }</span><small class="table-detail">{ unit.LoadState } · { unit.SubState }</small></td>
 								<td>{ unit.UnitFileState }</td>
 								<td>
@@ -44,15 +72,15 @@ templ Page(state State, csrf string, admin bool) {
 										if !admin {
 											<span class="card-subtle">Controls unavailable</span>
 										} else {
-											@unitAction(unit.Name, "start", "Start", csrf, "")
-											@unitAction(unit.Name, "restart", "Restart", csrf, "secondary")
-											@unitAction(unit.Name, "enable", "Enable", csrf, "secondary")
+											@unitAction(unit.Name, "start", "Start", csrf, "", filters)
+											@unitAction(unit.Name, "restart", "Restart", csrf, "secondary", filters)
+											@unitAction(unit.Name, "enable", "Enable", csrf, "secondary", filters)
 											if !protectedUnits[unit.Name] {
-												@unitAction(unit.Name, "stop", "Stop", csrf, "danger")
-												@unitAction(unit.Name, "disable", "Disable", csrf, "secondary")
+												@unitAction(unit.Name, "stop", "Stop", csrf, "danger", filters)
+												@unitAction(unit.Name, "disable", "Disable", csrf, "secondary", filters)
 											}
 											if unit.ActiveState == "failed" {
-												@unitAction(unit.Name, "reset-failed", "Reset", csrf, "secondary")
+												@unitAction(unit.Name, "reset-failed", "Reset", csrf, "secondary", filters)
 											}
 										}
 									</div>
@@ -97,6 +125,21 @@ templ Logs(journal Journal, unavailable bool) {
 	</div>
 }
 
-templ unitAction(unit, action, label, csrf, class string) {
-	<form method="post" action={ templ.SafeURL("/services/" + unit + "/" + action) } hx-boost="false"><input type="hidden" name="csrf" value={ csrf }/><button class={ "button", class } type="submit">{ label }</button></form>
+templ unitAction(unit, action, label, csrf, class string, filters Filters) {
+	<form method="post" action={ templ.SafeURL("/services/" + unit + "/" + action) } hx-boost="false">
+		<input type="hidden" name="csrf" value={ csrf }/>
+		if filters.Query != "" {
+			<input type="hidden" name="query" value={ filters.Query }/>
+		}
+		if filters.Status != "" {
+			<input type="hidden" name="status" value={ filters.Status }/>
+		}
+		if filters.Type != "" {
+			<input type="hidden" name="type" value={ filters.Type }/>
+		}
+		if filters.UnitFileState != "" {
+			<input type="hidden" name="unit-file" value={ filters.UnitFileState }/>
+		}
+		<button class={ "button", class } type="submit">{ label }</button>
+	</form>
 }

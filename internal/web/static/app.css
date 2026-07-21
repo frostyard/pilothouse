@@ -154,6 +154,10 @@ svg { display: block; height: 1.05rem; width: 1.05rem; }
 .page-intro { align-items: center; display: flex; justify-content: space-between; }
 .page-intro h2 { font-size: 18px; letter-spacing: -.035em; margin: 0; }
 .page-intro p, .stub-copy { color: #8fb0c2; font-size: 11px; line-height: 1.6; margin: 0; max-width: 680px; }
+.service-filters { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(180px, 1.5fr) repeat(3, minmax(120px, 1fr)) auto; }
+.service-filters label { display: grid; gap: 6px; }
+.service-filters input, .service-filters select { width: 100%; }
+.service-filter-actions { display: flex; gap: 6px; }
 .incus-project-bar { gap: 18px; }
 .incus-project-bar form, .table-toolbar form { align-items: center; display: flex; gap: 8px; margin-left: auto; }
 label { color: #93bfd6; font: 700 9px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
@@ -250,6 +254,8 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
   .hero-facts-table { display: none; }
   .enroll-grid { grid-template-columns: 1fr; }
   .enroll-step { min-height: 0; }
+  .service-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .service-filter-actions { grid-column: 1 / -1; }
 }
 @media (max-width: 760px) {
   .app-shell { display: block; }
@@ -278,6 +284,8 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
   .fleet-table td:last-child .button { justify-content: center; width: 100%; }
   .actions { justify-content: flex-start; }
   .page-intro, .fleet-intro, .enroll-footer { align-items: flex-start; display: flex; flex-direction: column; gap: 14px; }
+  .service-filters { grid-template-columns: 1fr; }
+  .service-filter-actions { grid-column: auto; }
   .preview-banner { align-items: flex-start; flex-wrap: wrap; }
   .login-body { padding: 12px; }
   .login-shell { display: block; min-height: calc(100vh - 24px); }
