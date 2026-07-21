@@ -31,7 +31,7 @@ func TestLVMEnricherReportsGraphUtilizationAndPartialHealth(t *testing.T) {
 		assert.Equal(t, []string{"--reportformat", "json", "--units", "b", "--nosuffix", "-o", fields}, args)
 		switch path {
 		case "/usr/sbin/pvs":
-			return []byte(`{"report":[{"pv":[{"pv_uuid":"pv-one","vg_uuid":"vg-one","pv_name":"/dev/sda2","pv_size":"1073741824","pv_free":"0","pv_attr":"a--"},{"pv_uuid":"pv-two","vg_uuid":"vg-one","pv_name":"/dev/sdb2","pv_size":"1073741824","pv_free":"0","pv_attr":"m--"}]}]}`), nil
+			return []byte(`{"report":[{"pv":[{"pv_uuid":"pv-one","vg_uuid":"vg-one","pv_name":"/dev/sda2","pv_size":"1073741824","pv_free":"0","pv_attr":"a--"},{"pv_uuid":"pv-two","vg_uuid":"vg-one","pv_name":"/dev/sdb2","pv_size":"1073741824","pv_free":"0","pv_attr":"a-m"}]}]}`), nil
 		case "/usr/sbin/vgs":
 			return []byte(`{"report":[{"vg":[{"vg_uuid":"vg-one","vg_name":"data","vg_size":"2147483648","vg_free":"536870912","vg_attr":"wz--np"}]}]}`), nil
 		default:
@@ -51,6 +51,16 @@ func TestLVMEnricherReportsGraphUtilizationAndPartialHealth(t *testing.T) {
 	assert.Contains(t, result.Relations, Relation{From: vgID, To: lvID, Kind: "contains"})
 	assert.Contains(t, result.Resources, Resource{ID: lvID, Kind: "logical-volume", Name: "data/root", Path: "/dev/data/root", SizeBytes: 1610612736, Health: HealthHealthy, State: "available", Details: []Detail{{Label: "Data utilization", Value: "75.0%"}, {Label: "Metadata utilization", Value: "25.0%"}}})
 	assert.Contains(t, result.Findings, Finding{ResourceID: vgID, Severity: HealthCritical, Title: "LVM volume group has missing devices", Detail: "1 physical volume is missing"})
+}
+
+func TestLVMEnricherAcceptsEmptyHostReports(t *testing.T) {
+	enricher := newLVMEnricher(LVMTools{PVS: "pvs", VGS: "vgs", LVS: "lvs"})
+	enricher.runner.run = func(context.Context, string, ...string) ([]byte, error) { return []byte(`{"report":[{}]}`), nil }
+
+	result, err := enricher.Collect(context.Background(), Inventory{})
+
+	require.NoError(t, err)
+	assert.Empty(t, result.Resources)
 }
 
 func TestLVMResultSkipsUnknownVolumeGroupReferences(t *testing.T) {

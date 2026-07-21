@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 const lvmEnricherName = "lvm"
@@ -103,7 +102,7 @@ func parseLVMReport(input []byte) (lvmReport, error) {
 		return lvmReport{}, fmt.Errorf("invalid LVM report")
 	}
 	report := lvmReport{PVs: document.Report[0].PVs, VGs: document.Report[0].VGs, LVs: document.Report[0].LVs}
-	if (len(report.PVs) == 0 && len(report.VGs) == 0 && len(report.LVs) == 0) || (len(report.PVs) > 0 && (len(report.VGs) > 0 || len(report.LVs) > 0)) || (len(report.VGs) > 0 && len(report.LVs) > 0) {
+	if (len(report.PVs) > 0 && (len(report.VGs) > 0 || len(report.LVs) > 0)) || (len(report.VGs) > 0 && len(report.LVs) > 0) || len(report.PVs)+len(report.VGs)+len(report.LVs) > maxResources {
 		return lvmReport{}, fmt.Errorf("invalid LVM report")
 	}
 	seen := map[string]bool{}
@@ -139,6 +138,9 @@ func validLVMPercent(value string) bool {
 }
 
 func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, error) {
+	if len(pvs.PVs)+len(vgs.VGs)+len(lvs.LVs) > maxResources {
+		return AdapterResult{}, fmt.Errorf("LVM resources exceed limit")
+	}
 	vgByUUID := map[string]lvmVG{}
 	for _, vg := range vgs.VGs {
 		vgByUUID[vg.UUID] = vg
@@ -158,7 +160,7 @@ func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, err
 		if core, ok := resourcesByPath[pv.Name]; ok {
 			result.Relations = append(result.Relations, Relation{From: core.ID, To: stableID("lvm-vg", pv.VGUUID), Kind: "member-of"})
 		}
-		if strings.Contains(pv.Attr, "m") {
+		if lvmAttrAt(pv.Attr, 2) == 'm' {
 			missing[pv.VGUUID]++
 		}
 	}
@@ -168,6 +170,9 @@ func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, err
 		if missing[vg.UUID] > 0 {
 			health = HealthCritical
 			result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: HealthCritical, Title: "LVM volume group has missing devices", Detail: fmt.Sprintf("%d physical volume is missing", missing[vg.UUID])})
+		} else if lvmAttrAt(vg.Attr, 3) == 'p' {
+			health = HealthCritical
+			result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: HealthCritical, Title: "LVM volume group is partial", Detail: "one or more physical volumes are unavailable"})
 		}
 		result.Resources = append(result.Resources, Resource{ID: id, Kind: "volume-group", Name: vg.Name, SizeBytes: parseUint(vg.Size), Health: health, State: "available", Details: []Detail{{Label: "Free", Value: vg.Free}}})
 	}
@@ -178,7 +183,7 @@ func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, err
 		details := lvmLVDetails(lv)
 		state := "inactive"
 		health := HealthUnknown
-		if strings.Contains(lv.Attr, "a") {
+		if lvmAttrAt(lv.Attr, 4) == 'a' {
 			state, health = "available", HealthHealthy
 		}
 		id := stableID("lvm-lv", lv.UUID)
@@ -188,6 +193,13 @@ func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, err
 	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].ID < result.Resources[j].ID })
 	sortRelations(result.Relations)
 	return result, nil
+}
+
+func lvmAttrAt(value string, index int) byte {
+	if len(value) <= index {
+		return 0
+	}
+	return value[index]
 }
 
 func lvmLVDetails(lv lvmLV) []Detail {
