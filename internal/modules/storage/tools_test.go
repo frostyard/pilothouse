@@ -55,6 +55,27 @@ func TestResolveToolAcceptsRootOwnedSafeRegularFile(t *testing.T) {
 	assert.Equal(t, path, resolved)
 }
 
+func TestResolveOptionalToolReturnsUnsupportedWithoutError(t *testing.T) {
+	path, supported, err := resolveOptionalTool([]string{"/does/not/exist"}, os.Lstat)
+
+	require.NoError(t, err)
+	assert.False(t, supported)
+	assert.Empty(t, path)
+}
+
+func TestResolveOptionalToolRejectsExistingSymlink(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	link := filepath.Join(directory, "tool")
+	require.NoError(t, os.WriteFile(target, []byte("tool"), 0o755))
+	require.NoError(t, os.Symlink(target, link))
+
+	_, supported, err := resolveOptionalTool([]string{link}, os.Lstat)
+
+	assert.Error(t, err)
+	assert.False(t, supported)
+}
+
 func TestBoundedRunnerRejectsOversizedOutput(t *testing.T) {
 	runner := commandRunner{limit: 8, run: func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("123456789"), nil

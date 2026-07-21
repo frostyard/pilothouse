@@ -48,7 +48,7 @@ templ SnapshotContents(snapshot Snapshot, unavailable bool, anchors anchorSet) {
 			@StorageAttention(snapshot.Findings, snapshot.Truncated)
 			@MountTable(snapshot.Mounts, anchors.mounts)
 			@Topology(snapshot.Resources, snapshot.Relations)
-			@Inventory(snapshot.Resources)
+			@ResourceInventory(snapshot.Resources)
 			@BackendStates(snapshot.Backends)
 		}
 	</section>
@@ -137,7 +137,7 @@ templ TopologyEndpoint(endpoint topologyEndpoint) {
 	}
 }
 
-templ Inventory(resources []Resource) {
+templ ResourceInventory(resources []Resource) {
 	<article class="card table-card">
 		<div class="table-toolbar"><h2>Storage inventory</h2><span>{ fmt.Sprintf("%d resources", len(resources)) }</span></div>
 		if len(resources) == 0 {

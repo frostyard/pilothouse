@@ -128,3 +128,34 @@ func resolveTool(candidates []string, identity func(string) (fileIdentity, error
 	}
 	return "", fmt.Errorf("resolve tool: %w", lastErr)
 }
+
+func resolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, error)) (string, bool, error) {
+	return ResolveOptionalTool(candidates, lstat)
+}
+
+func ResolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, error)) (string, bool, error) {
+	for _, path := range candidates {
+		info, err := lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("inspect optional tool %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return "", false, fmt.Errorf("optional tool %s is not a regular file", path)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return "", false, fmt.Errorf("inspect %s ownership", path)
+		}
+		if stat.Uid != 0 {
+			return "", false, fmt.Errorf("optional tool %s is not root-owned", path)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return "", false, fmt.Errorf("optional tool %s is group- or world-writable", path)
+		}
+		return path, true, nil
+	}
+	return "", false, nil
+}
