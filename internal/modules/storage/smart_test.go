@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +21,14 @@ func TestParseSMARTATAFailureIsCritical(t *testing.T) {
 	assert.Contains(t, health.Details, Detail{Label: "Pending sectors", Value: "2"})
 }
 
+func TestParseSMARTAcceptsVerboseATAOutput(t *testing.T) {
+	health, err := parseSMART(mustFixture(t, "smart-ata-full.json"), "/dev/sda")
+
+	require.NoError(t, err)
+	assert.Equal(t, HealthHealthy, health.Health)
+	assert.Contains(t, health.Details, Detail{Label: "Temperature", Value: "37 C"})
+}
+
 func TestParseSMARTNVMeMediaErrorsAreCritical(t *testing.T) {
 	health, err := parseSMART(mustFixture(t, "smart-nvme.json"), "/dev/nvme0n1")
 
@@ -37,6 +44,15 @@ func TestParseSMARTNVMeTemperatureAndWearAreWarning(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, HealthWarning, health.Health)
+}
+
+func TestParseSMARTUsesNVMeTemperatureWithoutDuplicate(t *testing.T) {
+	health, err := parseSMART([]byte(`{"device":{"name":"/dev/nvme0n1","info_name":"/dev/nvme0n1","protocol":"NVMe"},"smart_status":{"passed":true},"temperature":{"current":60},"nvme_smart_health_information_log":{"temperature":71,"percentage_used":10,"media_errors":0,"num_err_log_entries":0,"power_on_hours":321}}`), "/dev/nvme0n1")
+
+	require.NoError(t, err)
+	assert.Equal(t, HealthWarning, health.Health)
+	assert.Equal(t, 1, detailCount(health.Details, Detail{Label: "Temperature", Value: "71 C"}))
+	assert.NotContains(t, health.Details, Detail{Label: "Temperature", Value: "60 C"})
 }
 
 func TestParseSMARTHealthyDevices(t *testing.T) {
@@ -74,7 +90,6 @@ func TestParseSMARTRejectsInvalidInput(t *testing.T) {
 		{"malformed health", `{"device":{"name":"/dev/sda","info_name":"/dev/sda","protocol":"ATA"},"smart_status":{"passed":"yes"}}`, "/dev/sda"},
 		{"overflow counter", `{"device":{"name":"/dev/sda","info_name":"/dev/sda","protocol":"ATA"},"ata_smart_attributes":{"table":[{"id":5,"raw":{"value":18446744073709551616}}]}}`, "/dev/sda"},
 		{"oversized field", `{"device":{"name":"/dev/sda","info_name":"/dev/sda","protocol":"ATA"},"model_name":"` + strings.Repeat("a", maxFieldBytes+1) + `"}`, "/dev/sda"},
-		{"unknown structure", `{"device":{"name":"/dev/sda","info_name":"/dev/sda","protocol":"ATA"},"unrecognized":{"value":true}}`, "/dev/sda"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -90,10 +105,8 @@ func TestParseSMARTRejectsMultipleJSONValues(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestSMARTEnricherUsesFixedCommandAndCache(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	cache := newHealthCache(func() time.Time { return now })
-	enricher := newSMARTEnricher("/usr/sbin/smartctl", cache)
+func TestSMARTEnricherUsesFixedCommand(t *testing.T) {
+	enricher := newSMARTEnricher("/usr/sbin/smartctl")
 	var calls int
 	enricher.runner.run = func(_ context.Context, path string, args ...string) ([]byte, error) {
 		calls++
@@ -107,29 +120,11 @@ func TestSMARTEnricherUsesFixedCommandAndCache(t *testing.T) {
 	assert.Len(t, result.Resources, 1)
 	_, err = enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/nvme0n1"}})
 	require.NoError(t, err)
-	assert.Equal(t, 1, calls)
-}
-
-func TestSMARTEnricherReturnsStaleDataAfterRefreshFailure(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	cache := newHealthCache(func() time.Time { return now })
-	enricher := newSMARTEnricher("/usr/sbin/smartctl", cache)
-	enricher.runner.run = func(context.Context, string, ...string) ([]byte, error) {
-		return mustFixture(t, "smart-nvme.json"), nil
-	}
-	_, err := enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/nvme0n1"}})
-	require.NoError(t, err)
-	now = now.Add(healthCacheTTL + time.Second)
-	enricher.runner.run = func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("unavailable") }
-
-	result, err := enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/nvme0n1"}})
-
-	require.Error(t, err)
-	assert.Contains(t, result.Resources[0].Details, staleHealthDetail)
+	assert.Equal(t, 2, calls)
 }
 
 func TestSMARTEnricherLimitsDeviceReadsToFourWorkers(t *testing.T) {
-	enricher := newSMARTEnricher("/usr/sbin/smartctl", NewHealthCache())
+	enricher := newSMARTEnricher("/usr/sbin/smartctl")
 	started := make(chan struct{}, 5)
 	release := make(chan struct{})
 	var once sync.Once

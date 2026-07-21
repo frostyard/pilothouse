@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 )
 
 const smartEnricherName = "smart"
@@ -18,33 +17,23 @@ var smartctlArgs = []string{"--json=c", "--all"}
 
 type smartEnricher struct {
 	path   string
-	cache  *HealthCache
 	runner commandRunner
 }
 
-func NewSMARTEnricher(path string, cache *HealthCache) Enricher {
-	return newSMARTEnricher(path, cache)
+func NewSMARTEnricher(path string) Enricher {
+	return newSMARTEnricher(path)
 }
 
-func newSMARTEnricher(path string, cache *HealthCache) *smartEnricher {
-	if cache == nil {
-		cache = NewHealthCache()
-	}
-	return &smartEnricher{path: path, cache: cache, runner: commandRunner{limit: maxAdapterBytes}}
+func newSMARTEnricher(path string) *smartEnricher {
+	return &smartEnricher{path: path, runner: commandRunner{limit: maxAdapterBytes}}
 }
 
 func (e *smartEnricher) Name() string { return smartEnricherName }
 
 func (e *smartEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
-	if cached, fresh, found := e.cache.Load(e.Name()); found && fresh {
-		return cached, nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 	paths := smartDevicePaths(inventory)
 	result := AdapterResult{Resources: make([]Resource, 0, len(paths))}
 	if len(paths) == 0 {
-		e.cache.Store(e.Name(), result)
 		return result, nil
 	}
 
@@ -94,13 +83,8 @@ func (e *smartEnricher) Collect(ctx context.Context, inventory Inventory) (Adapt
 		result.Resources = append(result.Resources, collected.health)
 	}
 	if len(errs) != 0 {
-		if cached, _, found := e.cache.Load(e.Name()); found {
-			markStale(&cached)
-			return cached, errors.Join(errs...)
-		}
 		return result, errors.Join(errs...)
 	}
-	e.cache.Store(e.Name(), result)
 	return result, nil
 }
 
@@ -165,7 +149,6 @@ type smartDocument struct {
 
 func parseSMART(input []byte, path string) (Resource, error) {
 	decoder := json.NewDecoder(bytes.NewReader(input))
-	decoder.DisallowUnknownFields()
 	var document smartDocument
 	if err := decoder.Decode(&document); err != nil {
 		return Resource{}, fmt.Errorf("decode SMART output: %w", err)
@@ -173,7 +156,7 @@ func parseSMART(input []byte, path string) (Resource, error) {
 	if decoder.More() {
 		return Resource{}, errors.New("decode SMART output: multiple JSON values")
 	}
-	if document.Device.Name != path || document.Device.InfoName != path {
+	if document.Device.Name != path {
 		return Resource{}, fmt.Errorf("SMART device does not match %s", path)
 	}
 	if err := validateSMARTFields(document); err != nil {
@@ -190,7 +173,7 @@ func parseSMART(input []byte, path string) (Resource, error) {
 	details := make([]Detail, 0, 9)
 	appendSMARTDetail(&details, "Model", document.ModelName)
 	appendSMARTDetail(&details, "Serial", document.SerialNumber)
-	if document.Temperature != nil {
+	if document.Temperature != nil && document.NVMESMARTHealthInformationLog == nil {
 		appendSMARTDetail(&details, "Temperature", strconv.FormatUint(document.Temperature.Current, 10)+" C")
 		if document.Temperature.Current >= 70 {
 			health = higherHealth(health, HealthWarning)

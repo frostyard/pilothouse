@@ -36,6 +36,7 @@ func (a fakeAdapter) Core() bool   { return a.core }
 func (a fakeAdapter) Name() string { return a.name }
 
 type fakeEnricher struct {
+	calls     int
 	err       error
 	inventory Inventory
 	mutate    bool
@@ -44,6 +45,7 @@ type fakeEnricher struct {
 }
 
 func (e *fakeEnricher) Collect(_ context.Context, inventory Inventory) (AdapterResult, error) {
+	e.calls++
 	e.inventory = inventory
 	if e.mutate {
 		inventory.DevicePaths[0] = "modified"
@@ -141,6 +143,40 @@ func TestManagerMarksStaleEnricherResult(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, snapshot.Resources[0].Details, Detail{Label: "Health data", Value: "Stale"})
+}
+
+func TestManagerOwnsSMARTCacheAndStaleFallback(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	cache := newHealthCache(func() time.Time { return now })
+	cache.Store("other", AdapterResult{Resources: []Resource{{ID: "other"}}})
+	enricher := &fakeEnricher{name: "smart", result: AdapterResult{Resources: []Resource{{ID: "disk:one", Details: []Detail{{Label: "Temperature", Value: "30 C"}}}}}}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{enricher})
+	manager.cache = cache
+
+	_, err := manager.State(context.Background())
+	require.NoError(t, err)
+	require.Len(t, cache.entries, 2)
+	collectedAt := cache.entries["smart"].collectedAt
+	now = now.Add(time.Minute)
+	_, err = manager.State(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, enricher.calls)
+	assert.Equal(t, 2, len(cache.entries))
+	assert.Equal(t, collectedAt, cache.entries["smart"].collectedAt)
+
+	now = now.Add(healthCacheTTL + time.Second)
+	enricher.err = errors.New("unavailable")
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, enricher.calls)
+	assert.Equal(t, 2, len(cache.entries))
+	assert.Equal(t, 1, detailCount(snapshot.Resources[0].Details, staleHealthDetail))
+	assert.Contains(t, cache.entries, "other")
+	secondSnapshot, err := manager.State(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, enricher.calls)
+	assert.Equal(t, 1, detailCount(secondSnapshot.Resources[0].Details, staleHealthDetail))
 }
 
 func TestManagerRunsEnrichersConcurrently(t *testing.T) {
@@ -269,6 +305,16 @@ func makeDetails(prefix string, count int) []Detail {
 		details[index] = Detail{Label: fmt.Sprintf("%s-%d", prefix, index)}
 	}
 	return details
+}
+
+func detailCount(details []Detail, want Detail) int {
+	count := 0
+	for _, detail := range details {
+		if detail == want {
+			count++
+		}
+	}
+	return count
 }
 
 func backendStatuses(backends []BackendStatus) []BackendStatus {

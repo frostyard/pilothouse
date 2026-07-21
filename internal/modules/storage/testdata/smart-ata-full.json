@@ -1,0 +1,27 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "platform_info": "x86_64-linux", "exit_status": 0},
+  "device": {"name": "/dev/sda", "info_name": "/dev/sda [SAT]", "type": "sat", "protocol": "ATA"},
+  "model_name": "Example ATA SSD",
+  "serial_number": "ATA-1234",
+  "firmware_version": "1.2.3",
+  "user_capacity": {"blocks": 1000000, "bytes": 512000000},
+  "logical_block_size": 512,
+  "physical_block_size": 4096,
+  "rotation_rate": 0,
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true},
+  "temperature": {"current": 37},
+  "power_on_time": {"hours": 456},
+  "ata_smart_attributes": {
+    "revision": 16,
+    "table": [
+      {"id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "worst": 100, "thresh": 10, "when_failed": "", "flags": {"value": 51}, "raw": {"value": 0, "string": "0"}},
+      {"id": 197, "name": "Current_Pending_Sector", "value": 100, "worst": 100, "thresh": 0, "when_failed": "", "flags": {"value": 18}, "raw": {"value": 0, "string": "0"}}
+    ]
+  },
+  "ata_smart_data": {"offline_data_collection": {"status": {"value": 0, "string": "never started"}}},
+  "ata_sct_status": {"format_version": 3, "device_state": {"value": 0, "string": "active"}},
+  "smart_error_log": {"ata_smart_error_log": {"summary": {"count": 0}}},
+  "smart_self_test_log": {"standard": {"table": []}}
+}
