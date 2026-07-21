@@ -37,6 +37,22 @@ func TestCoreAdaptersUseFixedCommands(t *testing.T) {
 	assert.Equal(t, []string{"--json", "--bytes", "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%,MAJ:MIN"}, findmntArgs)
 }
 
+func TestSortRelationsUsesFromToKindTuple(t *testing.T) {
+	relations := []Relation{
+		{From: "ab", To: "c", Kind: "z"},
+		{From: "a", To: "bc", Kind: "z"},
+		{From: "a", To: "bc", Kind: "a"},
+	}
+
+	sortRelations(relations)
+
+	assert.Equal(t, []Relation{
+		{From: "a", To: "bc", Kind: "a"},
+		{From: "a", To: "bc", Kind: "z"},
+		{From: "ab", To: "c", Kind: "z"},
+	}, relations)
+}
+
 func TestParseLSBLKRejectsUnknownFields(t *testing.T) {
 	_, err := parseLSBLK([]byte(`{"blockdevices":[],"unexpected":true}`))
 	assert.Error(t, err)

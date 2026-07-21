@@ -140,10 +140,21 @@ func parseLSBLK(input []byte) (AdapterResult, error) {
 		result.Resources = append(result.Resources, resource)
 	}
 	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].ID < result.Resources[j].ID })
-	sort.Slice(result.Relations, func(i, j int) bool {
-		return result.Relations[i].From+result.Relations[i].To < result.Relations[j].From+result.Relations[j].To
-	})
+	sortRelations(result.Relations)
 	return result, nil
+}
+
+// sortRelations orders the From, To, and Kind tuple deterministically.
+func sortRelations(relations []Relation) {
+	sort.Slice(relations, func(i, j int) bool {
+		if relations[i].From != relations[j].From {
+			return relations[i].From < relations[j].From
+		}
+		if relations[i].To != relations[j].To {
+			return relations[i].To < relations[j].To
+		}
+		return relations[i].Kind < relations[j].Kind
+	})
 }
 
 func validateBlockDevice(device lsblkDevice) error {
