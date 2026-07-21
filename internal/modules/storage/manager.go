@@ -35,10 +35,12 @@ func (e unsupportedEnricher) Collect(context.Context, Inventory) (AdapterResult,
 func (e unsupportedEnricher) Name() string { return e.name }
 
 type SystemManager struct {
-	adapters  []Adapter
-	cache     *HealthCache
-	enrichers []Enricher
-	now       func() time.Time
+	adapters        []Adapter
+	cache           *HealthCache
+	enrichers       []Enricher
+	enricherTimeout time.Duration
+	lstat           func(string) (os.FileInfo, error)
+	now             func() time.Time
 }
 
 func NewSystemManager(adapters ...Adapter) *SystemManager {
@@ -46,7 +48,7 @@ func NewSystemManager(adapters ...Adapter) *SystemManager {
 }
 
 func newSystemManagerWithEnrichers(adapters []Adapter, enrichers []Enricher) *SystemManager {
-	return &SystemManager{adapters: slices.Clone(adapters), cache: NewHealthCache(), enrichers: slices.Clone(enrichers), now: time.Now}
+	return &SystemManager{adapters: slices.Clone(adapters), cache: NewHealthCache(), enrichers: slices.Clone(enrichers), enricherTimeout: 5 * time.Second, lstat: os.Lstat, now: time.Now}
 }
 
 func (m *SystemManager) State(ctx context.Context) (Snapshot, error) {
@@ -94,13 +96,45 @@ func (m *SystemManager) State(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	inventory := inventoryFromSnapshot(coreSnapshot)
-	enriched := make([]AdapterResult, 0, len(m.enrichers))
-	for _, enricher := range m.enrichers {
-		result, err := m.collectEnricher(overall, enricher, cloneInventory(inventory))
-		enriched = append(enriched, result)
+	inventory := inventoryFromSnapshot(coreSnapshot, m.lstat)
+	type enricherResult struct {
+		index  int
+		result AdapterResult
+		err    error
+	}
+	enricherResults := make(chan enricherResult, len(m.enrichers))
+	for index, enricher := range m.enrichers {
+		go func(index int, enricher Enricher) {
+			result, err := m.collectEnricher(overall, enricher, cloneInventory(inventory))
+			enricherResults <- enricherResult{index: index, result: result, err: err}
+		}(index, enricher)
+	}
+	enriched := make([]AdapterResult, len(m.enrichers))
+	enricherErrors := make([]error, len(m.enrichers))
+	receivedEnrichers := make([]bool, len(m.enrichers))
+	for count := 0; count < len(m.enrichers); {
+		select {
+		case result := <-enricherResults:
+			if !receivedEnrichers[result.index] {
+				receivedEnrichers[result.index] = true
+				count++
+				enriched[result.index] = result.result
+				enricherErrors[result.index] = result.err
+			}
+		case <-overall.Done():
+			for index := range m.enrichers {
+				if !receivedEnrichers[index] {
+					receivedEnrichers[index] = true
+					count++
+					enricherErrors[index] = context.DeadlineExceeded
+				}
+			}
+		}
+	}
+	for index, enricher := range m.enrichers {
+		result := enriched[index]
 		result.Resources = nil
-		collected = append(collected, collectedResult{name: enricher.Name(), result: result, err: err})
+		collected = append(collected, collectedResult{name: enricher.Name(), result: result, err: enricherErrors[index]})
 	}
 	snapshot, err := normalize(m.now(), collected)
 	if err != nil {
@@ -141,7 +175,7 @@ func (m *SystemManager) collectEnricher(ctx context.Context, enricher Enricher, 
 	if found && fresh {
 		return cached, nil
 	}
-	enricherCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	enricherCtx, cancel := context.WithTimeout(ctx, m.enricherTimeout)
 	defer cancel()
 	result, err := enricher.Collect(enricherCtx, inventory)
 	if enricherCtx.Err() == context.DeadlineExceeded {
@@ -152,15 +186,13 @@ func (m *SystemManager) collectEnricher(ctx context.Context, enricher Enricher, 
 		return result, nil
 	}
 	if found {
-		for i := range cached.Resources {
-			cached.Resources[i].Details = append(cached.Resources[i].Details, Detail{Label: "Health data", Value: "Stale"})
-		}
+		markStale(&cached)
 		return cached, err
 	}
 	return AdapterResult{}, err
 }
 
-func inventoryFromSnapshot(snapshot Snapshot) Inventory {
+func inventoryFromSnapshot(snapshot Snapshot, lstat func(string) (os.FileInfo, error)) Inventory {
 	inventory := Inventory{Mounts: slices.Clone(snapshot.Mounts), Resources: slices.Clone(snapshot.Resources)}
 	for _, resource := range snapshot.Resources {
 		if resource.Kind != "disk" && resource.Kind != "partition" && resource.Kind != "raid" && resource.Kind != "mapping" {
@@ -170,7 +202,7 @@ func inventoryFromSnapshot(snapshot Snapshot) Inventory {
 		if resource.Path != path || !filepath.IsAbs(path) || !strings.HasPrefix(path, "/dev/") {
 			continue
 		}
-		if hasSymlinkComponent(path) {
+		if hasSymlinkComponent(path, lstat) {
 			continue
 		}
 		inventory.DevicePaths = append(inventory.DevicePaths, path)
@@ -183,16 +215,32 @@ func cloneInventory(inventory Inventory) Inventory {
 	return Inventory{DevicePaths: slices.Clone(inventory.DevicePaths), Mounts: result.Mounts, Resources: result.Resources}
 }
 
-func hasSymlinkComponent(path string) bool {
+func hasSymlinkComponent(path string, lstat func(string) (os.FileInfo, error)) bool {
 	current := "/"
+	info, err := lstat(current)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
 	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
 		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		info, err := lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return true
 		}
 	}
 	return false
+}
+
+var staleHealthDetail = Detail{Label: "Health data", Value: "Stale"}
+
+func markStale(result *AdapterResult) {
+	for index := range result.Resources {
+		details := result.Resources[index].Details
+		if len(details) >= maxDetails {
+			details = details[:maxDetails-1]
+		}
+		result.Resources[index].Details = append(details, staleHealthDetail)
+	}
 }
 
 func mergeEnrichedResources(snapshot *Snapshot, results []AdapterResult) {
@@ -203,11 +251,39 @@ func mergeEnrichedResources(snapshot *Snapshot, results []AdapterResult) {
 	for _, result := range results {
 		for _, enriched := range result.Resources {
 			if resource, ok := resources[enriched.ID]; ok {
-				resource.Details = append(resource.Details, enriched.Details...)
+				resource.Details = mergeDetails(resource.Details, enriched.Details)
 				resource.Health = higherHealth(resource.Health, enriched.Health)
 			}
 		}
 	}
 	sortSnapshot(snapshot)
 	recalculateSummary(snapshot)
+}
+
+func mergeDetails(core, enriched []Detail) []Detail {
+	result := slices.Clone(core)
+	if len(result) >= maxDetails {
+		return result[:maxDetails]
+	}
+	stale := -1
+	for index, detail := range enriched {
+		if detail == staleHealthDetail {
+			stale = index
+			break
+		}
+	}
+	limit := maxDetails
+	if stale >= 0 {
+		limit--
+	}
+	for _, detail := range enriched {
+		if detail == staleHealthDetail || len(result) == limit {
+			continue
+		}
+		result = append(result, detail)
+	}
+	if stale >= 0 && len(result) < maxDetails {
+		result = append(result, staleHealthDetail)
+	}
+	return result
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -51,6 +53,17 @@ func (e *fakeEnricher) Collect(_ context.Context, inventory Inventory) (AdapterR
 
 func (e *fakeEnricher) Name() string { return e.name }
 
+type blockingEnricher struct {
+	collect func(context.Context, Inventory) (AdapterResult, error)
+	name    string
+}
+
+func (e blockingEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
+	return e.collect(ctx, inventory)
+}
+
+func (e blockingEnricher) Name() string { return e.name }
+
 func TestSystemManagerFailsWhenCoreAdapterFails(t *testing.T) {
 	manager := NewSystemManager(fakeAdapter{core: true, err: errors.New("failed"), name: "block"})
 	_, err := manager.State(context.Background())
@@ -76,6 +89,7 @@ func TestSystemManagerTimesOutAdapter(t *testing.T) {
 func TestManagerPassesValidatedCoreInventoryToEnrichers(t *testing.T) {
 	enricher := &fakeEnricher{name: "smart"}
 	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{enricher})
+	manager.lstat = existingDeviceLstat(t)
 
 	_, err := manager.State(context.Background())
 
@@ -87,6 +101,7 @@ func TestManagerClonesInventoryForEachEnricher(t *testing.T) {
 	first := &fakeEnricher{name: "first", mutate: true}
 	second := &fakeEnricher{name: "second"}
 	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{first, second})
+	manager.lstat = existingDeviceLstat(t)
 
 	_, err := manager.State(context.Background())
 
@@ -126,6 +141,154 @@ func TestManagerMarksStaleEnricherResult(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, snapshot.Resources[0].Details, Detail{Label: "Health data", Value: "Stale"})
+}
+
+func TestManagerRunsEnrichersConcurrently(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	newEnricher := func(name string) Enricher {
+		return blockingEnricher{name: name, collect: func(context.Context, Inventory) (AdapterResult, error) {
+			started <- name
+			<-release
+			return AdapterResult{}, nil
+		}}
+	}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{newEnricher("first"), newEnricher("second")})
+	done := make(chan error, 1)
+	go func() { _, err := manager.State(context.Background()); done <- err }()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+
+	startedNames := make([]string, 0, 2)
+	for range 2 {
+		select {
+		case name := <-started:
+			startedNames = append(startedNames, name)
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("enrichers did not start concurrently")
+		}
+	}
+	require.ElementsMatch(t, []string{"first", "second"}, startedNames)
+	close(release)
+	released = true
+	require.NoError(t, <-done)
+}
+
+func TestManagerLocalizesEnricherTimeout(t *testing.T) {
+	timedOut := blockingEnricher{name: "timed-out", collect: func(ctx context.Context, _ Inventory) (AdapterResult, error) {
+		<-ctx.Done()
+		return AdapterResult{}, ctx.Err()
+	}}
+	available := blockingEnricher{name: "available", collect: func(context.Context, Inventory) (AdapterResult, error) {
+		return AdapterResult{}, nil
+	}}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{timedOut, available})
+	manager.enricherTimeout = 10 * time.Millisecond
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []BackendStatus{{Name: "available", Availability: BackendAvailable}, {Name: "block", Availability: BackendAvailable}, {Name: "timed-out", Availability: BackendTimedOut}}, backendStatuses(snapshot.Backends))
+}
+
+func TestInventoryExcludesMissingAndSymlinkDevicePaths(t *testing.T) {
+	info, err := os.Stat(t.TempDir())
+	require.NoError(t, err)
+	lstat := func(path string) (os.FileInfo, error) {
+		switch path {
+		case "/", "/dev", "/dev/sda":
+			return info, nil
+		case "/dev/link":
+			return symlinkFileInfo{FileInfo: info}, nil
+		case "/dev/link/sda":
+			return info, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	snapshot := Snapshot{Resources: []Resource{
+		{ID: "disk:valid", Kind: "disk", Path: "/dev/sda"},
+		{ID: "disk:missing", Kind: "disk", Path: "/dev/missing"},
+		{ID: "disk:link", Kind: "disk", Path: "/dev/link/sda"},
+	}}
+
+	inventory := inventoryFromSnapshot(snapshot, lstat)
+
+	assert.Equal(t, []string{"/dev/sda"}, inventory.DevicePaths)
+}
+
+func TestMergeEnrichedDetailsCapsAtMaximum(t *testing.T) {
+	core := makeDetails("core", 30)
+	enriched := makeDetails("enriched", 4)
+	snapshot := Snapshot{Resources: []Resource{{ID: "disk:one", Details: core}}}
+
+	mergeEnrichedResources(&snapshot, []AdapterResult{{Resources: []Resource{{ID: "disk:one", Details: enriched}}}})
+
+	assert.Equal(t, append(core, enriched[:2]...), snapshot.Resources[0].Details)
+}
+
+func TestMergeEnrichedDetailsRetainsStaleMarkerAtMaximum(t *testing.T) {
+	core := makeDetails("core", 30)
+	enriched := append(makeDetails("enriched", 3), staleHealthDetail)
+	snapshot := Snapshot{Resources: []Resource{{ID: "disk:one", Details: core}}}
+
+	mergeEnrichedResources(&snapshot, []AdapterResult{{Resources: []Resource{{ID: "disk:one", Details: enriched}}}})
+
+	assert.Equal(t, append(append(core, enriched[:1]...), staleHealthDetail), snapshot.Resources[0].Details)
+}
+
+func TestStaleDetailsRetainMarkerAtMaximum(t *testing.T) {
+	result := AdapterResult{Resources: []Resource{{Details: makeDetails("cached", maxDetails)}}}
+
+	markStale(&result)
+
+	assert.Len(t, result.Resources[0].Details, maxDetails)
+	assert.Equal(t, staleHealthDetail, result.Resources[0].Details[maxDetails-1])
+}
+
+func TestStaleDetailsTrimOverMaximumAndRetainMarker(t *testing.T) {
+	result := AdapterResult{Resources: []Resource{{Details: makeDetails("cached", maxDetails+2)}}}
+
+	markStale(&result)
+
+	assert.Len(t, result.Resources[0].Details, maxDetails)
+	assert.Equal(t, staleHealthDetail, result.Resources[0].Details[maxDetails-1])
+}
+
+type symlinkFileInfo struct{ os.FileInfo }
+
+func (info symlinkFileInfo) Mode() os.FileMode { return info.FileInfo.Mode() | os.ModeSymlink }
+
+func makeDetails(prefix string, count int) []Detail {
+	details := make([]Detail, count)
+	for index := range details {
+		details[index] = Detail{Label: fmt.Sprintf("%s-%d", prefix, index)}
+	}
+	return details
+}
+
+func backendStatuses(backends []BackendStatus) []BackendStatus {
+	statuses := slices.Clone(backends)
+	for index := range statuses {
+		statuses[index].CollectedAt = time.Time{}
+	}
+	return statuses
+}
+
+func existingDeviceLstat(t *testing.T) func(string) (os.FileInfo, error) {
+	t.Helper()
+	info, err := os.Stat(t.TempDir())
+	require.NoError(t, err)
+	return func(path string) (os.FileInfo, error) {
+		if path == "/" || path == "/dev" || path == "/dev/sda" {
+			return info, nil
+		}
+		return nil, os.ErrNotExist
+	}
 }
 
 func coreFixtureAdapter() Adapter {
