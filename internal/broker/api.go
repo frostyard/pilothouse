@@ -48,6 +48,7 @@ const (
 	QueryPodmanState      = "org.frostyard.pilothouse.podman.state"
 	QueryServicesJournal  = "org.frostyard.pilothouse.services.journal"
 	QueryServicesState    = "org.frostyard.pilothouse.services.state"
+	QueryStorageState     = "org.frostyard.pilothouse.storage.state"
 )
 
 type ActionRequest struct {
