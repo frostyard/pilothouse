@@ -23,7 +23,12 @@ templ Hero(snapshot Snapshot) {
 	</article>
 }
 
-templ Metric(icon, title string, value float64, display, detail, tone string) {
+type MetricDetail struct {
+	Label string
+	Value string
+}
+
+templ Metric(icon, title string, value float64, display, detail, tone string, details []MetricDetail) {
 	<article class="card metric-card">
 		<div class="card-heading">
 			<span class={ "card-icon", tone }>@web.Icon(icon)</span>
@@ -32,6 +37,13 @@ templ Metric(icon, title string, value float64, display, detail, tone string) {
 		<div class="metric-value"><strong>{ display }</strong></div>
 		<div class={ "meter", tone }><span style={ fmt.Sprintf("width: %.1f%%", value) }></span></div>
 		<div class="metric-foot"><span>{ detail }</span><span>{ fmt.Sprintf("%.0f%%", value) }</span></div>
+		if len(details) > 0 {
+			<div class="metric-details">
+				for _, item := range details {
+					<div><span>{ item.Label }</span><strong>{ item.Value }</strong></div>
+				}
+			</div>
+		}
 	</article>
 }
 
@@ -67,15 +79,41 @@ templ SystemPage(snapshot Snapshot) {
 		</div>
 		<div class="dashboard-grid">
 			<div class="dashboard-slot span-full">@Hero(snapshot)</div>
-			<div class="dashboard-slot span-third">@Metric("cpu", "CPU load", snapshot.CPUPercent, fmt.Sprintf("%.1f%%", snapshot.CPUPercent), fmt.Sprintf("load %.2f / %.2f / %.2f", snapshot.Load1, snapshot.Load5, snapshot.Load15), "green")</div>
-			<div class="dashboard-slot span-third">@Metric("memory", "Memory", snapshot.MemoryPercent, formatBytes(snapshot.MemoryUsed), "of "+formatBytes(snapshot.MemoryTotal), "orange")</div>
-			<div class="dashboard-slot span-third">@Metric("disk", "Persistent storage", snapshot.DiskPercent, formatBytes(snapshot.DiskUsed), formatBytes(snapshot.DiskFree)+" free", "blue")</div>
+			<div class="dashboard-slot span-third">
+				@Metric("cpu", "CPU load", snapshot.CPUPercent, fmt.Sprintf("%.1f%%", snapshot.CPUPercent), fmt.Sprintf("load %.2f / %.2f / %.2f", snapshot.Load1, snapshot.Load5, snapshot.Load15), "green", []MetricDetail{
+					{Label: "User", Value: fmt.Sprintf("%.1f%%", snapshot.CPUUserPercent)},
+					{Label: "System", Value: fmt.Sprintf("%.1f%%", snapshot.CPUSystemPercent)},
+					{Label: "I/O wait", Value: fmt.Sprintf("%.1f%%", snapshot.CPUIOWaitPercent)},
+					{Label: "Logical CPUs", Value: fmt.Sprintf("%d", snapshot.CPUs)},
+				})
+			</div>
+			<div class="dashboard-slot span-third">
+				@Metric("memory", "Memory", snapshot.MemoryPercent, formatBytes(snapshot.MemoryUsed), "of "+formatBytes(snapshot.MemoryTotal), "orange", []MetricDetail{
+					{Label: "Available", Value: formatBytes(snapshot.MemoryAvailable)},
+					{Label: "Cached", Value: formatBytes(snapshot.MemoryCached)},
+					{Label: "Swap", Value: formatUsage(snapshot.SwapUsed, snapshot.SwapTotal)},
+				})
+			</div>
+			<div class="dashboard-slot span-third">
+				@Metric("disk", "Persistent storage", snapshot.DiskPercent, formatBytes(snapshot.DiskUsed), formatBytes(snapshot.DiskFree)+" free", "blue", []MetricDetail{
+					{Label: "Capacity", Value: formatBytes(snapshot.DiskTotal)},
+					{Label: "Inodes used", Value: formatInodePercent(snapshot)},
+					{Label: "Inodes free", Value: formatInodeFree(snapshot)},
+				})
+			</div>
 			<div class="dashboard-slot span-half">
 				<article class="card">
-					<div class="card-heading"><span class="card-icon blue">@web.Icon("network")</span><div><h2>Network totals</h2><p>Excludes loopback traffic</p></div></div>
-					<div class="mini-list">
-						<div class="mini-row"><div><strong>Received</strong><small>Since boot</small></div><span class="version">{ formatBytes(snapshot.NetworkReceive) }</span></div>
-						<div class="mini-row"><div><strong>Sent</strong><small>Since boot</small></div><span class="version">{ formatBytes(snapshot.NetworkSend) }</span></div>
+					<div class="card-heading"><span class="card-icon blue">@web.Icon("network")</span><div><h2>Network</h2><p>{ formatBytes(snapshot.NetworkReceive) } received / { formatBytes(snapshot.NetworkSend) } sent since boot</p></div></div>
+					<div class="mini-list network-list">
+						for _, network := range snapshot.NetworkInterfaces {
+							<div class="mini-row network-row">
+								<div><strong>{ network.Name }</strong><small>{ networkDetail(network) }</small></div>
+								<div class="network-totals"><span>RX { formatBytes(network.Receive) }</span><span>TX { formatBytes(network.Send) }</span></div>
+							</div>
+						}
+						if len(snapshot.NetworkInterfaces) == 0 {
+							<div class="mini-row"><div><strong>No non-loopback interfaces</strong><small>Interface telemetry is unavailable</small></div></div>
+						}
 					</div>
 				</article>
 			</div>

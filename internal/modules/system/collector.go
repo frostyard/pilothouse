@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,30 +26,72 @@ type LinuxCollector struct {
 }
 
 type Snapshot struct {
-	CPUPercent     float64
-	CPUs           int
-	DiskFree       uint64
-	DiskPercent    float64
-	DiskTotal      uint64
-	DiskUsed       uint64
-	Hostname       string
-	Kernel         string
-	Load1          float64
-	Load15         float64
-	Load5          float64
-	MemoryPercent  float64
-	MemoryTotal    uint64
-	MemoryUsed     uint64
-	NetworkReceive uint64
-	NetworkSend    uint64
-	OS             string
-	Uptime         time.Duration
-	Version        string
+	CPUUserPercent    float64
+	CPUSystemPercent  float64
+	CPUIOWaitPercent  float64
+	CPUPercent        float64
+	CPUs              int
+	DiskFree          uint64
+	DiskPercent       float64
+	DiskTotal         uint64
+	DiskUsed          uint64
+	InodesFree        uint64
+	InodesPercent     float64
+	InodesTotal       uint64
+	InodesUsed        uint64
+	Hostname          string
+	Kernel            string
+	Load1             float64
+	Load15            float64
+	Load5             float64
+	MemoryAvailable   uint64
+	MemoryCached      uint64
+	MemoryPercent     float64
+	MemoryTotal       uint64
+	MemoryUsed        uint64
+	NetworkInterfaces []NetworkInterface
+	NetworkReceive    uint64
+	NetworkSend       uint64
+	OS                string
+	SwapPercent       float64
+	SwapTotal         uint64
+	SwapUsed          uint64
+	Uptime            time.Duration
+	Version           string
+}
+
+type NetworkInterface struct {
+	Name      string
+	Receive   uint64
+	Send      uint64
+	SpeedMbps uint64
+	State     string
 }
 
 type cpuTimes struct {
-	idle  uint64
-	total uint64
+	idle   uint64
+	iowait uint64
+	system uint64
+	total  uint64
+	user   uint64
+}
+
+type memoryStats struct {
+	available uint64
+	cached    uint64
+	total     uint64
+	used      uint64
+	swapTotal uint64
+	swapUsed  uint64
+}
+
+type diskStats struct {
+	free        uint64
+	inodesFree  uint64
+	inodesTotal uint64
+	inodesUsed  uint64
+	total       uint64
+	used        uint64
 }
 
 func NewLinuxCollector(root string) *LinuxCollector {
@@ -76,11 +119,11 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	memoryTotal, memoryUsed, err := c.readMemory()
+	memory, err := c.readMemory()
 	if err != nil {
 		return Snapshot{}, err
 	}
-	diskTotal, diskUsed, diskFree, err := c.readDisk()
+	disk, err := c.readDisk()
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -88,7 +131,7 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	networkReceive, networkSend, err := c.readNetwork()
+	interfaces, networkReceive, networkSend, err := c.readNetwork()
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -109,36 +152,68 @@ func (c *LinuxCollector) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
+	cpuUser, cpuSystem, cpuIOWait := cpuBreakdown(first, second)
 	return Snapshot{
-		CPUPercent:     cpuPercent(first, second),
-		CPUs:           runtime.NumCPU(),
-		DiskFree:       diskFree,
-		DiskPercent:    percent(diskUsed, diskTotal),
-		DiskTotal:      diskTotal,
-		DiskUsed:       diskUsed,
-		Hostname:       hostname,
-		Kernel:         kernel,
-		Load1:          load1,
-		Load15:         load15,
-		Load5:          load5,
-		MemoryPercent:  percent(memoryUsed, memoryTotal),
-		MemoryTotal:    memoryTotal,
-		MemoryUsed:     memoryUsed,
-		NetworkReceive: networkReceive,
-		NetworkSend:    networkSend,
-		OS:             osName,
-		Uptime:         uptime,
-		Version:        version,
+		CPUUserPercent:    cpuUser,
+		CPUSystemPercent:  cpuSystem,
+		CPUIOWaitPercent:  cpuIOWait,
+		CPUPercent:        cpuPercent(first, second),
+		CPUs:              runtime.NumCPU(),
+		DiskFree:          disk.free,
+		DiskPercent:       percent(disk.used, disk.total),
+		DiskTotal:         disk.total,
+		DiskUsed:          disk.used,
+		InodesFree:        disk.inodesFree,
+		InodesPercent:     percent(disk.inodesUsed, disk.inodesTotal),
+		InodesTotal:       disk.inodesTotal,
+		InodesUsed:        disk.inodesUsed,
+		Hostname:          hostname,
+		Kernel:            kernel,
+		Load1:             load1,
+		Load15:            load15,
+		Load5:             load5,
+		MemoryAvailable:   memory.available,
+		MemoryCached:      memory.cached,
+		MemoryPercent:     percent(memory.used, memory.total),
+		MemoryTotal:       memory.total,
+		MemoryUsed:        memory.used,
+		NetworkInterfaces: interfaces,
+		NetworkReceive:    networkReceive,
+		NetworkSend:       networkSend,
+		OS:                osName,
+		SwapPercent:       percent(memory.swapUsed, memory.swapTotal),
+		SwapTotal:         memory.swapTotal,
+		SwapUsed:          memory.swapUsed,
+		Uptime:            uptime,
+		Version:           version,
 	}, nil
 }
 
 func cpuPercent(first, second cpuTimes) float64 {
-	total := second.total - first.total
+	total := counterDelta(first.total, second.total)
 	if total == 0 {
 		return 0
 	}
-	idle := second.idle - first.idle
-	return clamp(float64(total-idle) / float64(total) * 100)
+	idle := counterDelta(first.idle, second.idle)
+	return clamp(float64(total-min(total, idle)) / float64(total) * 100)
+}
+
+func cpuBreakdown(first, second cpuTimes) (float64, float64, float64) {
+	total := counterDelta(first.total, second.total)
+	if total == 0 {
+		return 0, 0, 0
+	}
+	share := func(before, after uint64) float64 {
+		return clamp(float64(counterDelta(before, after)) / float64(total) * 100)
+	}
+	return share(first.user, second.user), share(first.system, second.system), share(first.iowait, second.iowait)
+}
+
+func counterDelta(before, after uint64) uint64 {
+	if after < before {
+		return 0
+	}
+	return after - before
 }
 
 func percent(used, total uint64) float64 {
@@ -172,7 +247,7 @@ func (c *LinuxCollector) readCPU() (cpuTimes, error) {
 	if len(fields) < 5 || fields[0] != "cpu" {
 		return cpuTimes{}, fmt.Errorf("parse proc/stat: missing aggregate cpu row")
 	}
-	var values []uint64
+	values := make([]uint64, 0, len(fields)-1)
 	for _, field := range fields[1:] {
 		parsed, err := strconv.ParseUint(field, 10, 64)
 		if err != nil {
@@ -181,24 +256,33 @@ func (c *LinuxCollector) readCPU() (cpuTimes, error) {
 		values = append(values, parsed)
 	}
 	var total uint64
-	for _, value := range values {
+	for _, value := range values[:min(len(values), 8)] {
 		total += value
 	}
 	idle := values[3]
 	if len(values) > 4 {
 		idle += values[4]
 	}
-	return cpuTimes{idle: idle, total: total}, nil
+	result := cpuTimes{idle: idle, total: total, user: values[0] + values[1], system: values[2]}
+	if len(values) > 4 {
+		result.iowait = values[4]
+	}
+	if len(values) > 6 {
+		result.system += values[5] + values[6]
+	}
+	return result, nil
 }
 
-func (c *LinuxCollector) readDisk() (uint64, uint64, uint64, error) {
+func (c *LinuxCollector) readDisk() (diskStats, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(c.disk, &stat); err != nil {
-		return 0, 0, 0, fmt.Errorf("read disk usage: %w", err)
+		return diskStats{}, fmt.Errorf("read disk usage: %w", err)
 	}
 	total := stat.Blocks * uint64(stat.Bsize)
 	free := stat.Bavail * uint64(stat.Bsize)
-	return total, total - free, free, nil
+	inodesFree := stat.Ffree
+	inodesUsed := stat.Files - min(stat.Files, inodesFree)
+	return diskStats{free: free, inodesFree: inodesFree, inodesTotal: stat.Files, inodesUsed: inodesUsed, total: total, used: total - min(total, free)}, nil
 }
 
 func (c *LinuxCollector) readLoad() (float64, float64, float64, error) {
@@ -220,10 +304,10 @@ func (c *LinuxCollector) readLoad() (float64, float64, float64, error) {
 	return values[0], values[1], values[2], nil
 }
 
-func (c *LinuxCollector) readMemory() (uint64, uint64, error) {
+func (c *LinuxCollector) readMemory() (memoryStats, error) {
 	file, err := os.Open(c.path("proc/meminfo"))
 	if err != nil {
-		return 0, 0, fmt.Errorf("read proc/meminfo: %w", err)
+		return memoryStats{}, fmt.Errorf("read proc/meminfo: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 	values := map[string]uint64{}
@@ -239,24 +323,30 @@ func (c *LinuxCollector) readMemory() (uint64, uint64, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, 0, fmt.Errorf("scan proc/meminfo: %w", err)
+		return memoryStats{}, fmt.Errorf("scan proc/meminfo: %w", err)
 	}
 	total := values["MemTotal"]
 	available := values["MemAvailable"]
 	if total == 0 {
-		return 0, 0, fmt.Errorf("parse proc/meminfo: MemTotal missing")
+		return memoryStats{}, fmt.Errorf("parse proc/meminfo: MemTotal missing")
 	}
-	return total, total - available, nil
+	available = min(total, available)
+	cached := values["Buffers"] + values["Cached"] + values["SReclaimable"]
+	cached -= min(cached, values["Shmem"])
+	swapTotal := values["SwapTotal"]
+	swapFree := min(swapTotal, values["SwapFree"])
+	return memoryStats{available: available, cached: cached, total: total, used: total - available, swapTotal: swapTotal, swapUsed: swapTotal - swapFree}, nil
 }
 
-func (c *LinuxCollector) readNetwork() (uint64, uint64, error) {
+func (c *LinuxCollector) readNetwork() ([]NetworkInterface, uint64, uint64, error) {
 	file, err := os.Open(c.path("proc/net/dev"))
 	if err != nil {
-		return 0, 0, fmt.Errorf("read proc/net/dev: %w", err)
+		return nil, 0, 0, fmt.Errorf("read proc/net/dev: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 	var receive uint64
 	var send uint64
+	var interfaces []NetworkInterface
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -276,12 +366,43 @@ func (c *LinuxCollector) readNetwork() (uint64, uint64, error) {
 		if rxErr == nil && txErr == nil {
 			receive += rx
 			send += tx
+			name := strings.TrimSpace(parts[0])
+			interfaces = append(interfaces, NetworkInterface{Name: name, Receive: rx, Send: tx, State: c.networkState(name), SpeedMbps: c.networkSpeed(name)})
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, 0, fmt.Errorf("scan proc/net/dev: %w", err)
+		return nil, 0, 0, fmt.Errorf("scan proc/net/dev: %w", err)
 	}
-	return receive, send, nil
+	slices.SortFunc(interfaces, func(a, b NetworkInterface) int {
+		if (a.State == "up") != (b.State == "up") {
+			if a.State == "up" {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return interfaces, receive, send, nil
+}
+
+func (c *LinuxCollector) networkState(name string) string {
+	value, err := c.readTrimmed(filepath.Join("sys/class/net", name, "operstate"))
+	if err != nil || value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func (c *LinuxCollector) networkSpeed(name string) uint64 {
+	value, err := c.readTrimmed(filepath.Join("sys/class/net", name, "speed"))
+	if err != nil {
+		return 0
+	}
+	speed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return speed
 }
 
 func (c *LinuxCollector) readOSRelease() (string, string, error) {

@@ -23,9 +23,9 @@ func (m *Module) Dashboard(ctx context.Context, _ platform.Host) ([]platform.Das
 	}
 	return []platform.DashboardCard{
 		{Component: Hero(snapshot), Order: 10, Span: platform.SpanFull},
-		{Component: Metric("cpu", "CPU load", snapshot.CPUPercent, fmt.Sprintf("%.1f%%", snapshot.CPUPercent), fmt.Sprintf("%d logical cores", snapshot.CPUs), "green"), Order: 20, Span: platform.SpanThird},
-		{Component: Metric("memory", "Memory", snapshot.MemoryPercent, formatBytes(snapshot.MemoryUsed), fmt.Sprintf("of %s", formatBytes(snapshot.MemoryTotal)), "orange"), Order: 21, Span: platform.SpanThird},
-		{Component: Metric("disk", "Persistent storage", snapshot.DiskPercent, formatBytes(snapshot.DiskUsed), fmt.Sprintf("%s free", formatBytes(snapshot.DiskFree)), "blue"), Order: 22, Span: platform.SpanThird},
+		{Component: Metric("cpu", "CPU load", snapshot.CPUPercent, fmt.Sprintf("%.1f%%", snapshot.CPUPercent), fmt.Sprintf("%d logical cores", snapshot.CPUs), "green", nil), Order: 20, Span: platform.SpanThird},
+		{Component: Metric("memory", "Memory", snapshot.MemoryPercent, formatBytes(snapshot.MemoryUsed), fmt.Sprintf("of %s", formatBytes(snapshot.MemoryTotal)), "orange", nil), Order: 21, Span: platform.SpanThird},
+		{Component: Metric("disk", "Persistent storage", snapshot.DiskPercent, formatBytes(snapshot.DiskUsed), fmt.Sprintf("%s free", formatBytes(snapshot.DiskFree)), "blue", nil), Order: 22, Span: platform.SpanThird},
 		{Component: Resources(snapshot), Order: 30, Span: platform.SpanHalf},
 	}, nil
 }
@@ -108,4 +108,49 @@ func formatUptime(value int64) string {
 	}
 	minutes := (value % 3600) / 60
 	return fmt.Sprintf("%dh %dm", hours, minutes)
+}
+
+func formatUsage(used, total uint64) string {
+	if total == 0 {
+		return "Not configured"
+	}
+	return fmt.Sprintf("%s / %s", formatBytes(used), formatBytes(total))
+}
+
+func formatCount(value uint64) string {
+	const unit = 1000
+	if value < unit {
+		return fmt.Sprintf("%d", value)
+	}
+	divisor := float64(unit)
+	suffix := "K"
+	for _, next := range []string{"M", "B", "T"} {
+		if float64(value)/divisor < unit {
+			break
+		}
+		divisor *= unit
+		suffix = next
+	}
+	return fmt.Sprintf("%.1f%s", float64(value)/divisor, suffix)
+}
+
+func networkDetail(network NetworkInterface) string {
+	if network.SpeedMbps == 0 {
+		return network.State + " / speed unknown"
+	}
+	return fmt.Sprintf("%s / %d Mbps", network.State, network.SpeedMbps)
+}
+
+func formatInodePercent(snapshot Snapshot) string {
+	if snapshot.InodesTotal == 0 {
+		return "Not available"
+	}
+	return fmt.Sprintf("%.1f%%", snapshot.InodesPercent)
+}
+
+func formatInodeFree(snapshot Snapshot) string {
+	if snapshot.InodesTotal == 0 {
+		return "Not available"
+	}
+	return formatCount(snapshot.InodesFree)
 }
