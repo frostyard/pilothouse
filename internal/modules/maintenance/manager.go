@@ -79,7 +79,14 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, fmt.Errorf("list maintenance jobs: %w", err)
 	}
-	state := State{Jobs: make([]Job, 0, len(jobRecords)), OSVersion: m.osVersion(), Updates: available}
+	// Normalize slice fields to non-nil so they serialize as JSON `[]` rather
+	// than `null` over the broker protocol. Downstream JSON consumers should
+	// not have to special-case null vs empty array (the same contract updex's
+	// feature output now follows).
+	if available == nil {
+		available = []sysext.AvailableUpdate{}
+	}
+	state := State{Jobs: make([]Job, 0, len(jobRecords)), OSVersion: m.osVersion(), Updates: available, RebootReasons: []string{}}
 	for _, job := range jobRecords {
 		state.Jobs = append(state.Jobs, Job{ID: job.ID, Action: job.Action, Resource: job.Resource, Status: job.Status, ErrorCategory: job.ErrorCategory, RebootRequired: job.RebootRequired})
 	}
