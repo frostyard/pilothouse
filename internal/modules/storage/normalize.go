@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"reflect"
 	"slices"
 	"sort"
 	"time"
@@ -47,7 +46,7 @@ func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, erro
 	for i, collected := range results {
 		statuses[i] = BackendStatus{Availability: availabilityFor(collected.err), CollectedAt: collectedAt, Name: collected.name}
 		if collected.core && collected.err == nil {
-			if err := state.apply(collected.name, collected.result); err != nil {
+			if err := state.apply(collected.name, collected.result, false); err != nil {
 				return Snapshot{}, err
 			}
 		}
@@ -56,11 +55,11 @@ func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	for i, collected := range results {
-		if collected.core || collected.err != nil {
+		if collected.core {
 			continue
 		}
 		candidate := state.clone()
-		if err := candidate.apply(collected.name, collected.result); err != nil || candidate.validate() != nil {
+		if err := candidate.apply(collected.name, collected.result, true); err != nil || candidate.validate() != nil {
 			statuses[i].Availability = BackendUnavailable
 			continue
 		}
@@ -114,15 +113,21 @@ func availabilityFor(err error) Availability {
 	return BackendUnavailable
 }
 
-func (a *aggregate) apply(backend string, result AdapterResult) error {
+func (a *aggregate) apply(backend string, result AdapterResult, enrich bool) error {
 	if result.Truncated {
 		a.truncated[backend] = true
 	}
 	for _, resource := range result.Resources {
 		if existing, ok := a.resources[resource.ID]; ok {
-			if !reflect.DeepEqual(existing, resource) {
+			if !enrich {
 				return fmt.Errorf("conflicting resource %q", resource.ID)
 			}
+			existing.Details = mergeDetails(existing.Details, resource.Details)
+			existing.Health = higherHealth(existing.Health, resource.Health)
+			if resource.State != "" {
+				existing.State = resource.State
+			}
+			a.resources[resource.ID] = existing
 			continue
 		}
 		if len(a.resources) == maxResources {
@@ -171,6 +176,13 @@ func (a *aggregate) apply(backend string, result AdapterResult) error {
 }
 
 func (a aggregate) validate() error {
+	for _, finding := range a.findings {
+		if finding.ResourceID != "" {
+			if _, ok := a.resources[finding.ResourceID]; !ok {
+				return fmt.Errorf("finding has missing resource %q", finding.ResourceID)
+			}
+		}
+	}
 	for _, relation := range a.relations {
 		if _, ok := a.resources[relation.From]; !ok {
 			return fmt.Errorf("relation has missing endpoint %q", relation.From)

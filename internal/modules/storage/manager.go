@@ -132,22 +132,22 @@ func (m *SystemManager) State(ctx context.Context) (Snapshot, error) {
 		}
 	}
 	for index, enricher := range m.enrichers {
-		result := enriched[index]
-		result.Resources = nil
-		collected = append(collected, collectedResult{name: enricher.Name(), result: result, err: enricherErrors[index]})
+		collected = append(collected, collectedResult{name: enricher.Name(), result: enriched[index], err: enricherErrors[index]})
 	}
 	snapshot, err := normalize(m.now(), collected)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	for i := range snapshot.Backends {
-		for _, enricher := range m.enrichers {
+	for index, enricher := range m.enrichers {
+		if enricherErrors[index] == nil {
+			continue
+		}
+		for i := range snapshot.Backends {
 			if snapshot.Backends[i].Name == enricher.Name() {
 				snapshot.Backends[i].Availability = enricherAvailability(enricher, collected)
 			}
 		}
 	}
-	mergeEnrichedResources(&snapshot, enriched)
 	return snapshot, nil
 }
 

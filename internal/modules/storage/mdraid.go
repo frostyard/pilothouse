@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,7 @@ type mdArray struct {
 	active   int
 	members  []string
 	recovery float64
+	state    string
 }
 
 type mdraidEnricher struct {
@@ -39,7 +41,7 @@ type mdraidEnricher struct {
 func NewMDRAIDEnricher(root, mdadmPath string) Enricher { return newMDRAIDEnricher(root, mdadmPath) }
 
 func newMDRAIDEnricher(root, mdadmPath string) *mdraidEnricher {
-	return &mdraidEnricher{root: root, mdadm: mdadmPath, readFile: os.ReadFile, runner: commandRunner{limit: maxAdapterBytes}}
+	return &mdraidEnricher{root: root, mdadm: mdadmPath, readFile: readMDStat, runner: commandRunner{limit: maxAdapterBytes}}
 }
 
 func (*mdraidEnricher) Name() string { return mdraidEnricherName }
@@ -68,21 +70,34 @@ func (e *mdraidEnricher) Collect(ctx context.Context, inventory Inventory) (Adap
 		if err != nil {
 			return AdapterResult{}, fmt.Errorf("read MD detail for %s: %w", path, err)
 		}
-		detail, err := parseMDDetail(detailOutput, path)
+		detail, err := parseMDDetail(detailOutput, array.name)
 		if err != nil {
 			return AdapterResult{}, err
 		}
-		if detail.level != array.level {
+		if array.level != "" && detail.level != array.level {
 			return AdapterResult{}, fmt.Errorf("MD detail level does not match %s", path)
 		}
 
 		raidID := stableID("raid", array.name)
-		health, state := HealthHealthy, "available"
-		if array.active < array.expected {
-			health, state = HealthCritical, "degraded"
-			result.Findings = append(result.Findings, Finding{ResourceID: raidID, Severity: HealthCritical, Title: "RAID array is degraded", Detail: fmt.Sprintf("%d of %d members active", array.active, array.expected)})
+		if resource, ok := resources[path]; ok && (resource.Kind == "raid" || resource.Kind == "mapping") {
+			raidID = resource.ID
 		}
-		details := []Detail{{Label: "Level", Value: detail.level}, {Label: "Members", Value: fmt.Sprintf("%d of %d active", array.active, array.expected)}}
+		expected := array.expected
+		if expected == 0 {
+			expected = detail.devices
+		}
+		health, state := HealthHealthy, array.state
+		switch state {
+		case "inactive":
+			health = HealthUnknown
+		case "auto-read-only":
+			health = HealthWarning
+		}
+		if state != "inactive" && expected > 0 && array.active < expected {
+			health, state = HealthCritical, "degraded"
+			result.Findings = append(result.Findings, Finding{ResourceID: raidID, Severity: HealthCritical, Title: "RAID array is degraded", Detail: fmt.Sprintf("%d of %d members active", array.active, expected)})
+		}
+		details := []Detail{{Label: "Level", Value: detail.level}, {Label: "Members", Value: fmt.Sprintf("%d of %d active", array.active, expected)}}
 		if array.recovery != 0 {
 			details = append(details, Detail{Label: "Recovery", Value: strconv.FormatFloat(array.recovery, 'f', 1, 64) + "%"})
 		}
@@ -99,11 +114,12 @@ func (e *mdraidEnricher) Collect(ctx context.Context, inventory Inventory) (Adap
 }
 
 type mdDetail struct {
+	devices int
 	level   string
 	members []string
 }
 
-func parseMDDetail(input []byte, path string) (mdDetail, error) {
+func parseMDDetail(input []byte, name string) (mdDetail, error) {
 	values := make(map[string]string)
 	for _, line := range strings.Split(string(input), "\n") {
 		if line == "" {
@@ -122,10 +138,11 @@ func parseMDDetail(input []byte, path string) (mdDetail, error) {
 			}
 		}
 	}
-	if values["MD_DEVNAME"] != path {
-		return mdDetail{}, fmt.Errorf("MD detail does not match %s", path)
+	if values["MD_DEVNAME"] != name {
+		return mdDetail{}, fmt.Errorf("MD detail does not match %s", name)
 	}
-	if values["MD_LEVEL"] == "" || !mdMemberCount.MatchString("["+values["MD_DEVICES"]+"/0]") {
+	devices, err := strconv.Atoi(values["MD_DEVICES"])
+	if values["MD_LEVEL"] == "" || err != nil || devices <= 0 {
 		return mdDetail{}, fmt.Errorf("invalid MD detail")
 	}
 	members := make([]string, 0)
@@ -135,7 +152,23 @@ func parseMDDetail(input []byte, path string) (mdDetail, error) {
 		}
 	}
 	sort.Strings(members)
-	return mdDetail{level: values["MD_LEVEL"], members: members}, nil
+	return mdDetail{devices: devices, level: values["MD_LEVEL"], members: members}, nil
+}
+
+func readMDStat(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maxAdapterBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAdapterBytes {
+		return nil, errOutputTooLarge
+	}
+	return data, nil
 }
 
 func parseMDStat(input []byte) ([]mdArray, error) {
@@ -147,26 +180,49 @@ func parseMDStat(input []byte) ([]mdArray, error) {
 			return nil, fmt.Errorf("mdstat line exceeds limit")
 		}
 		fields := strings.Fields(line)
-		if len(fields) >= 4 && strings.HasSuffix(fields[1], ":") && mdArrayName.MatchString(fields[0]) {
-			if seen[fields[0]] {
-				return nil, fmt.Errorf("duplicate MD array %s", fields[0])
+		if len(fields) >= 2 && fields[1] == ":" {
+			current = nil
+			if !mdArrayName.MatchString(fields[0]) || seen[fields[0]] || len(fields) < 3 {
+				continue
 			}
-			if len(arrays) >= maxResources || fields[2] != "active" {
-				return nil, fmt.Errorf("invalid MD array")
+			if len(arrays) >= maxResources {
+				return nil, fmt.Errorf("MD arrays exceed limit")
 			}
-			array := mdArray{name: fields[0], level: fields[3]}
-			for _, field := range fields[4:] {
+			array := mdArray{name: fields[0]}
+			memberStart := 0
+			switch fields[2] {
+			case "active":
+				array.state = "available"
+				memberStart = 3
+				if memberStart < len(fields) && fields[memberStart] == "(auto-read-only)" {
+					array.state = "auto-read-only"
+					memberStart++
+				}
+				if memberStart >= len(fields) {
+					continue
+				}
+				array.level = fields[memberStart]
+				memberStart++
+			case "inactive":
+				array.state = "inactive"
+				memberStart = 3
+			default:
+				continue
+			}
+			valid := true
+			for _, field := range fields[memberStart:] {
 				if !strings.Contains(field, "[") {
 					continue
 				}
 				match := mdMember.FindStringSubmatch(field)
 				if match == nil {
-					return nil, fmt.Errorf("invalid MD member")
+					valid = false
+					break
 				}
 				array.members = append(array.members, match[1])
 			}
-			if len(array.members) == 0 {
-				return nil, fmt.Errorf("MD array has no members")
+			if !valid || len(array.members) == 0 {
+				continue
 			}
 			arrays, seen[array.name] = append(arrays, array), true
 			current = &arrays[len(arrays)-1]
@@ -186,7 +242,7 @@ func parseMDStat(input []byte) ([]mdArray, error) {
 		}
 	}
 	for _, array := range arrays {
-		if array.level == "" || array.expected == 0 || array.active > array.expected {
+		if (array.state != "inactive" && (array.level == "" || array.expected == 0)) || (array.expected > 0 && array.active > array.expected) {
 			return nil, fmt.Errorf("invalid MD array %s", array.name)
 		}
 	}

@@ -111,6 +111,54 @@ func TestManagerClonesInventoryForEachEnricher(t *testing.T) {
 	assert.Equal(t, []string{"/dev/sda"}, second.inventory.DevicePaths)
 }
 
+func TestManagerRetainsNewEnricherResourcesAndRelations(t *testing.T) {
+	raid := Resource{ID: "raid:one", Kind: "raid", Name: "md0", Path: "/dev/md0", Health: HealthWarning, State: "degraded"}
+	enricher := &fakeEnricher{name: "mdraid", result: AdapterResult{
+		Resources: []Resource{raid},
+		Relations: []Relation{{From: "disk:one", To: raid.ID, Kind: "member-of"}},
+		Findings:  []Finding{{ResourceID: raid.ID, Severity: HealthWarning, Title: "RAID array is degraded"}},
+	}}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{enricher})
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Contains(t, snapshot.Resources, raid)
+	assert.Contains(t, snapshot.Relations, Relation{From: "disk:one", To: raid.ID, Kind: "member-of"})
+	assert.Contains(t, snapshot.Findings, Finding{ResourceID: raid.ID, Severity: HealthWarning, Title: "RAID array is degraded"})
+	assert.Equal(t, BackendAvailable, backendStatus(snapshot.Backends, "mdraid").Availability)
+}
+
+func TestManagerMergesExistingEnricherResourceHealthDetailsAndState(t *testing.T) {
+	enricher := &fakeEnricher{name: "mdraid", result: AdapterResult{Resources: []Resource{{
+		ID: "disk:one", Health: HealthWarning, State: "degraded", Details: []Detail{{Label: "RAID", Value: "member"}},
+	}}}}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{enricher})
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	resource := snapshot.Resources[0]
+	assert.Equal(t, HealthWarning, resource.Health)
+	assert.Equal(t, "degraded", resource.State)
+	assert.Contains(t, resource.Details, Detail{Label: "RAID", Value: "member"})
+}
+
+func TestManagerLocalizesDanglingEnricherAdditions(t *testing.T) {
+	enricher := &fakeEnricher{name: "mdraid", result: AdapterResult{
+		Relations: []Relation{{From: "disk:one", To: "raid:missing", Kind: "member-of"}},
+		Findings:  []Finding{{ResourceID: "raid:missing", Severity: HealthWarning, Title: "RAID array is degraded"}},
+	}}
+	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{enricher})
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.NotContains(t, snapshot.Relations, Relation{From: "disk:one", To: "raid:missing", Kind: "member-of"})
+	assert.NotContains(t, snapshot.Findings, Finding{ResourceID: "raid:missing", Severity: HealthWarning, Title: "RAID array is degraded"})
+	assert.Equal(t, BackendUnavailable, backendStatus(snapshot.Backends, "mdraid").Availability)
+}
+
 func TestManagerMapsUnsupportedEnricher(t *testing.T) {
 	manager := newSystemManagerWithEnrichers([]Adapter{coreFixtureAdapter()}, []Enricher{NewUnsupportedEnricher("smart")})
 
@@ -323,6 +371,15 @@ func backendStatuses(backends []BackendStatus) []BackendStatus {
 		statuses[index].CollectedAt = time.Time{}
 	}
 	return statuses
+}
+
+func backendStatus(backends []BackendStatus, name string) BackendStatus {
+	for _, backend := range backends {
+		if backend.Name == name {
+			return backend
+		}
+	}
+	return BackendStatus{}
 }
 
 func existingDeviceLstat(t *testing.T) func(string) (os.FileInfo, error) {

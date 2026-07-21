@@ -1,6 +1,6 @@
 MD_LEVEL=raid1
 MD_DEVICES=2
-MD_DEVNAME=/dev/md0
+MD_DEVNAME=md0
 MD_DEVICE_sda1_DEV=/dev/sda1
 MD_DEVICE_sda1_ROLE=0
 MD_DEVICE_sda1_STATE=in_sync
