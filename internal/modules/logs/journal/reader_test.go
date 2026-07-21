@@ -127,7 +127,47 @@ func TestReaderStopsAtWindowWithoutTruncation(t *testing.T) {
 	assert.False(t, result.Truncated)
 }
 
-func TestReaderFailsClosed(t *testing.T) {
+func TestReaderSkipsInvalidPresentationRecords(t *testing.T) {
+	validBefore := record("before", "6", "sshd.service")
+	validAfter := record("after", "5", "cron.service")
+	for _, tc := range []struct {
+		name    string
+		record  rawRecord
+		filters logs.Filters
+	}{
+		{"missing priority", rawRecord{Timestamp: fixedNow.Add(-time.Minute), Fields: map[string]string{"MESSAGE": "routine"}}, logs.Filters{Window: "1h"}},
+		{"missing message", rawRecord{Timestamp: fixedNow.Add(-time.Minute), Fields: map[string]string{"PRIORITY": "6"}}, logs.Filters{Window: "1h"}},
+		{"malformed priority", record("routine", "bad", "sshd.service"), logs.Filters{Window: "1h"}},
+		{"zero timestamp", rawRecord{Fields: map[string]string{"MESSAGE": "routine", "PRIORITY": "6"}}, logs.Filters{Window: "1h"}},
+		{"selected unit mismatch", record("routine", "6", "cron.service"), logs.Filters{Unit: "sshd.service", Window: "1h"}},
+		{"long message", record(strings.Repeat("x", messageMaxBytes+1), "6", "sshd.service"), logs.Filters{Window: "1h"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := validAfter
+			if tc.filters.Unit != "" {
+				after = record("after", "5", tc.filters.Unit)
+			}
+			result, err := testReader(&fakeSource{records: []rawRecord{validBefore, tc.record, after}}).Read(context.Background(), tc.filters, limits())
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{"before", "after"}, []string{result.Entries[0].Message, result.Entries[1].Message})
+		})
+	}
+}
+
+func TestReaderSkipsRecordsWithOversizedSourceFields(t *testing.T) {
+	for _, field := range []string{"_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER", "_COMM", "_TRANSPORT"} {
+		t.Run(field, func(t *testing.T) {
+			fields := map[string]string{"MESSAGE": "routine", "PRIORITY": "6", field: strings.Repeat("x", sourceMaxBytes+1)}
+			result, err := testReader(&fakeSource{records: []rawRecord{record("before", "6", "sshd.service"), {Timestamp: fixedNow.Add(-time.Minute), Fields: fields}, record("after", "5", "cron.service")}}).Read(context.Background(), logs.Filters{Window: "1h"}, limits())
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{"before", "after"}, []string{result.Entries[0].Message, result.Entries[1].Message})
+		})
+	}
+}
+
+func TestReaderFailsClosedForIterationAndContextErrors(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, tc := range []struct {
@@ -137,12 +177,6 @@ func TestReaderFailsClosed(t *testing.T) {
 		filters logs.Filters
 	}{
 		{"canceled context", canceled, &fakeSource{}, logs.Filters{Window: "1h"}},
-		{"missing message", context.Background(), &fakeSource{records: []rawRecord{{Timestamp: fixedNow, Fields: map[string]string{"PRIORITY": "6"}}}}, logs.Filters{Window: "1h"}},
-		{"malformed priority", context.Background(), &fakeSource{records: []rawRecord{record("routine", "bad", "sshd.service")}}, logs.Filters{Window: "1h"}},
-		{"zero timestamp", context.Background(), &fakeSource{records: []rawRecord{{Fields: map[string]string{"MESSAGE": "routine", "PRIORITY": "6"}}}}, logs.Filters{Window: "1h"}},
-		{"selected unit mismatch", context.Background(), &fakeSource{records: []rawRecord{record("routine", "6", "cron.service")}}, logs.Filters{Unit: "sshd.service", Window: "1h"}},
-		{"long message", context.Background(), &fakeSource{records: []rawRecord{record(strings.Repeat("x", 64*1024+1), "6", "sshd.service")}}, logs.Filters{Window: "1h"}},
-		{"long source", context.Background(), &fakeSource{records: []rawRecord{record("routine", "6", strings.Repeat("x", 4*1024+1))}}, logs.Filters{Window: "1h"}},
 		{"previous error", context.Background(), &fakeSource{err: errors.New("previous")}, logs.Filters{Window: "1h"}},
 		{"record error", context.Background(), &fakeSource{records: []rawRecord{record("routine", "6", "sshd.service")}, recordErr: errors.New("record")}, logs.Filters{Window: "1h"}},
 	} {

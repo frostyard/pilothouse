@@ -26,7 +26,7 @@ func (*Module) Manifest() platform.Manifest {
 }
 
 func normalizeHTTPFilters(filters Filters) Filters {
-	filters.Query = truncateQuery(strings.TrimSpace(filters.Query))
+	filters.Query = truncateQuery(strings.ReplaceAll(strings.TrimSpace(filters.Query), "\x00", ""))
 	if _, ok := PriorityNumber(filters.Priority); !ok {
 		filters.Priority = ""
 	}

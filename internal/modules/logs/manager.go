@@ -33,7 +33,7 @@ var (
 		"15m": 15 * time.Minute, "1h": time.Hour,
 		"6h": 6 * time.Hour, "24h": 24 * time.Hour,
 	}
-	unitNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\-]+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)$`)
+	unitNamePattern = regexp.MustCompile(`^(?:[A-Za-z0-9:_.@\-]|\\x[0-9A-Fa-f]{2})+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)$`)
 )
 
 type Filters struct {
@@ -140,7 +140,8 @@ func validFilters(filters Filters) error {
 }
 
 func validUnitName(name string) bool {
-	return unitNamePattern.MatchString(name) && !strings.Contains(name, "..")
+	lowerName := strings.ToLower(name)
+	return unitNamePattern.MatchString(name) && !strings.Contains(name, "..") && !strings.Contains(name, "/") && !strings.Contains(lowerName, "\\x2f") && !strings.Contains(lowerName, "\\x00")
 }
 
 func NewSystemManager(reader JournalReader) (*SystemManager, error) {

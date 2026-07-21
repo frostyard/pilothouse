@@ -14,15 +14,16 @@ import (
 type fakeSystemdClient struct {
 	statuses []dbus.UnitStatus
 	files    []dbus.UnitFile
-	err      error
+	unitsErr error
+	filesErr error
 }
 
 func (f *fakeSystemdClient) ListUnitsContext(context.Context) ([]dbus.UnitStatus, error) {
-	return f.statuses, f.err
+	return f.statuses, f.unitsErr
 }
 
 func (f *fakeSystemdClient) ListUnitFilesContext(context.Context) ([]dbus.UnitFile, error) {
-	return f.files, f.err
+	return f.files, f.filesErr
 }
 
 type fakeJournalReader struct {
@@ -41,10 +42,10 @@ func (f *fakeJournalReader) Read(_ context.Context, filters Filters, limits Jour
 
 func TestParseBrokerFiltersAcceptsOnlyFixedGrammar(t *testing.T) {
 	valid, err := ParseBrokerFilters(map[string]string{
-		"query": "panic", "priority": "warning", "unit": "session-4.scope", "window": "6h",
+		"query": "panic", "priority": "warning", "unit": "session\\x2d4.scope", "window": "6h",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, Filters{Query: "panic", Priority: "warning", Unit: "session-4.scope", Window: "6h"}, valid)
+	assert.Equal(t, Filters{Query: "panic", Priority: "warning", Unit: "session\\x2d4.scope", Window: "6h"}, valid)
 
 	defaults, err := ParseBrokerFilters(nil)
 	require.NoError(t, err)
@@ -55,6 +56,7 @@ func TestParseBrokerFiltersAcceptsOnlyFixedGrammar(t *testing.T) {
 		{"priority": "verbose"},
 		{"window": "7d"},
 		{"unit": "../system.service"},
+		{"unit": "system\\x2fjournal.service"},
 		{"unit": "missing.suffix"},
 		{"query": strings.Repeat("x", 1025)},
 		{"query": strings.Repeat("界", 201)},
@@ -103,7 +105,13 @@ func TestSystemManagerFailsClosedForInvalidFiltersAndDependencies(t *testing.T) 
 	}{
 		{
 			name:    "unit list failure",
-			client:  &fakeSystemdClient{err: errors.New("secret backend detail")},
+			client:  &fakeSystemdClient{unitsErr: errors.New("secret backend detail")},
+			reader:  &fakeJournalReader{},
+			filters: Filters{Window: "1h"},
+		},
+		{
+			name:    "unit file list failure",
+			client:  &fakeSystemdClient{filesErr: errors.New("secret backend detail")},
 			reader:  &fakeJournalReader{},
 			filters: Filters{Window: "1h"},
 		},

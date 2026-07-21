@@ -87,6 +87,12 @@ func TestNormalizeHTTPFiltersASCIIQueryHitsRuneCapFirst(t *testing.T) {
 	assert.LessOrEqual(t, len(filters.Query), queryMaxBytes)
 }
 
+func TestNormalizeHTTPFiltersStripsNUL(t *testing.T) {
+	filters := normalizeHTTPFilters(Filters{Query: "panic\x00now"})
+
+	assert.Equal(t, "panicnow", filters.Query)
+}
+
 func TestNormalizeHTTPFiltersKeepsValidValues(t *testing.T) {
 	filters := normalizeHTTPFilters(Filters{
 		Query: "query", Priority: "warning", Unit: "sshd.service", Window: "6h",
@@ -104,6 +110,9 @@ func TestLogsPageRequiresAdministratorWithoutBrokerCall(t *testing.T) {
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/logs", nil))
 
 	assert.Zero(t, host.queryCalls)
+	assert.Equal(t, "logs", host.page.Active)
+	assert.Equal(t, "Logs", host.page.Title)
+	assert.Equal(t, "system journal", host.page.Eyebrow)
 	assert.Contains(t, response.Body.String(), "Administrator access required")
 	assert.Contains(t, response.Body.String(), "<svg")
 	assert.NotContains(t, response.Body.String(), "@web.")

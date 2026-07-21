@@ -12,7 +12,9 @@ import (
 func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
 		if !host.Identity(r).Admin {
-			_ = host.Render(w, r, platform.Page{Body: AccessDenied()})
+			_ = host.Render(w, r, platform.Page{
+				Active: "logs", Body: AccessDenied(), Eyebrow: "system journal", Title: "Logs",
+			})
 			return
 		}
 

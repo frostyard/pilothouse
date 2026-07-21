@@ -21,6 +21,8 @@ func New() Reader {
 		if err != nil {
 			return nil, err
 		}
+		// Retain one byte beyond the presentation limit so oversized messages are
+		// detected and skipped instead of silently appearing truncated.
 		if err := journal.SetDataThreshold(uint64(messageMaxBytes + len("MESSAGE=") + 1)); err != nil {
 			_ = journal.Close()
 			return nil, err
@@ -39,20 +41,28 @@ func (s *journalSource) Record() (rawRecord, error) {
 	if err != nil {
 		return rawRecord{}, err
 	}
+	fields, err := recordFields(s.journal.GetData)
+	if err != nil {
+		return rawRecord{}, err
+	}
+	return rawRecord{Timestamp: time.UnixMicro(int64(usec)), Fields: fields}, nil
+}
+
+func recordFields(getData func(string) (string, error)) (map[string]string, error) {
 	fields := make(map[string]string, 6)
 	for _, name := range []string{"PRIORITY", "MESSAGE", "_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER", "_COMM", "_TRANSPORT"} {
-		raw, err := s.journal.GetData(name)
+		raw, err := getData(name)
 		if err != nil {
-			if errors.Is(err, syscall.ENOENT) && name != "PRIORITY" && name != "MESSAGE" {
+			if errors.Is(err, syscall.ENOENT) {
 				continue
 			}
-			return rawRecord{}, err
+			return nil, err
 		}
 		field, value, ok := strings.Cut(raw, "=")
 		if !ok || field != name {
-			return rawRecord{}, errors.New("journal record has malformed field")
+			return nil, errors.New("journal record has malformed field")
 		}
 		fields[name] = value
 	}
-	return rawRecord{Timestamp: time.UnixMicro(int64(usec)), Fields: fields}, nil
+	return fields, nil
 }
