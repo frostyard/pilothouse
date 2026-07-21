@@ -34,7 +34,7 @@ func TestPageRendersFiltersAndUnitDescriptionSpacing(t *testing.T) {
 	require.NoError(t, Page(state, filters, options, "token", true).Render(context.Background(), &output))
 
 	html := output.String()
-	for _, value := range []string{`type="search"`, `value="backup"`, `value="failed" selected`, `value="timer" selected`, `value="enabled" selected`, `name="query" value="backup"`, `name="status" value="failed"`, `name="type" value="timer"`, `name="unit-file" value="enabled"`, `href="/services"`, "Reset filters", "1 of 4 shown", `<small class="table-detail">Nightly backup</small>`} {
+	for _, value := range []string{`class="card filter-bar"`, `class="filter-bar-actions"`, `type="search"`, `value="backup"`, `value="failed" selected`, `value="timer" selected`, `value="enabled" selected`, `name="query" value="backup"`, `name="status" value="failed"`, `name="type" value="timer"`, `name="unit-file" value="enabled"`, `href="/services"`, "Reset filters", "1 of 4 shown", `<small class="table-detail">Nightly backup</small>`} {
 		assert.Contains(t, html, value)
 	}
 	assert.NotContains(t, html, "@web.")
