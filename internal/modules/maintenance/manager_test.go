@@ -2,8 +2,10 @@ package maintenance
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,4 +89,31 @@ func TestRebootUsesFixedSystemctlArguments(t *testing.T) {
 	require.NoError(t, manager.Reboot(context.Background()))
 	assert.Equal(t, "systemctl", runner.name)
 	assert.Equal(t, []string{"reboot", "--no-wall", "--no-block"}, runner.args)
+}
+
+// TestStateSliceFieldsSerializeAsArrays verifies that when there are no
+// updates and no reboot reasons, the broker-serialized maintenance state
+// uses JSON `[]` for the slice fields, never `null`. Downstream JSON
+// consumers should not have to special-case null vs empty array.
+func TestStateSliceFieldsSerializeAsArrays(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "proc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
+
+	// fakeUpdates{} returns a nil updates slice from Check(); no reboot marker
+	// and no jobs means RebootReasons and Jobs are empty too.
+	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, &fakeRunner{}, root)
+	state, err := manager.State(context.Background())
+	require.NoError(t, err)
+
+	assert.NotNil(t, state.Updates, "Updates must be non-nil to serialize as []")
+	assert.NotNil(t, state.RebootReasons, "RebootReasons must be non-nil to serialize as []")
+
+	b, err := json.Marshal(state)
+	require.NoError(t, err)
+	out := string(b)
+	assert.Contains(t, out, `"updates":[]`)
+	assert.Contains(t, out, `"reboot_reasons":[]`)
+	assert.False(t, strings.Contains(out, `"updates":null`), "updates must not be null")
+	assert.False(t, strings.Contains(out, `"reboot_reasons":null`), "reboot_reasons must not be null")
 }
