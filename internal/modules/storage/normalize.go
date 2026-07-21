@@ -156,6 +156,19 @@ func (a *aggregate) apply(backend string, result AdapterResult, enrich bool) err
 		a.relations[key] = relation
 	}
 	for _, mount := range result.Mounts {
+		replaced := false
+		if enrich {
+			for index := range a.mounts {
+				if a.mounts[index].ID == mount.ID {
+					a.mounts[index] = mount
+					replaced = true
+					break
+				}
+			}
+		}
+		if replaced {
+			continue
+		}
 		if len(a.mounts) == maxMounts {
 			a.truncated[backend] = true
 			continue

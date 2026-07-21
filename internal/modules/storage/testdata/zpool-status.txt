@@ -1,0 +1,18 @@
+  pool: tank
+ state: DEGRADED
+status: One or more devices could not be used because the label is missing or
+        invalid.
+config:
+
+	NAME          STATE     READ WRITE CKSUM
+	tank          DEGRADED     0     0     0
+	  /dev/sda    ONLINE       0     0     0
+	  /dev/sdb    FAULTED      1     0     2  too many errors
+
+  pool: backup
+ state: ONLINE
+config:
+
+	NAME          STATE     READ WRITE CKSUM
+	backup        ONLINE       0     0     0
+	  /dev/sdc    ONLINE       0     0     0
