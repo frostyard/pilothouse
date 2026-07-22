@@ -1,4 +1,5 @@
 /bin/
+/.superpowers/
 /.worktrees/
 /*_templ.go
 /**/*_templ.go
