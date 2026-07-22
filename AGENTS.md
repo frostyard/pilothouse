@@ -25,3 +25,19 @@ For any new or changed templ component invocation, add or update a rendering tes
 Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
 
 If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
+
+## Documentation
+
+**update documentation** After any change to source code, update
+relevant documentation in CLAUDE.md, README.md and the `yeti/` folder.
+A task is not complete without reviewing and updating relevant
+documentation.
+
+**yeti/ directory** The `yeti/` directory contains documentation
+written for AI consumption and context enhancement, not primarily for
+humans. Jobs like `doc-maintainer` and `issue-worker` instruct the AI
+to read `yeti/OVERVIEW.md` and related files for codebase context
+before performing tasks. Write content in this directory to be
+maximally useful to an AI agent understanding the codebase — detailed
+architecture, patterns, and decision rationale rather than user-facing
+guides.

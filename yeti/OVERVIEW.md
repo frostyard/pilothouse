@@ -6,9 +6,9 @@ Pilothouse (`github.com/frostyard/pilothouse`) is a local web administration
 console for [Snosi](https://github.com/frostyard/snosi) systems. It presents
 a live dashboard and management UI (system telemetry, sysext/`updex`
 lifecycle, systemd services, Podman/Docker/Incus workloads, journal search,
-backups, file browsing, maintenance/reboot) over HTMX-enhanced server-rendered
-HTML, while keeping all privileged system access behind a single, fixed,
-root-only broker.
+backups, storage/disk health and managed NFS/SMB mounts, file browsing,
+maintenance/reboot) over HTMX-enhanced server-rendered HTML, while keeping
+all privileged system access behind a single, fixed, root-only broker.
 
 The defining architectural rule: an unprivileged web process (`pilothouse`)
 never talks to root-equivalent APIs (systemd D-Bus, journald, Podman/Docker/
@@ -51,8 +51,9 @@ packaging/            systemd units, PAM policy, sysusers declaration
   `euid == 0`. Opens root-owned bbolt databases for audit and jobs, builds
   `broker.QueryRegistry` / `broker.ActionRegistry` / stream registries, and
   registers every privileged implementation (services, Podman, Docker, Incus,
-  sysext, files, logs, backups, maintenance). Serves HTTP only over a Unix
-  socket with `0660 root:<socket-group>` permissions — never a TCP listener.
+  sysext, files, logs, backups, storage/remote-mounts, maintenance). Serves HTTP
+  only over a Unix socket with `0660 root:<socket-group>` permissions — never a
+  TCP listener.
 
 ### Modules (`internal/modules/<name>`)
 
@@ -63,6 +64,7 @@ directory. Current modules:
 | Module | Purpose |
 |---|---|
 | `system` | Unprivileged host telemetry (CPU/mem/disk/load/net/os) from `/proc`, `/sys`, `/etc/os-release`; emits health findings. |
+| `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. |
 | `attention` | Aggregates `platform.HealthProvider` findings from other modules (bounded 2s/provider) into one "needs attention" view. |
 | `services` | Systemd service/socket/timer inventory and lifecycle/enablement control via system D-Bus; bounded journal diagnostics. |
 | `sysext` | Snosi `updex` feature discovery/install state and `systemd-sysext` merge state; install/remove/update/refresh actions. |
@@ -149,6 +151,13 @@ routes and receives a `Host` for rendering and broker calls. Modules are
 constructed and registered into `platform.Registry` once in
 `cmd/pilothouse/main.go`.
 
+A module may optionally implement `platform.HealthProvider`
+(`Health(context.Context, Host) ([]Finding, error)` plus `Manifest`) to
+contribute findings to the `attention` module's aggregated view (e.g.
+`system`, `storage`). Health-producing modules must also be added to the
+`attention.New(...)` provider list in `cmd/pilothouse/main.go`, not just
+registered in `platform.Registry`.
+
 ### Testing
 
 - Unit tests live beside source (`*_test.go`): domain managers use fake
@@ -176,6 +185,7 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
 - `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)
+- `--pam-service` (default `pilothouse`)
 - `--socket` (Unix socket path), `--socket-group`
 - audit/jobs bbolt DB paths (default under `/var/lib/pilothouse`)
 - backup timer name(s) and max-age; also augmented by `PILOTHOUSE_BACKUP_TIMERS`
