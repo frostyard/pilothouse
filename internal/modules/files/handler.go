@@ -84,7 +84,7 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 		}
 		defer func() { _ = result.Body.Close() }()
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": result.Filename}))
-		w.Header().Set("Content-Type", result.MediaType)
+		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
 		w.WriteHeader(http.StatusOK)
@@ -171,16 +171,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request, host platform.Host) {
 		}
 	}
 	if copyErr != nil {
-		select {
-		case brokerErr := <-done:
-			if brokerErr != nil {
-				uploadFailure(w, r, brokerErr)
-				return
-			}
-		default:
-		}
 		_ = pipeWriter.CloseWithError(copyErr)
-		<-done
+		if brokerErr := <-done; brokerErr != nil {
+			uploadFailure(w, r, brokerErr)
+			return
+		}
 		status := http.StatusBadRequest
 		if n > MaxTransferBytes {
 			status = http.StatusRequestEntityTooLarge
@@ -197,7 +192,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, host platform.Host) {
 }
 
 func validUploadName(name string) bool {
-	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
 		return false
 	}
 	for _, value := range name {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,6 +33,7 @@ type filesHost struct {
 	streamParameters map[string]string
 	streamBody       bytes.Buffer
 	streamActionErr  error
+	streamAction     func(context.Context, *http.Request, string, map[string]string, io.Reader) error
 	discardStream    bool
 	streamSize       int64
 	csrf             string
@@ -64,9 +66,12 @@ func (h *filesHost) ValidateActionToken(_ http.ResponseWriter, _ *http.Request, 
 	h.csrfCalls++
 	return h.validCSRF && token == h.csrf
 }
-func (h *filesHost) StreamAction(_ context.Context, _ *http.Request, id string, parameters map[string]string, body io.Reader) error {
+func (h *filesHost) StreamAction(ctx context.Context, request *http.Request, id string, parameters map[string]string, body io.Reader) error {
 	h.streamCalls++
 	h.streamActionID, h.streamParameters = id, parameters
+	if h.streamAction != nil {
+		return h.streamAction(ctx, request, id, parameters, body)
+	}
 	writer := io.Writer(&h.streamBody)
 	if h.discardStream {
 		writer = io.Discard
@@ -152,7 +157,7 @@ func TestFilesDownloadStreamsExactResponse(t *testing.T) {
 	assert.Equal(t, broker.QueryFilesDownload, host.streamID)
 	assert.Equal(t, map[string]string{"root": "safe", "path": "logs/report.txt"}, host.parameters)
 	assert.Equal(t, "attachment; filename=report.txt", response.Header().Get("Content-Disposition"))
-	assert.Equal(t, "text/plain", response.Header().Get("Content-Type"))
+	assert.Equal(t, "application/octet-stream", response.Header().Get("Content-Type"))
 	assert.Equal(t, "nosniff", response.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "7", response.Header().Get("Content-Length"))
 	assert.Equal(t, "payload", response.Body.String())
@@ -180,6 +185,20 @@ func TestFilesDownloadMapsFailureBeforeWritingHeaders(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, response.Code)
 	assert.Empty(t, response.Header().Get("Content-Disposition"))
 	assert.NotContains(t, response.Body.String(), "private")
+}
+
+func TestFilesDownloadRejectsInvalidSizeBeforeWritingHeaders(t *testing.T) {
+	for _, size := range []int64{-1, MaxTransferBytes + 1} {
+		t.Run(strconv.FormatInt(size, 10), func(t *testing.T) {
+			host := &filesHost{admin: true, stream: broker.StreamResult{Body: io.NopCloser(strings.NewReader("payload")), Filename: "report.txt", Size: size}}
+
+			response := serveFiles(t, host, http.MethodGet, "/files/safe/download?path=report.txt", nil)
+
+			assert.Equal(t, http.StatusBadGateway, response.Code)
+			assert.Empty(t, response.Header().Get("Content-Disposition"))
+			assert.Empty(t, response.Header().Get("Content-Length"))
+		})
+	}
 }
 
 func multipartBody(parts ...string) (io.Reader, string) {
@@ -215,6 +234,19 @@ func TestUploadRejectsMissingCSRFBeforeBrokerCall(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 	assert.Zero(t, host.csrfCalls)
 	assert.Zero(t, host.streamCalls)
+}
+
+func TestUploadRejectsWrongCSRFFromInitialPartWithoutBrokerCall(t *testing.T) {
+	host := &filesHost{admin: true, csrf: "csrf"}
+	prefix := "--boundary\r\n" + multipartField("csrf", "wrong") + "\r\n--boundary\r\n"
+	body := &afterPrefixReader{prefix: []byte(prefix)}
+
+	response := serveUpload(t, host, body, "multipart/form-data; boundary=boundary")
+
+	assert.Equal(t, 1, host.csrfCalls)
+	assert.Zero(t, host.streamCalls)
+	assert.False(t, body.readAfterPrefix)
+	assert.Equal(t, http.StatusOK, response.Code)
 }
 
 func TestUploadStreamsOneFinalPartWithExactMetadata(t *testing.T) {
@@ -259,6 +291,20 @@ func TestUploadRejectsInvalidFilenameBeforeBrokerCall(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 	assert.Zero(t, host.streamCalls)
+}
+
+func TestUploadRejectsUnsafeNamesBeforeBrokerCall(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "bad\x01name"} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			host := &filesHost{admin: true, csrf: "csrf", validCSRF: true}
+			body, contentType := multipartBody(multipartField("csrf", "csrf"), multipartFile("file", name, "payload"))
+
+			response := serveUpload(t, host, body, contentType)
+
+			assert.Equal(t, http.StatusBadRequest, response.Code)
+			assert.Zero(t, host.streamCalls)
+		})
+	}
 }
 
 func TestUploadMapsBrokerFailuresToStableNotices(t *testing.T) {
@@ -311,6 +357,36 @@ func TestUploadRejectsFileOverTransferLimit(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 	assert.Equal(t, int64(MaxTransferBytes+1), host.streamSize)
+}
+
+func TestUploadMapsEarlyBrokerRejectionAfterPipeError(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		host := &filesHost{admin: true, csrf: "csrf", validCSRF: true}
+		host.streamAction = func(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+			return broker.NewPublicError(http.StatusForbidden, "private", "read_only", errors.New("rejected"))
+		}
+		body, contentType := multipartBody(multipartField("csrf", "csrf"), multipartFile("file", "report.txt", strings.Repeat("x", 8<<10)))
+
+		response := serveUpload(t, host, body, contentType)
+
+		assert.Equal(t, http.StatusSeeOther, response.Code)
+		assert.Contains(t, response.Header().Get("Location"), url.QueryEscape("Uploads are disabled for this root."))
+	}
+}
+
+type afterPrefixReader struct {
+	prefix          []byte
+	readAfterPrefix bool
+}
+
+func (r *afterPrefixReader) Read(buffer []byte) (int, error) {
+	if len(r.prefix) == 0 {
+		r.readAfterPrefix = true
+		return 0, errors.New("file body was read")
+	}
+	buffer[0] = r.prefix[0]
+	r.prefix = r.prefix[1:]
+	return 1, nil
 }
 
 type zeroReader struct{}
