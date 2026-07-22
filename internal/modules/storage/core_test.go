@@ -34,7 +34,7 @@ func TestCoreAdaptersUseFixedCommands(t *testing.T) {
 	assert.Equal(t, []string{"--json", "--bytes", "--output", "NAME,KNAME,PATH,TYPE,MAJ:MIN,PKNAME,SIZE,FSTYPE,FSVER,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,RM,RO"}, lsblkArgs)
 	assert.True(t, mount.Core())
 	assert.Equal(t, "mount", mount.Name())
-	assert.Equal(t, []string{"--json", "--bytes", "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%,MAJ:MIN"}, findmntArgs)
+	assert.Equal(t, []string{"--json", "--list", "--bytes", "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%,MAJ:MIN"}, findmntArgs)
 }
 
 func TestSortRelationsUsesFromToKindTuple(t *testing.T) {
@@ -85,6 +85,12 @@ func TestParseLSBLKRejectsTooManyResources(t *testing.T) {
 func TestParseFindmntRejectsUnknownFields(t *testing.T) {
 	_, err := parseFindmnt([]byte(`{"filesystems":[],"unexpected":true}`))
 	assert.Error(t, err)
+}
+
+func TestParseFindmntAcceptsFlatLiveShapedRecord(t *testing.T) {
+	result, err := parseFindmnt(mustFixture(t, "findmnt-list.json"))
+	require.NoError(t, err)
+	assert.Len(t, result.Mounts, 2)
 }
 
 func TestParseFindmntRejectsMalformedByteCount(t *testing.T) {

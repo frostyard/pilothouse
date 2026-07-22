@@ -97,9 +97,9 @@ func (e *mdraidEnricher) Collect(ctx context.Context, inventory Inventory) (Adap
 			health, state = HealthCritical, "degraded"
 			result.Findings = append(result.Findings, Finding{ResourceID: raidID, Severity: HealthCritical, Title: "RAID array is degraded", Detail: fmt.Sprintf("%d of %d members active", array.active, expected)})
 		}
-		details := []Detail{{Label: "Level", Value: detail.level}, {Label: "Members", Value: fmt.Sprintf("%d of %d active", array.active, expected)}}
+		details := []Detail{{Label: "Level", Value: detail.level}, {Label: "RAID members", Value: fmt.Sprintf("%d of %d active", array.active, expected)}}
 		if array.recovery != 0 {
-			details = append(details, Detail{Label: "Recovery", Value: strconv.FormatFloat(array.recovery, 'f', 1, 64) + "%"})
+			details = append(details, Detail{Label: "Recovery progress", Value: strconv.FormatFloat(array.recovery, 'f', 1, 64) + "%"})
 		}
 		result.Resources = append(result.Resources, Resource{ID: raidID, Kind: "raid", Name: array.name, Path: path, Health: health, State: state, Details: details})
 		for _, member := range detail.members {

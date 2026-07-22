@@ -214,7 +214,7 @@ func btrfsResult(filesystems []btrfsFilesystem, inventory Inventory) (AdapterRes
 		result.Resources = append(result.Resources, Resource{ID: id, Kind: "btrfs-filesystem", Name: fs.uuid, SizeBytes: fs.size, Health: health, State: "mounted"})
 		for _, device := range fs.devices {
 			deviceID := stableID("btrfs-device", fs.uuid+":"+device)
-			result.Resources = append(result.Resources, Resource{ID: deviceID, Kind: "btrfs-device", Name: device, Path: device, Health: health, State: "available"})
+			result.Resources = append(result.Resources, Resource{ID: deviceID, Kind: "btrfs-device", Name: device, Path: device, Health: health, State: "available", Details: []Detail{{Label: "Btrfs device errors", Value: fmt.Sprint(fs.errors[device])}}})
 			result.Relations = append(result.Relations, Relation{From: deviceID, To: id, Kind: "member-of"})
 			if count := fs.errors[device]; count > 0 {
 				result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: HealthWarning, Title: "Btrfs device reports errors", Detail: fmt.Sprintf("%s has %d errors", device, count)})

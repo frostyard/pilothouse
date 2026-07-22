@@ -139,23 +139,31 @@ func TestRenderStorageOperationsEscapesLabels(t *testing.T) {
 }
 
 func TestRenderAdvancedStorageDetails(t *testing.T) {
-	snapshot := Snapshot{
-		Resources: []Resource{{
-			ID: "advanced", Name: "advanced", Details: []Detail{
-				{Label: "Temperature", Value: "40 C"},
-				{Label: "Percentage used", Value: "12%"},
-				{Label: "RAID members", Value: "2 of 2 active"},
-				{Label: "Recovery progress", Value: "50%"},
-				{Label: "LVM data usage", Value: "20%"},
-				{Label: "Encrypted mapping", Value: "Yes"},
-				{Label: "Multipath paths", Value: "2 of 2 observed"},
-				{Label: "ZFS pool health", Value: "Online"},
-				{Label: "Btrfs device errors", Value: "0"},
-				{Label: "Health data", Value: "Stale"},
-			},
-		}},
-		Backends: []BackendStatus{{Name: "smart", Availability: BackendUnsupported}},
-	}
+	smart, err := parseSMART(mustFixture(t, "smart-nvme.json"), "/dev/nvme0n1")
+	require.NoError(t, err)
+	mdraid := newMDRAIDEnricher("/fixture", "mdadm")
+	mdraid.readFile = func(string) ([]byte, error) { return mustFixture(t, "mdstat-degraded.txt"), nil }
+	mdraid.runner.run = func(context.Context, string, ...string) ([]byte, error) { return mustFixture(t, "mdadm-detail.txt"), nil }
+	raid, err := mdraid.Collect(context.Background(), Inventory{})
+	require.NoError(t, err)
+	deviceMapper := deviceMapperResult([]dmInfo{{Name: "crypt", UUID: "CRYPT-LUKS2-test", MajorMinor: "253:0", Open: 1}}, Inventory{})
+	multipath := multipathResult([]multipathMap{{Name: "mpatha", DeclaredPaths: 1}}, []multipathPath{{Map: "mpatha", DMState: "active", CheckerState: "ready"}}, Inventory{Resources: []Resource{{ID: "mpath", Kind: "mpath", Path: "/dev/mapper/mpatha"}}})
+	zfs, err := zfsResult([]zfsPool{{name: "tank", size: 1, health: "ONLINE"}}, map[string]zfsStatus{"tank": {state: "ONLINE"}}, nil, Inventory{})
+	require.NoError(t, err)
+	btrfs, err := btrfsResult([]btrfsFilesystem{{uuid: "fs", size: 1, devices: []string{"/dev/sda"}, errors: map[string]uint64{"/dev/sda": 2}}}, Inventory{})
+	require.NoError(t, err)
+	lvm, err := lvmResult(lvmReport{}, lvmReport{VGs: []lvmVG{{UUID: "vg", Name: "data", Size: "1", Free: "0"}}}, lvmReport{LVs: []lvmLV{{UUID: "lv", VGUUID: "vg", Name: "root", VGName: "data", Path: "/dev/data/root", Size: "1", Attr: "----a", Data: "20"}}}, Inventory{})
+	require.NoError(t, err)
+	stale := AdapterResult{Resources: []Resource{{ID: "stale"}}}
+	markStale(&stale)
+	resources := append([]Resource{smart}, raid.Resources...)
+	resources = append(resources, deviceMapper.Resources...)
+	resources = append(resources, multipath.Resources...)
+	resources = append(resources, zfs.Resources...)
+	resources = append(resources, btrfs.Resources...)
+	resources = append(resources, lvm.Resources...)
+	resources = append(resources, stale.Resources...)
+	snapshot := Snapshot{Resources: resources, Backends: []BackendStatus{{Name: "smart", Availability: BackendUnsupported}}}
 	var output strings.Builder
 	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
 

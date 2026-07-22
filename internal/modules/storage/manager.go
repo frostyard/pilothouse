@@ -24,6 +24,10 @@ type Enricher interface {
 	Name() string
 }
 
+type HealthCacheable interface {
+	CacheHealth() bool
+}
+
 type unsupportedEnricher struct{ name string }
 
 func NewUnsupportedEnricher(name string) Enricher { return unsupportedEnricher{name: name} }
@@ -175,6 +179,16 @@ func enricherAvailability(enricher Enricher, collected []collectedResult) Availa
 }
 
 func (m *SystemManager) collectEnricher(ctx context.Context, enricher Enricher, inventory Inventory) (AdapterResult, error) {
+	cacheable, ok := enricher.(HealthCacheable)
+	if !ok || !cacheable.CacheHealth() {
+		enricherCtx, cancel := context.WithTimeout(ctx, m.enricherTimeout)
+		defer cancel()
+		result, err := enricher.Collect(enricherCtx, inventory)
+		if enricherCtx.Err() == context.DeadlineExceeded {
+			err = context.DeadlineExceeded
+		}
+		return result, err
+	}
 	cached, fresh, found := m.cache.Load(enricher.Name())
 	if found && fresh {
 		return cached, nil

@@ -28,7 +28,8 @@ func newSMARTEnricher(path string) *smartEnricher {
 	return &smartEnricher{path: path, runner: commandRunner{limit: maxAdapterBytes}}
 }
 
-func (e *smartEnricher) Name() string { return smartEnricherName }
+func (e *smartEnricher) Name() string    { return smartEnricherName }
+func (*smartEnricher) CacheHealth() bool { return true }
 
 func (e *smartEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
 	paths := smartDevicePaths(inventory)

@@ -11,7 +11,7 @@ import (
 )
 
 var lsblkArgs = []string{"--json", "--bytes", "--output", "NAME,KNAME,PATH,TYPE,MAJ:MIN,PKNAME,SIZE,FSTYPE,FSVER,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,RM,RO"}
-var findmntArgs = []string{"--json", "--bytes", "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%,MAJ:MIN"}
+var findmntArgs = []string{"--json", "--list", "--bytes", "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%,MAJ:MIN"}
 
 type Adapter interface {
 	Collect(context.Context) (AdapterResult, error)

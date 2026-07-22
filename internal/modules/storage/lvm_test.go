@@ -49,7 +49,7 @@ func TestLVMEnricherReportsGraphUtilizationAndPartialHealth(t *testing.T) {
 	lvID := stableID("lvm-lv", "lv-one")
 	assert.Contains(t, result.Relations, Relation{From: stableID("partition", "8:2"), To: vgID, Kind: "member-of"})
 	assert.Contains(t, result.Relations, Relation{From: vgID, To: lvID, Kind: "contains"})
-	assert.Contains(t, result.Resources, Resource{ID: lvID, Kind: "logical-volume", Name: "data/root", Path: "/dev/data/root", SizeBytes: 1610612736, Health: HealthHealthy, State: "available", Details: []Detail{{Label: "Data utilization", Value: "75.0%"}, {Label: "Metadata utilization", Value: "25.0%"}}})
+	assert.Contains(t, result.Resources, Resource{ID: lvID, Kind: "logical-volume", Name: "data/root", Path: "/dev/data/root", SizeBytes: 1610612736, Health: HealthHealthy, State: "available", Details: []Detail{{Label: "LVM data usage", Value: "75.0%"}, {Label: "Metadata utilization", Value: "25.0%"}}})
 	assert.Contains(t, result.Findings, Finding{ResourceID: vgID, Severity: HealthCritical, Title: "LVM volume group has missing devices", Detail: "1 physical volume is missing"})
 }
 

@@ -205,7 +205,7 @@ func lvmAttrAt(value string, index int) byte {
 func lvmLVDetails(lv lvmLV) []Detail {
 	details := []Detail{}
 	if lv.Data != "" {
-		details = append(details, Detail{Label: "Data utilization", Value: lv.Data + "%"})
+		details = append(details, Detail{Label: "LVM data usage", Value: lv.Data + "%"})
 	}
 	if lv.Metadata != "" {
 		details = append(details, Detail{Label: "Metadata utilization", Value: lv.Metadata + "%"})

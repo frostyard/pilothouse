@@ -97,7 +97,7 @@ func TestMDRAIDEnricherReportsTopologyAndHealth(t *testing.T) {
 	assert.Contains(t, result.Relations, Relation{From: stableID("disk", "8:1"), To: raidID, Kind: "member-of"})
 	assert.Contains(t, result.Relations, Relation{From: stableID("disk", "8:2"), To: raidID, Kind: "member-of"})
 	assert.Contains(t, result.Findings, Finding{ResourceID: raidID, Severity: HealthCritical, Title: "RAID array is degraded", Detail: "1 of 2 members active"})
-	assert.Contains(t, result.Resources, Resource{ID: raidID, Kind: "raid", Name: "md0", Path: "/dev/md0", Health: HealthCritical, State: "degraded", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "Members", Value: "1 of 2 active"}, {Label: "Recovery", Value: "5.0%"}}})
+	assert.Contains(t, result.Resources, Resource{ID: raidID, Kind: "raid", Name: "md0", Path: "/dev/md0", Health: HealthCritical, State: "degraded", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "RAID members", Value: "1 of 2 active"}, {Label: "Recovery progress", Value: "5.0%"}}})
 }
 
 func TestMDRAIDEnricherRejectsMismatchedDetailArray(t *testing.T) {
@@ -156,8 +156,8 @@ func TestMDRAIDEnricherMarksInactiveAndAutoReadOnlyArraysUnhealthy(t *testing.T)
 	result, err := enricher.Collect(context.Background(), Inventory{})
 
 	require.NoError(t, err)
-	assert.Contains(t, result.Resources, Resource{ID: stableID("raid", "md1"), Kind: "raid", Name: "md1", Path: "/dev/md1", Health: HealthUnknown, State: "inactive", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "Members", Value: "0 of 2 active"}}})
-	assert.Contains(t, result.Resources, Resource{ID: stableID("raid", "md2"), Kind: "raid", Name: "md2", Path: "/dev/md2", Health: HealthWarning, State: "auto-read-only", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "Members", Value: "2 of 2 active"}}})
+	assert.Contains(t, result.Resources, Resource{ID: stableID("raid", "md1"), Kind: "raid", Name: "md1", Path: "/dev/md1", Health: HealthUnknown, State: "inactive", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "RAID members", Value: "0 of 2 active"}}})
+	assert.Contains(t, result.Resources, Resource{ID: stableID("raid", "md2"), Kind: "raid", Name: "md2", Path: "/dev/md2", Health: HealthWarning, State: "auto-read-only", Details: []Detail{{Label: "Level", Value: "raid1"}, {Label: "RAID members", Value: "2 of 2 active"}}})
 }
 
 func TestMDRAIDEnricherBoundsMDStatRead(t *testing.T) {

@@ -164,7 +164,7 @@ func deviceMapperResult(infos []dmInfo, inventory Inventory) AdapterResult {
 			resource.State, resource.Health = "inactive", HealthUnknown
 		}
 		if strings.HasPrefix(info.UUID, cryptUUIDPrefix) {
-			resource.Details = append(resource.Details, Detail{Label: "Encrypted", Value: "Yes"})
+			resource.Details = append(resource.Details, Detail{Label: "Encrypted mapping", Value: "Yes"})
 			encryptionID := stableID("encryption", info.UUID)
 			result.Resources = append(result.Resources, Resource{ID: encryptionID, Kind: "encryption", Name: info.Name, Health: resource.Health, State: resource.State})
 			result.Relations = append(result.Relations, Relation{From: encryptionID, To: id, Kind: "maps-to"})
@@ -182,7 +182,7 @@ func multipathResult(maps []multipathMap, paths []multipathPath, inventory Inven
 	result := AdapterResult{}
 	resources := make(map[string]Resource, len(inventory.Resources))
 	for _, resource := range inventory.Resources {
-		if resource.Kind == "mapping" && resource.Path == filepath.Clean(resource.Path) && strings.HasPrefix(resource.Path, "/dev/mapper/") {
+		if resource.Path == filepath.Clean(resource.Path) && strings.HasPrefix(resource.Path, "/dev/mapper/") {
 			resources[resource.Path] = resource
 		}
 	}
@@ -194,7 +194,7 @@ func multipathResult(maps []multipathMap, paths []multipathPath, inventory Inven
 		health, detail := multipathHealth(mapping, paths)
 		resource.Name = mapping.Name
 		resource.Health = higherHealth(resource.Health, health)
-		resource.Details = append(resource.Details, Detail{Label: "Paths", Value: pathSummary(mapping, paths)})
+		resource.Details = append(resource.Details, Detail{Label: "Multipath paths", Value: pathSummary(mapping, paths)})
 		result.Resources = append(result.Resources, resource)
 		switch health {
 		case HealthCritical:

@@ -32,7 +32,7 @@ func TestZFSEnricherReportsPoolsDatasetsAndHealth(t *testing.T) {
 	poolID := stableID("zfs-pool", "tank")
 	datasetID := stableID("zfs-dataset", "tank/home")
 	assert.Contains(t, result.Relations, Relation{From: poolID, To: datasetID, Kind: "contains"})
-	assert.Contains(t, result.Resources, Resource{ID: poolID, Kind: "zfs-pool", Name: "tank", SizeBytes: 1073741824, Health: HealthCritical, State: "degraded", Details: []Detail{{Label: "Allocated", Value: "536870912"}, {Label: "Free", Value: "536870912"}, {Label: "Capacity", Value: "50%"}, {Label: "Read errors", Value: "1"}, {Label: "Write errors", Value: "0"}, {Label: "Checksum errors", Value: "2"}}})
+	assert.Contains(t, result.Resources, Resource{ID: poolID, Kind: "zfs-pool", Name: "tank", SizeBytes: 1073741824, Health: HealthCritical, State: "degraded", Details: []Detail{{Label: "ZFS pool health", Value: "DEGRADED"}, {Label: "Allocated", Value: "536870912"}, {Label: "Free", Value: "536870912"}, {Label: "Capacity", Value: "50%"}, {Label: "Read errors", Value: "1"}, {Label: "Write errors", Value: "0"}, {Label: "Checksum errors", Value: "2"}}})
 	assert.Contains(t, result.Findings, Finding{ResourceID: poolID, Severity: HealthCritical, Title: "ZFS pool is degraded", Detail: "one or more devices are unavailable"})
 	assert.Len(t, result.Mounts, 3)
 	assert.Equal(t, poolID, result.Mounts[0].ResourceID)
