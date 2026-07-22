@@ -108,6 +108,12 @@ rules for adding a new module (routes, actions, queries).
 - **Streams for large/blocking data.** File upload/download use fixed
   `stream-actions`/`stream-queries` registrations with explicit size caps
   (256 MiB) rather than the generic action/query path.
+- **Storage executable validation.** Core and optional storage commands use
+  fixed absolute candidates. Optional candidates may be symlinks for distro
+  multicall tools such as LVM, but the broker validates the fully resolved
+  target as a root-owned, non-group/world-writable regular file while executing
+  the original entry-point path. Broken or unsafe present candidates fail
+  startup; absent optional tools degrade only their backend to unsupported.
 
 See `docs/authentication.md` for the full login/session/authorization/audit
 model and deployment rules (cookie flags, allowed origins, PAM policy).

@@ -54,6 +54,12 @@ make docker-lint
 
 Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
 
+If local sign-in is unavailable, verify the privileged broker before debugging
+the browser: `systemctl status pilothoused` and `journalctl -u pilothoused`.
+The broker validates fixed storage-tool paths at startup; distro-provided
+symlinks such as `pvs -> lvm` are accepted only when the resolved executable is
+a safe root-owned regular file.
+
 ### Create a release
 
 `make bump` verifies the project in the development container, calculates the

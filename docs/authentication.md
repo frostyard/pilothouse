@@ -30,6 +30,13 @@ Only the opaque token is placed in the browser cookie. The cookie is HTTP-only, 
 
 Authentication errors are deliberately generic. Empty passwords are rejected before PAM. Failed attempts receive a fixed delay and exponential per-user/per-address backoff.
 
+If local sign-in fails while `pilothoused` is restarting, diagnose the broker
+startup failure first with `systemctl status pilothoused` and
+`journalctl -u pilothoused`. The web process cannot authenticate without the
+broker; a stale login page from a previous web-process instance can also submit
+an obsolete login CSRF token and show `invalid csrf token` as a secondary
+symptom.
+
 ## Authorization
 
 Every authenticated account may read metrics, extension state, storage

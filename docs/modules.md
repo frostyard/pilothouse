@@ -122,6 +122,13 @@ independently, so an unavailable optional backend does not prevent other
 inventory from being returned. Unmanaged mounts, including NFS and SMB mounts,
 remain read-only inventory.
 
+Optional storage tools are selected only from fixed absolute candidates. A
+candidate may be a symbolic link, as is common for LVM's `pvs`, `vgs`, and
+`lvs` entry points, but its fully resolved target must be a root-owned regular
+file that is not writable by group or others. Missing tools degrade their
+backend to unsupported; a present broken or unsafe candidate fails broker
+startup.
+
 ## Managed remote mounts
 
 Storage remote-mount mutations are administrator-only broker actions:
