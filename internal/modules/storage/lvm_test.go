@@ -63,6 +63,16 @@ func TestLVMEnricherAcceptsEmptyHostReports(t *testing.T) {
 	assert.Empty(t, result.Resources)
 }
 
+func TestLVMResultOmitsRelationForPhysicalVolumeWithoutVolumeGroup(t *testing.T) {
+	inventory := Inventory{Resources: []Resource{{ID: stableID("partition", "8:2"), Path: "/dev/sda2"}}}
+	result, err := lvmResult(lvmReport{PVs: []lvmPV{{UUID: "pv-one", VGUUID: "", Name: "/dev/sda2", Size: "1073741824", Free: "1073741824", Attr: "---"}}}, lvmReport{}, lvmReport{}, inventory)
+
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "physical-volume", result.Resources[0].Kind)
+	assert.Empty(t, result.Relations)
+}
+
 func TestLVMResultSkipsUnknownVolumeGroupReferences(t *testing.T) {
 	result, err := lvmResult(lvmReport{}, lvmReport{}, lvmReport{LVs: []lvmLV{{UUID: "lv-one", VGUUID: "missing", Name: "root", VGName: "data", Path: "/dev/data/root", Size: "1", Attr: "-wi-a-----"}}}, Inventory{})
 

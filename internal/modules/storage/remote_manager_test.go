@@ -215,7 +215,7 @@ func TestRemoteManagerMountAndUnmountUseExactUnits(t *testing.T) {
 	require.NoError(t, manager.Mount(context.Background(), request.ID))
 	require.NoError(t, manager.Unmount(context.Background(), request.ID))
 
-	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
+	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
 }
 
 func TestRemoteManagerStateDoesNotWaitForLifecycleOperation(t *testing.T) {
@@ -258,18 +258,40 @@ func TestRemoteManagerStateSkipsManifestRemovedAfterListing(t *testing.T) {
 	assert.Empty(t, snapshot.Mounts)
 }
 
-func TestRemoteManagerStateRejectsInvalidManifest(t *testing.T) {
+func TestRemoteManagerStateDegradesGracefullyOnCorruptManifest(t *testing.T) {
 	store := testArtifactStore(t)
-	request := testNFSRequest(t)
+	corrupt := testNFSRequest(t)
+	valid := testNFSRequest(t)
+	valid.ID = "fedcba9876543210fedcba9876543210"
+	valid.Target = filepath.Join(t.TempDir(), "other")
 	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
-	require.NoError(t, manager.Create(context.Background(), request))
-	manifest, err := store.ManifestPath(request.ID)
+	require.NoError(t, manager.Create(context.Background(), corrupt))
+	require.NoError(t, manager.Create(context.Background(), valid))
+	manifest, err := store.ManifestPath(corrupt.ID)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(manifest, []byte("invalid"), 0o600))
 
-	_, err = manager.State(context.Background())
+	snapshot, err := manager.State(context.Background())
 
-	assert.ErrorIs(t, err, errInvalidManifest)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Mounts, 1)
+	assert.Equal(t, "remote:"+valid.ID, snapshot.Mounts[0].ID)
+	assert.Contains(t, snapshot.Findings, Finding{ResourceID: "remote:" + corrupt.ID, Severity: HealthWarning, Title: "Managed mount manifest is invalid", Detail: "A managed remote mount manifest failed verification and was excluded from the inventory."})
+}
+
+func TestRemoteManagerCreateRefusesWhileManifestIsCorrupt(t *testing.T) {
+	store := testArtifactStore(t)
+	corrupt := testNFSRequest(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	require.NoError(t, manager.Create(context.Background(), corrupt))
+	manifest, err := store.ManifestPath(corrupt.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, []byte("invalid"), 0o600))
+
+	request := testNFSRequest(t)
+	request.ID = "fedcba9876543210fedcba9876543210"
+	request.Target = filepath.Join(t.TempDir(), "other")
+	assert.ErrorIs(t, manager.Create(context.Background(), request), errInvalidManifest)
 }
 
 func TestRemoteManagerSerializesSameDefinitionButNotDifferentDefinitions(t *testing.T) {
@@ -470,7 +492,7 @@ func TestRemoteManagerDeleteDeactivatesBeforeRemovingCredentialAndCreatedTarget(
 
 	assert.Equal(t, []string{
 		"reload", "enable " + automountUnitName(request.Target), "start " + automountUnitName(request.Target),
-		"stop " + mountUnitName(request.Target), "stop " + automountUnitName(request.Target), "disable " + automountUnitName(request.Target), "reload",
+		"stop " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target), "disable " + automountUnitName(request.Target), "reload",
 	}, controller.calls)
 	assert.NoFileExists(t, filepath.Join(store.CredentialRoot, request.ID))
 	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
@@ -517,6 +539,49 @@ func TestRemoteManagerDeleteResumesInterruptedCleanup(t *testing.T) {
 	controller.fail = ""
 	require.NoError(t, manager.Delete(context.Background(), request.ID))
 	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+}
+
+func TestRemoteManagerDeleteDeactivatesTamperedDefinitionAndRecovers(t *testing.T) {
+	store := testArtifactStore(t)
+	controller := &recordingUnitController{}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+	request := testNFSRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	mountPath, _ := store.MountUnitPath(definition)
+	require.NoError(t, os.WriteFile(mountPath, []byte("tampered"), 0o644))
+	controller.calls = nil
+
+	require.Error(t, manager.Delete(context.Background(), request.ID))
+
+	assert.Equal(t, []string{
+		"stop " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target), "disable " + automountUnitName(request.Target),
+	}, controller.calls)
+	definition, err = store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "needs-attention", definition.State)
+	contents, err := os.ReadFile(mountPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("tampered"), contents)
+
+	require.NoError(t, os.Remove(mountPath))
+	require.NoError(t, manager.Delete(context.Background(), request.ID))
+	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+}
+
+func TestRemoteManagerStateRendersIPv6NFSSource(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testNFSRequest(t)
+	request.Host = "fd00::5"
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	require.NoError(t, manager.Create(context.Background(), request))
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, snapshot.Mounts, 1)
+	assert.Equal(t, "[fd00::5]:/exports/media", snapshot.Mounts[0].Source)
 }
 
 func TestRemoteManagerDeleteNeedsAttentionPreservesForeignArtifact(t *testing.T) {

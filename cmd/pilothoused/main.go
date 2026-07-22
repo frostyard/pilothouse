@@ -425,13 +425,29 @@ func (controller storageUnitController) Enable(ctx context.Context, unit string)
 }
 
 func (controller storageUnitController) Start(ctx context.Context, unit string) error {
-	_, err := controller.client.StartUnitContext(ctx, unit, "replace", nil)
-	return err
+	return waitForStorageUnitJob(ctx, unit, controller.client.StartUnitContext)
 }
 
 func (controller storageUnitController) Stop(ctx context.Context, unit string) error {
-	_, err := controller.client.StopUnitContext(ctx, unit, "replace", nil)
-	return err
+	return waitForStorageUnitJob(ctx, unit, controller.client.StopUnitContext)
+}
+
+// waitForStorageUnitJob waits for the queued systemd job to finish so lifecycle
+// operations never remove units or targets while the job is still running.
+func waitForStorageUnitJob(ctx context.Context, unit string, operation func(context.Context, string, string, chan<- string) (int, error)) error {
+	results := make(chan string, 1)
+	if _, err := operation(ctx, unit, "replace", results); err != nil {
+		return err
+	}
+	select {
+	case result := <-results:
+		if result != "done" {
+			return fmt.Errorf("systemd job for %s finished as %q", unit, result)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {

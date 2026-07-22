@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,31 @@ func TestSMARTEnricherUsesFixedCommand(t *testing.T) {
 	_, err = enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/nvme0n1"}})
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls)
+}
+
+func TestSMARTEnricherSurfacesFailedDiskDespiteNonZeroExit(t *testing.T) {
+	enricher := newSMARTEnricher("/usr/sbin/smartctl")
+	enricher.runner.run = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"device":{"name":"/dev/sda","info_name":"/dev/sda","protocol":"ATA"},"smart_status":{"passed":false}}`), errors.New("run /usr/sbin/smartctl: exit status 8")
+	}
+
+	result, err := enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/sda"}})
+
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, HealthCritical, result.Resources[0].Health)
+}
+
+func TestSMARTEnricherReportsErrorWhenFailedRunEmitsNoUsableData(t *testing.T) {
+	enricher := newSMARTEnricher("/usr/sbin/smartctl")
+	enricher.runner.run = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("run /usr/sbin/smartctl: exit status 2")
+	}
+
+	result, err := enricher.Collect(context.Background(), Inventory{DevicePaths: []string{"/dev/sda"}})
+
+	assert.Error(t, err)
+	assert.Empty(t, result.Resources)
 }
 
 func TestSMARTEnricherLimitsDeviceReadsToFourWorkers(t *testing.T) {
