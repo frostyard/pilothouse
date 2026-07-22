@@ -2,6 +2,7 @@ package backups
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,6 +40,15 @@ func (host *moduleHost) Render(_ http.ResponseWriter, _ *http.Request, page plat
 	return nil
 }
 func (*moduleHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*moduleHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*moduleHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*moduleHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestModulePageUsesFixedBrokerQuery(t *testing.T) {
 	host := &moduleHost{state: State{Configured: true, Timers: []Timer{{Name: "nightly.timer", Health: HealthHealthy}}}}

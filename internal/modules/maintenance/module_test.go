@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,6 +37,15 @@ func (h *moduleHost) Query(_ context.Context, _ string, _ map[string]string, tar
 }
 func (*moduleHost) Render(http.ResponseWriter, *http.Request, platform.Page) error { return nil }
 func (*moduleHost) ValidateAction(http.ResponseWriter, *http.Request) bool         { return true }
+func (*moduleHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*moduleHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*moduleHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestRebootRouteRequiresCanonicalConfirmation(t *testing.T) {
 	host := &moduleHost{}

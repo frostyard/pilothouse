@@ -3,6 +3,7 @@ package incus
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -79,6 +80,15 @@ func (host *fakeHost) Render(w http.ResponseWriter, _ *http.Request, page platfo
 }
 
 func (host *fakeHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*fakeHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*fakeHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*fakeHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestModulePropagatesSelectedProject(t *testing.T) {
 	host := &fakeHost{}

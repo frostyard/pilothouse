@@ -2,6 +2,7 @@ package activity
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,6 +45,15 @@ func (*activityHost) Render(w http.ResponseWriter, r *http.Request, page platfor
 	return page.Body.Render(r.Context(), w)
 }
 func (*activityHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*activityHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*activityHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*activityHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestActivityPageUsesAdminOnlyFixedQuery(t *testing.T) {
 	host := &activityHost{admin: true}

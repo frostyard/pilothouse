@@ -2,6 +2,7 @@ package podman
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -41,6 +42,15 @@ func (h *moduleHost) Render(_ http.ResponseWriter, _ *http.Request, page platfor
 	return nil
 }
 func (*moduleHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*moduleHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*moduleHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*moduleHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestImageActionDispatch(t *testing.T) {
 	host := &moduleHost{}

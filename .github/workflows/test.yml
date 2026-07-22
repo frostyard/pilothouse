@@ -96,7 +96,7 @@ jobs:
         run: go tool templ generate
 
       - name: Run tests with race detector
-        run: go test -race -short ./internal/... -run "^Test[^I]" -skip "Integration"
+        run: make race
 
   verify:
     name: Verify
