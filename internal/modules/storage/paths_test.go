@@ -14,8 +14,17 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const testDefinitionID = "0123456789abcdef0123456789abcdef"
+
+func newPathManager(t *testing.T) PathManager {
+	t.Helper()
+	manager, err := NewPathManager(testDefinitionID)
+	require.NoError(t, err)
+	return manager
+}
+
 func TestValidateTargetRejectsProtectedTrees(t *testing.T) {
-	manager := NewPathManager()
+	manager := newPathManager(t)
 	for _, target := range []string{
 		"/",
 		"/proc", "/proc/x",
@@ -33,6 +42,13 @@ func TestValidateTargetRejectsProtectedTrees(t *testing.T) {
 	}
 }
 
+func TestNewPathManagerRequiresValidDefinitionID(t *testing.T) {
+	_, err := NewPathManager("new")
+	assert.Error(t, err)
+	_, err = NewPathManager(testDefinitionID)
+	assert.NoError(t, err)
+}
+
 func TestValidateTargetRejectsPolicyBeforeFilesystemAccess(t *testing.T) {
 	fs := &recordingPathFS{}
 	manager := PathManager{DefinitionID: "definition", fs: fs}
@@ -44,7 +60,7 @@ func TestValidateTargetRejectsPolicyBeforeFilesystemAccess(t *testing.T) {
 }
 
 func TestValidateTargetRejectsUnsafePaths(t *testing.T) {
-	manager := NewPathManager()
+	manager := newPathManager(t)
 	for _, target := range []string{"relative", "/tmp/../tmp", "/tmp//target"} {
 		t.Run(target, func(t *testing.T) {
 			assert.Error(t, manager.ValidateTarget(context.Background(), target, nil))
@@ -60,7 +76,7 @@ func TestValidateTargetRejectsSymlinksInEveryComponent(t *testing.T) {
 	require.NoError(t, os.Symlink(real, filepath.Join(base, "link")))
 	require.NoError(t, os.Symlink(filepath.Join(real, "child"), filepath.Join(real, "leaf-link")))
 
-	manager := NewPathManager()
+	manager := newPathManager(t)
 	assert.Error(t, manager.ValidateTarget(context.Background(), filepath.Join(base, "link", "child"), nil))
 	assert.Error(t, manager.ValidateTarget(context.Background(), filepath.Join(real, "leaf-link"), nil))
 }
@@ -73,7 +89,7 @@ func TestValidateTargetRejectsExistingFileAndNonEmptyDirectory(t *testing.T) {
 	require.NoError(t, os.Mkdir(nonEmpty, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o600))
 
-	manager := NewPathManager()
+	manager := newPathManager(t)
 	assert.Error(t, manager.ValidateTarget(context.Background(), file, nil))
 	assert.Error(t, manager.ValidateTarget(context.Background(), nonEmpty, nil))
 	empty := filepath.Join(base, "empty")
@@ -85,13 +101,22 @@ func TestValidateTargetRejectsExistingFileAndNonEmptyDirectory(t *testing.T) {
 func TestValidateTargetRejectsMountAndUnitConflicts(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")
-	manager := NewPathManager()
+	manager := newPathManager(t)
 
 	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{Mounts: []string{target}}))
 	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{Mounts: []string{filepath.Join(target, "nested")}}))
-	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): "other"}}))
-	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{automountUnitName(target): "other"}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): "fedcba9876543210fedcba9876543210"}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{automountUnitName(target): "fedcba9876543210fedcba9876543210"}}))
 	assert.NoError(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): manager.DefinitionID}}))
+}
+
+func TestValidateTargetRejectsInvalidInventory(t *testing.T) {
+	manager := newPathManager(t)
+	target := filepath.Join(t.TempDir(), "target")
+
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{Mounts: []string{"relative"}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{"unsafe/name.mount": testDefinitionID}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): "invalid"}}))
 }
 
 func TestMountUnitNameEscapesLiteralHyphens(t *testing.T) {
@@ -101,9 +126,9 @@ func TestMountUnitNameEscapesLiteralHyphens(t *testing.T) {
 func TestCreateTargetCreatesOnlyMissingLeafWithExpectedMode(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")
-	manager := NewPathManager()
+	manager := newPathManager(t)
 
-	created, err := manager.CreateTarget(context.Background(), target)
+	created, err := manager.CreateTarget(context.Background(), target, nil)
 	require.NoError(t, err)
 	assert.True(t, created)
 	info, err := os.Stat(target)
@@ -114,32 +139,60 @@ func TestCreateTargetCreatesOnlyMissingLeafWithExpectedMode(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, uint32(os.Getuid()), stat.Uid)
 
-	created, err = manager.CreateTarget(context.Background(), target)
+	created, err = manager.CreateTarget(context.Background(), target, nil)
 	require.NoError(t, err)
 	assert.False(t, created)
-	_, err = manager.CreateTarget(context.Background(), filepath.Join(base, "missing", "nested"))
+	_, err = manager.CreateTarget(context.Background(), filepath.Join(base, "missing", "nested"), nil)
 	assert.Error(t, err)
+}
+
+func TestCreateTargetRejectsConflictingInventory(t *testing.T) {
+	manager := newPathManager(t)
+	target := filepath.Join(t.TempDir(), "target")
+
+	created, err := manager.CreateTarget(context.Background(), target, &TargetInventory{Mounts: []string{target}})
+	assert.Error(t, err)
+	assert.False(t, created)
+	assert.NoDirExists(t, target)
 }
 
 func TestRemoveTargetOnlyRemovesManagerCreatedEmptyDirectory(t *testing.T) {
 	base := t.TempDir()
-	manager := NewPathManager()
+	manager := newPathManager(t)
 
 	notCreated := filepath.Join(base, "not-created")
 	require.NoError(t, os.Mkdir(notCreated, 0o755))
-	require.NoError(t, manager.RemoveTarget(context.Background(), notCreated, false))
+	require.NoError(t, manager.RemoveTarget(context.Background(), notCreated, false, nil))
 	assert.DirExists(t, notCreated)
 
 	nonEmpty := filepath.Join(base, "non-empty")
 	require.NoError(t, os.Mkdir(nonEmpty, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o600))
-	assert.Error(t, manager.RemoveTarget(context.Background(), nonEmpty, true))
+	assert.Error(t, manager.RemoveTarget(context.Background(), nonEmpty, true, nil))
 	assert.DirExists(t, nonEmpty)
 
 	empty := filepath.Join(base, "empty")
 	require.NoError(t, os.Mkdir(empty, 0o755))
-	require.NoError(t, manager.RemoveTarget(context.Background(), empty, true))
+	require.NoError(t, manager.RemoveTarget(context.Background(), empty, true, nil))
 	assert.NoDirExists(t, empty)
+}
+
+func TestRemoveTargetRequiresManifestCreatedFlag(t *testing.T) {
+	manager := newPathManager(t)
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.Mkdir(target, 0o755))
+
+	require.NoError(t, manager.RemoveTarget(context.Background(), target, false, nil))
+	assert.DirExists(t, target)
+}
+
+func TestRemoveTargetRejectsFreshConflictingInventory(t *testing.T) {
+	manager := newPathManager(t)
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.Mkdir(target, 0o755))
+
+	assert.Error(t, manager.RemoveTarget(context.Background(), target, true, &TargetInventory{Mounts: []string{target}}))
+	assert.DirExists(t, target)
 }
 
 type recordingPathFS struct {
@@ -147,7 +200,7 @@ type recordingPathFS struct {
 }
 
 func (fs *recordingPathFS) close(int) error                                 { return nil }
-func (fs *recordingPathFS) empty(int, string) (bool, error)                 { return true, nil }
+func (fs *recordingPathFS) empty(int) (bool, error)                         { return true, nil }
 func (fs *recordingPathFS) fstat(int, *unix.Stat_t) error                   { return nil }
 func (fs *recordingPathFS) mkdirat(int, string, uint32) error               { return nil }
 func (fs *recordingPathFS) openat2(int, string, *unix.OpenHow) (int, error) { return 0, nil }

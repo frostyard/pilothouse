@@ -6,14 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
 var errUnsafeTarget = errors.New("unsafe target path")
+var errInvalidTargetInventory = errors.New("invalid target inventory")
 
 var protectedTargetRoots = []string{
 	"/proc", "/sys", "/dev", "/run", "/boot", "/etc", "/usr", "/var/lib/pilothouse",
@@ -34,7 +33,7 @@ type PathManager struct {
 
 type pathFS interface {
 	close(int) error
-	empty(int, string) (bool, error)
+	empty(int) (bool, error)
 	fstat(int, *unix.Stat_t) error
 	mkdirat(int, string, uint32) error
 	openat2(int, string, *unix.OpenHow) (int, error)
@@ -44,28 +43,23 @@ type pathFS interface {
 
 type linuxPathFS struct{}
 
-func NewPathManager() PathManager {
-	return PathManager{DefinitionID: "new", fs: linuxPathFS{}}
+func NewPathManager(definitionID string) (PathManager, error) {
+	if err := ValidateDefinitionID(definitionID); err != nil {
+		return PathManager{}, err
+	}
+	return PathManager{DefinitionID: definitionID, fs: linuxPathFS{}}, nil
 }
 
 func (linuxPathFS) close(fd int) error { return unix.Close(fd) }
 
-func (linuxPathFS) empty(parent int, name string) (bool, error) {
-	fd, err := openTarget(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+func (linuxPathFS) empty(fd int) (bool, error) {
+	buffer := make([]byte, 4096)
+	read, err := unix.Getdents(fd, buffer)
 	if err != nil {
 		return false, err
 	}
-
-	directory := os.NewFile(uintptr(fd), name)
-	defer func() { _ = directory.Close() }()
-	entries, err := directory.ReadDir(1)
-	if err == io.EOF {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return len(entries) == 0, nil
+	_, count, _ := unix.ParseDirent(buffer[:read], 1, nil)
+	return count == 0, nil
 }
 
 func (linuxPathFS) fstat(fd int, stat *unix.Stat_t) error { return unix.Fstat(fd, stat) }
@@ -86,8 +80,8 @@ func (manager PathManager) ValidateTarget(ctx context.Context, target string, in
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if ValidateTarget(target) != nil || protectedTarget(target) || manager.hasConflict(target, inventory) {
-		return errUnsafeTarget
+	if err := manager.validatePolicy(target, inventory); err != nil {
+		return err
 	}
 
 	parent, leaf, exists, err := manager.walk(target)
@@ -101,12 +95,23 @@ func (manager PathManager) ValidateTarget(ctx context.Context, target string, in
 	return manager.validateDirectory(parent, leaf)
 }
 
-func (manager PathManager) CreateTarget(ctx context.Context, target string) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
+func (manager PathManager) validatePolicy(target string, inventory *TargetInventory) error {
 	if ValidateTarget(target) != nil || protectedTarget(target) {
-		return false, errUnsafeTarget
+		return errUnsafeTarget
+	}
+	if err := validateTargetInventory(inventory); err != nil {
+		return err
+	}
+	if manager.hasConflict(target, inventory) {
+		return errUnsafeTarget
+	}
+	return nil
+}
+
+func (manager PathManager) CreateTarget(ctx context.Context, target string, inventory *TargetInventory) (bool, error) {
+	// Recheck trusted policy and filesystem state immediately before mkdirat.
+	if err := manager.ValidateTarget(ctx, target, inventory); err != nil {
+		return false, err
 	}
 
 	parent, leaf, exists, err := manager.walk(target)
@@ -126,15 +131,14 @@ func (manager PathManager) CreateTarget(ctx context.Context, target string) (boo
 	return true, nil
 }
 
-func (manager PathManager) RemoveTarget(ctx context.Context, target string, created bool) error {
+// RemoveTarget removes a target only when created came from the root-owned manifest.
+func (manager PathManager) RemoveTarget(ctx context.Context, target string, created bool, inventory *TargetInventory) error {
 	if !created {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
+	// Recheck trusted policy and filesystem state immediately before unlinkat.
+	if err := manager.ValidateTarget(ctx, target, inventory); err != nil {
 		return err
-	}
-	if ValidateTarget(target) != nil || protectedTarget(target) {
-		return errUnsafeTarget
 	}
 
 	parent, leaf, exists, err := manager.walk(target)
@@ -188,7 +192,7 @@ func (manager PathManager) walk(target string) (parent int, leaf string, exists 
 }
 
 func (manager PathManager) validateDirectory(parent int, leaf string) error {
-	fd, err := manager.open(parent, leaf, unix.O_PATH|unix.O_DIRECTORY)
+	fd, err := manager.open(parent, leaf, unix.O_RDONLY|unix.O_DIRECTORY)
 	if err != nil {
 		return fmt.Errorf("open target: %w", err)
 	}
@@ -201,7 +205,7 @@ func (manager PathManager) validateDirectory(parent int, leaf string) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return errUnsafeTarget
 	}
-	empty, err := manager.fs.empty(parent, leaf)
+	empty, err := manager.fs.empty(fd)
 	if err != nil {
 		return fmt.Errorf("read target: %w", err)
 	}
@@ -233,6 +237,47 @@ func (manager PathManager) hasConflict(target string, inventory *TargetInventory
 		}
 	}
 	return false
+}
+
+func validateTargetInventory(inventory *TargetInventory) error {
+	if inventory == nil {
+		return nil
+	}
+	for _, mount := range inventory.Mounts {
+		if ValidateTarget(mount) != nil {
+			return errInvalidTargetInventory
+		}
+	}
+	for name, owner := range inventory.UnitOwners {
+		if !validUnitName(name) || ValidateDefinitionID(owner) != nil {
+			return errInvalidTargetInventory
+		}
+	}
+	return nil
+}
+
+func validUnitName(name string) bool {
+	if len(name) == 0 || len(name) > 255 || (!strings.HasSuffix(name, ".mount") && !strings.HasSuffix(name, ".automount")) {
+		return false
+	}
+	if strings.TrimSuffix(strings.TrimSuffix(name, ".automount"), ".mount") == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		byteValue := name[index]
+		if (byteValue >= 'a' && byteValue <= 'z') || (byteValue >= 'A' && byteValue <= 'Z') || (byteValue >= '0' && byteValue <= '9') || byteValue == ':' || byteValue == '_' || byteValue == '.' || byteValue == '-' {
+			continue
+		}
+		if byteValue != '\\' || index+3 >= len(name) || name[index+1] != 'x' || !hexByte(name[index+2]) || !hexByte(name[index+3]) {
+			return false
+		}
+		index += 3
+	}
+	return true
+}
+
+func hexByte(value byte) bool {
+	return ('0' <= value && value <= '9') || ('a' <= value && value <= 'f')
 }
 
 func protectedTarget(target string) bool {
@@ -270,11 +315,4 @@ func systemdEscapePath(target string) string {
 		fmt.Fprintf(&escaped, "\\x%02x", byteValue)
 	}
 	return escaped.String()
-}
-
-func openTarget(parent int, name string, flags int) (int, error) {
-	return unix.Openat2(parent, name, &unix.OpenHow{
-		Flags:   uint64(flags | unix.O_CLOEXEC),
-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
-	})
 }
