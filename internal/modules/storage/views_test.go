@@ -42,21 +42,54 @@ func TestPageEscapesMountValues(t *testing.T) {
 	assert.NotContains(t, html, "@web.")
 }
 
-func TestPageRendersUniqueResourceAndFindingAnchors(t *testing.T) {
+func TestPagePlacesSnapshotAnchorsOnVisibleRows(t *testing.T) {
 	snapshot := Snapshot{
-		Resources: []Resource{{ID: "disk:abc"}, {ID: "volume:one"}, {ID: "mount:disk:abc"}},
-		Findings:  []Finding{{ResourceID: "disk:abc"}, {ResourceID: "alert:only"}},
-		Mounts:    []Mount{{ID: "disk:abc", Target: "/data"}},
+		Resources: []Resource{
+			{ID: "disk:abc", Name: "Primary"},
+			{ID: "disk/abc", Name: "Collision"},
+		},
+		Mounts: []Mount{{ID: "remote:mount", Target: "/managed"}},
+		Findings: []Finding{
+			{ResourceID: "disk:abc", Title: "Device warning"},
+			{ResourceID: "disk:abc", Title: "Second device warning"},
+			{ResourceID: "remote:mount", Title: "Mount warning"},
+			{ResourceID: "orphan:manifest", Title: "Manifest warning"},
+			{ResourceID: "orphan:manifest", Title: "Second manifest warning"},
+			{Title: "Global warning"},
+		},
 	}
+
 	var output strings.Builder
 	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
 
 	html := output.String()
+	assert.NotContains(t, html, `<span id=`)
+	assert.Contains(t, html, `<tr id="disk-abc">`)
+	assert.Contains(t, html, `<tr id="disk-abc-">`)
+	assert.Contains(t, html, `<tr id="remote-mount">`)
+	assert.Contains(t, html, `<div id="orphan-manifest" class="mini-row storage-details">`)
 	assert.Equal(t, 1, strings.Count(html, `id="disk-abc"`))
-	assert.Equal(t, 1, strings.Count(html, `id="volume-one"`))
-	assert.Equal(t, 1, strings.Count(html, `id="alert-only"`))
-	assert.Equal(t, 1, strings.Count(html, `id="mount-disk-abc"`))
-	assert.Equal(t, 1, strings.Count(html, `id="mount-disk-abc-"`))
+	assert.Equal(t, 1, strings.Count(html, `id="disk-abc-"`))
+	assert.Equal(t, 1, strings.Count(html, `id="remote-mount"`))
+	assert.Equal(t, 1, strings.Count(html, `id="orphan-manifest"`))
+	assert.NotContains(t, html, `id=""`)
+	assert.NotContains(t, html, `@web.`)
+}
+
+func TestManagedPagePlacesFindingAnchorOnManagedMountRow(t *testing.T) {
+	snapshot := Snapshot{
+		Mounts:   []Mount{{ID: "remote:0123456789abcdef0123456789abcdef", Managed: true, Target: "/managed"}},
+		Findings: []Finding{{ResourceID: "remote:0123456789abcdef0123456789abcdef", Title: "Managed mount warning"}},
+	}
+
+	var output strings.Builder
+	require.NoError(t, ManagedPage(snapshot, false, "csrf", true).Render(context.Background(), &output))
+	html := output.String()
+
+	assert.Contains(t, html, `<tr id="remote-0123456789abcdef0123456789abcdef">`)
+	assert.Equal(t, 1, strings.Count(html, `id="remote-0123456789abcdef0123456789abcdef"`))
+	assert.NotContains(t, html, `<span id=`)
+	assert.NotContains(t, html, `@web.`)
 }
 
 func TestRenderStorageOperations(t *testing.T) {
@@ -184,25 +217,26 @@ func TestRenderStorageOperationsReadOnlyBadge(t *testing.T) {
 	assert.Contains(t, output.String(), `Read-only`)
 }
 
-func TestRenderTopologyLinksFriendlyResourceNames(t *testing.T) {
+func TestRenderTopologyUsesAllocatedResourceAnchors(t *testing.T) {
 	resources := []Resource{
-		{ID: "disk:sda", Name: "Primary disk"},
-		{ID: "partition:sda1", Name: "<root>"},
+		{ID: "disk:abc", Name: "Primary disk"},
+		{ID: "disk/abc", Name: "<collision>"},
 	}
 	relations := []Relation{
-		{From: "disk:sda", To: "partition:sda1", Kind: "contains"},
-		{From: "partition:sda1", To: "missing", Kind: "mounts"},
+		{From: "disk:abc", To: "disk/abc", Kind: "contains"},
+		{From: "disk/abc", To: "missing", Kind: "mounts"},
 	}
+	anchors := map[string]string{"disk:abc": "disk-abc", "disk/abc": "disk-abc-"}
+
 	var output strings.Builder
-	require.NoError(t, Topology(resources, relations).Render(context.Background(), &output))
+	require.NoError(t, Topology(resources, relations, anchors).Render(context.Background(), &output))
 
 	html := output.String()
-	assert.Contains(t, html, `<a href="#disk-sda">Primary disk</a>`)
-	assert.Contains(t, html, `<a href="#partition-sda1">&lt;root&gt;</a>`)
+	assert.Contains(t, html, `<a href="#disk-abc">Primary disk</a>`)
+	assert.Contains(t, html, `<a href="#disk-abc-">&lt;collision&gt;</a>`)
 	assert.Contains(t, html, `Unknown resource`)
 	assert.NotContains(t, html, `href="#missing"`)
-	assert.NotContains(t, html, `>disk-sda<`)
-	assert.NotContains(t, html, `>partition-sda1<`)
+	assert.NotContains(t, html, `@web.`)
 }
 
 func TestUsagePercentClampsToRange(t *testing.T) {

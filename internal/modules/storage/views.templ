@@ -50,14 +50,12 @@ templ ManagedSnapshotRegion(snapshot Snapshot, unavailable bool, csrf string, ad
 		if unavailable {
 			<div class="empty-state">Storage status is unavailable.</div>
 		} else {
-			for _, anchor := range snapshotAnchorSet(snapshot).resources {
-				<span id={ anchor }></span>
-			}
+			{{ anchors := snapshotAnchorSet(snapshot) }}
 			@StorageMetrics(snapshot.Summary)
-			@StorageAttention(snapshot.Findings, snapshot.Truncated)
-			@ManagedMountTable(snapshot.Mounts, snapshotAnchorSet(snapshot).mounts, csrf, admin)
-			@Topology(snapshot.Resources, snapshot.Relations)
-			@ResourceInventory(snapshot.Resources)
+			@StorageAttention(snapshot.Findings, snapshot.Truncated, anchors.findings)
+			@ManagedMountTable(snapshot.Mounts, anchors.mounts, csrf, admin)
+			@Topology(snapshot.Resources, snapshot.Relations, anchors.resourceByID)
+			@ResourceInventory(snapshot.Resources, anchors.resources)
 			@BackendStates(snapshot.Backends)
 		}
 	</section>
@@ -103,14 +101,11 @@ templ SnapshotContents(snapshot Snapshot, unavailable bool, anchors anchorSet) {
 		if unavailable {
 			<div class="empty-state">Storage status is unavailable.</div>
 		} else {
-			for _, anchor := range anchors.resources {
-				<span id={ anchor }></span>
-			}
 			@StorageMetrics(snapshot.Summary)
-			@StorageAttention(snapshot.Findings, snapshot.Truncated)
+			@StorageAttention(snapshot.Findings, snapshot.Truncated, anchors.findings)
 			@MountTable(snapshot.Mounts, anchors.mounts)
-			@Topology(snapshot.Resources, snapshot.Relations)
-			@ResourceInventory(snapshot.Resources)
+			@Topology(snapshot.Resources, snapshot.Relations, anchors.resourceByID)
+			@ResourceInventory(snapshot.Resources, anchors.resources)
 			@BackendStates(snapshot.Backends)
 		}
 	</section>
@@ -132,17 +127,25 @@ templ StorageMetrics(summary Summary) {
 	</div>
 }
 
-templ StorageAttention(findings []Finding, truncated bool) {
+templ StorageAttention(findings []Finding, truncated bool, anchors []string) {
 	if truncated || len(findings) > 0 {
 		<article class="card table-card">
 			<div class="table-toolbar"><h2>Storage attention</h2><span>{ fmt.Sprintf("%d findings", len(findings)) }</span></div>
 			if truncated {
 				<div class="empty-state compact">Storage inventory was truncated.</div>
 			}
-			for _, finding := range findings {
-				<div class="mini-row storage-details"><div><strong>{ finding.Title }</strong><small>{ finding.Detail }</small></div><span class={ "badge", string(finding.Severity) }>{ healthLabel(finding.Severity) }</span></div>
+			for index, finding := range findings {
+				@StorageFinding(finding, anchors[index])
 			}
 		</article>
+	}
+}
+
+templ StorageFinding(finding Finding, anchor string) {
+	if anchor == "" {
+		<div class="mini-row storage-details"><div><strong>{ finding.Title }</strong><small>{ finding.Detail }</small></div><span class={ "badge", string(finding.Severity) }>{ healthLabel(finding.Severity) }</span></div>
+	} else {
+		<div id={ anchor } class="mini-row storage-details"><div><strong>{ finding.Title }</strong><small>{ finding.Detail }</small></div><span class={ "badge", string(finding.Severity) }>{ healthLabel(finding.Severity) }</span></div>
 	}
 }
 
@@ -195,24 +198,24 @@ templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bo
 	</article>
 }
 
-templ Topology(resources []Resource, relations []Relation) {
+templ Topology(resources []Resource, relations []Relation, anchors map[string]string) {
 	<article class="card table-card storage-topology">
 		<div class="table-toolbar"><h2>Storage topology</h2><span>{ fmt.Sprintf("%d relations", len(relations)) }</span></div>
 		if len(relations) == 0 {
 			<div class="empty-state">No storage relationships were reported.</div>
 		} else {
-			@TopologyRelations(resourceIndex(resources), relations)
+			@TopologyRelations(resourceIndex(resources), relations, anchors)
 		}
 	</article>
 }
 
-templ TopologyRelations(resources map[string]Resource, relations []Relation) {
+templ TopologyRelations(resources map[string]Resource, relations []Relation, anchors map[string]string) {
 	<div class="storage-tree">
 		for _, relation := range relations {
 			<div class="storage-node"><strong>
-				@TopologyEndpoint(endpointFor(resources, relation.From))
+				@TopologyEndpoint(endpointFor(resources, anchors, relation.From))
 				→
-				@TopologyEndpoint(endpointFor(resources, relation.To))
+				@TopologyEndpoint(endpointFor(resources, anchors, relation.To))
 			</strong><small>{ relation.Kind }</small></div>
 		}
 	</div>
@@ -226,7 +229,7 @@ templ TopologyEndpoint(endpoint topologyEndpoint) {
 	}
 }
 
-templ ResourceInventory(resources []Resource) {
+templ ResourceInventory(resources []Resource, anchors []string) {
 	<article class="card table-card">
 		<div class="table-toolbar"><h2>Storage inventory</h2><span>{ fmt.Sprintf("%d resources", len(resources)) }</span></div>
 		if len(resources) == 0 {
@@ -235,8 +238,8 @@ templ ResourceInventory(resources []Resource) {
 			<table class="data-table">
 				<thead><tr><th>Resource</th><th>Kind</th><th>Path</th><th>Capacity</th><th>Health</th></tr></thead>
 				<tbody>
-					for _, resource := range resources {
-						<tr><td><strong>{ resource.Name }</strong><small class="table-detail">{ resource.State }</small></td><td>{ resource.Kind }</td><td>{ resource.Path }</td><td>{ capacity(resource.SizeBytes) }</td><td><span class={ "badge", string(resource.Health) }>{ healthLabel(resource.Health) }</span>
+					for index, resource := range resources {
+						<tr id={ anchors[index] }><td><strong>{ resource.Name }</strong><small class="table-detail">{ resource.State }</small></td><td>{ resource.Kind }</td><td>{ resource.Path }</td><td>{ capacity(resource.SizeBytes) }</td><td><span class={ "badge", string(resource.Health) }>{ healthLabel(resource.Health) }</span>
 							@ResourceDetails(resource.Details)
 						</td></tr>
 					}
@@ -330,60 +333,88 @@ func resourceIndex(resources []Resource) map[string]Resource {
 	return index
 }
 
-func endpointFor(resources map[string]Resource, id string) topologyEndpoint {
+func endpointFor(resources map[string]Resource, anchors map[string]string, id string) topologyEndpoint {
 	resource, found := resources[id]
 	if !found {
 		return topologyEndpoint{}
 	}
-	return topologyEndpoint{anchor: storageAnchor(resource.ID), found: true, name: resource.Name}
-}
-
-func snapshotAnchors(snapshot Snapshot) []string {
-	seen := make(map[string]struct{}, len(snapshot.Resources)+len(snapshot.Findings))
-	anchors := make([]string, 0, len(snapshot.Resources)+len(snapshot.Findings))
-	add := func(resourceID string) {
-		anchor := storageAnchor(resourceID)
-		if _, exists := seen[anchor]; exists {
-			return
-		}
-		seen[anchor] = struct{}{}
-		anchors = append(anchors, anchor)
-	}
-	for _, resource := range snapshot.Resources {
-		add(resource.ID)
-	}
-	for _, finding := range snapshot.Findings {
-		add(finding.ResourceID)
-	}
-	return anchors
+	return topologyEndpoint{anchor: anchors[id], found: true, name: resource.Name}
 }
 
 type anchorSet struct {
-	mounts    []string
-	resources []string
+	findings       []string
+	findingTargets []string
+	mounts         []string
+	resources      []string
+	resourceByID   map[string]string
 }
 
 func snapshotAnchorSet(snapshot Snapshot) anchorSet {
-	resources := snapshotAnchors(snapshot)
-	return anchorSet{resources: resources, mounts: mountAnchors(snapshot, resources)}
-}
-
-func mountAnchors(snapshot Snapshot, resourceAnchors []string) []string {
-	used := make(map[string]struct{}, len(resourceAnchors)+len(snapshot.Mounts))
-	for _, anchor := range resourceAnchors {
-		used[anchor] = struct{}{}
+	anchors := anchorSet{
+		findings:       make([]string, len(snapshot.Findings)),
+		findingTargets: make([]string, len(snapshot.Findings)),
+		mounts:         make([]string, len(snapshot.Mounts)),
+		resources:      make([]string, len(snapshot.Resources)),
+		resourceByID:   make(map[string]string, len(snapshot.Resources)),
 	}
-	anchors := make([]string, len(snapshot.Mounts))
-	for index, mount := range snapshot.Mounts {
-		anchor := "mount-" + storageAnchor(mount.ID)
+	used := make(map[string]struct{}, len(snapshot.Resources)+len(snapshot.Mounts)+len(snapshot.Findings))
+	unique := func(base string) string {
+		anchor := base
 		for {
 			if _, exists := used[anchor]; !exists {
-				break
+				used[anchor] = struct{}{}
+				return anchor
 			}
 			anchor += "-"
 		}
-		used[anchor] = struct{}{}
-		anchors[index] = anchor
+	}
+
+	for index, resource := range snapshot.Resources {
+		anchor := unique(storageAnchor(resource.ID))
+		anchors.resources[index] = anchor
+		anchors.resourceByID[resource.ID] = anchor
+	}
+
+	targetedMounts := make(map[string]bool, len(snapshot.Findings))
+	for _, finding := range snapshot.Findings {
+		targetedMounts[finding.ResourceID] = true
+	}
+	mountByID := make(map[string]string, len(snapshot.Mounts))
+	for index, mount := range snapshot.Mounts {
+		base := "mount-" + storageAnchor(mount.ID)
+		if targetedMounts[mount.ID] {
+			if _, resourceOwnsTarget := anchors.resourceByID[mount.ID]; !resourceOwnsTarget {
+				base = storageAnchor(mount.ID)
+			}
+		}
+		anchor := unique(base)
+		anchors.mounts[index] = anchor
+		if _, exists := mountByID[mount.ID]; !exists {
+			mountByID[mount.ID] = anchor
+		}
+	}
+
+	orphanByID := make(map[string]string)
+	for index, finding := range snapshot.Findings {
+		if finding.ResourceID == "" {
+			continue
+		}
+		if anchor, exists := anchors.resourceByID[finding.ResourceID]; exists {
+			anchors.findingTargets[index] = anchor
+			continue
+		}
+		if anchor, exists := mountByID[finding.ResourceID]; exists {
+			anchors.findingTargets[index] = anchor
+			continue
+		}
+		if anchor, exists := orphanByID[finding.ResourceID]; exists {
+			anchors.findingTargets[index] = anchor
+			continue
+		}
+		anchor := unique(storageAnchor(finding.ResourceID))
+		orphanByID[finding.ResourceID] = anchor
+		anchors.findings[index] = anchor
+		anchors.findingTargets[index] = anchor
 	}
 	return anchors
 }
