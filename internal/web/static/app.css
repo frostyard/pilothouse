@@ -201,6 +201,13 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
 .storage-node strong { font-size: 10.5px; overflow-wrap: anywhere; }
 .storage-node small, .storage-details small { color: #7a9cb0; display: block; font-size: 8.5px; margin-top: 3px; overflow-wrap: anywhere; }
 .storage-details { min-width: 0; }
+.remote-mount-form { max-width: 780px; }
+.remote-protocols { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.remote-protocols a { border: 1px solid var(--line); color: var(--ice); font-size: 10px; padding: 6px 8px; text-decoration: none; }
+.remote-protocols a:hover { border-color: var(--sky); }
+.remote-mount-fields { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.remote-mount-fields label { display: grid; gap: 6px; }
+.remote-mount-actions { display: flex; gap: 8px; grid-column: 1 / -1; justify-content: flex-end; }
 .engine-stats { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .engine-stat { background: var(--gradient-card); border: 1px solid var(--line); display: grid; gap: 3px; padding: 11px 14px; }
 .engine-stat > span { color: #7cbddc; font: 750 8.5px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
@@ -280,6 +287,7 @@ input:focus, select:focus { border-color: var(--sky); box-shadow: 0 0 0 3px rgba
   .hero-card::after { opacity: .2; }
   .engine-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .storage-operations { grid-template-columns: 1fr; }
+  .remote-mount-fields { grid-template-columns: 1fr; }
   .data-table { display: block; overflow-x: auto; }
   .fleet-table, .fleet-table tbody { display: block; width: 100%; }
   .fleet-table thead { display: none; }

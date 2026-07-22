@@ -32,6 +32,67 @@ templ Page(snapshot Snapshot, unavailable bool) {
 	</div>
 }
 
+templ ManagedPage(snapshot Snapshot, unavailable bool, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p>
+			if admin {
+				<a class="button" href="/storage/mounts/new">Add remote mount</a>
+			}
+		</div>
+		@ManagedSnapshotRegion(snapshot, unavailable, csrf, admin)
+	</div>
+}
+
+templ ManagedSnapshotRegion(snapshot Snapshot, unavailable bool, csrf string, admin bool) {
+	<section id="storage-snapshot" class="storage-snapshot" hx-get="/storage" hx-trigger="every 30s" hx-select="#storage-snapshot" hx-target="#storage-snapshot" hx-swap="outerHTML">
+		if unavailable {
+			<div class="empty-state">Storage status is unavailable.</div>
+		} else {
+			for _, anchor := range snapshotAnchorSet(snapshot).resources {
+				<span id={ anchor }></span>
+			}
+			@StorageMetrics(snapshot.Summary)
+			@StorageAttention(snapshot.Findings, snapshot.Truncated)
+			@ManagedMountTable(snapshot.Mounts, snapshotAnchorSet(snapshot).mounts, csrf, admin)
+			@Topology(snapshot.Resources, snapshot.Relations)
+			@ResourceInventory(snapshot.Resources)
+			@BackendStates(snapshot.Backends)
+		}
+	</section>
+}
+
+templ RemoteMountForm(protocol string, csrf string) {
+	<div class="remote-mount-form card">
+		<div class="card-heading"><div><h2>Add remote mount</h2><p>Managed NFS and SMB mounts use fixed, reviewed settings.</p></div></div>
+		<nav class="remote-protocols" aria-label="Remote mount protocol">
+			<a href="/storage/mounts/new?protocol=nfs">NFS</a>
+			<a href="/storage/mounts/new?protocol=smb-guest">SMB guest</a>
+			<a href="/storage/mounts/new?protocol=smb-credentials">SMB credentials</a>
+		</nav>
+		<form method="post" action="/storage/mounts" class="remote-mount-fields" hx-boost="false">
+			<input type="hidden" name="csrf" value={ csrf }/>
+			<input type="hidden" name="protocol" value={ protocol }/>
+			if protocol == "nfs" {
+				<label>Server <input name="host" required/></label>
+				<label>Export <input name="export" placeholder="/export" required/></label>
+				<label>Version <select name="version"><option value="auto">Auto</option><option value="3">3</option><option value="4">4</option><option value="4.1">4.1</option><option value="4.2">4.2</option></select></label>
+			} else {
+				<label>Server <input name="server" required/></label>
+				<label>Share <input name="share" required/></label>
+				if protocol == "smb-credentials" {
+					<label>Username <input name="username" required/></label>
+					<label>Password <input type="password" name="password" required/></label>
+				}
+				<label>Version <select name="version"><option value="auto">Auto</option><option value="2.1">2.1</option><option value="3.0">3.0</option><option value="3.1.1">3.1.1</option></select></label>
+			}
+			<label>Target <input name="target" placeholder="/mnt/remote" required/></label>
+			<label>Read-only <select name="read_only"><option value="false">No</option><option value="true">Yes</option></select></label>
+			<div class="remote-mount-actions"><a class="button secondary" href="/storage">Cancel</a><button class="button" type="submit">Add remote mount</button></div>
+		</form>
+	</div>
+}
+
 templ SnapshotRegion(snapshot Snapshot, unavailable bool) {
 	@SnapshotContents(snapshot, unavailable, snapshotAnchorSet(snapshot))
 }
@@ -102,6 +163,25 @@ templ MountTable(mounts []Mount, mountIDs []string) {
 					}
 				</tbody>
 			</table>
+		}
+	</article>
+}
+
+templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bool) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Mounted storage</h2><span>{ fmt.Sprintf("%d mounts", len(mounts)) }</span></div>
+		if len(mounts) == 0 {
+			<div class="empty-state">No mounted storage was reported.</div>
+		} else {
+			<table class="data-table"><thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th><th></th></tr></thead><tbody>
+				for index, mount := range mounts {
+					<tr id={ mountIDs[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td><span class={ "badge", string(mount.Health) }>{ mount.State }</span></td><td>
+						if admin && mount.Managed {
+							<div class="actions"><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/mount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Mount</button></form><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/unmount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Unmount</button></form><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/delete" }><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Delete</button></form></div>
+						}
+					</td></tr>
+				}
+			</tbody></table>
 		}
 	</article>
 }

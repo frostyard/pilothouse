@@ -210,3 +210,17 @@ func TestUsagePercentClampsToRange(t *testing.T) {
 	assert.Equal(t, 0.0, usagePercent(0, 1))
 	assert.Equal(t, 100.0, usagePercent(2, 1))
 }
+
+func TestRemoteMountFormRendersAllowlistedFieldsAndEscapesValues(t *testing.T) {
+	var output strings.Builder
+	require.NoError(t, RemoteMountForm("smb-credentials", "csrf-token").Render(context.Background(), &output))
+
+	html := output.String()
+	for _, value := range []string{`action="/storage/mounts"`, `name="csrf"`, `value="csrf-token"`, `name="server"`, `name="share"`, `name="username"`, `name="password"`, `name="target"`, `name="version"`, `name="read_only"`, `value="2.1"`, `value="3.0"`, `value="3.1.1"`} {
+		assert.Contains(t, html, value)
+	}
+	assert.NotContains(t, html, `name="options"`)
+	assert.NotContains(t, html, `credential-path`)
+	assert.NotContains(t, html, `name="unit"`)
+	assert.NotContains(t, html, `@web.`)
+}

@@ -17,20 +17,33 @@ import (
 )
 
 type fakeHost struct {
+	admin           bool
+	confirmCalls    []string
+	confirmResult   bool
+	executeErr      error
+	executeID       string
+	executeParams   map[string]string
 	page            platform.Page
 	queryDeadline   time.Time
 	queryErr        error
 	queryID         string
 	queryParameters map[string]string
 	snapshot        Snapshot
+	validateCalls   int
+	validateResult  bool
 }
 
-func (*fakeHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }
-func (*fakeHost) CSRFToken(*http.Request) string                                        { return "" }
-func (*fakeHost) Execute(context.Context, *http.Request, string, map[string]string) error {
-	return nil
+func (host *fakeHost) ConfirmAction(_ http.ResponseWriter, _ *http.Request, _ string, resource string) bool {
+	host.confirmCalls = append(host.confirmCalls, resource)
+	return host.confirmResult
 }
-func (*fakeHost) Identity(*http.Request) auth.Identity { return auth.Identity{} }
+func (*fakeHost) CSRFToken(*http.Request) string { return "csrf-token" }
+func (host *fakeHost) Execute(_ context.Context, _ *http.Request, id string, parameters map[string]string) error {
+	host.executeID = id
+	host.executeParams = parameters
+	return host.executeErr
+}
+func (host *fakeHost) Identity(*http.Request) auth.Identity { return auth.Identity{Admin: host.admin} }
 func (host *fakeHost) Query(ctx context.Context, queryID string, parameters map[string]string, target any) error {
 	host.queryID = queryID
 	host.queryParameters = parameters
@@ -45,7 +58,10 @@ func (host *fakeHost) Render(_ http.ResponseWriter, _ *http.Request, page platfo
 	host.page = page
 	return nil
 }
-func (*fakeHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (host *fakeHost) ValidateAction(http.ResponseWriter, *http.Request) bool {
+	host.validateCalls++
+	return host.validateResult
+}
 
 func TestModuleUsesOnlyStorageQuery(t *testing.T) {
 	host := &fakeHost{snapshot: Snapshot{Summary: Summary{ActiveMounts: 3}}}
@@ -129,4 +145,67 @@ func TestStoragePageRendersUnavailableState(t *testing.T) {
 	require.NoError(t, host.page.Body.Render(context.Background(), &output))
 	assert.Contains(t, output.String(), "Storage status is unavailable.")
 	assert.NotContains(t, output.String(), "broker connection refused")
+}
+
+func TestStorageActionCreateCredentialsUsesExactParametersWithoutConfirmation(t *testing.T) {
+	host := &fakeHost{admin: true, confirmResult: true, validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	request := httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader("protocol=smb-credentials&server=nas.example&share=media&username=mount-user&password=secret&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, 1, host.validateCalls)
+	assert.Empty(t, host.confirmCalls)
+	assert.Equal(t, broker.ActionStorageCreateSMBCredentials, host.executeID)
+	assert.Equal(t, map[string]string{"server": "nas.example", "share": "media", "username": "mount-user", "password": "secret", "target": "/mnt/media", "version": "3.1.1", "read_only": "false"}, host.executeParams)
+	assert.NotContains(t, response.Header().Get("Location"), "secret")
+}
+
+func TestStorageActionRejectsNonAdminBeforeValidationOrBroker(t *testing.T) {
+	host := &fakeHost{validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/storage/mounts/0123456789abcdef0123456789abcdef/mount", nil))
+
+	assert.Equal(t, http.StatusForbidden, response.Code)
+	assert.Zero(t, host.validateCalls)
+	assert.Empty(t, host.executeID)
+}
+
+func TestStorageActionUnmountConfirmsExactResourceAndUsesHXRedirect(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	host := &fakeHost{admin: true, confirmResult: true, validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	request := httptest.NewRequest(http.MethodPost, "/storage/mounts/"+id+"/unmount", nil)
+	request.Header.Set("HX-Request", "true")
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusNoContent, response.Code)
+	assert.Contains(t, response.Header().Get("HX-Redirect"), "Mount+unmounted")
+	assert.Equal(t, 1, host.validateCalls)
+	assert.Equal(t, []string{"storage/mount/" + id}, host.confirmCalls)
+	assert.Equal(t, broker.ActionStorageUnmount, host.executeID)
+	assert.Equal(t, map[string]string{"id": id}, host.executeParams)
+}
+
+func TestStorageActionFailureDoesNotExposeBrokerError(t *testing.T) {
+	host := &fakeHost{admin: true, executeErr: errors.New("credential path leaked"), validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/storage/mounts/0123456789abcdef0123456789abcdef/mount", nil))
+
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Contains(t, response.Header().Get("Location"), "Action+failed.+Review+Activity+for+the+recorded+outcome.")
+	assert.NotContains(t, response.Header().Get("Location"), "credential")
 }
