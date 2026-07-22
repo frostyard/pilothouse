@@ -284,21 +284,28 @@ func TestRegisterStorageOwnedSMBCreateActionsRejectInvalidOwnership(t *testing.T
 	base := map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000", "gid": "100"}
 	for _, test := range []struct {
 		name       string
+		action     string
 		parameters map[string]string
+		password   string
 	}{
-		{"missing ownership", map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000"}},
-		{"extra parameter", map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000", "gid": "100", "unexpected": "secret"}},
-		{"sentinel ownership", map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "4294967295", "gid": "100"}},
-		{"malformed ownership", map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "invalid", "gid": "100"}},
+		{"missing ownership", broker.ActionStorageCreateSMBGuestOwned, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000"}, ""},
+		{"extra parameter", broker.ActionStorageCreateSMBGuestOwned, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000", "gid": "100", "unexpected": "secret"}, ""},
+		{"sentinel ownership", broker.ActionStorageCreateSMBGuestOwned, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "4294967295", "gid": "100"}, ""},
+		{"malformed ownership", broker.ActionStorageCreateSMBGuestOwned, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "invalid", "gid": "100"}, ""},
+		{"credentials ownership", broker.ActionStorageCreateSMBCredentialsOwned, map[string]string{"server": "nas.example", "share": "media", "username": "mount-user", "password": "credentials-owned-sentinel", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "invalid", "gid": "100"}, "credentials-owned-sentinel"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
 			require.NoError(t, registerStorageActions(actions, manager))
 
-			err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBGuestOwned, test.parameters, "")
+			err := actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, test.parameters, "")
 			require.Error(t, err)
 			assert.Equal(t, storage.CreateRequest{}, manager.create)
+			if test.password != "" {
+				assert.NotContains(t, err.Error(), test.password)
+				assert.NotContains(t, fmt.Sprintf("%+v", store.attempts), test.password)
+			}
 			if len(store.attempts) != 0 {
 				assert.Regexp(t, `^storage/mount/[a-f0-9]{32}$`, store.last().Resource)
 			}

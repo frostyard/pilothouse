@@ -148,7 +148,7 @@ func ValidatePassword(value string) error {
 }
 
 func ValidateProtocol(value string) error {
-	if !validText(value) || value != "nfs" && value != "smb" {
+	if !validText(value) || (value != "nfs" && value != "smb") {
 		return errInvalidProtocol
 	}
 	return nil
@@ -253,7 +253,7 @@ func validateDefinitionOwnership(formatVersion int, protocol string, ownership S
 		return nil
 	}
 	canonical, err := ParseSMBOwnership(ownership.UID, ownership.GID)
-	if err != nil || canonical != ownership || protocol != "smb" && ownership != (SMBOwnership{}) {
+	if err != nil || canonical != ownership || (protocol != "smb" && ownership != (SMBOwnership{})) {
 		return errInvalidSMBOwnership
 	}
 	return nil

@@ -356,7 +356,7 @@ func (manager *SystemRemoteManager) loadVerified(id string) (Definition, error) 
 
 func (manager *SystemRemoteManager) definition(request CreateRequest) (Definition, error) {
 	ownership, err := ParseSMBOwnership(request.UID, request.GID)
-	if err != nil || request.Protocol != "smb" && ownership != (SMBOwnership{}) {
+	if err != nil || (request.Protocol != "smb" && ownership != (SMBOwnership{})) {
 		return Definition{}, errInvalidManifest
 	}
 	if ValidateDefinitionID(request.ID) != nil || ValidateProtocol(request.Protocol) != nil || ValidateTarget(request.Target) != nil {
