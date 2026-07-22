@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -213,6 +214,75 @@ func TestRemoteManagerMountAndUnmountUseExactUnits(t *testing.T) {
 	require.NoError(t, manager.Unmount(context.Background(), request.ID))
 
 	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
+}
+
+func TestRemoteManagerMountAndUnmountRefuseNeedsAttentionDefinitions(t *testing.T) {
+	store := testArtifactStore(t)
+	controller := &recordingUnitController{}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+	request := testNFSRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	definition.State = "needs-attention"
+	require.NoError(t, store.UpdateManifest(definition))
+	controller.calls = nil
+
+	assert.Error(t, manager.Mount(context.Background(), request.ID))
+	assert.Error(t, manager.Unmount(context.Background(), request.ID))
+	assert.Empty(t, controller.calls)
+}
+
+func TestRemoteManagerCreateRejectsTargetNestedUnderInactiveDefinition(t *testing.T) {
+	store := testArtifactStore(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	request := testNFSRequest(t)
+	require.NoError(t, os.Mkdir(request.Target, 0o755))
+	definition, err := manager.definition(request)
+	require.NoError(t, err)
+	definition.State = "inactive"
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.WriteManifest(definition))
+
+	request.ID = "fedcba9876543210fedcba9876543210"
+	request.Target = filepath.Join(request.Target, "nested")
+	assert.Error(t, manager.Create(context.Background(), request))
+	assert.NoDirExists(t, request.Target)
+}
+
+func TestRemoteMountCredentialOnlyAppearsInCredentialArtifact(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testSMBRequest(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	require.NoError(t, manager.Create(context.Background(), request))
+
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	manifestPath, _ := store.ManifestPath(request.ID)
+	mountPath, _ := store.MountUnitPath(definition)
+	automountPath, _ := store.AutomountUnitPath(definition)
+	credentialPath, _ := store.CredentialPath(request.ID)
+	snapshot, err := manager.State(context.Background())
+	require.NoError(t, err)
+	var html strings.Builder
+	require.NoError(t, ManagedPage(snapshot, false, "csrf-token", true).Render(context.Background(), &html))
+	invalid := request
+	invalid.Target = "/etc/never-record-this-secret"
+	createErr := manager.Create(context.Background(), invalid)
+	require.Error(t, createErr)
+
+	credential, err := os.ReadFile(credentialPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(credential), request.Password)
+	for _, contents := range []string{html.String(), createErr.Error(), fmt.Sprintf("%+v", snapshot)} {
+		assert.NotContains(t, contents, request.Password)
+	}
+	for _, path := range []string{manifestPath, mountPath, automountPath} {
+		contents, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.NotContains(t, string(contents), request.Password)
+	}
 }
 
 func TestRemoteManagerRefusesMalformedIDsAndModifiedArtifacts(t *testing.T) {

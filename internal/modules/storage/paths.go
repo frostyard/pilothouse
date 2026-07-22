@@ -228,7 +228,7 @@ func (manager PathManager) hasConflict(target string, inventory *TargetInventory
 		return false
 	}
 	for _, mount := range inventory.Mounts {
-		if mount == target || strings.HasPrefix(mount, target+"/") {
+		if mount == target || strings.HasPrefix(mount, target+"/") || strings.HasPrefix(target, mount+"/") {
 			return true
 		}
 	}

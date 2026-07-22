@@ -161,6 +161,9 @@ func (manager *SystemRemoteManager) Mount(ctx context.Context, id string) error 
 	if err != nil {
 		return err
 	}
+	if definition.State == "needs-attention" {
+		return errArtifactNotManaged
+	}
 	return manager.units.Start(ctx, automountUnitName(definition.Target))
 }
 
@@ -170,6 +173,9 @@ func (manager *SystemRemoteManager) Unmount(ctx context.Context, id string) erro
 	definition, err := manager.loadVerified(id)
 	if err != nil {
 		return err
+	}
+	if definition.State == "needs-attention" {
+		return errArtifactNotManaged
 	}
 	return manager.units.Stop(ctx, definition.UnitName)
 }
@@ -364,6 +370,9 @@ func (manager *SystemRemoteManager) inventory(ctx context.Context, exclude ...st
 				return TargetInventory{}, err
 			}
 		}
+		// Definitions reserve their targets even while inactive so a later
+		// activation cannot overlap a subsequently-created managed target.
+		inventory.Mounts = append(inventory.Mounts, definition.Target)
 		inventory.UnitOwners[definition.UnitName] = definition.ID
 		inventory.UnitOwners[automountUnitName(definition.Target)] = definition.ID
 	}

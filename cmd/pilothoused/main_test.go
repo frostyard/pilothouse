@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -259,6 +260,22 @@ func TestRegisterStorageActionsRejectUnexpectedParameters(t *testing.T) {
 	assert.NotContains(t, err.Error(), "/secret")
 }
 
+func TestRegisterStorageCredentialActionAuditsOnlyOpaqueID(t *testing.T) {
+	const secret = "never-record-this-secret"
+	manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
+	actions := broker.NewActionRegistry(store)
+	require.NoError(t, registerStorageActions(actions, manager))
+
+	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBCredentials, map[string]string{
+		"server": "nas.example", "share": "media", "username": "mount-user", "password": secret,
+		"target": "/mnt/media", "version": "3.1.1", "read_only": "false",
+	}, ""))
+
+	assert.Regexp(t, `^storage/mount/[a-f0-9]{32}$`, store.last().Resource)
+	assert.NotContains(t, store.last().Resource, secret)
+	assert.NotContains(t, fmt.Sprintf("%+v", store.last()), secret)
+}
+
 func TestRegisterStorageCreateActionUsesGlobalLock(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -285,6 +302,55 @@ func TestRegisterStorageCreateActionUsesGlobalLock(t *testing.T) {
 	require.NoError(t, <-second)
 }
 
+func TestRegisterStorageLifecycleActionsSerializeSameIDAndAllowDifferentIDs(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		action       string
+		confirmation bool
+	}{
+		{"mount", broker.ActionStorageMount, false},
+		{"unmount", broker.ActionStorageUnmount, true},
+		{"delete", broker.ActionStorageDelete, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &blockingLifecycleRemoteManager{entered: make(chan string, 3), release: make(chan struct{})}
+			actions := broker.NewActionRegistry()
+			require.NoError(t, registerStorageActions(actions, manager))
+			confirmation := ""
+			if test.confirmation {
+				confirmation = "storage/mount/0123456789abcdef0123456789abcdef"
+			}
+			run := func(id string, done chan<- error) {
+				confirm := confirmation
+				if test.confirmation && id != "0123456789abcdef0123456789abcdef" {
+					confirm = "storage/mount/11111111111111111111111111111111"
+				}
+				done <- actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, map[string]string{"id": id}, confirm)
+			}
+			first := make(chan error, 1)
+			go run("0123456789abcdef0123456789abcdef", first)
+			require.Equal(t, "0123456789abcdef0123456789abcdef", <-manager.entered)
+			same := make(chan error, 1)
+			go run("0123456789abcdef0123456789abcdef", same)
+			different := make(chan error, 1)
+			go run("11111111111111111111111111111111", different)
+			require.Equal(t, "11111111111111111111111111111111", <-manager.entered)
+			select {
+			case id := <-manager.entered:
+				t.Fatalf("same ID overlapped: %s", id)
+			case <-time.After(20 * time.Millisecond):
+			}
+			manager.release <- struct{}{}
+			manager.release <- struct{}{}
+			require.NoError(t, <-first)
+			require.NoError(t, <-different)
+			require.Equal(t, "0123456789abcdef0123456789abcdef", <-manager.entered)
+			manager.release <- struct{}{}
+			require.NoError(t, <-same)
+		})
+	}
+}
+
 type blockingRemoteManager struct {
 	started chan<- struct{}
 	release <-chan struct{}
@@ -305,6 +371,33 @@ func (*blockingRemoteManager) Mount(context.Context, string) error   { return ni
 func (*blockingRemoteManager) Unmount(context.Context, string) error { return nil }
 func (*blockingRemoteManager) State(context.Context) (storage.Snapshot, error) {
 	return storage.Snapshot{}, nil
+}
+
+type blockingLifecycleRemoteManager struct {
+	entered chan string
+	release chan struct{}
+}
+
+func (*blockingLifecycleRemoteManager) Create(context.Context, storage.CreateRequest) error {
+	return nil
+}
+func (*blockingLifecycleRemoteManager) State(context.Context) (storage.Snapshot, error) {
+	return storage.Snapshot{}, nil
+}
+func (m *blockingLifecycleRemoteManager) Delete(_ context.Context, id string) error {
+	m.entered <- id
+	<-m.release
+	return nil
+}
+func (m *blockingLifecycleRemoteManager) Mount(_ context.Context, id string) error {
+	m.entered <- id
+	<-m.release
+	return nil
+}
+func (m *blockingLifecycleRemoteManager) Unmount(_ context.Context, id string) error {
+	m.entered <- id
+	<-m.release
+	return nil
 }
 
 func TestStorageManagerCompositionReportsUnsupportedOptionalBackends(t *testing.T) {
