@@ -6,7 +6,6 @@ GOFILES := $(shell find . -type f -name '*.go' -not -name '*_templ.go')
 GO_VERSION ?= 1.26.5
 GOLANGCI_LINT_VERSION ?= v2.11.4
 SVU_VERSION ?= v3.4.1
-GIT_COMMON_DIR := $(shell git rev-parse --path-format=absolute --git-common-dir)
 DOCKER ?= docker
 DOCKER_IMAGE ?= pilothouse-dev:go$(GO_VERSION)
 DOCKER_CACHE_PREFIX ?= pilothouse
@@ -18,7 +17,6 @@ DOCKER_RUN = $(DOCKER) run --rm \
 	--env GOTOOLCHAIN=local \
 	--env GOLANGCI_LINT_CACHE=/cache/golangci-lint \
 	--mount "type=bind,source=$(CURDIR),target=/workspace" \
-	--mount "type=bind,source=$(GIT_COMMON_DIR),target=$(GIT_COMMON_DIR),readonly" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-build,target=/cache/go-build" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-mod,target=/cache/go-mod" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-golangci-lint,target=/cache/golangci-lint" \
@@ -45,7 +43,7 @@ fmt: ## Format Go source files
 	$(GOFMT) -w $(GOFILES)
 
 format-check: ## Verify Go source formatting without rewriting files
-	@files="$$(gofmt -l $(GOFILES))"; \
+	@files="$$($(GOFMT) -l $(GOFILES))" || exit $$?; \
 	if [ -n "$$files" ]; then printf '%s\n' "$$files"; exit 1; fi
 
 lint: ## Run linter
@@ -103,11 +101,49 @@ bump-verify: ## Run strict release checks inside the development image
 	golangci-lint run
 
 docker-bump-verify: docker-image ## Run all release checks in Docker
-	$(DOCKER_RUN) make bump-verify
+	@set -eu; \
+	source=$$(mktemp -d); \
+	trap 'rm -rf "$$source"' EXIT HUP INT TERM; \
+	if ! git clone --no-local "$(CURDIR)" "$$source" >/dev/null; then \
+		printf '%s\n' 'bump: could not prepare isolated verification source.' >&2; \
+		exit 1; \
+	fi; \
+	rm -rf "$$source/.git"; \
+	$(DOCKER) run --rm \
+		--user "$(shell id -u):$(shell id -g)" \
+		--env HOME=/tmp \
+		--env GOCACHE=/cache/go-build \
+		--env GOMODCACHE=/cache/go-mod \
+		--env GOTOOLCHAIN=local \
+		--env GOLANGCI_LINT_CACHE=/cache/golangci-lint \
+		--mount "type=bind,source=$$source,target=/workspace" \
+		--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-build,target=/cache/go-build" \
+		--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-mod,target=/cache/go-mod" \
+		--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-golangci-lint,target=/cache/golangci-lint" \
+		--workdir /workspace \
+		$(DOCKER_IMAGE) \
+		make bump-verify
 
 docker-next-version: ## Calculate the next version with pinned svu
-	@$(MAKE) --no-print-directory docker-image >&2
-	@$(DOCKER_RUN) svu next
+	@set -eu; \
+	$(MAKE) --no-print-directory docker-image >&2; \
+	repo=$$(mktemp -d); \
+	trap 'rm -rf "$$repo"' EXIT HUP INT TERM; \
+	if ! git clone --mirror --no-local "$(CURDIR)" "$$repo" >/dev/null; then \
+		printf '%s\n' 'bump: could not prepare isolated version repository.' >&2; \
+		exit 1; \
+	fi; \
+	if ! git -C "$$repo" remote remove origin; then \
+		printf '%s\n' 'bump: could not remove remote configuration from version repository.' >&2; \
+		exit 1; \
+	fi; \
+	$(DOCKER) run --rm \
+		--user "$(shell id -u):$(shell id -g)" \
+		--env HOME=/tmp \
+		--mount "type=bind,source=$$repo,target=/repository,readonly" \
+		--workdir /repository \
+		$(DOCKER_IMAGE) \
+		svu next
 
 docker-tools-check: docker-image ## Verify release tools are executable in Docker
 	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version'

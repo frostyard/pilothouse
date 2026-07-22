@@ -74,8 +74,16 @@ make_contracts() {
     grep -q '^docker-next-version:' "$REPO_ROOT/Makefile" || fail 'exposes Docker svu calculation'
     grep -q '^docker-tools-check:' "$REPO_ROOT/Makefile" || fail 'exposes Docker tool smoke check'
     grep -q '^test-bump:' "$REPO_ROOT/Makefile" || fail 'runs bump harness'
-    grep -q 'git rev-parse --path-format=absolute --git-common-dir' "$REPO_ROOT/Makefile" ||
-        fail 'mounts Git metadata for Docker version calculation'
+    ! grep -q 'GIT_COMMON_DIR' "$REPO_ROOT/Makefile" || fail 'does not mount host Git metadata'
+    ! grep -q '\$(shell.*git' "$REPO_ROOT/Makefile" || fail 'avoids parse-time Git commands'
+    grep -q 'git clone --no-local' "$REPO_ROOT/Makefile" || fail 'prepares isolated bump inputs'
+    grep -q 'rm -rf "$$source/.git"' "$REPO_ROOT/Makefile" || fail 'removes Git metadata from verification source'
+    grep -q 'git -C "$$repo" remote remove origin' "$REPO_ROOT/Makefile" ||
+        fail 'removes mirror remote configuration'
+    grep -q 'target=/repository,readonly' "$REPO_ROOT/Makefile" ||
+        fail 'mounts only the sanitized svu repository'
+    awk '/^docker-next-version:/,/^docker-tools-check:/' "$REPO_ROOT/Makefile" |
+        grep -q '^[[:space:]]*@set -eu;' || fail 'starts version calculation in strict mode'
     grep -q 'ARG SVU_VERSION' "$REPO_ROOT/.docker/Dockerfile" || fail 'Dockerfile accepts svu version'
     grep -q 'github.com/caarlos0/svu/v3@${SVU_VERSION}' "$REPO_ROOT/.docker/Dockerfile" ||
         fail 'Dockerfile installs pinned svu'
@@ -83,6 +91,18 @@ make_contracts() {
 }
 
 make_contracts
+
+gofmt_failure=$(write_command gofmt-failure 'exit 37')
+if make -s -C "$REPO_ROOT" format-check GOFMT="$gofmt_failure" GOFILES=ignored >/dev/null 2>&1; then
+    fail 'preserves gofmt failures'
+fi
+pass 'preserves gofmt failures'
+
+gofmt_dirty=$(write_command gofmt-dirty 'printf "%s\\n" dirty.go')
+if make -s -C "$REPO_ROOT" format-check GOFMT="$gofmt_dirty" GOFILES=ignored >/dev/null 2>&1; then
+    fail 'rejects unformatted Go files'
+fi
+pass 'rejects unformatted Go files'
 
 repo=$(new_repo clean)
 run_preflight "$repo" >/dev/null || fail 'accepts clean synchronized main'
