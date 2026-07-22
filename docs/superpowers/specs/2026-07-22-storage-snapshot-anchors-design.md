@@ -13,7 +13,7 @@ top of the snapshot.
 
 ## Scope
 
-The change is limited to storage view anchor allocation and rendering:
+The change is limited to storage presentation anchor allocation and rendering:
 
 - Remove empty top-level anchor spans from both regular and managed snapshot
   regions.
@@ -24,16 +24,19 @@ The change is limited to storage view anchor allocation and rendering:
 - Preserve deterministic, unique HTML IDs when resource and mount identifiers
   collide or distinct identifiers sanitize to the same fragment.
 - Preserve the existing HTMX snapshot refresh behavior and all storage data.
+- Use the same allocated targets for aggregate Attention links so sanitized
+  collisions cannot send a finding to another resource's row.
 
 The broker contract, normalized snapshot model, collectors, health semantics,
 and remote-mount mutations do not change.
 
 ## Anchor Allocation
 
-Replace the current `anchorSet` lists with aligned assignments for resources,
-mounts, and findings. Each assignment has the same length and order as the
-corresponding snapshot slice, so templates can apply IDs without searching or
-recomputing collision rules.
+Replace the current `anchorSet` lists with aligned owner assignments for
+resources, mounts, and findings, plus an aligned target assignment for every
+finding. Each assignment has the same length and order as the corresponding
+snapshot slice, so templates and aggregate Attention paths can use IDs without
+searching or recomputing collision rules.
 
 Allocation proceeds deterministically:
 
@@ -70,6 +73,10 @@ Topology links continue to use the allocated resource fragments rather than
 recomputing IDs independently. The section remains the sole 30-second HTMX
 replacement target, so every refreshed fragment includes a coherent set of
 links and targets.
+
+`Module.Health` uses the aligned finding targets from the same allocator. It
+links a targeted finding to `/storage#<allocated-fragment>` and uses `/storage`
+without a fragment for findings whose `ResourceID` is empty.
 
 No new CSS is required. Removing the empty direct grid children eliminates the
 accumulated gap while preserving the existing card spacing.
