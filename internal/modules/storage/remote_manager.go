@@ -355,10 +355,14 @@ func (manager *SystemRemoteManager) loadVerified(id string) (Definition, error) 
 }
 
 func (manager *SystemRemoteManager) definition(request CreateRequest) (Definition, error) {
+	ownership, err := ParseSMBOwnership(request.UID, request.GID)
+	if err != nil || request.Protocol != "smb" && ownership != (SMBOwnership{}) {
+		return Definition{}, errInvalidManifest
+	}
 	if ValidateDefinitionID(request.ID) != nil || ValidateProtocol(request.Protocol) != nil || ValidateTarget(request.Target) != nil {
 		return Definition{}, errInvalidManifest
 	}
-	definition := Definition{CreatedTarget: false, FormatVersion: ManifestFormatVersion, ID: request.ID, Protocol: request.Protocol, ProtocolVersion: request.Version, ReadOnly: request.ReadOnly, State: "active", Target: request.Target, UnitName: mountUnitName(request.Target)}
+	definition := Definition{CreatedTarget: false, FormatVersion: ManifestFormatVersion, ID: request.ID, Protocol: request.Protocol, ProtocolVersion: request.Version, ReadOnly: request.ReadOnly, State: "active", Target: request.Target, UnitName: mountUnitName(request.Target), SMBOwnership: ownership}
 	switch request.Protocol {
 	case "nfs":
 		if ValidateNFSHost(request.Host) != nil || ValidateNFSExport(request.Export) != nil || ValidateNFSVersion(request.Version) != nil || request.Password != "" || request.Username != "" {

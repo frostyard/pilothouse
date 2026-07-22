@@ -152,6 +152,9 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 		if definition.ProtocolVersion != "auto" {
 			options = append(options, "vers="+definition.ProtocolVersion)
 		}
+		if definition.UID != "" {
+			options = append(options, "uid="+definition.UID, "gid="+definition.GID)
+		}
 		sort.Strings(options)
 		return "//" + definition.Server + "/" + definition.Share, "cifs", options, nil
 	default:
