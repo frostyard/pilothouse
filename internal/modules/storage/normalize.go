@@ -160,6 +160,9 @@ func (a *aggregate) apply(backend string, result AdapterResult, enrich bool) err
 		if enrich {
 			for index := range a.mounts {
 				if a.mounts[index].ID == mount.ID {
+					if a.dropped[mount.ResourceID] {
+						mount.ResourceID = ""
+					}
 					a.mounts[index] = mount
 					replaced = true
 					break

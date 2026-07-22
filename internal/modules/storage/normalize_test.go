@@ -97,6 +97,21 @@ func TestNormalizeDropsRelationsToResourceLimitDrops(t *testing.T) {
 	assert.Empty(t, snapshot.Relations)
 }
 
+func TestNormalizeClearsDroppedResourceOnMountReplacement(t *testing.T) {
+	resources := make([]Resource, maxResources)
+	for i := range resources {
+		resources[i] = Resource{ID: fmt.Sprintf("resource-%04d", i)}
+	}
+	core := AdapterResult{Resources: resources, Mounts: []Mount{{ID: "mount", ResourceID: "resource-0000"}}}
+	enriched := AdapterResult{Resources: []Resource{{ID: "dropped"}}, Mounts: []Mount{{ID: "mount", ResourceID: "dropped"}}}
+
+	snapshot, err := normalize(time.Unix(1, 0), []collectedResult{{name: "core", core: true, result: core}, {name: "zfs", result: enriched}})
+
+	require.NoError(t, err)
+	require.Len(t, snapshot.Mounts, 1)
+	assert.Empty(t, snapshot.Mounts[0].ResourceID)
+}
+
 func TestNormalizeDiscardsMalformedOptionalResult(t *testing.T) {
 	snapshot, err := normalize(time.Unix(1, 0), []collectedResult{
 		{name: "block", core: true, result: AdapterResult{Resources: []Resource{{ID: "disk"}}}},

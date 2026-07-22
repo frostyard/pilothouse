@@ -36,7 +36,7 @@ func newZFSEnricher(paths ZFSTools) *zfsEnricher {
 }
 func (*zfsEnricher) Name() string { return zfsEnricherName }
 
-func (e *zfsEnricher) Collect(ctx context.Context, _ Inventory) (AdapterResult, error) {
+func (e *zfsEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
 	pools, err := e.runner.Run(ctx, e.tools.ZPool, "list", "-Hp", "-o", "name,size,alloc,free,cap,health")
 	if err != nil {
 		return AdapterResult{}, fmt.Errorf("read ZFS pools: %w", err)
@@ -61,7 +61,7 @@ func (e *zfsEnricher) Collect(ctx context.Context, _ Inventory) (AdapterResult, 
 	if err != nil {
 		return AdapterResult{}, err
 	}
-	return zfsResult(parsedPools, parsedStatus, parsedDatasets)
+	return zfsResult(parsedPools, parsedStatus, parsedDatasets, inventory)
 }
 
 func parseZFSPools(input []byte) ([]zfsPool, error) {
@@ -77,7 +77,7 @@ func parseZFSPools(input []byte) ([]zfsPool, error) {
 		free, e3 := strictUint(fields[3])
 		capText := strings.TrimSuffix(fields[4], "%")
 		cap, e4 := strictUint(capText)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !strings.HasSuffix(fields[4], "%") || cap > 100 || size == 0 || alloc > size || free > size {
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || cap > 100 || size == 0 || alloc > size || free > size {
 			return nil, fmt.Errorf("invalid ZFS pool")
 		}
 		seen[fields[0]] = true
@@ -140,7 +140,7 @@ func parseZFSStatus(input []byte) (map[string]zfsStatus, error) {
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) < 5 || validateStrings(fields[:5]...) != nil {
+		if len(fields) < 5 || !strings.HasPrefix(fields[0], "/") || validateStrings(fields[:5]...) != nil {
 			continue
 		}
 		read, e1 := strictUint(fields[2])
@@ -158,7 +158,7 @@ func parseZFSStatus(input []byte) (map[string]zfsStatus, error) {
 	return states, nil
 }
 
-func zfsResult(pools []zfsPool, states map[string]zfsStatus, datasets []zfsDataset) (AdapterResult, error) {
+func zfsResult(pools []zfsPool, states map[string]zfsStatus, datasets []zfsDataset, inventory Inventory) (AdapterResult, error) {
 	known := make(map[string]zfsPool, len(pools))
 	result := AdapterResult{}
 	for _, pool := range pools {
@@ -197,10 +197,28 @@ func zfsResult(pools []zfsPool, states map[string]zfsStatus, datasets []zfsDatas
 			mount := Mount{ID: stableID("zfs-mount", dataset.mountpoint), Target: dataset.mountpoint, Source: dataset.name, Filesystem: "zfs", ResourceID: stableID("zfs-pool", pool), State: "mounted"}
 			pool := known[pool]
 			mount.TotalBytes, mount.UsedBytes, mount.AvailableBytes = pool.size, pool.alloc, pool.free
+			mount.UsedPercent = zfsUsedPercent(pool.alloc, pool.size)
+			for _, coreMount := range inventory.Mounts {
+				if coreMount.Target == mount.Target && coreMount.Source == mount.Source && coreMount.Filesystem == mount.Filesystem {
+					mount.ID = coreMount.ID
+					break
+				}
+			}
 			result.Mounts = append(result.Mounts, mount)
 		}
 	}
 	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].ID < result.Resources[j].ID })
 	sortRelations(result.Relations)
 	return result, nil
+}
+
+func zfsUsedPercent(alloc, size uint64) float64 {
+	if size == 0 {
+		return 0
+	}
+	percent := float64(alloc) * 100 / float64(size)
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }

@@ -1,0 +1,9 @@
+  pool: tank
+ state: DEGRADED
+config:
+
+	NAME                         STATE     READ WRITE CKSUM
+	tank                         DEGRADED     9    12    15
+	  mirror-0                   DEGRADED     9    12    15
+	    /dev/disk/by-id/disk-a   ONLINE       1     2     3
+	    /dev/disk/by-id/disk-b   FAULTED      2     3     4
