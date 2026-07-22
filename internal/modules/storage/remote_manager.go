@@ -37,7 +37,14 @@ type SystemRemoteManager struct {
 	writer    ArtifactWriter
 	manager   Manager
 	units     UnitController
-	mu        sync.Mutex
+	createMu  sync.Mutex
+	locksMu   sync.Mutex
+	locks     map[string]*definitionLock
+}
+
+type definitionLock struct {
+	mu   sync.Mutex
+	uses int
 }
 
 func NewSystemRemoteManager(manager Manager, artifacts ArtifactStore, units UnitController) *SystemRemoteManager {
@@ -45,16 +52,18 @@ func NewSystemRemoteManager(manager Manager, artifacts ArtifactStore, units Unit
 }
 
 func NewSystemRemoteManagerWithWriter(manager Manager, artifacts ArtifactStore, writer ArtifactWriter, units UnitController) *SystemRemoteManager {
-	return &SystemRemoteManager{artifacts: artifacts, writer: writer, manager: manager, units: units}
+	return &SystemRemoteManager{artifacts: artifacts, writer: writer, manager: manager, units: units, locks: make(map[string]*definitionLock)}
 }
 
 func (manager *SystemRemoteManager) Create(ctx context.Context, request CreateRequest) error {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	manager.createMu.Lock()
+	defer manager.createMu.Unlock()
 	definition, err := manager.definition(request)
 	if err != nil {
 		return err
 	}
+	unlock := manager.lockDefinition(definition.ID)
+	defer unlock()
 	inventory, err := manager.inventory(ctx)
 	if err != nil {
 		return err
@@ -155,8 +164,8 @@ func (manager *SystemRemoteManager) Create(ctx context.Context, request CreateRe
 }
 
 func (manager *SystemRemoteManager) Mount(ctx context.Context, id string) error {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	unlock := manager.lockDefinition(id)
+	defer unlock()
 	definition, err := manager.loadVerified(id)
 	if err != nil {
 		return err
@@ -168,8 +177,8 @@ func (manager *SystemRemoteManager) Mount(ctx context.Context, id string) error 
 }
 
 func (manager *SystemRemoteManager) Unmount(ctx context.Context, id string) error {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	unlock := manager.lockDefinition(id)
+	defer unlock()
 	definition, err := manager.loadVerified(id)
 	if err != nil {
 		return err
@@ -181,12 +190,16 @@ func (manager *SystemRemoteManager) Unmount(ctx context.Context, id string) erro
 }
 
 func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	unlock := manager.lockDefinition(id)
+	defer unlock()
 	definition, err := manager.loadVerified(id)
 	if err != nil {
 		return err
 	}
+	if err := manager.persistAttention(definition); err != nil {
+		return fmt.Errorf("remote mount needs attention: %w", err)
+	}
+	definition.State = "needs-attention"
 	if err := manager.units.Stop(ctx, definition.UnitName); err != nil {
 		return manager.retainAttention(definition, err)
 	}
@@ -263,8 +276,6 @@ func (manager *SystemRemoteManager) removeVerifiedArtifact(path string, contents
 }
 
 func (manager *SystemRemoteManager) State(ctx context.Context) (Snapshot, error) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	snapshot, err := manager.manager.State(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -380,11 +391,39 @@ func (manager *SystemRemoteManager) inventory(ctx context.Context, exclude ...st
 }
 
 func (manager *SystemRemoteManager) retainAttention(definition Definition, cause error) error {
-	definition.State = "needs-attention"
-	if manager.artifacts.UpdateManifest(definition) != nil {
-		_ = manager.artifacts.WriteManifest(definition)
-	}
+	_ = manager.persistAttention(definition)
 	return fmt.Errorf("remote mount needs attention: %w", cause)
+}
+
+func (manager *SystemRemoteManager) persistAttention(definition Definition) error {
+	definition.State = "needs-attention"
+	if err := manager.artifacts.UpdateManifest(definition); err != nil {
+		if err := manager.artifacts.WriteManifest(definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (manager *SystemRemoteManager) lockDefinition(id string) func() {
+	manager.locksMu.Lock()
+	lock := manager.locks[id]
+	if lock == nil {
+		lock = &definitionLock{}
+		manager.locks[id] = lock
+	}
+	lock.uses++
+	manager.locksMu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		manager.locksMu.Lock()
+		lock.uses--
+		if lock.uses == 0 {
+			delete(manager.locks, id)
+		}
+		manager.locksMu.Unlock()
+	}
 }
 
 func (manager *SystemRemoteManager) definitions() ([]Definition, error) {
@@ -403,6 +442,9 @@ func (manager *SystemRemoteManager) definitions() ([]Definition, error) {
 		id := entry.Name()[:len(entry.Name())-len(".json")]
 		definition, err := manager.artifacts.LoadDefinition(id)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		definitions = append(definitions, definition)

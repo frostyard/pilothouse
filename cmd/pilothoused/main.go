@@ -93,15 +93,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve storage tools: %w", err)
 	}
-	if err := registerStorage(queries, storageManager); err != nil {
-		return err
-	}
 	unitClient, err := dbus.NewSystemConnectionContext(context.Background())
 	if err != nil {
 		return fmt.Errorf("connect storage systemd controller: %w", err)
 	}
 	defer unitClient.Close()
 	remoteManager := storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: unitClient})
+	if err := registerStorage(queries, remoteManager); err != nil {
+		return err
+	}
 	if err := registerStorageActions(actions, remoteManager); err != nil {
 		return err
 	}

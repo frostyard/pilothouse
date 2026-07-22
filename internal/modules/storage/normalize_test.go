@@ -140,6 +140,17 @@ func TestNormalizeKeepsSerializedSnapshotReferencesValid(t *testing.T) {
 	assert.NoError(t, validateGraph(snapshot.Resources, snapshot.Relations))
 }
 
+func TestSanitizeSnapshotReferencesDropsFindingsForRemovedResources(t *testing.T) {
+	snapshot := Snapshot{
+		Resources: []Resource{{ID: "kept"}, {ID: "removed"}},
+		Findings:  []Finding{{ResourceID: "kept"}, {ResourceID: "removed"}, {Title: "global"}},
+	}
+
+	require.NoError(t, sanitizeSnapshotReferences(&snapshot, []Resource{{ID: "removed"}}))
+
+	assert.Equal(t, []Finding{{ResourceID: "kept"}, {Title: "global"}}, snapshot.Findings)
+}
+
 func TestNormalizeRejectsConflictingDuplicateResources(t *testing.T) {
 	_, err := normalize(time.Unix(1, 0), []collectedResult{{core: true, result: AdapterResult{Resources: []Resource{{ID: "disk", Name: "one"}}}}, {core: true, result: AdapterResult{Resources: []Resource{{ID: "disk", Name: "two"}}}}})
 	assert.ErrorContains(t, err, "conflicting resource")

@@ -30,10 +30,11 @@ type fakeStorageManager struct{ snapshot storage.Snapshot }
 func (m fakeStorageManager) State(context.Context) (storage.Snapshot, error) { return m.snapshot, nil }
 
 type fakeRemoteManager struct {
-	create  storage.CreateRequest
-	deleted string
-	mounted string
-	stopped string
+	create   storage.CreateRequest
+	deleted  string
+	mounted  string
+	snapshot storage.Snapshot
+	stopped  string
 }
 
 func (m *fakeRemoteManager) Create(_ context.Context, request storage.CreateRequest) error {
@@ -43,8 +44,8 @@ func (m *fakeRemoteManager) Create(_ context.Context, request storage.CreateRequ
 func (m *fakeRemoteManager) Delete(_ context.Context, id string) error  { m.deleted = id; return nil }
 func (m *fakeRemoteManager) Mount(_ context.Context, id string) error   { m.mounted = id; return nil }
 func (m *fakeRemoteManager) Unmount(_ context.Context, id string) error { m.stopped = id; return nil }
-func (*fakeRemoteManager) State(context.Context) (storage.Snapshot, error) {
-	return storage.Snapshot{}, nil
+func (m *fakeRemoteManager) State(context.Context) (storage.Snapshot, error) {
+	return m.snapshot, nil
 }
 
 type recordingAuditStore struct {
@@ -175,6 +176,24 @@ func TestRegisterStorageRejectsParameters(t *testing.T) {
 
 	_, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, map[string]string{"unexpected": "value"})
 	assert.EqualError(t, err, "storage state query does not accept parameters")
+}
+
+func TestStorageQueryAndActionsShareManagedRemoteComposition(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	manager := &fakeRemoteManager{snapshot: storage.Snapshot{Mounts: []storage.Mount{{ID: "remote:" + id, Managed: true, State: "needs-attention"}}, Findings: []storage.Finding{{ResourceID: "remote:" + id, Severity: storage.HealthWarning, Title: "Managed remote mount needs attention"}}}}
+	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
+	require.NoError(t, registerStorage(queries, manager))
+	require.NoError(t, registerStorageActions(actions, manager))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
+	require.NoError(t, err)
+	snapshot := result.(storage.Snapshot)
+	require.Len(t, snapshot.Mounts, 1)
+	assert.True(t, snapshot.Mounts[0].Managed)
+	assert.Equal(t, "remote:"+id, snapshot.Mounts[0].ID)
+	assert.Contains(t, snapshot.Findings, storage.Finding{ResourceID: "remote:" + id, Severity: storage.HealthWarning, Title: "Managed remote mount needs attention"})
+	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageMount, map[string]string{"id": id}, ""))
+	assert.Equal(t, id, manager.mounted)
 }
 
 func TestRegisterStorageCreateActionsUseTrustedIDsAndGlobalLock(t *testing.T) {

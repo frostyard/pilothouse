@@ -146,6 +146,8 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 				return "", "", nil, errInvalidManifest
 			}
 			options = append(options, "credentials="+escapeSystemdValue(definition.Credential))
+		} else {
+			options = append(options, "guest")
 		}
 		if definition.ProtocolVersion != "auto" {
 			options = append(options, "vers="+definition.ProtocolVersion)

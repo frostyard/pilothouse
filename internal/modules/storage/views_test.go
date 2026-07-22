@@ -277,6 +277,27 @@ func TestManagedPageShowsControlsOnlyForAdminManagedMounts(t *testing.T) {
 	}
 }
 
+func TestManagedPageRendersLifecycleControlsForMountState(t *testing.T) {
+	id := "remote:0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		state   string
+		mount   bool
+		unmount bool
+	}{
+		{"mounted", false, true},
+		{"inactive", true, false},
+		{"needs-attention", false, false},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			var output strings.Builder
+			require.NoError(t, ManagedPage(Snapshot{Mounts: []Mount{{ID: id, Managed: true, State: test.state}}}, false, "csrf", true).Render(context.Background(), &output))
+			assert.Equal(t, test.mount, strings.Contains(output.String(), `>Mount</button>`))
+			assert.Equal(t, test.unmount, strings.Contains(output.String(), `>Unmount</button>`))
+			assert.Contains(t, output.String(), `>Delete</button>`)
+		})
+	}
+}
+
 func TestManagedMountPathFailsClosedForMalformedIDs(t *testing.T) {
 	assert.Equal(t, "0123456789abcdef0123456789abcdef", managedMountID("remote:0123456789abcdef0123456789abcdef"))
 	assert.Empty(t, managedMountID("malformed"))

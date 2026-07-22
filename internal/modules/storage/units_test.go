@@ -30,6 +30,27 @@ func TestRenderMountUnit(t *testing.T) {
 	}
 }
 
+func TestRenderSMBMountUnitGuestAndCredentialOptions(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		username string
+		want     string
+	}{
+		{"guest", "", "guest,nodev,nosuid,rw,vers=3.1.1"},
+		{"credentials", "mount-user", "credentials=/etc/pilothouse/storage/credentials/0123456789abcdef0123456789abcdef,nodev,nosuid,rw,vers=3.1.1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			definition := Definition{FormatVersion: ManifestFormatVersion, ID: testDefinitionID, Protocol: "smb", ProtocolVersion: "3.1.1", Server: "nas.example", Share: "media", State: "active", Target: "/mnt/media", UnitName: "mnt-media.mount", Username: test.username}
+			if definition.Username != "" {
+				definition.Credential = "/etc/pilothouse/storage/credentials/" + definition.ID
+			}
+			actual, err := RenderMountUnit(definition)
+			require.NoError(t, err)
+			assert.Equal(t, "# Managed by Pilothouse; definition=0123456789abcdef0123456789abcdef\n[Unit]\nDescription=Pilothouse remote storage 0123456789abcdef0123456789abcdef\nWants=network-online.target\nAfter=network-online.target\n[Mount]\nWhat=//nas.example/media\nWhere=/mnt/media\nType=cifs\nOptions="+test.want+"\nTimeoutSec=30\n", string(actual))
+		})
+	}
+}
+
 func TestRenderAutomountUnit(t *testing.T) {
 	actual, err := RenderAutomountUnit(testDefinition())
 	require.NoError(t, err)

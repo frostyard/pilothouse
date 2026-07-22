@@ -95,7 +95,7 @@ type lsblkDevice struct {
 	Removable   bool          `json:"rm"`
 	Rotational  bool          `json:"rota"`
 	Serial      *string       `json:"serial"`
-	Size        decimal       `json:"size"`
+	Size        *decimal      `json:"size"`
 	Type        string        `json:"type"`
 	UUID        *string       `json:"uuid"`
 }
@@ -119,7 +119,7 @@ func parseLSBLK(input []byte) (AdapterResult, error) {
 		resourceCount++
 		kind := blockKind(device.Type)
 		id := stableID(kind, device.MajorMinor)
-		resources[id] = Resource{Details: blockDetails(device), Health: HealthHealthy, ID: id, Kind: kind, Name: device.Name, Path: device.Path, SizeBytes: parseUint(string(device.Size)), State: blockState(device)}
+		resources[id] = Resource{Details: blockDetails(device), Health: HealthHealthy, ID: id, Kind: kind, Name: device.Name, Path: device.Path, SizeBytes: blockSize(device.Size), State: blockState(device)}
 		if parentID != "" {
 			result.Relations = append(result.Relations, Relation{From: parentID, To: id, Kind: "contains"})
 		}
@@ -129,7 +129,7 @@ func parseLSBLK(input []byte) (AdapterResult, error) {
 				return fmt.Errorf("lsblk resources exceed limit")
 			}
 			resourceCount++
-			resources[filesystemID] = Resource{Details: filesystemDetails(device), Health: HealthHealthy, ID: filesystemID, Kind: "filesystem", Name: *device.FSType, SizeBytes: parseUint(string(device.Size)), State: "available"}
+			resources[filesystemID] = Resource{Details: filesystemDetails(device), Health: HealthHealthy, ID: filesystemID, Kind: "filesystem", Name: *device.FSType, SizeBytes: blockSize(device.Size), State: "available"}
 			result.Relations = append(result.Relations, Relation{From: id, To: filesystemID, Kind: "contains"})
 		}
 		for _, child := range device.Children {
@@ -166,14 +166,20 @@ func sortRelations(relations []Relation) {
 }
 
 func validateBlockDevice(device lsblkDevice) error {
-	if err := validateStrings(device.Name, device.KName, device.Path, device.Type, device.MajorMinor, string(device.Size)); err != nil {
+	size := ""
+	if device.Size != nil {
+		size = string(*device.Size)
+	}
+	if err := validateStrings(device.Name, device.KName, device.Path, device.Type, device.MajorMinor, size); err != nil {
 		return err
 	}
 	if !validMajorMinor(device.MajorMinor) {
 		return fmt.Errorf("invalid block MAJ:MIN")
 	}
-	if _, err := strictUint(string(device.Size)); err != nil {
-		return fmt.Errorf("invalid block size: %w", err)
+	if device.Size != nil {
+		if _, err := strictUint(string(*device.Size)); err != nil {
+			return fmt.Errorf("invalid block size: %w", err)
+		}
 	}
 	for _, value := range []*string{device.FSVersion, device.FSType, device.Label, device.Model, device.ParentName, device.Serial, device.UUID} {
 		if value != nil && len(*value) > maxFieldBytes {
@@ -186,6 +192,13 @@ func validateBlockDevice(device lsblkDevice) error {
 		}
 	}
 	return nil
+}
+
+func blockSize(value *decimal) uint64 {
+	if value == nil {
+		return 0
+	}
+	return parseUint(string(*value))
 }
 
 func blockKind(value string) string {

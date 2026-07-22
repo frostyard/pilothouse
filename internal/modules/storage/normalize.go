@@ -332,6 +332,7 @@ func recalculateSummary(snapshot *Snapshot) {
 		if mount.State == "mounted" {
 			summary.ActiveMounts++
 		}
+		// Network and ambiguous mounts have no local resource to attribute, so exclude them from aggregate usable capacity.
 		if mount.Filesystem != "overlay" && mount.ResourceID != "" && !capacity[mount.ResourceID] {
 			capacity[mount.ResourceID] = true
 			summary.UsableBytes += mount.TotalBytes
@@ -361,7 +362,9 @@ func enforceSnapshotLimit(snapshot *Snapshot) error {
 		if len(snapshot.Resources) > 0 {
 			removed := snapshot.Resources[len(snapshot.Resources)/2:]
 			snapshot.Resources = snapshot.Resources[:len(snapshot.Resources)/2]
-			sanitizeSnapshotReferences(snapshot, removed)
+			if err := sanitizeSnapshotReferences(snapshot, removed); err != nil {
+				return err
+			}
 		} else if len(snapshot.Findings) > 0 {
 			snapshot.Findings = snapshot.Findings[:len(snapshot.Findings)/2]
 		} else if len(snapshot.Mounts) > 0 {
@@ -382,7 +385,7 @@ func enforceSnapshotLimit(snapshot *Snapshot) error {
 	return validateGraph(snapshot.Resources, snapshot.Relations)
 }
 
-func sanitizeSnapshotReferences(snapshot *Snapshot, removed []Resource) {
+func sanitizeSnapshotReferences(snapshot *Snapshot, removed []Resource) error {
 	removedIDs := make(map[string]bool, len(removed))
 	for _, resource := range removed {
 		removedIDs[resource.ID] = true
@@ -399,4 +402,17 @@ func sanitizeSnapshotReferences(snapshot *Snapshot, removed []Resource) {
 			snapshot.Mounts[i].ResourceID = ""
 		}
 	}
+	findings := snapshot.Findings[:0]
+	for _, finding := range snapshot.Findings {
+		if !removedIDs[finding.ResourceID] {
+			findings = append(findings, finding)
+		}
+	}
+	snapshot.Findings = findings
+	for _, finding := range snapshot.Findings {
+		if removedIDs[finding.ResourceID] {
+			return fmt.Errorf("finding has removed resource %q", finding.ResourceID)
+		}
+	}
+	return nil
 }

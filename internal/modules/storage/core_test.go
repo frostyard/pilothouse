@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,22 @@ func TestParseLSBLKAcceptsNumericByteCount(t *testing.T) {
 	result, err := parseLSBLK([]byte(`{"blockdevices":[{"name":"sda","kname":"sda","path":"/dev/sda","type":"disk","maj:min":"8:0","pkname":null,"size":1,"fstype":null,"fsver":null,"label":null,"uuid":null,"mountpoints":null,"model":null,"serial":null,"rota":true,"rm":false,"ro":false}]}`))
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), result.Resources[0].SizeBytes)
+}
+
+func TestParseLSBLKTreatsMissingOrNullSizeAsUnknown(t *testing.T) {
+	for _, size := range []string{"null", ""} {
+		t.Run(fmt.Sprintf("size %q", size), func(t *testing.T) {
+			field := ""
+			if size != "" {
+				field = `,"size":` + size
+			}
+			input := []byte(`{"blockdevices":[{"name":"loop0","kname":"loop0","path":"/dev/loop0","type":"loop","maj:min":"7:0","pkname":null` + field + `,"fstype":null,"fsver":null,"label":null,"uuid":null,"mountpoints":[null],"model":null,"serial":null,"rota":false,"rm":false,"ro":true}]}`)
+			result, err := parseLSBLK(input)
+			require.NoError(t, err)
+			require.Len(t, result.Resources, 1)
+			assert.Zero(t, result.Resources[0].SizeBytes)
+		})
+	}
 }
 
 func TestParseLSBLKRejectsOversizedField(t *testing.T) {

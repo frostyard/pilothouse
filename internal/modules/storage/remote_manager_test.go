@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -216,6 +218,102 @@ func TestRemoteManagerMountAndUnmountUseExactUnits(t *testing.T) {
 	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
 }
 
+func TestRemoteManagerStateDoesNotWaitForLifecycleOperation(t *testing.T) {
+	store := testArtifactStore(t)
+	units := &blockingUnitController{stopStarted: make(chan struct{}), release: make(chan struct{})}
+	manager := NewSystemRemoteManager(staticManager{}, store, units)
+	request := testNFSRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	units.blockStop = true
+
+	deleted := make(chan error, 1)
+	go func() { deleted <- manager.Delete(context.Background(), request.ID) }()
+	<-units.stopStarted
+	state := make(chan error, 1)
+	go func() { _, err := manager.State(context.Background()); state <- err }()
+	select {
+	case err := <-state:
+		require.NoError(t, err)
+	case <-time.After(100 * time.Millisecond):
+		t.Error("State waited for lifecycle operation")
+	}
+	close(units.release)
+	if err := <-deleted; err != nil {
+		t.Error(err)
+	}
+}
+
+func TestRemoteManagerSerializesSameDefinitionButNotDifferentDefinitions(t *testing.T) {
+	store := testArtifactStore(t)
+	units := &blockingUnitController{entered: make(chan string, 3), release: make(chan struct{})}
+	manager := NewSystemRemoteManager(staticManager{}, store, units)
+	first := testNFSRequest(t)
+	second := testNFSRequest(t)
+	second.ID = "fedcba9876543210fedcba9876543210"
+	second.Target = filepath.Join(t.TempDir(), "other")
+	require.NoError(t, manager.Create(context.Background(), first))
+	require.NoError(t, manager.Create(context.Background(), second))
+	units.blockStart = true
+	units.ids = map[string]string{automountUnitName(first.Target): first.ID, automountUnitName(second.Target): second.ID}
+
+	one := make(chan error, 1)
+	go func() { one <- manager.Mount(context.Background(), first.ID) }()
+	require.Equal(t, first.ID, <-units.entered)
+	same := make(chan error, 1)
+	go func() { same <- manager.Mount(context.Background(), first.ID) }()
+	different := make(chan error, 1)
+	go func() { different <- manager.Mount(context.Background(), second.ID) }()
+	select {
+	case id := <-units.entered:
+		require.Equal(t, second.ID, id)
+	case <-time.After(100 * time.Millisecond):
+		units.release <- struct{}{}
+		require.NoError(t, <-one)
+		t.Error("different IDs were serialized")
+		return
+	}
+	select {
+	case id := <-units.entered:
+		t.Fatalf("same ID overlapped: %s", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+	units.release <- struct{}{}
+	units.release <- struct{}{}
+	require.NoError(t, <-one)
+	require.NoError(t, <-different)
+	require.Equal(t, first.ID, <-units.entered)
+	units.release <- struct{}{}
+	require.NoError(t, <-same)
+}
+
+type blockingUnitController struct {
+	blockStart  bool
+	blockStop   bool
+	entered     chan string
+	ids         map[string]string
+	release     chan struct{}
+	stopStarted chan struct{}
+	stopOnce    sync.Once
+}
+
+func (*blockingUnitController) DaemonReload(context.Context) error    { return nil }
+func (*blockingUnitController) Disable(context.Context, string) error { return nil }
+func (*blockingUnitController) Enable(context.Context, string) error  { return nil }
+func (u *blockingUnitController) Start(_ context.Context, name string) error {
+	if u.blockStart {
+		u.entered <- u.ids[name]
+		<-u.release
+	}
+	return nil
+}
+func (u *blockingUnitController) Stop(_ context.Context, _ string) error {
+	if u.blockStop {
+		u.stopOnce.Do(func() { close(u.stopStarted) })
+		<-u.release
+	}
+	return nil
+}
+
 func TestRemoteManagerMountAndUnmountRefuseNeedsAttentionDefinitions(t *testing.T) {
 	store := testArtifactStore(t)
 	controller := &recordingUnitController{}
@@ -369,6 +467,26 @@ func TestRemoteManagerDeleteNeedsAttentionAcceptsMissingCanonicalArtifacts(t *te
 
 	require.NoError(t, manager.Delete(context.Background(), request.ID))
 
+	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+}
+
+func TestRemoteManagerDeleteResumesInterruptedCleanup(t *testing.T) {
+	store := testArtifactStore(t)
+	controller := &recordingUnitController{}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+	request := testSMBRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	controller.fail = "reload"
+
+	require.Error(t, manager.Delete(context.Background(), request.ID))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "needs-attention", definition.State)
+	mountPath, _ := store.MountUnitPath(definition)
+	assert.NoFileExists(t, mountPath)
+
+	controller.fail = ""
+	require.NoError(t, manager.Delete(context.Background(), request.ID))
 	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
 }
 
