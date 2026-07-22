@@ -5,6 +5,7 @@ ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 mkdir "$ROOT/bin"
 SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bump.sh
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PASS=0
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
@@ -64,6 +65,24 @@ write_git_wrapper() {
     chmod +x "$wrapper"
     printf '%s\n' "$wrapper"
 }
+
+make_contracts() {
+    grep -q '^SVU_VERSION ?= v3\.4\.1$' "$REPO_ROOT/Makefile" || fail 'pins svu version'
+    grep -q '^bump-preflight:' "$REPO_ROOT/Makefile" || fail 'exposes bump preflight'
+    grep -q '^bump-verify:' "$REPO_ROOT/Makefile" || fail 'exposes strict release verification'
+    grep -q '^docker-bump-verify:' "$REPO_ROOT/Makefile" || fail 'exposes Docker verification'
+    grep -q '^docker-next-version:' "$REPO_ROOT/Makefile" || fail 'exposes Docker svu calculation'
+    grep -q '^docker-tools-check:' "$REPO_ROOT/Makefile" || fail 'exposes Docker tool smoke check'
+    grep -q '^test-bump:' "$REPO_ROOT/Makefile" || fail 'runs bump harness'
+    grep -q 'git rev-parse --path-format=absolute --git-common-dir' "$REPO_ROOT/Makefile" ||
+        fail 'mounts Git metadata for Docker version calculation'
+    grep -q 'ARG SVU_VERSION' "$REPO_ROOT/.docker/Dockerfile" || fail 'Dockerfile accepts svu version'
+    grep -q 'github.com/caarlos0/svu/v3@${SVU_VERSION}' "$REPO_ROOT/.docker/Dockerfile" ||
+        fail 'Dockerfile installs pinned svu'
+    pass 'Make and Docker contracts are present'
+}
+
+make_contracts
 
 repo=$(new_repo clean)
 run_preflight "$repo" >/dev/null || fail 'accepts clean synchronized main'

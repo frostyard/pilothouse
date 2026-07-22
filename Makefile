@@ -1,10 +1,12 @@
-.PHONY: build generate run test race fmt lint bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint
+.PHONY: build generate run test race fmt format-check lint bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint
 
 GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell find . -type f -name '*.go' -not -name '*_templ.go')
 GO_VERSION ?= 1.26.5
 GOLANGCI_LINT_VERSION ?= v2.11.4
+SVU_VERSION ?= v3.4.1
+GIT_COMMON_DIR := $(shell git rev-parse --path-format=absolute --git-common-dir)
 DOCKER ?= docker
 DOCKER_IMAGE ?= pilothouse-dev:go$(GO_VERSION)
 DOCKER_CACHE_PREFIX ?= pilothouse
@@ -16,6 +18,7 @@ DOCKER_RUN = $(DOCKER) run --rm \
 	--env GOTOOLCHAIN=local \
 	--env GOLANGCI_LINT_CACHE=/cache/golangci-lint \
 	--mount "type=bind,source=$(CURDIR),target=/workspace" \
+	--mount "type=bind,source=$(GIT_COMMON_DIR),target=$(GIT_COMMON_DIR),readonly" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-build,target=/cache/go-build" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-go-mod,target=/cache/go-mod" \
 	--mount "type=volume,source=$(DOCKER_CACHE_PREFIX)-golangci-lint,target=/cache/golangci-lint" \
@@ -41,6 +44,10 @@ race: generate
 fmt: ## Format Go source files
 	$(GOFMT) -w $(GOFILES)
 
+format-check: ## Verify Go source formatting without rewriting files
+	@files="$$(gofmt -l $(GOFILES))"; \
+	if [ -n "$$files" ]; then printf '%s\n' "$$files"; exit 1; fi
+
 lint: ## Run linter
 	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run; else echo "golangci-lint not installed, skipping"; fi
 
@@ -48,6 +55,7 @@ docker-image: ## Build the development image used by docker-* targets
 	$(DOCKER) build \
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) \
+		--build-arg SVU_VERSION=$(SVU_VERSION) \
 		--tag $(DOCKER_IMAGE) \
 		--file .docker/Dockerfile \
 		.docker
@@ -85,18 +93,30 @@ docker-fmt: docker-image ## Format Go source files in Docker
 docker-lint: docker-image ## Run golangci-lint in Docker
 	$(DOCKER_RUN) golangci-lint run
 
-bump: ## generate a new version with svu
+bump-preflight: ## Verify that main is clean and synchronized
+	@DOCKER="$(DOCKER)" ./scripts/bump.sh preflight
+
+bump-verify: ## Run strict release checks inside the development image
 	@$(MAKE) build
 	@$(MAKE) test
-	@$(MAKE) fmt
-	$(MAKE) lint
-	@if [ -n "$$(git status --porcelain)" ]; then \
-		echo "Working directory is not clean. Please commit or stash changes before bumping version."; \
-		exit 1; \
-	fi
-	@echo "Creating new tag..."
-	@version=$$(svu next); \
-		git tag -a $$version -m "Version $$version"; \
-		echo "Tagged version $$version"; \
-		echo "Pushing tag $$version to origin..."; \
-		git push origin $$version
+	@$(MAKE) format-check
+	golangci-lint run
+
+docker-bump-verify: docker-image ## Run all release checks in Docker
+	$(DOCKER_RUN) make bump-verify
+
+docker-next-version: ## Calculate the next version with pinned svu
+	@$(MAKE) --no-print-directory docker-image >&2
+	@$(DOCKER_RUN) svu next
+
+docker-tools-check: docker-image ## Verify release tools are executable in Docker
+	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version'
+
+test-bump: ## Test release orchestration without publishing
+	bash scripts/bump_test.sh
+
+bump: ## Verify and publish the next version tag
+	@DOCKER="$(DOCKER)" \
+	BUMP_VERIFY_COMMAND='$(MAKE) --no-print-directory docker-bump-verify' \
+	BUMP_VERSION_COMMAND='$(MAKE) --silent --no-print-directory docker-next-version' \
+	./scripts/bump.sh release
