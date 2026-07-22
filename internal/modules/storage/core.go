@@ -278,21 +278,9 @@ func mountFromFilesystem(filesystem findmntFilesystem) (Mount, error) {
 	if err := validateStrings(string(filesystem.Available), filesystem.Filesystem, filesystem.Options, string(filesystem.Size), filesystem.Source, filesystem.Target, string(filesystem.Used), filesystem.UsedPct); err != nil {
 		return Mount{}, err
 	}
-	total, err := strictUint(string(filesystem.Size))
+	total, used, available, percent, err := mountCapacity(filesystem)
 	if err != nil {
-		return Mount{}, fmt.Errorf("invalid mount size: %w", err)
-	}
-	used, err := strictUint(string(filesystem.Used))
-	if err != nil {
-		return Mount{}, fmt.Errorf("invalid mount used: %w", err)
-	}
-	available, err := strictUint(string(filesystem.Available))
-	if err != nil {
-		return Mount{}, fmt.Errorf("invalid mount available: %w", err)
-	}
-	percent, err := strictPercent(filesystem.UsedPct)
-	if err != nil {
-		return Mount{}, fmt.Errorf("invalid mount use%%: %w", err)
+		return Mount{}, err
 	}
 	resourceID := ""
 	if filesystem.MajorMinor != nil {
@@ -314,6 +302,43 @@ func mountFromFilesystem(filesystem findmntFilesystem) (Mount, error) {
 	}
 	return Mount{AvailableBytes: available, Filesystem: filesystem.Filesystem, Health: HealthHealthy, ID: stableID("mount", identity), Options: options, ReadOnly: readOnly, ResourceID: resourceID, Source: filesystem.Source, State: "mounted", Target: filesystem.Target, TotalBytes: total, UsedBytes: used, UsedPercent: percent}, nil
 }
+
+func mountCapacity(filesystem findmntFilesystem) (uint64, uint64, uint64, float64, error) {
+	values := []string{string(filesystem.Size), string(filesystem.Used), string(filesystem.Available)}
+	if unavailableCapacity(filesystem.UsedPct) {
+		for _, value := range values {
+			if unavailableCapacity(value) || value == "0" {
+				continue
+			}
+			return 0, 0, 0, 0, fmt.Errorf("inconsistent unknown mount capacity")
+		}
+		return 0, 0, 0, 0, nil
+	}
+	for _, value := range values {
+		if unavailableCapacity(value) {
+			return 0, 0, 0, 0, fmt.Errorf("inconsistent unknown mount capacity")
+		}
+	}
+	total, err := strictUint(values[0])
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("invalid mount size: %w", err)
+	}
+	used, err := strictUint(values[1])
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("invalid mount used: %w", err)
+	}
+	available, err := strictUint(values[2])
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("invalid mount available: %w", err)
+	}
+	percent, err := strictPercent(filesystem.UsedPct)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("invalid mount use%%: %w", err)
+	}
+	return total, used, available, percent, nil
+}
+
+func unavailableCapacity(value string) bool { return value == "" || value == "-" || value == "null" }
 
 func decodeStrict(input []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(input))

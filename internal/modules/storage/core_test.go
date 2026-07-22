@@ -90,7 +90,17 @@ func TestParseFindmntRejectsUnknownFields(t *testing.T) {
 func TestParseFindmntAcceptsFlatLiveShapedRecord(t *testing.T) {
 	result, err := parseFindmnt(mustFixture(t, "findmnt-list.json"))
 	require.NoError(t, err)
-	assert.Len(t, result.Mounts, 2)
+	require.Len(t, result.Mounts, 3)
+	pseudo := result.Mounts[2]
+	assert.Equal(t, "sysfs", pseudo.Filesystem)
+	assert.Equal(t, "/sys", pseudo.Target)
+	assert.Equal(t, uint64(0), pseudo.TotalBytes)
+	assert.Equal(t, 0.0, pseudo.UsedPercent)
+}
+
+func TestParseFindmntRejectsPartialCapacityPlaceholders(t *testing.T) {
+	_, err := parseFindmnt([]byte(`{"filesystems":[{"target":"/sys","source":"sysfs","fstype":"sysfs","options":"rw","size":1,"used":0,"avail":0,"use%":"-","maj:min":"0:24"}]}`))
+	assert.Error(t, err)
 }
 
 func TestParseFindmntRejectsMalformedByteCount(t *testing.T) {
