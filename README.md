@@ -27,7 +27,13 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Extension update availability, reboot-required posture, and confirmed host reboot
 - Exact systemd backup timer monitoring with freshness and last-result health
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
+- Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts
 - Responsive desktop and mobile layouts
+
+Pilothouse-managed SMB mounts can optionally map file ownership to a local
+numeric UID/GID. Both IDs are required together; leaving both fields blank
+preserves default ownership. Names and free-form mount options are not
+accepted.
 
 ## Develop
 
