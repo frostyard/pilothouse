@@ -1,3 +1,5 @@
+//go:build linux
+
 package storage
 
 import (
@@ -7,11 +9,8 @@ import (
 )
 
 func RenderMountUnit(definition Definition) ([]byte, error) {
-	if validateArtifactDefinition(definition, NewArtifactStore()) != nil {
-		// Credential paths are store-specific, so validate the public fields here.
-		if ValidateDefinitionID(definition.ID) != nil || ValidateTarget(definition.Target) != nil || definition.UnitName != mountUnitName(definition.Target) {
-			return nil, errInvalidManifest
-		}
+	if validateRenderDefinition(definition) != nil {
+		return nil, errInvalidManifest
 	}
 	what, filesystem, options, err := mountSettings(definition)
 	if err != nil {
@@ -34,7 +33,7 @@ func RenderMountUnit(definition Definition) ([]byte, error) {
 }
 
 func RenderAutomountUnit(definition Definition) ([]byte, error) {
-	if ValidateDefinitionID(definition.ID) != nil || ValidateTarget(definition.Target) != nil || definition.UnitName != mountUnitName(definition.Target) {
+	if validateRenderDefinition(definition) != nil {
 		return nil, errInvalidManifest
 	}
 	return []byte(strings.Join([]string{
@@ -112,6 +111,12 @@ func (store ArtifactStore) VerifyOwnedArtifacts(definition Definition) error {
 	if err != nil || store.verifyFile(automountPath, automount, 0o644) != nil {
 		return errArtifactNotManaged
 	}
+	if definition.Username != "" {
+		credentialPath, err := store.CredentialPath(definition.ID)
+		if err != nil || store.verifyMetadata(credentialPath, 0o600) != nil {
+			return errArtifactNotManaged
+		}
+	}
 	return nil
 }
 
@@ -126,6 +131,9 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 	case "nfs":
 		if ValidateNFSHost(definition.Host) != nil || ValidateNFSExport(definition.Export) != nil || ValidateNFSVersion(definition.ProtocolVersion) != nil {
 			return "", "", nil, errInvalidManifest
+		}
+		if definition.ProtocolVersion != "auto" {
+			options = append(options, "nfsvers="+definition.ProtocolVersion)
 		}
 		sort.Strings(options)
 		return definition.Host + ":" + definition.Export, "nfs", options, nil
@@ -147,6 +155,29 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 	default:
 		return "", "", nil, errInvalidManifest
 	}
+}
+
+func validateRenderDefinition(definition Definition) error {
+	if definition.FormatVersion != ManifestFormatVersion || ValidateDefinitionID(definition.ID) != nil || ValidateProtocol(definition.Protocol) != nil || ValidateTarget(definition.Target) != nil || definition.State == "" || definition.UnitName != mountUnitName(definition.Target) {
+		return errInvalidManifest
+	}
+	switch definition.Protocol {
+	case "nfs":
+		if ValidateNFSHost(definition.Host) != nil || ValidateNFSExport(definition.Export) != nil || ValidateNFSVersion(definition.ProtocolVersion) != nil || definition.Server != "" || definition.Share != "" || definition.Username != "" || definition.Credential != "" {
+			return errInvalidManifest
+		}
+	case "smb":
+		if ValidateSMBServer(definition.Server) != nil || ValidateSMBShare(definition.Share) != nil || ValidateSMBVersion(definition.ProtocolVersion) != nil || definition.Host != "" || definition.Export != "" {
+			return errInvalidManifest
+		}
+		if definition.Username == "" && definition.Credential != "" {
+			return errInvalidManifest
+		}
+		if definition.Username != "" && (ValidateUsername(definition.Username) != nil || definition.Credential == "") {
+			return errInvalidManifest
+		}
+	}
+	return nil
 }
 
 func escapeSystemdValue(value string) string {

@@ -1,3 +1,5 @@
+//go:build linux
+
 package storage
 
 import (
@@ -10,10 +12,22 @@ import (
 )
 
 func TestRenderMountUnit(t *testing.T) {
-	definition := testDefinition()
-	actual, err := RenderMountUnit(definition)
-	require.NoError(t, err)
-	assert.Equal(t, "# Managed by Pilothouse; definition=0123456789abcdef0123456789abcdef\n[Unit]\nDescription=Pilothouse remote storage 0123456789abcdef0123456789abcdef\nWants=network-online.target\nAfter=network-online.target\n[Mount]\nWhat=nas.example:/exports/media\nWhere=/mnt/media\nType=nfs\nOptions=nodev,nosuid,rw\nTimeoutSec=30\n", string(actual))
+	for _, test := range []struct {
+		name    string
+		version string
+		options string
+	}{
+		{"explicit version", "4", "nfsvers=4,nodev,nosuid,rw"},
+		{"automatic version", "auto", "nodev,nosuid,rw"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			definition := testDefinition()
+			definition.ProtocolVersion = test.version
+			actual, err := RenderMountUnit(definition)
+			require.NoError(t, err)
+			assert.Equal(t, "# Managed by Pilothouse; definition=0123456789abcdef0123456789abcdef\n[Unit]\nDescription=Pilothouse remote storage 0123456789abcdef0123456789abcdef\nWants=network-online.target\nAfter=network-online.target\n[Mount]\nWhat=nas.example:/exports/media\nWhere=/mnt/media\nType=nfs\nOptions="+test.options+"\nTimeoutSec=30\n", string(actual))
+		})
+	}
 }
 
 func TestRenderAutomountUnit(t *testing.T) {
@@ -50,6 +64,36 @@ func TestVerifyOwnedArtifactsRejectsModifiedArtifact(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("modified"), 0o644))
 	err := store.VerifyOwnedArtifacts(definition)
 	assert.EqualError(t, err, "artifact is not managed by Pilothouse")
+}
+
+func TestVerifyOwnedArtifactsRejectsCredentialMetadataTampering(t *testing.T) {
+	store := newArtifactStore(t)
+	definition := Definition{
+		FormatVersion:   ManifestFormatVersion,
+		ID:              testDefinitionID,
+		Protocol:        "smb",
+		ProtocolVersion: "3.1.1",
+		Server:          "nas.example",
+		Share:           "media",
+		Target:          "/mnt/media",
+		UnitName:        "mnt-media.mount",
+		State:           "active",
+		Username:        "mount-user",
+	}
+	credential, err := store.CredentialPath(definition.ID)
+	require.NoError(t, err)
+	definition.Credential = credential
+	require.NoError(t, store.WriteManifest(definition))
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.WriteCredentials(definition.ID, definition.Username, "never-record-this-secret"))
+	require.NoError(t, store.VerifyOwnedArtifacts(definition))
+
+	require.NoError(t, os.Chmod(credential, 0o644))
+	assert.EqualError(t, store.VerifyOwnedArtifacts(definition), "artifact is not managed by Pilothouse")
+	require.NoError(t, os.Chmod(credential, 0o600))
+	store.UID++
+	assert.EqualError(t, store.VerifyOwnedArtifacts(definition), "artifact is not managed by Pilothouse")
 }
 
 func TestCredentialAndUnitFilesUseExactModes(t *testing.T) {

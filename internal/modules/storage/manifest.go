@@ -1,3 +1,5 @@
+//go:build linux
+
 package storage
 
 import (
@@ -141,7 +143,7 @@ func (store ArtifactStore) writeArtifact(path string, contents []byte, mode os.F
 		_ = file.Close()
 		return errInvalidManifest
 	}
-	if err := unix.Fdatasync(int(file.Fd())); err != nil {
+	if err := unix.Fsync(int(file.Fd())); err != nil {
 		_ = file.Close()
 		return errInvalidManifest
 	}
@@ -173,16 +175,23 @@ func (store ArtifactStore) renameNoReplace(source, destination string) error {
 }
 
 func (store ArtifactStore) verifyFile(path string, expected []byte, mode os.FileMode) error {
+	if err := store.verifyMetadata(path, mode); err != nil {
+		return err
+	}
+	actual, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(actual, expected) {
+		return errArtifactNotManaged
+	}
+	return nil
+}
+
+func (store ArtifactStore) verifyMetadata(path string, mode os.FileMode) error {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
 		return errArtifactNotManaged
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(stat.Uid) != store.UID || int(stat.Gid) != store.GID {
-		return errArtifactNotManaged
-	}
-	actual, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(actual, expected) {
 		return errArtifactNotManaged
 	}
 	return nil
