@@ -30,6 +30,8 @@ Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
 authenticated host Git to create and push the tag. Do not run the full bump
 target inside an ad hoc container or pass Git credentials into the image.
+Preflight treats `origin` as authoritative for moved and remote-only tags, but
+preserves and rejects local-only tags.
 
 ## Documentation
 

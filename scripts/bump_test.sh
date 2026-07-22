@@ -118,19 +118,35 @@ repo=$(new_repo clean)
 run_preflight "$repo" >/dev/null || fail 'accepts clean synchronized main'
 pass 'accepts clean synchronized main'
 
+repo=$(new_repo moved-tag)
+git -C "$repo" tag dev
+git -C "$repo" push origin refs/tags/dev >/dev/null 2>&1
+git -C "$repo" commit --allow-empty -m moved-tag-target >/dev/null
+git -C "$repo" push origin main >/dev/null 2>&1
+git --git-dir="$ROOT/moved-tag.git" update-ref refs/tags/dev "$(git -C "$repo" rev-parse HEAD)"
+run_preflight "$repo" >/dev/null || fail 'reconciles moved origin tag'
+[ "$(git -C "$repo" rev-parse refs/tags/dev)" = "$(git --git-dir="$ROOT/moved-tag.git" rev-parse refs/tags/dev)" ] ||
+    fail 'does not update moved local tag'
+pass 'reconciles moved origin tag'
+
 repo=$(new_repo local-only-tag)
 git -C "$repo" tag -a v1.2.3 -m local-only
+git -C "$repo" config fetch.prune true
+git -C "$repo" config fetch.pruneTags true
 if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'accepts local-only semver tag'; fi
 grep -q 'local and origin tag refs differ' "$ROOT/out" || fail 'explains local-only tag failure'
 pass 'rejects local-only semver tag'
 
 repo=$(new_repo mismatched-tag)
-git -C "$repo" commit --allow-empty -m local-tag-target >/dev/null
 git -C "$repo" tag -a v1.2.3 -m local-tag
-git --git-dir="$ROOT/mismatched-tag.git" tag v1.2.3 "$(git -C "$repo" rev-parse HEAD~1)"
-if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'accepts mismatched semver tag'; fi
-grep -q 'local and origin tag refs differ' "$ROOT/out" || fail 'explains mismatched tag failure'
-pass 'rejects mismatched semver tag'
+git -C "$repo" push origin refs/tags/v1.2.3 >/dev/null 2>&1
+git -C "$repo" commit --allow-empty -m moved-semver-tag-target >/dev/null
+git -C "$repo" push origin main >/dev/null 2>&1
+git --git-dir="$ROOT/mismatched-tag.git" update-ref refs/tags/v1.2.3 "$(git -C "$repo" rev-parse HEAD)"
+run_preflight "$repo" >/dev/null || fail 'reconciles moved semver tag'
+[ "$(git -C "$repo" rev-parse refs/tags/v1.2.3)" = "$(git --git-dir="$ROOT/mismatched-tag.git" rev-parse refs/tags/v1.2.3)" ] ||
+    fail 'does not update moved local semver tag'
+pass 'reconciles moved semver tag'
 
 git -C "$repo" switch -c feature >/dev/null
 if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'rejects feature branch'; fi

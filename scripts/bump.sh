@@ -25,7 +25,9 @@ preflight() {
         die 'working tree is not clean; commit or stash changes.'
     run_git remote get-url origin >/dev/null 2>&1 || die 'origin remote is missing.'
     fetch_failed=0
-    run_git fetch --tags origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1 ||
+    run_git fetch --no-prune origin \
+        '+refs/heads/main:refs/remotes/origin/main' \
+        '+refs/tags/*:refs/tags/*' >/dev/null 2>&1 ||
         fetch_failed=1
     local_tag_refs=$(run_git for-each-ref --format='%(objectname) %(refname)' refs/tags | LC_ALL=C sort)
     if ! remote_tag_refs=$(run_git ls-remote --tags origin); then
