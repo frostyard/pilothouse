@@ -16,6 +16,7 @@ import (
 )
 
 type memoryAudit struct {
+	begin     func()
 	beginErr  error
 	completed []audit.Record
 	mu        sync.Mutex
@@ -25,6 +26,9 @@ type memoryAudit struct {
 func (s *memoryAudit) Begin(_ context.Context, attempt audit.Attempt) (audit.Record, error) {
 	if s.beginErr != nil {
 		return audit.Record{}, s.beginErr
+	}
+	if s.begin != nil {
+		s.begin()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,6 +73,132 @@ func TestActionRequiresExactParametersAndConfirmation(t *testing.T) {
 	require.Len(t, store.completed, 1)
 	assert.Equal(t, "container/web", store.completed[0].Resource)
 	assert.Equal(t, audit.OutcomeSucceeded, store.completed[0].Outcome)
+}
+
+func TestActionPrepareRunsBeforeAuditResourceAndHandler(t *testing.T) {
+	steps := []string{}
+	store := &memoryAudit{begin: func() { steps = append(steps, "audit") }}
+	registry := NewActionRegistry(store)
+	require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+		ID: "test.create", Admin: true, Parameters: []string{"value"},
+		Prepare: func(_ context.Context, _ auth.Identity, parameters map[string]string) (map[string]string, error) {
+			steps = append(steps, "prepare")
+			prepared := cloneParameters(parameters)
+			prepared["_id"] = "trusted-id"
+			return prepared, nil
+		},
+		Resource: func(parameters map[string]string) (string, error) {
+			steps = append(steps, "resource")
+			return "thing/" + parameters["_id"], nil
+		},
+		Handler: func(_ context.Context, _ auth.Identity, parameters map[string]string) error {
+			steps = append(steps, "handler")
+			assert.Equal(t, "trusted-id", parameters["_id"])
+			return nil
+		},
+	}))
+
+	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", map[string]string{"value": "public"}, ""))
+	assert.Equal(t, []string{"prepare", "resource", "audit", "handler"}, steps)
+	require.Len(t, store.records, 1)
+	assert.Equal(t, "thing/trusted-id", store.records[0].Resource)
+}
+
+func TestActionPrepareRejectsUntrustedOrInvalidParameters(t *testing.T) {
+	t.Run("external internal id", func(t *testing.T) {
+		prepared := false
+		registry := NewActionRegistry(&memoryAudit{})
+		require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+			ID: "test.create", Admin: true, Parameters: []string{"value"},
+			Prepare: func(context.Context, auth.Identity, map[string]string) (map[string]string, error) {
+				prepared = true
+				return nil, nil
+			},
+			Resource: func(map[string]string) (string, error) { return "thing", nil },
+			Handler:  func(context.Context, auth.Identity, map[string]string) error { return nil },
+		}))
+
+		err := registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", map[string]string{"value": "public", "_id": "untrusted"}, "")
+		assert.ErrorContains(t, err, "action parameters")
+		assert.False(t, prepared)
+	})
+
+	t.Run("prepare error has no side effects", func(t *testing.T) {
+		store := &memoryAudit{}
+		resourceCalled := false
+		handlerCalled := false
+		registry := NewActionRegistry(store)
+		require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+			ID: "test.create", Admin: true, Parameters: []string{"value"},
+			Prepare: func(context.Context, auth.Identity, map[string]string) (map[string]string, error) {
+				return nil, errors.New("cannot prepare")
+			},
+			Resource: func(map[string]string) (string, error) { resourceCalled = true; return "thing", nil },
+			Handler:  func(context.Context, auth.Identity, map[string]string) error { handlerCalled = true; return nil },
+		}))
+
+		err := registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", map[string]string{"value": "public"}, "")
+		assert.ErrorContains(t, err, "prepare action")
+		assert.False(t, resourceCalled)
+		assert.False(t, handlerCalled)
+		assert.Empty(t, store.records)
+	})
+
+	for _, value := range []string{"\r", "\n", "\x00", string(make([]byte, 513))} {
+		t.Run("invalid derived id", func(t *testing.T) {
+			store := &memoryAudit{}
+			handlerCalled := false
+			registry := NewActionRegistry(store)
+			require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+				ID: "test.create", Admin: true, Parameters: []string{"value"},
+				Prepare: func(_ context.Context, _ auth.Identity, parameters map[string]string) (map[string]string, error) {
+					prepared := cloneParameters(parameters)
+					prepared["_id"] = value
+					return prepared, nil
+				},
+				Resource: func(map[string]string) (string, error) { return "thing", nil },
+				Handler:  func(context.Context, auth.Identity, map[string]string) error { handlerCalled = true; return nil },
+			}))
+
+			err := registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", map[string]string{"value": "public"}, "")
+			assert.ErrorContains(t, err, "prepared action parameters")
+			assert.False(t, handlerCalled)
+			assert.Empty(t, store.records)
+		})
+	}
+}
+
+func TestActionPrepareCannotMutateCallerParameters(t *testing.T) {
+	parameters := map[string]string{"value": "public"}
+	registry := NewActionRegistry(&memoryAudit{})
+	require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+		ID: "test.create", Admin: true, Parameters: []string{"value"},
+		Prepare: func(_ context.Context, _ auth.Identity, parameters map[string]string) (map[string]string, error) {
+			parameters["_id"] = "trusted-id"
+			return parameters, nil
+		},
+		Resource: func(map[string]string) (string, error) { return "thing", nil },
+		Handler:  func(context.Context, auth.Identity, map[string]string) error { return nil },
+	}))
+
+	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", parameters, ""))
+	assert.Equal(t, map[string]string{"value": "public"}, parameters)
+}
+
+func TestActionWithoutPrepareRetainsCallerParameterSemantics(t *testing.T) {
+	parameters := map[string]string{"value": "public"}
+	registry := NewActionRegistry(&memoryAudit{})
+	require.NoError(t, registry.RegisterDefinition(ActionDefinition{
+		ID: "test.create", Admin: true, Parameters: []string{"value"},
+		Resource: func(map[string]string) (string, error) { return "thing", nil },
+		Handler: func(_ context.Context, _ auth.Identity, parameters map[string]string) error {
+			parameters["value"] = "handled"
+			return nil
+		},
+	}))
+
+	require.NoError(t, registry.Execute(context.Background(), auth.Identity{Admin: true}, "test.create", parameters, ""))
+	assert.Equal(t, map[string]string{"value": "handled"}, parameters)
 }
 
 func TestAuditBeginFailurePreventsMutation(t *testing.T) {
