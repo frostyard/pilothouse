@@ -2,7 +2,6 @@ package files
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"strings"
 	"unicode/utf8"
@@ -30,9 +29,6 @@ func (*Module) Manifest() platform.Manifest {
 		Icon: "disk", Order: 38, Path: "/files",
 	}
 }
-
-// Mount is intentionally empty until the Files HTTP handlers are introduced.
-func (*Module) Mount(*http.ServeMux, platform.Host) {}
 
 func normalizeHTTPFilters(filters ListRequest) ListRequest {
 	filters.Filter = truncateFilter(strings.ReplaceAll(strings.TrimSpace(filters.Filter), "\x00", ""))
