@@ -65,14 +65,81 @@ func TestLoadDefinitionRejectsUnknownOrInvalidDerivedFields(t *testing.T) {
 	require.NoError(t, os.MkdirAll(store.ManifestRoot, 0o700))
 	path := filepath.Join(store.ManifestRoot, testDefinitionID+".json")
 
-	require.NoError(t, os.WriteFile(path, []byte(`{"format_version":1,"id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","host":"nas.example","export":"/exports/media","target":"/mnt/media","unit_name":"wrong.mount","state":"active","unknown":true}`), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`{"created_target":false,"export":"/exports/media","format_version":1,"host":"nas.example","id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","read_only":false,"state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","unknown":true}`+"\n"), 0o600))
 	_, err := store.LoadDefinition(testDefinitionID)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "unknown")
 
-	require.NoError(t, os.WriteFile(path, []byte(`{"format_version":2,"id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","host":"nas.example","export":"/exports/media","target":"/mnt/media","unit_name":"mnt-media.mount","state":"active"}`), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`{"format_version":3,"id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","host":"nas.example","export":"/exports/media","target":"/mnt/media","unit_name":"mnt-media.mount","state":"active"}`), 0o600))
 	_, err = store.LoadDefinition(testDefinitionID)
 	require.Error(t, err)
+}
+
+func TestLoadDefinitionAcceptsLegacyVersionOneWithoutOwnership(t *testing.T) {
+	store := newArtifactStore(t)
+	require.NoError(t, os.MkdirAll(store.ManifestRoot, 0o700))
+	path := filepath.Join(store.ManifestRoot, testDefinitionID+".json")
+	legacy := []byte(`{"created_target":false,"export":"/exports/media","format_version":1,"host":"nas.example","id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","read_only":false,"state":"active","target":"/mnt/media","unit_name":"mnt-media.mount"}` + "\n")
+	require.NoError(t, os.WriteFile(path, legacy, 0o600))
+
+	definition, err := store.LoadDefinition(testDefinitionID)
+	require.NoError(t, err)
+	assert.Equal(t, LegacyManifestFormatVersion, definition.FormatVersion)
+	assert.Empty(t, definition.UID)
+	assert.Empty(t, definition.GID)
+	marshaled, err := marshalManifest(definition)
+	require.NoError(t, err)
+	assert.Equal(t, legacy, marshaled)
+}
+
+func TestLoadDefinitionValidatesVersionTwoOwnershipPair(t *testing.T) {
+	store := newArtifactStore(t)
+	require.NoError(t, os.MkdirAll(store.ManifestRoot, 0o700))
+	path := filepath.Join(store.ManifestRoot, testDefinitionID+".json")
+	definition := Definition{
+		FormatVersion:   ManifestFormatVersion,
+		ID:              testDefinitionID,
+		Protocol:        "smb",
+		ProtocolVersion: "3.1.1",
+		Server:          "nas.example",
+		Share:           "media",
+		State:           "active",
+		Target:          "/mnt/media",
+		UnitName:        "mnt-media.mount",
+		SMBOwnership:    SMBOwnership{UID: "1000", GID: "100"},
+	}
+	contents, err := marshalManifest(definition)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(path, contents, 0o600))
+	loaded, err := store.LoadDefinition(testDefinitionID)
+	require.NoError(t, err)
+	assert.Equal(t, SMBOwnership{UID: "1000", GID: "100"}, loaded.SMBOwnership)
+
+	for _, contents := range []string{
+		`{"created_target":false,"format_version":2,"id":"0123456789abcdef0123456789abcdef","protocol":"smb","protocol_version":"3.1.1","read_only":false,"server":"nas.example","share":"media","state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","uid":"1000"}` + "\n",
+		`{"created_target":false,"format_version":2,"id":"0123456789abcdef0123456789abcdef","protocol":"smb","protocol_version":"3.1.1","read_only":false,"server":"nas.example","share":"media","state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","gid":"100"}` + "\n",
+		`{"created_target":false,"format_version":2,"id":"0123456789abcdef0123456789abcdef","protocol":"smb","protocol_version":"3.1.1","read_only":false,"server":"nas.example","share":"media","state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","uid":"01000","gid":"100"}` + "\n",
+	} {
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+		_, err := store.LoadDefinition(testDefinitionID)
+		assert.ErrorIs(t, err, errInvalidManifest)
+	}
+}
+
+func TestLoadDefinitionRejectsOwnershipOutsideVersionTwoSMB(t *testing.T) {
+	store := newArtifactStore(t)
+	require.NoError(t, os.MkdirAll(store.ManifestRoot, 0o700))
+	path := filepath.Join(store.ManifestRoot, testDefinitionID+".json")
+
+	for _, contents := range []string{
+		`{"created_target":false,"export":"/exports/media","format_version":1,"host":"nas.example","id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","read_only":false,"state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","uid":"1000","gid":"100"}` + "\n",
+		`{"created_target":false,"export":"/exports/media","format_version":2,"host":"nas.example","id":"0123456789abcdef0123456789abcdef","protocol":"nfs","protocol_version":"4","read_only":false,"state":"active","target":"/mnt/media","unit_name":"mnt-media.mount","uid":"1000","gid":"100"}` + "\n",
+	} {
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+		_, err := store.LoadDefinition(testDefinitionID)
+		assert.ErrorIs(t, err, errInvalidManifest)
+	}
 }
 
 func TestLoadDefinitionPreservesMissingManifestIdentity(t *testing.T) {
@@ -141,4 +208,14 @@ func TestManifestErrorsDoNotDisclosePassword(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "never-record-this-secret")
 	assert.NotContains(t, strings.ToLower(err.Error()), "password")
+}
+
+func TestVerifyOwnedArtifactsAcceptsLegacyVersionOne(t *testing.T) {
+	store := newArtifactStore(t)
+	definition := testDefinition()
+	definition.FormatVersion = LegacyManifestFormatVersion
+	require.NoError(t, store.WriteManifest(definition))
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.VerifyOwnedArtifacts(definition))
 }

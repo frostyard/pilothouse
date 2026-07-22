@@ -161,6 +161,38 @@ func TestParseReadOnly(t *testing.T) {
 	}
 }
 
+func TestParseSMBOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		uid   string
+		gid   string
+		want  SMBOwnership
+		valid bool
+	}{
+		{"absent", "", "", SMBOwnership{}, true},
+		{"zero", "0", "0", SMBOwnership{UID: "0", GID: "0"}, true},
+		{"maximum", "4294967294", "4294967294", SMBOwnership{UID: "4294967294", GID: "4294967294"}, true},
+		{"normalizes leading zeroes", "001000", "000100", SMBOwnership{UID: "1000", GID: "100"}, true},
+		{"uid only", "1000", "", SMBOwnership{}, false},
+		{"gid only", "", "1000", SMBOwnership{}, false},
+		{"sentinel", "4294967295", "1000", SMBOwnership{}, false},
+		{"overflow", "4294967296", "1000", SMBOwnership{}, false},
+		{"negative", "-1", "1000", SMBOwnership{}, false},
+		{"positive sign", "+1", "1000", SMBOwnership{}, false},
+		{"hex", "0x10", "1000", SMBOwnership{}, false},
+		{"internal whitespace", "10 00", "1000", SMBOwnership{}, false},
+		{"invalid utf8", string([]byte{0xff}), "1000", SMBOwnership{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ParseSMBOwnership(test.uid, test.gid)
+			assertValidation(t, err, test.valid, test.uid)
+			if test.valid {
+				assert.Equal(t, test.want, got)
+			}
+		})
+	}
+}
+
 func TestValidateDefinitionID(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -259,6 +291,7 @@ func TestRemoteTextValidatorsRejectInvalidUTF8(t *testing.T) {
 		{"NFS version", ValidateNFSVersion},
 		{"password", ValidatePassword},
 		{"read only", func(value string) error { _, err := ParseReadOnly(value); return err }},
+		{"SMB ownership", func(value string) error { _, err := ParseSMBOwnership(value, "1000"); return err }},
 		{"protocol", ValidateProtocol},
 		{"SMB server", ValidateSMBServer},
 		{"SMB share", ValidateSMBShare},
