@@ -18,6 +18,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/attention"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
+	"github.com/frostyard/pilothouse/internal/modules/files"
 	"github.com/frostyard/pilothouse/internal/modules/fleet"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
@@ -63,6 +64,7 @@ func run() error {
 		docker.New(),
 		incus.New(),
 		logs.New(),
+		files.New(),
 		serviceModule,
 		maintenanceModule,
 		backupModule,

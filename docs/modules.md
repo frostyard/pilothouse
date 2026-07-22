@@ -121,6 +121,14 @@ Podman container diagnostics likewise use the fixed read-only
 `/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the
 broker daemon accesses the root-equivalent Podman socket.
 
+The administrator-only Files module uses three fixed registrations:
+`org.frostyard.pilothouse.files.list`,
+`org.frostyard.pilothouse.files.download`, and
+`org.frostyard.pilothouse.files.upload`. The list query accepts bounded listing
+parameters, while download and upload use fixed stream query/action parameter
+sets and a 256 MiB transfer limit. Register those stream operations explicitly;
+never add a generic stream or filesystem proxy to the broker protocol.
+
 Query handlers receive the refreshed system identity just like action handlers. Return narrow presentation models; do not expose generic filesystem reads, command output, instance environment variables, secrets, or root-equivalent sockets. Managers must rediscover resources and validate identifiers or names before every mutation.
 
 ## Design conventions
