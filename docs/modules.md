@@ -139,8 +139,20 @@ The supported NFS versions are `auto`, `3`, `4`, `4.1`, and `4.2`; supported
 SMB versions are `auto`, `2.1`, `3.0`, and `3.1.1`. Forms accept no free-form
 mount options. The manager generates only its fixed safe options, including
 `nosuid,nodev`, read-only mode, the selected protocol version, and an SMB
-credential path when needed. Unmanaged mounts are never modified, activated,
+credential path when needed. IPv6 NFS hosts are rendered in bracketed
+`[host]:/export` form. Unmanaged mounts are never modified, activated,
 deactivated, or deleted by these actions.
+
+Lifecycle operations wait for systemd job completion before touching
+artifacts. Unmount stops the `.automount` trigger before the `.mount` unit so
+the target cannot silently remount on access; delete does the same before
+removing artifacts. Delete verifies each artifact individually before removing
+it: a tampered unit file stops the definition's units, durably marks the
+manifest `needs-attention`, and preserves the foreign file for inspection,
+after which delete can be retried to finish cleanup. A corrupt manifest is
+reported as a warning finding in the storage snapshot without hiding the rest
+of the inventory, while create and delete refuse to proceed until it is
+resolved.
 
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The

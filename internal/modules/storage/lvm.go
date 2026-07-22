@@ -157,7 +157,9 @@ func lvmResult(pvs, vgs, lvs lvmReport, inventory Inventory) (AdapterResult, err
 		}
 		id := stableID("lvm-pv", pv.UUID)
 		result.Resources = append(result.Resources, Resource{ID: id, Kind: "physical-volume", Name: pv.Name, Path: pv.Name, SizeBytes: parseUint(pv.Size), Health: HealthHealthy, State: "available"})
-		if core, ok := resourcesByPath[pv.Name]; ok {
+		// A PV outside any VG has no group resource to relate to; a relation
+		// to a nonexistent endpoint would fail snapshot validation.
+		if core, ok := resourcesByPath[pv.Name]; ok && pv.VGUUID != "" {
 			result.Relations = append(result.Relations, Relation{From: core.ID, To: stableID("lvm-vg", pv.VGUUID), Kind: "member-of"})
 		}
 		if lvmAttrAt(pv.Attr, 2) == 'm' {

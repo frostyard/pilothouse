@@ -126,7 +126,7 @@ model and deployment rules (cookie flags, allowed origins, PAM policy).
   Mutating forms are otherwise plain POSTs (often with `hx-boost="false"`) —
   **pages must remain usable without JavaScript.**
 - Run `make generate` (or `make docker-generate`) after editing any
-  `*.templ` file. Never hand-edit the generated `*_templo.go` files.
+  `*.templ` file. Never hand-edit the generated `*_templ.go` files.
 - **Composition rule:** put component calls like `@web.Icon("chevron")` on
   their own template node, never inline inside a text node (`View all
   @web.Icon("chevron")` renders the call literally as text). Every new/
@@ -139,8 +139,8 @@ model and deployment rules (cookie flags, allowed origins, PAM policy).
 
 ```go
 type Module interface {
-    Manifest() Manifest
     Dashboard(context.Context, Host) ([]DashboardCard, error)
+    Manifest() Manifest
     Mount(*http.ServeMux, Host)
 }
 ```
@@ -153,10 +153,11 @@ constructed and registered into `platform.Registry` once in
 
 A module may optionally implement `platform.HealthProvider`
 (`Health(context.Context, Host) ([]Finding, error)` plus `Manifest`) to
-contribute findings to the `attention` module's aggregated view (e.g.
-`system`, `storage`). Health-producing modules must also be added to the
-`attention.New(...)` provider list in `cmd/pilothouse/main.go`, not just
-registered in `platform.Registry`.
+contribute findings to the `attention` module's aggregated view. Health-
+producing modules must also be added to the `attention.New(...)` provider
+list in `cmd/pilothouse/main.go`, not just registered in
+`platform.Registry`. Current health providers: `system`, `services`,
+`maintenance`, `backups`, `storage`.
 
 ### Testing
 
@@ -186,11 +187,13 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
 - `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)
 - `--pam-service` (default `pilothouse`)
-- `--socket` (Unix socket path), `--socket-group`
-- audit/jobs bbolt DB paths (default under `/var/lib/pilothouse`)
-- backup timer name(s) and max-age; also augmented by `PILOTHOUSE_BACKUP_TIMERS`
+- `--socket` (default `/run/pilothouse/broker.sock`), `--socket-group`
+  (default `pilothouse`)
+- `--audit-db`, `--jobs-db` bbolt DB paths (default under `/var/lib/pilothouse`)
+- backup timer name(s) and `--backup-max-age` (default `48h`); also augmented
+  by `PILOTHOUSE_BACKUP_TIMERS`
 - sysext definitions root and `updex` executable path
-- Podman socket path
+- `--podman-socket` (default `/run/podman/podman.sock`)
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)
@@ -204,10 +207,18 @@ unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.
 
-**Release tooling:** `make bump` runs host-side Git preflight and publication
-around containerized verification and `svu`. Preflight force-fetches tag refs
-from authoritative `origin`, reconciling moved and remote-only tags, while
-preserving and rejecting local-only tags.
+## Release workflow
+
+`make bump` (backed by `scripts/bump.sh`) cuts a release: it requires a
+clean `main` checkout exactly matching `origin/main` (rejects dirty, ahead,
+behind, divergent, feature-branch, and detached-HEAD states), runs
+verification and semantic-version calculation (`svu`) inside the dev
+container, then uses authenticated *host* Git (not the container) to create
+and push an annotated tag. Never run the full `bump` target inside an ad
+hoc container or pass Git credentials into the image — see
+`docs/superpowers/specs/2026-07-21-bump-workflow-design.md` and
+`docs/superpowers/plans/2026-07-21-bump-workflow.md` for the design
+rationale.
 
 ## Further Reading
 

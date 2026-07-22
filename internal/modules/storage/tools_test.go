@@ -89,6 +89,15 @@ func TestResolveOptionalToolRejectsUnsafeCandidateAfterSafeCandidate(t *testing.
 	assert.False(t, supported)
 }
 
+func TestCommandRunnerReturnsCapturedOutputOnExitFailure(t *testing.T) {
+	runner := commandRunner{limit: 64}
+
+	output, err := runner.Run(context.Background(), "/bin/sh", "-c", "echo data; exit 4")
+
+	require.Error(t, err)
+	assert.Equal(t, "data\n", string(output))
+}
+
 func TestBoundedRunnerRejectsOversizedOutput(t *testing.T) {
 	runner := commandRunner{limit: 8, run: func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("123456789"), nil

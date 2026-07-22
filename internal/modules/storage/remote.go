@@ -187,6 +187,15 @@ func ValidateUsername(value string) error {
 	return nil
 }
 
+// nfsMountSource brackets IPv6 literals so the rendered source stays a valid
+// host:export mount specification.
+func nfsMountSource(host, export string) string {
+	if strings.Contains(host, ":") {
+		return "[" + host + "]:" + export
+	}
+	return host + ":" + export
+}
+
 func hasControl(value string) bool {
 	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }

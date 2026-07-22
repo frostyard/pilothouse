@@ -40,6 +40,48 @@ func TestBtrfsEnricherReportsFilesystemDevicesSubvolumesAndErrors(t *testing.T) 
 	assert.Contains(t, result.Findings, Finding{ResourceID: fsID, Severity: HealthWarning, Title: "Btrfs device reports errors", Detail: "/dev/sdb has 2 errors"})
 }
 
+func TestBtrfsEnricherHandlesSubvolumeMountsOfOneFilesystem(t *testing.T) {
+	enricher := newBtrfsEnricher("btrfs")
+	var usageCalls int
+	enricher.runner.run = func(_ context.Context, path string, args ...string) ([]byte, error) {
+		require.Equal(t, "btrfs", path)
+		switch strings.Join(args, " ") {
+		case "filesystem usage -b --raw /":
+			usageCalls++
+			return []byte("Overall:\n    Device size:                 1073741824\n    Device missing:                       0\n\n   /dev/sda\t1073741824"), nil
+		case "device stats /":
+			return []byte("[/dev/sda].write_io_errs 0"), nil
+		case "subvolume list -o /":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected btrfs arguments %q", args)
+			return nil, nil
+		}
+	}
+	inventory := Inventory{Mounts: []Mount{
+		{ID: "mount-root", Target: "/", Source: "/dev/sda[/@]", Filesystem: "btrfs", State: "mounted"},
+		{ID: "mount-home", Target: "/home", Source: "/dev/sda[/@home]", Filesystem: "btrfs", State: "mounted"},
+	}, Resources: []Resource{{ID: "device-root", Path: "/dev/sda", Details: []Detail{{Label: "UUID", Value: "fs-one"}}}}}
+
+	result, err := enricher.Collect(context.Background(), inventory)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, usageCalls)
+	fsID := stableID("btrfs-filesystem", "fs-one")
+	assert.Contains(t, result.Resources, Resource{ID: fsID, Kind: "btrfs-filesystem", Name: "fs-one", SizeBytes: 1073741824, Health: HealthHealthy, State: "mounted"})
+	require.Len(t, result.Mounts, 2)
+	for _, mount := range result.Mounts {
+		assert.Equal(t, fsID, mount.ResourceID)
+	}
+}
+
+func TestParseBtrfsSubvolumesAcceptsEmptyOutput(t *testing.T) {
+	subvolumes, err := parseBtrfsSubvolumes(nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, subvolumes)
+}
+
 func TestParseBtrfsRejectsDuplicateFilesystemAndOversizedOutput(t *testing.T) {
 	_, err := btrfsResult([]btrfsFilesystem{{uuid: "same"}, {uuid: "same"}}, Inventory{})
 	assert.Error(t, err)

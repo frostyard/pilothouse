@@ -186,13 +186,24 @@ func (manager *SystemRemoteManager) Unmount(ctx context.Context, id string) erro
 	if definition.State == "needs-attention" {
 		return errArtifactNotManaged
 	}
+	// Disarm the automount before stopping the mount; otherwise any access to
+	// the target immediately remounts the share.
+	if err := manager.units.Stop(ctx, automountUnitName(definition.Target)); err != nil {
+		return err
+	}
 	return manager.units.Stop(ctx, definition.UnitName)
 }
 
 func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error {
 	unlock := manager.lockDefinition(id)
 	defer unlock()
-	definition, err := manager.loadVerified(id)
+	if err := ValidateDefinitionID(id); err != nil {
+		return err
+	}
+	// Delete deliberately skips VerifyOwnedArtifacts: tampered unit files must
+	// not leave an active mount unmanageable. Every artifact is still verified
+	// individually before removal below.
+	definition, err := manager.artifacts.LoadDefinition(id)
 	if err != nil {
 		return err
 	}
@@ -200,10 +211,10 @@ func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error
 		return fmt.Errorf("remote mount needs attention: %w", err)
 	}
 	definition.State = "needs-attention"
-	if err := manager.units.Stop(ctx, definition.UnitName); err != nil {
+	if err := manager.units.Stop(ctx, automountUnitName(definition.Target)); err != nil {
 		return manager.retainAttention(definition, err)
 	}
-	if err := manager.units.Stop(ctx, automountUnitName(definition.Target)); err != nil {
+	if err := manager.units.Stop(ctx, definition.UnitName); err != nil {
 		return manager.retainAttention(definition, err)
 	}
 	if err := manager.units.Disable(ctx, automountUnitName(definition.Target)); err != nil {
@@ -280,15 +291,24 @@ func (manager *SystemRemoteManager) State(ctx context.Context) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	definitions, err := manager.definitions()
+	definitions, invalid, err := manager.definitions()
 	if err != nil {
 		return Snapshot{}, err
+	}
+	// A corrupt manifest degrades to a finding instead of hiding the rest of
+	// the inventory.
+	for _, id := range invalid {
+		resourceID := ""
+		if ValidateDefinitionID(id) == nil {
+			resourceID = "remote:" + id
+		}
+		snapshot.Findings = append(snapshot.Findings, Finding{ResourceID: resourceID, Severity: HealthWarning, Title: "Managed mount manifest is invalid", Detail: "A managed remote mount manifest failed verification and was excluded from the inventory."})
 	}
 	for _, definition := range definitions {
 		mount := Mount{ID: "remote:" + definition.ID, Health: HealthHealthy, Managed: true, ReadOnly: definition.ReadOnly, State: definition.State, Target: definition.Target}
 		switch definition.Protocol {
 		case "nfs":
-			mount.Filesystem, mount.Source = "nfs", definition.Host+":"+definition.Export
+			mount.Filesystem, mount.Source = "nfs", nfsMountSource(definition.Host, definition.Export)
 		case "smb":
 			mount.Filesystem, mount.Source = "cifs", "//"+definition.Server+"/"+definition.Share
 		}
@@ -368,9 +388,14 @@ func (manager *SystemRemoteManager) inventory(ctx context.Context, exclude ...st
 	for _, mount := range snapshot.Mounts {
 		inventory.Mounts = append(inventory.Mounts, mount.Target)
 	}
-	definitions, err := manager.definitions()
+	definitions, invalid, err := manager.definitions()
 	if err != nil {
 		return TargetInventory{}, err
+	}
+	// A corrupt manifest hides its target and unit reservations, so mutating
+	// lifecycle operations must not proceed past it.
+	if len(invalid) > 0 {
+		return TargetInventory{}, errInvalidManifest
 	}
 	for _, definition := range definitions {
 		if len(exclude) > 0 && definition.ID == exclude[0] {
@@ -426,15 +451,19 @@ func (manager *SystemRemoteManager) lockDefinition(id string) func() {
 	}
 }
 
-func (manager *SystemRemoteManager) definitions() ([]Definition, error) {
+// definitions loads every managed manifest. Manifests that fail to load or
+// verify are returned separately by ID so callers choose between degrading
+// gracefully and refusing to proceed.
+func (manager *SystemRemoteManager) definitions() ([]Definition, []string, error) {
 	entries, err := os.ReadDir(manager.artifacts.ManifestRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	definitions := make([]Definition, 0, len(entries))
+	var invalid []string
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -445,9 +474,13 @@ func (manager *SystemRemoteManager) definitions() ([]Definition, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, err
+			if errors.Is(err, errInvalidManifest) {
+				invalid = append(invalid, id)
+				continue
+			}
+			return nil, nil, err
 		}
 		definitions = append(definitions, definition)
 	}
-	return definitions, nil
+	return definitions, invalid, nil
 }
