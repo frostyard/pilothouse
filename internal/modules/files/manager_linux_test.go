@@ -100,11 +100,16 @@ func TestListRootNestedFiltersAndMetadata(t *testing.T) {
 
 func TestListSortsDirectoriesFirstAndBreaksTiesByName(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"z-dir", "a-dir"} {
+	names := []string{"z-dir", "a-dir", "z-file", "a-file"}
+	for _, name := range names[:2] {
 		require.NoError(t, os.Mkdir(filepath.Join(root, name), 0o755))
 	}
-	for _, name := range []string{"z-file", "a-file"} {
+	for _, name := range names[2:] {
 		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte("same"), 0o600))
+	}
+	tieTime := time.Unix(1_700_000_000, 0)
+	for _, name := range names {
+		require.NoError(t, os.Chtimes(filepath.Join(root, name), tieTime, tieTime))
 	}
 	manager := newTestManager(t, RootSpec{ID: "safe", Path: root})
 

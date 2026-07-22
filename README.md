@@ -35,6 +35,7 @@ Go 1.26 or newer is required.
 
 ```bash
 make test
+make race
 make build
 sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id -gn)"
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
@@ -47,6 +48,7 @@ make docker-generate
 make docker-fmt
 make docker-build
 make docker-test
+make docker-race
 make docker-lint
 ```
 
