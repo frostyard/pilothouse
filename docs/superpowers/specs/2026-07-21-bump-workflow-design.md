@@ -35,9 +35,13 @@ Docker will receive the repository as a bind mount for reads, generated ignored 
 6. Run `svu next` in the development image.
 7. Require the result to match `vMAJOR.MINOR.PATCH` and reject a version that already exists locally or on `origin`.
 8. Create an annotated tag on the host with message `Version <version>` and push only that tag to `origin`.
-9. If the push fails, delete only the local tag created by this invocation and return a clear error. Never alter an existing tag.
+9. If the push reports failure, query the remote tag directly:
+   - if the remote tag resolves to the intended commit, report that publication succeeded despite the transport error;
+   - if the remote tag is confirmed absent, delete only the local tag created by this invocation and return a clear retryable error;
+   - if remote state cannot be determined, preserve the local tag and report the indeterminate state for manual reconciliation.
+   Never alter an existing or remote tag during rollback.
 
-The preflight and all verification must finish before tag creation. A failure before tagging leaves repository references unchanged.
+The preflight and all verification must finish before tag creation. A failure before tagging creates no local or remote version tag; preflight fetches may update normal remote-tracking references.
 
 ## Make Targets
 
@@ -67,7 +71,7 @@ Each preflight failure will identify the violated condition and the corrective a
 - branch mismatch: report whether local `main` is ahead, behind, or diverged;
 - verification failure: stop before calculating or creating a version tag;
 - malformed/existing version: stop before tag creation;
-- push failure: remove the newly created local tag and report that no remote tag was published.
+- push failure: inspect the remote before rollback, remove the new local tag only when remote absence is confirmed, and preserve it when publication state is indeterminate.
 
 Commands must preserve the underlying failure status. Success messages must only appear after the corresponding operation succeeds.
 
@@ -84,7 +88,7 @@ Coverage will include:
 - failed container verification;
 - malformed and already-existing proposed versions;
 - successful annotated tag creation and push to a temporary bare origin;
-- push failure with local-tag rollback;
+- push failure with confirmed-absence rollback, accepted-but-reported-failed recovery, and indeterminate-state preservation;
 - preservation of pre-existing tags;
 - Docker image smoke checks showing both `svu` and `golangci-lint` on `PATH`.
 
