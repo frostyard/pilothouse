@@ -2,12 +2,14 @@ package broker
 
 import (
 	"encoding/json"
+	"io"
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/auth"
 )
 
 const (
+	ActionFilesUpload         = "org.frostyard.pilothouse.files.upload"
 	ActionDockerRemove        = "org.frostyard.pilothouse.docker.remove"
 	ActionDockerRemoveImage   = "org.frostyard.pilothouse.docker.remove_image"
 	ActionDockerRestart       = "org.frostyard.pilothouse.docker.restart"
@@ -49,6 +51,13 @@ const (
 	QueryPodmanState      = "org.frostyard.pilothouse.podman.state"
 	QueryServicesJournal  = "org.frostyard.pilothouse.services.journal"
 	QueryServicesState    = "org.frostyard.pilothouse.services.state"
+	QueryFilesDownload    = "org.frostyard.pilothouse.files.download"
+	QueryFilesList        = "org.frostyard.pilothouse.files.list"
+)
+
+const (
+	StreamMetadataHeader = "Pilothouse-Stream-Metadata"
+	StreamNameHeader     = "Pilothouse-Stream-Name"
 )
 
 type ActionRequest struct {
@@ -83,4 +92,11 @@ type SessionResponse struct {
 	CSRF      string        `json:"csrf"`
 	ExpiresAt time.Time     `json:"expires_at"`
 	Identity  auth.Identity `json:"identity"`
+}
+
+type StreamResult struct {
+	Body      io.ReadCloser
+	Filename  string
+	MediaType string
+	Size      int64
 }
