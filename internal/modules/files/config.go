@@ -101,7 +101,9 @@ type SystemManager struct {
 	closeFD      func(int) error
 	openTmpfile  func(int) (int, error)
 	writeFD      func(int, []byte) (int, error)
+	chownFD      func(int, int, int) error
 	syncFD       func(int) error
+	syncDirFD    func(int) error
 	linkat       func(int, string, int, string, int) error
 	closeOnce    sync.Once
 	closeErr     error
@@ -132,9 +134,11 @@ func NewSystemManager(specs []RootSpec) (*SystemManager, error) {
 		openTmpfile: func(dirFD int) (int, error) {
 			return unix.Openat(dirFD, ".", unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
 		},
-		writeFD: unix.Write,
-		syncFD:  unix.Fsync,
-		linkat:  unix.Linkat,
+		writeFD:   unix.Write,
+		chownFD:   unix.Fchown,
+		syncFD:    unix.Fsync,
+		syncDirFD: unix.Fsync,
+		linkat:    unix.Linkat,
 	}
 	for _, spec := range specs {
 		fd, err := unix.Open(spec.Path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)

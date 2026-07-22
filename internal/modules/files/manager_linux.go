@@ -350,7 +350,7 @@ func (m *SystemManager) Download(ctx context.Context, rootID, path string) (Down
 	if !ok {
 		return Download{}, ErrNotFound
 	}
-	fd, err := openBeneath(root.fd, path, unix.O_RDONLY|unix.O_NOFOLLOW)
+	fd, err := openBeneath(root.fd, path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK)
 	if err != nil {
 		return Download{}, err
 	}
@@ -411,7 +411,7 @@ func (m *SystemManager) Upload(ctx context.Context, rootID, path, name string, r
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := unix.Fchown(fd, 0, 0); err != nil {
+	if err := m.chownFD(fd, 0, 0); err != nil {
 		return fmt.Errorf("%w: set upload ownership: %v", ErrUnavailable, err)
 	}
 	if err := unix.Fchmod(fd, 0o640); err != nil {
@@ -429,7 +429,7 @@ func (m *SystemManager) Upload(ctx context.Context, rootID, path, name string, r
 		}
 		return fmt.Errorf("%w: publish upload: %v", ErrUnavailable, err)
 	}
-	if err := unix.Fsync(dirFD); err != nil {
+	if err := m.syncDirFD(dirFD); err != nil {
 		return fmt.Errorf("%w: sync upload directory: %v", ErrUnavailable, err)
 	}
 	return nil

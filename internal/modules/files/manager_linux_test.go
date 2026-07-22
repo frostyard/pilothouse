@@ -277,13 +277,30 @@ func TestDownloadRejectsCancelledContext(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-func TestUploadPublishesCompleteFilesWithRestrictedMetadata(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("upload publication requires the configured root ownership")
+func TestDownloadRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, unix.Mkfifo(filepath.Join(root, "pipe"), 0o600))
+	manager := newTestManager(t, RootSpec{ID: "safe", Path: root})
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := manager.Download(context.Background(), "safe", "pipe")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		assert.ErrorIs(t, err, ErrNotFound)
+	case <-time.After(time.Second):
+		t.Fatal("download blocked while opening a FIFO")
 	}
+}
+
+func TestUploadPublishesCompleteFilesWithRestrictedMetadata(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, "nested"), 0o755))
 	manager := newTestManager(t, RootSpec{ID: "write", Path: root, Writable: true})
+	permitTestChown(manager)
 	manager.maxTransfer = 8
 
 	require.NoError(t, manager.Upload(context.Background(), "write", "nested", "file", strings.NewReader("data")))
@@ -307,6 +324,7 @@ func TestUploadRejectsUnsafeRequestsAndOversizedStreams(t *testing.T) {
 	require.NoError(t, os.Symlink("directory", filepath.Join(root, "link")))
 	readonly := newTestManager(t, RootSpec{ID: "read", Path: root})
 	writable := newTestManager(t, RootSpec{ID: "write", Path: root, Writable: true})
+	permitTestChown(writable)
 	writable.maxTransfer = 8
 	require.NoError(t, os.WriteFile(filepath.Join(root, "exists"), []byte("old"), 0o640))
 
@@ -318,20 +336,16 @@ func TestUploadRejectsUnsafeRequestsAndOversizedStreams(t *testing.T) {
 	assert.ErrorIs(t, writable.Upload(context.Background(), "write", "", "large", strings.NewReader(strings.Repeat("x", 9))), ErrTooLarge)
 	_, err := os.Stat(filepath.Join(root, "large"))
 	assert.ErrorIs(t, err, os.ErrNotExist)
-	if os.Geteuid() == 0 {
-		assert.ErrorIs(t, writable.Upload(context.Background(), "write", "", "exists", strings.NewReader("data")), ErrConflict)
-		data, err := os.ReadFile(filepath.Join(root, "exists"))
-		require.NoError(t, err)
-		assert.Equal(t, "old", string(data))
-	}
+	assert.ErrorIs(t, writable.Upload(context.Background(), "write", "", "exists", strings.NewReader("data")), ErrConflict)
+	data, err := os.ReadFile(filepath.Join(root, "exists"))
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(data))
 }
 
 func TestUploadNeverPublishesPartialFile(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("upload publication requires the configured root ownership")
-	}
 	root := t.TempDir()
 	manager := newTestManager(t, RootSpec{ID: "write", Path: root, Writable: true})
+	permitTestChown(manager)
 	reader := newBlockingReader([]byte("partial"))
 	done := make(chan error, 1)
 	go func() { done <- manager.Upload(context.Background(), "write", "", "new.txt", reader) }()
@@ -354,9 +368,6 @@ func TestUploadReturnsReaderCancellationWithoutPublication(t *testing.T) {
 }
 
 func TestUploadCleansUpOnCancellationAndSyscallFailures(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("upload metadata setup requires the configured root ownership")
-	}
 	for _, tc := range []struct {
 		name  string
 		setup func(*SystemManager)
@@ -375,6 +386,7 @@ func TestUploadCleansUpOnCancellationAndSyscallFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			manager := newTestManager(t, RootSpec{ID: "write", Path: root, Writable: true})
+			permitTestChown(manager)
 			tc.setup(manager)
 			ctx := context.Background()
 			if tc.name == "cancelled" {
@@ -390,6 +402,20 @@ func TestUploadCleansUpOnCancellationAndSyscallFailures(t *testing.T) {
 			assert.ErrorIs(t, statErr, os.ErrNotExist)
 		})
 	}
+}
+
+func TestUploadReportsDirectorySyncFailureAfterPublication(t *testing.T) {
+	root := t.TempDir()
+	manager := newTestManager(t, RootSpec{ID: "write", Path: root, Writable: true})
+	permitTestChown(manager)
+	manager.syncDirFD = func(int) error { return errors.New("directory sync failed") }
+
+	err := manager.Upload(context.Background(), "write", "", "new", strings.NewReader("data"))
+
+	assert.ErrorIs(t, err, ErrUnavailable)
+	data, readErr := os.ReadFile(filepath.Join(root, "new"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "data", string(data), "the destination is published despite uncertain directory durability")
 }
 
 type blockingReader struct {
@@ -428,6 +454,12 @@ func (r *blockingReader) Finish() { close(r.finish) }
 type errorReader struct{ err error }
 
 func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func permitTestChown(manager *SystemManager) {
+	if os.Geteuid() != 0 {
+		manager.chownFD = func(int, int, int) error { return nil }
+	}
+}
 
 func newTestManager(t *testing.T, specs ...RootSpec) *SystemManager {
 	t.Helper()
