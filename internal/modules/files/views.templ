@@ -1,0 +1,127 @@
+package files
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ AccessDenied() {
+	<div class="page-stack"><article class="card error-card"><div class="card-heading"><span class="card-icon danger">
+		@web.Icon("alert")
+	</span><div><h2>Administrator access required</h2><p>Configured host files are available only to administrators.</p></div></div></article></div>
+}
+
+templ Unavailable(inaccessible bool) {
+	<div class="page-stack"><article class="card error-card"><div class="card-heading"><span class="card-icon danger">
+		@web.Icon("alert")
+	</span><div><h2>
+		if inaccessible {
+			This directory is inaccessible or no longer exists.
+		} else {
+			Files are temporarily unavailable.
+		}
+	</h2><p>Refresh the page to try again.</p></div></div></article></div>
+}
+
+templ Page(state State, csrf string) {
+	<div class="page-stack">
+		if len(state.Roots) == 0 {
+			@NoRoots()
+		} else {
+			@RootBar(state)
+			@Breadcrumbs(state)
+			@Toolbar(state)
+			if state.Active.Writable {
+				@UploadForm(state, csrf)
+			} else {
+				<p class="files-read-only">This root is read-only. Uploads are disabled.</p>
+			}
+			@Entries(state)
+		}
+	</div>
+}
+
+templ NoRoots() {
+	<article class="card empty-state"><span class="card-icon">
+		@web.Icon("disk")
+	</span><h2>No file roots are configured.</h2><p>Configure one or more --files-root or --files-write-root values on pilothoused.</p></article>
+}
+
+templ RootBar(state State) {
+	<section class="card files-root-bar"><div><span class="preview-label">Configured root</span><strong>{ state.Active.ID }</strong><small>{ state.Active.Path }</small></div><nav class="files-root-list" aria-label="Configured roots">
+		for _, root := range state.Roots {
+			<a href={ filesURL(root.ID, "", state.Filters) } class={ templ.KV("active", root.ID == state.Active.ID) }>{ root.ID } <small>{ rootMode(root) }</small></a>
+		}
+	</nav></section>
+}
+
+templ Breadcrumbs(state State) {
+	<nav class="files-breadcrumbs" aria-label="File path"><a href={ filesURL(state.Active.ID, "", state.Filters) }>Root</a>
+		for _, crumb := range breadcrumbPaths(state.Path) {
+			<span>/</span><a href={ filesURL(state.Active.ID, crumb.Path, state.Filters) }>{ crumb.Name }</a>
+		}
+	</nav>
+}
+
+templ Toolbar(state State) {
+	<section class="card files-toolbar"><form method="get" action={ filesURL(state.Active.ID, state.Path, state.Filters) }><input type="hidden" name="path" value={ state.Path }/><input type="hidden" name="sort" value={ state.Filters.Sort }/><input type="hidden" name="direction" value={ state.Filters.Direction }/><label>Find files<input type="search" name="filter" value={ state.Filters.Filter } placeholder="Name contains"/></label><label class="files-hidden"><input type="checkbox" name="hidden" value="true" checked?={ state.Filters.Hidden }/> Include hidden</label><button class="button" type="submit">Apply</button></form><span>{ fmt.Sprintf("%d entries", len(state.Entries)) }</span>
+		if state.Truncated {
+			<span class="files-truncated">Results are truncated by safety limits.</span>
+		}
+	</section>
+}
+
+templ UploadForm(state State, csrf string) {
+	<form class="card files-upload" method="post" enctype="multipart/form-data" action={ uploadURL(state.Active.ID, state.Path) }><div><strong>Upload file</strong><p>Up to 256 MiB. Existing names are never overwritten.</p></div><input type="hidden" name="csrf" value={ csrf }/><label>File<input name="file" type="file" required/></label><button class="button" type="submit">Upload file</button></form>
+}
+
+templ Entries(state State) {
+	<article class="card table-card"><table class="data-table files-table"><thead><tr><th><a href={ filesURL(state.Active.ID, state.Path, nextSort(state.Filters, "name")) }>Name</a></th><th><a href={ filesURL(state.Active.ID, state.Path, nextSort(state.Filters, "size")) }>Size</a></th><th><a href={ filesURL(state.Active.ID, state.Path, nextSort(state.Filters, "modified")) }>Modified</a></th><th><a href={ filesURL(state.Active.ID, state.Path, nextSort(state.Filters, "owner")) }>Owner</a></th><th>Group</th><th><a href={ filesURL(state.Active.ID, state.Path, nextSort(state.Filters, "permissions")) }>Permissions</a></th></tr></thead><tbody>
+		if len(state.Entries) == 0 {
+			<tr><td class="empty-state" colspan="6">
+				if state.Filters.Filter != "" {
+					No entries match the active filter.
+				} else {
+					This directory is empty.
+				}
+			</td></tr>
+		} else {
+			for _, entry := range state.Entries {
+				<tr><td class="files-name" data-label="Name">
+					if entry.Type == EntryDirectory {
+						<a href={ filesURL(state.Active.ID, childPath(state.Path, entry.Name), state.Filters) }>{ entry.Name }</a>
+					} else if entry.Type == EntryRegular {
+						<a href={ downloadURL(state.Active.ID, childPath(state.Path, entry.Name)) }>{ entry.Name }</a>
+					} else {
+						<span>{ entry.Name }</span>
+					}
+					if entry.Type == EntrySymlink {
+						<small>symlink to { entry.LinkTarget }</small>
+					} else if entry.Type == EntryOther {
+						<small>other</small>
+					}
+				</td><td class="files-metadata" data-label="Size">{ fileSize(entry) }</td><td class="files-metadata" data-label="Modified"><time datetime={ entry.Modified.Format(time.RFC3339) }>{ entry.Modified.Format("2006-01-02 15:04 MST") }</time></td><td class="files-metadata" data-label="Owner">{ entry.Owner }</td><td class="files-metadata" data-label="Group">{ entry.Group }</td><td class="files-metadata" data-label="Permissions">{ permissions(entry) }</td></tr>
+			}
+		}
+	</tbody></table></article>
+}
+
+func rootMode(root Root) string {
+	if root.Writable {
+		return "Read/write"
+	}
+	return "Read-only"
+}
+
+func fileSize(entry Entry) string {
+	if entry.Type != EntryRegular {
+		return "-"
+	}
+	return fmt.Sprintf("%d B", entry.Size)
+}
+
+func permissions(entry Entry) string {
+	return fmt.Sprintf("%04o", entry.Mode&0o7777)
+}
