@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -173,13 +172,6 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 	if err := validateStreamParameters(definition.Parameters, parameters); err != nil {
 		return fmt.Errorf("stream action parameters: %w", err)
 	}
-	data, err := io.ReadAll(io.LimitReader(body, definition.Limit+1))
-	if err != nil {
-		return fmt.Errorf("read stream action body: %w", err)
-	}
-	if int64(len(data)) > definition.Limit {
-		return ErrStreamTooLarge
-	}
 	resource, err := definition.Resource(parameters)
 	if err != nil || !validStreamResource(resource) {
 		return fmt.Errorf("stream action resource is invalid")
@@ -210,7 +202,7 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	actionErr := definition.Handler(ctx, identity, parameters, bytes.NewReader(data))
+	actionErr := definition.Handler(ctx, identity, parameters, newStreamLimitReader(body, definition.Limit))
 	if r.audit != nil {
 		outcome, category := audit.OutcomeSucceeded, ""
 		if actionErr != nil {
@@ -223,6 +215,32 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 		}
 	}
 	return actionErr
+}
+
+type streamLimitReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func newStreamLimitReader(body io.Reader, limit int64) *streamLimitReader {
+	return &streamLimitReader{reader: io.LimitReader(body, limit+1), remaining: limit}
+}
+
+func (r *streamLimitReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		var extra [1]byte
+		n, err := r.reader.Read(extra[:])
+		if n > 0 {
+			return 0, ErrStreamTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 func registeredStreamParameters(id string, parameters []string) ([]string, error) {

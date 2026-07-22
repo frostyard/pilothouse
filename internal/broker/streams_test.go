@@ -20,6 +20,27 @@ type trackingBody struct {
 	closed bool
 }
 
+type stagedReader struct {
+	first   string
+	release <-chan struct{}
+	second  string
+	stage   int
+}
+
+func (r *stagedReader) Read(p []byte) (int, error) {
+	switch r.stage {
+	case 0:
+		r.stage++
+		return copy(p, r.first), nil
+	case 1:
+		<-r.release
+		r.stage++
+		return copy(p, r.second), nil
+	default:
+		return 0, io.EOF
+	}
+}
+
 func (b *trackingBody) Close() error {
 	b.closed = true
 	return nil
@@ -150,15 +171,17 @@ func TestStreamActionsLimitSerializeCancelAndAudit(t *testing.T) {
 		err := registry.Execute(context.Background(), identity, "test."+want.category, nil, strings.NewReader("ok"))
 		assert.ErrorIs(t, err, want.err)
 	}
-	require.Len(t, store.completed, 5)
-	assert.Equal(t, audit.OutcomeSucceeded, store.completed[0].Outcome)
+	require.Len(t, store.completed, 6)
+	assert.Equal(t, audit.OutcomeFailed, store.completed[0].Outcome)
+	assert.Equal(t, "operation_failed", store.completed[0].ErrorCategory)
 	assert.Equal(t, audit.OutcomeSucceeded, store.completed[1].Outcome)
-	assert.Equal(t, audit.OutcomeFailed, store.completed[2].Outcome)
-	assert.Equal(t, "operation_failed", store.completed[2].ErrorCategory)
+	assert.Equal(t, audit.OutcomeSucceeded, store.completed[2].Outcome)
 	assert.Equal(t, audit.OutcomeFailed, store.completed[3].Outcome)
-	assert.Equal(t, "timeout", store.completed[3].ErrorCategory)
+	assert.Equal(t, "operation_failed", store.completed[3].ErrorCategory)
 	assert.Equal(t, audit.OutcomeFailed, store.completed[4].Outcome)
-	assert.Equal(t, "cancelled", store.completed[4].ErrorCategory)
+	assert.Equal(t, "timeout", store.completed[4].ErrorCategory)
+	assert.Equal(t, audit.OutcomeFailed, store.completed[5].Outcome)
+	assert.Equal(t, "cancelled", store.completed[5].ErrorCategory)
 }
 
 func TestStreamActionCancellationReleasesLock(t *testing.T) {
@@ -178,6 +201,39 @@ func TestStreamActionCancellationReleasesLock(t *testing.T) {
 	registry.locks.mu.Lock()
 	assert.Empty(t, registry.locks.locks)
 	registry.locks.mu.Unlock()
+}
+
+func TestStreamActionStreamsBodyWithoutPrereading(t *testing.T) {
+	registry := NewStreamActionRegistry()
+	firstChunk := make(chan string, 1)
+	require.NoError(t, registry.Register(StreamActionDefinition{
+		ID: "test.stream", Limit: 4,
+		Resource: func(map[string]string) (string, error) { return "file", nil },
+		Handler: func(_ context.Context, _ auth.Identity, _ map[string]string, body io.Reader) error {
+			chunk := make([]byte, 2)
+			if _, err := io.ReadFull(body, chunk); err != nil {
+				return err
+			}
+			firstChunk <- string(chunk)
+			_, err := io.Copy(io.Discard, body)
+			return err
+		},
+	}))
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- registry.Execute(context.Background(), auth.Identity{}, "test.stream", nil, &stagedReader{first: "ab", second: "cd", release: release})
+	}()
+	select {
+	case got := <-firstChunk:
+		assert.Equal(t, "ab", got)
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("handler did not receive the first chunk before the source released the rest")
+	}
+	close(release)
+	require.NoError(t, <-done)
 }
 
 func TestStreamRegistryPublicErrors(t *testing.T) {
