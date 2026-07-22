@@ -204,6 +204,11 @@ unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.
 
+**Release tooling:** `make bump` runs host-side Git preflight and publication
+around containerized verification and `svu`. Preflight force-fetches tag refs
+from authoritative `origin`, reconciling moved and remote-only tags, while
+preserving and rejecting local-only tags.
+
 ## Further Reading
 
 - `docs/authentication.md` — login flow, session/CSRF model, authorization,

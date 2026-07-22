@@ -12,11 +12,13 @@ publication; Docker supplies pinned build, lint, and version-calculation tools.
 - `scripts/bump.sh` performs host-side preflight, runs verification and version
   commands, validates the version, and creates and pushes the annotated tag.
 - Preflight requires Git and Docker, `main`, a clean worktree, and `origin`.
-  It fetches `origin/main` and tags, requires local `HEAD` to equal
+  It force-fetches without pruning with `+refs/heads/main:refs/remotes/origin/main` and
+  `+refs/tags/*:refs/tags/*` from `origin`, requires local `HEAD` to equal
   `refs/remotes/origin/main`, and compares sorted direct `object-id ref` tag
   sets from local refs and `git ls-remote --tags origin`. Peeled `^{}` entries
-  are excluded. Any local-only, remote-only, or object-ID-mismatched tag fails
-  preflight.
+  are excluded. Moved and remote-only tags are reconciled from authoritative
+  `origin` values. Local-only tags still fail preflight rather than being
+  deleted automatically.
 - `docker-bump-verify` creates a temporary clean clone, removes its `.git`, and
   mounts only that source into Docker. Verification therefore has no Git
   metadata, configuration, identity, or credentials from the host checkout.
@@ -28,8 +30,10 @@ publication; Docker supplies pinned build, lint, and version-calculation tools.
 ## Workflow
 
 1. Validate host commands, branch, clean worktree, and `origin`.
-2. Fetch `origin/main` and tags; reject unequal main commits and unequal direct
-   local/remote tag sets.
+2. Fetch `origin/main`, force-update local tags from `origin`, and reject
+   unequal main commits or remaining unequal direct local/remote tag sets.
+   This automatically reconciles moved and remote-only tags while preserving
+   and rejecting local-only tags.
 3. Build the development image and run generation, both builds, tests, format
    checking without rewrites, and mandatory golangci-lint in an isolated
    Git-less source clone.
@@ -47,10 +51,10 @@ publication; Docker supplies pinned build, lint, and version-calculation tools.
 ## Testing And Verification
 
 The shell harness uses temporary bare origins, temporary clones, and injectable
-Git wrappers. It covers branch and cleanliness checks, tag parity including a
-local-only semver tag, version validation, publication, and all push recovery
-states. The missing-Docker case runs in a temporary repository, never the
-developer checkout.
+Git wrappers. It covers branch and cleanliness checks, automatic reconciliation
+of a moved tag, rejection of a local-only semver tag, version validation,
+publication, and all push recovery states. The missing-Docker case runs in a
+temporary repository, never the developer checkout.
 
 Final verification must run:
 
@@ -71,4 +75,5 @@ push a release tag.
 - Passing host Git credentials, identity, configuration, or live Git metadata
   into Docker.
 - Releasing from feature branches, detached HEADs, dirty worktrees, unequal
-  `main` commits, or unequal tag state.
+  `main` commits, or tag state that remains unequal after authoritative remote
+  tags are fetched.

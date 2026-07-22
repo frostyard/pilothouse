@@ -65,6 +65,10 @@ clean `main` checkout that exactly matches `origin/main`; the target rejects
 dirty, ahead, behind, divergent, feature-branch, and detached-HEAD states
 before creating a tag.
 
+Before verification, preflight force-updates local tag refs from authoritative
+`origin` values, so moved and remote-only tags are reconciled automatically.
+Local-only tags are preserved and rejected rather than silently deleted.
+
 ```bash
 make bump
 ```
