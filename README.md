@@ -54,6 +54,21 @@ make docker-lint
 
 Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
 
+### Create a release
+
+`make bump` verifies the project in the development container, calculates the
+next semantic version with the container's pinned `svu`, creates an annotated
+tag, and immediately pushes that tag to `origin`.
+
+The host needs only Docker, Make, and authenticated Git access. Run it from a
+clean `main` checkout that exactly matches `origin/main`; the target rejects
+dirty, ahead, behind, divergent, feature-branch, and detached-HEAD states
+before creating a tag.
+
+```bash
+make bump
+```
+
 Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext, Podman, and Docker mutations.
 
 The default is intentionally loopback-only. Terminate TLS at a reverse proxy and add `--secure-cookie` to the web service before exposing it to another machine.
