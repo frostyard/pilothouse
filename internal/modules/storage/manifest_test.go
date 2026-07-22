@@ -75,6 +75,27 @@ func TestLoadDefinitionRejectsUnknownOrInvalidDerivedFields(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoadDefinitionPreservesMissingManifestIdentity(t *testing.T) {
+	store := newArtifactStore(t)
+
+	_, err := store.LoadDefinition(testDefinitionID)
+
+	assert.ErrorIs(t, err, errInvalidManifest)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	assert.NotContains(t, err.Error(), store.ManifestRoot)
+}
+
+func TestLoadDefinitionMapsInvalidManifestToStableError(t *testing.T) {
+	store := newArtifactStore(t)
+	require.NoError(t, os.MkdirAll(store.ManifestRoot, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(store.ManifestRoot, testDefinitionID+".json"), []byte("invalid"), 0o600))
+
+	_, err := store.LoadDefinition(testDefinitionID)
+
+	assert.ErrorIs(t, err, errInvalidManifest)
+	assert.NotErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestManifestRefusesToReplaceUnmanagedFile(t *testing.T) {
 	store := newArtifactStore(t)
 	definition := testDefinition()

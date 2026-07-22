@@ -243,6 +243,35 @@ func TestRemoteManagerStateDoesNotWaitForLifecycleOperation(t *testing.T) {
 	}
 }
 
+func TestRemoteManagerStateSkipsManifestRemovedAfterListing(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testNFSRequest(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	require.NoError(t, manager.Create(context.Background(), request))
+	manifest, err := store.ManifestPath(request.ID)
+	require.NoError(t, err)
+	manager.artifacts.beforeLoad = func() { require.NoError(t, os.Remove(manifest)) }
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Mounts)
+}
+
+func TestRemoteManagerStateRejectsInvalidManifest(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testNFSRequest(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	require.NoError(t, manager.Create(context.Background(), request))
+	manifest, err := store.ManifestPath(request.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, []byte("invalid"), 0o600))
+
+	_, err = manager.State(context.Background())
+
+	assert.ErrorIs(t, err, errInvalidManifest)
+}
+
 func TestRemoteManagerSerializesSameDefinitionButNotDifferentDefinitions(t *testing.T) {
 	store := testArtifactStore(t)
 	units := &blockingUnitController{entered: make(chan string, 3), release: make(chan struct{})}

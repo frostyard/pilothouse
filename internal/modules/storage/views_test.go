@@ -262,7 +262,7 @@ func TestManagedPageShowsControlsOnlyForAdminManagedMounts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var output strings.Builder
 			require.NoError(t, ManagedPage(snapshot, false, "csrf-token", test.admin).Render(context.Background(), &output))
-			for _, control := range []string{"Add remote mount", `>Mount</button>`, `>Unmount</button>`, `>Delete</button>`} {
+			for _, control := range []string{"Add remote mount", `>Delete</button>`} {
 				if test.want {
 					assert.Contains(t, output.String(), control)
 				} else {
@@ -285,7 +285,7 @@ func TestManagedPageRendersLifecycleControlsForMountState(t *testing.T) {
 		unmount bool
 	}{
 		{"mounted", false, true},
-		{"inactive", true, false},
+		{"active", true, false},
 		{"needs-attention", false, false},
 	} {
 		t.Run(test.state, func(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 
 var errArtifactNotManaged = errors.New("artifact is not managed by Pilothouse")
 var errInvalidManifest = errors.New("invalid manifest")
+var errManifestNotFound = errors.Join(errInvalidManifest, os.ErrNotExist)
 
 // ArtifactStore persists managed remote-mount artifacts. Production callers use
 // NewArtifactStore; tests inject roots and the identity expected on disk.
@@ -26,6 +27,7 @@ type ArtifactStore struct {
 	UID            int
 	GID            int
 	rename         func(string, string) error
+	beforeLoad     func()
 }
 
 func NewArtifactStore() ArtifactStore {
@@ -126,12 +128,18 @@ func (store ArtifactStore) LoadDefinition(id string) (Definition, error) {
 	if err != nil {
 		return Definition{}, err
 	}
+	if store.beforeLoad != nil {
+		store.beforeLoad()
+	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Definition{}, errManifestNotFound
+		}
 		return Definition{}, errInvalidManifest
 	}
 	if err := store.verifyFile(path, contents, 0o600); err != nil {
-		return Definition{}, err
+		return Definition{}, errInvalidManifest
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.DisallowUnknownFields()
