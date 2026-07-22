@@ -95,7 +95,7 @@ Only these journal values are read into the presentation model:
 - `_COMM`.
 - `_TRANSPORT`.
 
-Display source is selected in that order after timestamp, priority, and message validation: `_SYSTEMD_UNIT`, then `SYSLOG_IDENTIFIER`, then `_COMM`, then `_TRANSPORT`. A missing systemd unit is valid because the module covers the entire system journal. `MESSAGE` is limited to 64 KiB, and each source field is limited to 4 KiB. Missing or malformed timestamp, priority, or message fields, an oversized individual field, unexpected reader data, and invalid priorities fail closed without returning partial records.
+Display source is selected in that order after timestamp, priority, and message validation: `_SYSTEMD_UNIT`, then `SYSLOG_IDENTIFIER`, then `_COMM`, then `_TRANSPORT`. A missing systemd unit is valid because the module covers the entire system journal. `MESSAGE` is limited to 64 KiB, and each source field is limited to 4 KiB. The reader validates every non-empty source field before selecting the display source. Missing `PRIORITY` or `MESSAGE`, invalid priority, zero timestamp, selected-unit mismatch, and oversized individual presentation fields cause that record to be skipped so surrounding valid records remain available. Absent raw journal fields are represented as absent data; malformed raw `FIELD=value` framing and non-absence journal API errors fail the whole read.
 
 ## Filter Semantics
 
@@ -160,7 +160,7 @@ Messages and source values are rendered as escaped text. Errors shown to users a
 
 The initial page and each poll use an eight-second broker request context, while the privileged journal read has its own four-second timeout. This leaves time to serialize and return the bounded response before the next five-second poll. If the broker or journal query fails, the handler renders the page with an unavailable results article rather than exposing the underlying error. The article continues polling so transient failures recover without a manual reload.
 
-Malformed privileged records, an oversized individual field, reader timeouts, and reader inconsistencies fail the query closed. The manager does not return a partial successful response in those cases. Reaching the aggregate result cap is instead a successful truncated response that remains within the cap.
+Source/API iteration errors, malformed raw `FIELD=value` framing, reader timeouts, and context cancellation fail the query closed with no partial successful response. Individual presentation-record defects (missing `PRIORITY` or `MESSAGE`, invalid priority, zero timestamp, selected-unit mismatch, or oversized `MESSAGE` or source field) are skipped while scanning continues. Reaching the aggregate result cap is instead a successful truncated response that remains within the cap.
 
 Non-administrator HTTP requests render an access-denied page without contacting the broker. Direct non-administrator broker requests are rejected by query authorization.
 
@@ -177,7 +177,8 @@ Manager tests cover:
 - Records without `_SYSTEMD_UNIT`.
 - Count, scan, timeout, per-field, and aggregate-byte limits.
 - Truncated-coverage reporting.
-- Missing, malformed, mismatched, and oversized records.
+- Invalid presentation records skipped between valid records, including missing `PRIORITY` or `MESSAGE`, invalid priorities, zero timestamps, selected-unit mismatches, and oversized messages or any source field.
+- Whole-read failures for iteration/API errors, malformed raw framing, timeout, and cancellation.
 - Reader and unit-inventory failures.
 
 Handler and broker-registration tests cover:

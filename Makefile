@@ -1,4 +1,4 @@
-.PHONY: build generate run test fmt lint bump docker-image docker-build docker-generate docker-run docker-test docker-fmt docker-lint
+.PHONY: build generate run test race fmt lint bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint
 
 GO ?= go
 GOFMT ?= gofmt
@@ -34,6 +34,9 @@ run: generate
 
 test: generate
 	$(GO) test ./...
+
+race: generate
+	$(GO) test -race -short ./internal/... -run "^Test[^I]" -skip "Integration"
 
 fmt: ## Format Go source files
 	$(GOFMT) -w $(GOFILES)
@@ -72,6 +75,9 @@ docker-run: docker-image ## Run the web process in Docker using host networking
 
 docker-test: docker-image ## Run the test suite in Docker
 	$(DOCKER_RUN) make test
+
+docker-race: docker-image ## Run the race detector suite in Docker
+	$(DOCKER_RUN) make race
 
 docker-fmt: docker-image ## Format Go source files in Docker
 	$(DOCKER_RUN) make fmt

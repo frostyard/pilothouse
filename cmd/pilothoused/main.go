@@ -6,12 +6,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,7 +28,10 @@ import (
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
+	"github.com/frostyard/pilothouse/internal/modules/files"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/logs"
+	logjournal "github.com/frostyard/pilothouse/internal/modules/logs/journal"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
@@ -51,6 +56,9 @@ func run() error {
 	var backupTimers stringListFlag
 	flag.Var(&backupTimers, "backup-timer", "exact systemd backup timer to monitor; repeatable")
 	definitionsRoot := flag.String("definitions-root", "", "custom root containing sysupdate definition directories")
+	var filesRoots files.RootFlags
+	flag.Var(filesRoots.Flag(false), "files-root", "read-only files root as id=absolute-path; repeatable")
+	flag.Var(filesRoots.Flag(true), "files-write-root", "writable files root as id=absolute-path; repeatable")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
 	podmanSocket := flag.String("podman-socket", "/run/podman/podman.sock", "Podman API Unix socket path")
@@ -76,6 +84,7 @@ func run() error {
 	}
 	defer func() { _ = auditStore.Close() }()
 	actions := broker.NewActionRegistry(auditStore)
+	streamActions := broker.NewStreamActionRegistry(auditStore)
 	jobStore, err := jobs.Open(*jobsDB, 1_000)
 	if err != nil {
 		return err
@@ -83,6 +92,15 @@ func run() error {
 	defer func() { _ = jobStore.Close() }()
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
+	streamQueries := broker.NewStreamQueryRegistry()
+	filesManager, err := files.NewSystemManager(filesRoots.Specs())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = filesManager.Close() }()
+	if err := registerFiles(queries, streamQueries, streamActions, filesManager); err != nil {
+		return err
+	}
 	if err := registerActivity(queries, auditStore); err != nil {
 		return err
 	}
@@ -120,6 +138,13 @@ func run() error {
 	if err := registerServices(actions, queries, servicesManager); err != nil {
 		return err
 	}
+	logsManager, err := logs.NewSystemManager(logjournal.New())
+	if err != nil {
+		return err
+	}
+	if err := registerLogs(queries, logsManager); err != nil {
+		return err
+	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
 	if err := registerSysextActions(actions, sysextManager); err != nil {
 		return err
@@ -152,6 +177,8 @@ func run() error {
 		sessions,
 		actions,
 		queries,
+		streamActions,
+		streamQueries,
 		logger,
 	)
 	listener, err := listenUnix(*socket, *socketGroup)
@@ -405,6 +432,87 @@ func (controller storageUnitController) Start(ctx context.Context, unit string) 
 func (controller storageUnitController) Stop(ctx context.Context, unit string) error {
 	_, err := controller.client.StopUnitContext(ctx, unit, "replace", nil)
 	return err
+}
+
+func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {
+	return queries.Register(broker.QueryLogs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		filters, err := logs.ParseBrokerFilters(parameters)
+		if err != nil {
+			return nil, err
+		}
+		return manager.Logs(ctx, filters)
+	})
+}
+
+func registerFiles(queries *broker.QueryRegistry, streamQueries *broker.StreamQueryRegistry, streamActions *broker.StreamActionRegistry, manager files.Manager) error {
+	if err := queries.Register(broker.QueryFilesList, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		request, err := files.ParseListParameters(parameters)
+		if err != nil {
+			return nil, filesPublicError(err)
+		}
+		state, err := manager.List(ctx, request)
+		return state, filesPublicError(err)
+	}); err != nil {
+		return err
+	}
+	if err := streamQueries.Register(broker.StreamQueryDefinition{
+		ID: broker.QueryFilesDownload, Admin: true, Parameters: []string{"root", "path"}, Limit: files.MaxTransferBytes,
+		Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) (broker.StreamResult, error) {
+			download, err := manager.Download(ctx, parameters["root"], parameters["path"])
+			if err != nil {
+				return broker.StreamResult{}, filesPublicError(err)
+			}
+			return broker.StreamResult{Body: download.Body, Filename: path.Base(download.Name), MediaType: "application/octet-stream", Size: download.Size}, nil
+		},
+	}); err != nil {
+		return err
+	}
+	return streamActions.Register(broker.StreamActionDefinition{
+		ID: broker.ActionFilesUpload, Admin: true, Parameters: []string{"root", "directory", "name"}, Limit: files.MaxTransferBytes, Timeout: 15 * time.Minute,
+		Resource: func(parameters map[string]string) (string, error) {
+			return filesResource(parameters)
+		},
+		LockResource: func(parameters map[string]string) (string, error) {
+			return filesResource(parameters)
+		},
+		Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string, body io.Reader) error {
+			return filesPublicError(manager.Upload(ctx, parameters["root"], parameters["directory"], parameters["name"], body))
+		},
+	})
+}
+
+func filesResource(parameters map[string]string) (string, error) {
+	destination := parameters["name"]
+	if directory := parameters["directory"]; directory != "" {
+		destination = directory + "/" + destination
+	}
+	if len(destination) > files.MaxPathBytes {
+		return "", filesPublicError(files.ErrInvalid)
+	}
+	return "files/" + parameters["root"] + "/" + destination, nil
+}
+
+func filesPublicError(err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, public := range []struct {
+		err               error
+		status            int
+		message, category string
+	}{
+		{files.ErrInvalid, 400, "invalid files request", "invalid_request"},
+		{files.ErrNotFound, 404, "files resource not found", "not_found"},
+		{files.ErrReadOnly, 403, "files root is read-only", "read_only"},
+		{files.ErrConflict, 409, "files conflict", "conflict"},
+		{files.ErrTooLarge, 413, "file transfer is too large", "too_large"},
+		{files.ErrUnavailable, 503, "files service unavailable", "unavailable"},
+	} {
+		if errors.Is(err, public.err) {
+			return broker.NewPublicError(public.status, public.message, public.category, err)
+		}
+	}
+	return broker.NewPublicError(503, "files service unavailable", "unavailable", err)
 }
 
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager) error {

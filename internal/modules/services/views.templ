@@ -23,7 +23,7 @@ templ Page(state State, filters Filters, options FilterOptions, csrf string, adm
 				<span class="badge">Read only</span>
 			}
 		</div>
-		<form class="card service-filters" method="get" action="/services">
+		<form class="card filter-bar" method="get" action="/services">
 			<label>Find unit<input type="search" name="query" value={ filters.Query } placeholder="Name or description"/></label>
 			<label>Status<select name="status">
 				<option value="">All statuses</option>
@@ -43,7 +43,7 @@ templ Page(state State, filters Filters, options FilterOptions, csrf string, adm
 					<option value={ state } selected?={ filters.UnitFileState == state }>{ filterLabel(state) }</option>
 				}
 			</select></label>
-			<div class="service-filter-actions"><button class="button" type="submit">Apply filters</button><a class="button secondary" href="/services">Reset filters</a></div>
+			<div class="filter-bar-actions"><button class="button" type="submit">Apply filters</button><a class="button secondary" href="/services">Reset filters</a></div>
 		</form>
 		<section class="engine-stats" aria-label="Service summary"><div class="engine-stat"><span>Units</span><strong>{ fmt.Sprint(state.Summary.Total) }</strong><small>known systemd units</small></div><div class="engine-stat"><span>Active</span><strong>{ fmt.Sprint(state.Summary.Active) }</strong><small>currently active</small></div><div class="engine-stat"><span>Failed</span><strong>{ fmt.Sprint(state.Summary.Failed) }</strong><small>require attention</small></div></section>
 		<article class="card table-card">

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -42,6 +43,15 @@ func (h *testHost) Render(_ http.ResponseWriter, _ *http.Request, page platform.
 	return nil
 }
 func (*testHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*testHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*testHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*testHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestUnitActionDispatch(t *testing.T) {
 	host := &testHost{}

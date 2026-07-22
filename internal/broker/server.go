@@ -1,8 +1,12 @@
 package broker
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -21,6 +25,8 @@ type Server struct {
 	queries       *QueryRegistry
 	resolver      auth.Resolver
 	sessions      *SessionStore
+	streamActions *StreamActionRegistry
+	streamQueries *StreamQueryRegistry
 }
 
 type attempt struct {
@@ -34,7 +40,7 @@ type attemptLimiter struct {
 	now      func() time.Time
 }
 
-func NewServer(authenticator auth.Authenticator, resolver auth.Resolver, sessions *SessionStore, actions *ActionRegistry, queries *QueryRegistry, logger *slog.Logger) *Server {
+func NewServer(authenticator auth.Authenticator, resolver auth.Resolver, sessions *SessionStore, actions *ActionRegistry, queries *QueryRegistry, streamActions *StreamActionRegistry, streamQueries *StreamQueryRegistry, logger *slog.Logger) *Server {
 	return &Server{
 		actions:       actions,
 		attempts:      &attemptLimiter{attempts: map[string]attempt{}, now: time.Now},
@@ -44,6 +50,8 @@ func NewServer(authenticator auth.Authenticator, resolver auth.Resolver, session
 		queries:       queries,
 		resolver:      resolver,
 		sessions:      sessions,
+		streamActions: streamActions,
+		streamQueries: streamQueries,
 	}
 }
 
@@ -57,11 +65,129 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/session", s.currentSession)
 	mux.HandleFunc("POST /v1/actions/{id}", s.execute)
 	mux.HandleFunc("POST /v1/queries/{id}", s.query)
+	mux.HandleFunc("POST /v1/stream-actions/{id}", s.streamAction)
+	mux.HandleFunc("POST /v1/stream-queries/{id}", s.streamQuery)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) streamQuery(w http.ResponseWriter, r *http.Request) {
+	session, identity, ok := s.authorize(w, r)
+	if !ok {
+		return
+	}
+	var request QueryRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if s.streamQueryRequiresAdmin(r.PathValue("id")) && !identity.Admin {
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "not authorized"})
+		return
+	}
+	result, err := s.streamQueries.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters)
+	if err != nil {
+		s.streamError(w, err, "stream query", r.PathValue("id"), session.Identity.Username)
+		return
+	}
+	defer func() { _ = result.Body.Close() }()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			_ = result.Body.Close()
+		case <-done:
+		}
+	}()
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", result.Size))
+	w.Header().Set("Content-Type", result.MediaType)
+	w.Header().Set(StreamNameHeader, base64.RawURLEncoding.EncodeToString([]byte(result.Filename)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.CopyN(w, &requestContextReader{ctx: r.Context(), reader: result.Body}, result.Size); err != nil && !errors.Is(err, context.Canceled) {
+		s.logger.Warn("broker stream query copy failed", "error", err, "query", r.PathValue("id"), "user", session.Identity.Username)
+	}
+}
+
+func (s *Server) streamAction(w http.ResponseWriter, r *http.Request) {
+	session, identity, ok := s.authorize(w, r)
+	if !ok {
+		return
+	}
+	if s.streamActionRequiresAdmin(r.PathValue("id")) && !identity.Admin {
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "not authorized"})
+		return
+	}
+	metadata := r.Header.Get(StreamMetadataHeader)
+	if len(metadata) == 0 || len(metadata) > 8<<10 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+		return
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(metadata)
+	if err != nil || len(decoded) > 8<<10 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+		return
+	}
+	var request QueryRequest
+	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+		return
+	}
+	if limit, ok := s.streamActionLimit(r.PathValue("id")); ok && r.ContentLength > limit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "stream exceeds registered limit"})
+		return
+	}
+	if err := s.streamActions.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters, r.Body); err != nil {
+		s.streamError(w, err, "stream action", r.PathValue("id"), session.Identity.Username)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) streamActionLimit(id string) (int64, bool) {
+	s.streamActions.mu.RLock()
+	defer s.streamActions.mu.RUnlock()
+	definition, ok := s.streamActions.actions[id]
+	return definition.Limit, ok
+}
+
+func (s *Server) streamActionRequiresAdmin(id string) bool {
+	s.streamActions.mu.RLock()
+	defer s.streamActions.mu.RUnlock()
+	return s.streamActions.actions[id].Admin
+}
+
+func (s *Server) streamQueryRequiresAdmin(id string) bool {
+	s.streamQueries.mu.RLock()
+	defer s.streamQueries.mu.RUnlock()
+	return s.streamQueries.queries[id].Admin
+}
+
+func (s *Server) streamError(w http.ResponseWriter, err error, operation, id, username string) {
+	status, message, _ := PublicErrorDetails(err)
+	if errors.Is(err, ErrStreamTooLarge) {
+		status, message = http.StatusRequestEntityTooLarge, "stream exceeds registered limit"
+	}
+	s.logger.Warn("broker "+operation+" denied or failed", "error", err, "id", id, "user", username)
+	writeJSON(w, status, ErrorResponse{Error: message})
+}
+
+type requestContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *requestContextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
 }
 
 func (s *Server) query(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +202,12 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	result, err := s.queries.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters)
 	if err != nil {
 		s.logger.Warn("broker query denied or failed", "error", err, "query", r.PathValue("id"), "user", session.Identity.Username)
-		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: err.Error()})
+		status, message := http.StatusForbidden, "query denied"
+		var public *PublicError
+		if errors.As(err, &public) {
+			status, message, _ = PublicErrorDetails(err)
+		}
+		writeJSON(w, status, ErrorResponse{Error: message})
 		return
 	}
 	encoded, err := json.Marshal(result)

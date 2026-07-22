@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,6 +62,13 @@ func (host *fakeHost) Render(_ http.ResponseWriter, _ *http.Request, page platfo
 func (host *fakeHost) ValidateAction(http.ResponseWriter, *http.Request) bool {
 	host.validateCalls++
 	return host.validateResult
+}
+func (*fakeHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool { return true }
+func (*fakeHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*fakeHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
 }
 
 func TestModuleUsesOnlyStorageQuery(t *testing.T) {

@@ -17,6 +17,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Administrator-only container start, stop, restart, and safe removal actions
 - System Docker Engine inventory with container lifecycle controls, bounded log viewing, and socket isolation
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls
+- Administrator-only browsing, download, and atomic upload within configured host file roots
 - PAM authentication using Snow's users and account policy
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
@@ -34,6 +35,7 @@ Go 1.26 or newer is required.
 
 ```bash
 make test
+make race
 make build
 sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id -gn)"
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
@@ -46,6 +48,7 @@ make docker-generate
 make docker-fmt
 make docker-build
 make docker-test
+make docker-race
 make docker-lint
 ```
 
@@ -72,6 +75,21 @@ Configure exact backup timers for the privileged broker in `/etc/pilothouse/pilo
 ```ini
 PILOTHOUSE_BACKUP_TIMERS=restic.timer,borg.timer
 ```
+
+Configure Files only on the privileged broker. `--files-root` adds a read-only
+root and `--files-write-root` adds a writable root; each flag is repeatable and
+uses `id=absolute-path`. The unprivileged web process never receives root paths.
+
+```bash
+sudo ./bin/pilothoused \
+  --files-root logs=/var/log \
+  --files-write-root imports=/var/lib/pilothouse/imports
+```
+
+The filesystem root (`/`) is rejected. Symlinks are displayed but never
+followed. Downloads and uploads are limited to 256 MiB each. Uploads are
+available only in writable roots, are atomically published as `root:root` mode
+`0640`, and reject existing destination names rather than overwriting them.
 
 ## Module architecture
 

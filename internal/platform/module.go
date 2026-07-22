@@ -2,10 +2,12 @@ package platform
 
 import (
 	"context"
+	"io"
 	"net/http"
 
 	"github.com/a-h/templ"
 	"github.com/frostyard/pilothouse/internal/auth"
+	"github.com/frostyard/pilothouse/internal/broker"
 )
 
 type DashboardCard struct {
@@ -40,6 +42,9 @@ type Host interface {
 	Query(context.Context, string, map[string]string, any) error
 	Render(http.ResponseWriter, *http.Request, Page) error
 	ValidateAction(http.ResponseWriter, *http.Request) bool
+	ValidateActionToken(http.ResponseWriter, *http.Request, string) bool
+	StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error
+	StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error)
 }
 
 type Manifest struct {

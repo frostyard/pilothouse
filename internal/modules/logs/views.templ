@@ -1,0 +1,76 @@
+package logs
+
+import (
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ AccessDenied() {
+	<div class="page-stack"><article class="card error-card"><div class="card-heading"><span class="card-icon danger">
+		@web.Icon("alert")
+	</span><div><h2>Administrator access required</h2><p>System journal entries contain sensitive operational details.</p></div></div></article></div>
+}
+
+templ Page(state State, unavailable bool) {
+	<div class="page-stack">
+		<div class="page-intro"><p>Administrator-only view of recent entries from the systemd journal.</p><span class="badge active">Administrator</span></div>
+		<form class="card filter-bar" method="get" action="/logs">
+			<label>Find entries<input type="search" name="query" value={ state.Filters.Query } placeholder="Message text"/></label>
+			<label>Priority<select name="priority">
+				<option value="">All priorities</option>
+				for _, priority := range []string{"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"} {
+					<option value={ priority } selected?={ state.Filters.Priority == priority }>{ priority }</option>
+				}
+			</select></label>
+			<label>Unit<select name="unit">
+				<option value="">All units</option>
+				if state.Filters.Unit != "" && !slices.Contains(state.Units, state.Filters.Unit) {
+					<option value={ state.Filters.Unit } selected>{ state.Filters.Unit }</option>
+				}
+				for _, unit := range state.Units {
+					<option value={ unit } selected?={ state.Filters.Unit == unit }>{ unit }</option>
+				}
+			</select></label>
+			<label>Time range<select name="window">
+				<option value="15m" selected?={ state.Filters.Window == "15m" }>15 minutes</option>
+				<option value="1h" selected?={ state.Filters.Window == "1h" }>1 hour</option>
+				<option value="6h" selected?={ state.Filters.Window == "6h" }>6 hours</option>
+				<option value="24h" selected?={ state.Filters.Window == "24h" }>24 hours</option>
+			</select></label>
+			<div class="filter-bar-actions"><button class="button" type="submit">Apply filters</button><a class="button secondary" href="/logs">Reset filters</a></div>
+		</form>
+		@Results(state, unavailable)
+	</div>
+}
+
+templ Results(state State, unavailable bool) {
+	<article id="journal-logs" class="card table-card" hx-get={ pollURL(state.Filters) } hx-trigger="every 5s" hx-select="#journal-logs" hx-target="#journal-logs" hx-swap="outerHTML">
+		<div class="table-toolbar"><h2>Journal entries</h2><span>{ fmt.Sprintf("%d shown · %s · updates every 5s", len(state.Entries), state.Filters.Window) }
+			if state.Truncated {
+				· Coverage truncated by safety limits.
+			}
+		</span></div>
+		if unavailable {
+			<div class="empty-state">System journal entries are unavailable. Retrying automatically.</div>
+		} else if len(state.Entries) == 0 {
+			<div class="empty-state">
+				if state.Truncated {
+					No matching entries were found before a safety limit was reached.
+				} else if state.Filters.Active() {
+					No journal entries match these filters.
+				} else {
+					No journal entries were found in this time window.
+				}
+			</div>
+		} else {
+			<table class="data-table"><thead><tr><th>Timestamp</th><th>Priority</th><th>Source</th><th>Message</th></tr></thead><tbody>
+				for _, entry := range state.Entries {
+					<tr><td><time datetime={ entry.Timestamp.Format(time.RFC3339Nano) }>{ entry.Timestamp.Format("2006-01-02 15:04:05 MST") }</time></td><td><span class="badge">{ entry.Severity }</span></td><td>{ entry.Source }</td><td class="log-message">{ entry.Message }</td></tr>
+				}
+			</tbody></table>
+		}
+	</article>
+}
