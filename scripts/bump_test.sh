@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bump.sh
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PASS=0
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
