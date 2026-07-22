@@ -138,6 +138,34 @@ func TestRenderStorageOperationsEscapesLabels(t *testing.T) {
 	assert.NotContains(t, html, `<script>alert(1)</script>`)
 }
 
+func TestRenderAdvancedStorageDetails(t *testing.T) {
+	snapshot := Snapshot{
+		Resources: []Resource{{
+			ID: "advanced", Name: "advanced", Details: []Detail{
+				{Label: "Temperature", Value: "40 C"},
+				{Label: "Percentage used", Value: "12%"},
+				{Label: "RAID members", Value: "2 of 2 active"},
+				{Label: "Recovery progress", Value: "50%"},
+				{Label: "LVM data usage", Value: "20%"},
+				{Label: "Encrypted mapping", Value: "Yes"},
+				{Label: "Multipath paths", Value: "2 of 2 observed"},
+				{Label: "ZFS pool health", Value: "Online"},
+				{Label: "Btrfs device errors", Value: "0"},
+				{Label: "Health data", Value: "Stale"},
+			},
+		}},
+		Backends: []BackendStatus{{Name: "smart", Availability: BackendUnsupported}},
+	}
+	var output strings.Builder
+	require.NoError(t, Page(snapshot, false).Render(context.Background(), &output))
+
+	html := output.String()
+	for _, label := range []string{"Temperature", "Percentage used", "RAID members", "Recovery progress", "LVM data usage", "Encrypted mapping", "Multipath paths", "ZFS pool health", "Btrfs device errors", "Health data: Stale", "Backend unsupported"} {
+		assert.Contains(t, html, label)
+	}
+	assert.NotContains(t, html, "@web.")
+}
+
 func TestRenderStorageOperationsReadOnlyBadge(t *testing.T) {
 	snapshot := Snapshot{Mounts: []Mount{{ID: "mount:readonly", Target: "/archive", Source: "/dev/sdb1", Filesystem: "ext4", State: "mounted", ReadOnly: true}}}
 	var output strings.Builder

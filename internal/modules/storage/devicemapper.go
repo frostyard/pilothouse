@@ -15,8 +15,12 @@ const (
 )
 
 type deviceMapperEnricher struct {
-	dmsetup, multipathd string
-	runner              commandRunner
+	dmsetup string
+	runner  commandRunner
+}
+type multipathEnricher struct {
+	multipathd string
+	runner     commandRunner
 }
 type dmInfo struct {
 	Name, UUID, MajorMinor string
@@ -28,13 +32,21 @@ type multipathMap struct {
 }
 type multipathPath struct{ Map, Device, DMState, CheckerState string }
 
-func NewDeviceMapperEnricher(dmsetupPath, multipathdPath string) Enricher {
-	return newDeviceMapperEnricher(dmsetupPath, multipathdPath)
+func NewDeviceMapperEnricher(dmsetupPath string) Enricher {
+	return newDeviceMapperEnricher(dmsetupPath)
 }
-func newDeviceMapperEnricher(dmsetupPath, multipathdPath string) *deviceMapperEnricher {
-	return &deviceMapperEnricher{dmsetup: dmsetupPath, multipathd: multipathdPath, runner: commandRunner{limit: maxAdapterBytes}}
+func newDeviceMapperEnricher(dmsetupPath string) *deviceMapperEnricher {
+	return &deviceMapperEnricher{dmsetup: dmsetupPath, runner: commandRunner{limit: maxAdapterBytes}}
 }
 func (*deviceMapperEnricher) Name() string { return deviceMapperEnricherName }
+
+func NewMultipathEnricher(multipathdPath string) Enricher {
+	return newMultipathEnricher(multipathdPath)
+}
+func newMultipathEnricher(multipathdPath string) *multipathEnricher {
+	return &multipathEnricher{multipathd: multipathdPath, runner: commandRunner{limit: maxAdapterBytes}}
+}
+func (*multipathEnricher) Name() string { return "multipath" }
 
 func (e *deviceMapperEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
 	dmOutput, err := e.runner.Run(ctx, e.dmsetup, "info", "--columns", "--noheadings", "--separator", "|", "-o", "name,uuid,major,minor,open,segments")
@@ -45,6 +57,10 @@ func (e *deviceMapperEnricher) Collect(ctx context.Context, inventory Inventory)
 	if err != nil {
 		return AdapterResult{}, err
 	}
+	return deviceMapperResult(infos, inventory), nil
+}
+
+func (e *multipathEnricher) Collect(ctx context.Context, inventory Inventory) (AdapterResult, error) {
 	multipathOutput, err := e.runner.Run(ctx, e.multipathd, "show", "maps", "raw", "format", "%n|%w|%d|%N|%t")
 	if err != nil {
 		return AdapterResult{}, fmt.Errorf("read multipath maps: %w", err)
@@ -61,7 +77,7 @@ func (e *deviceMapperEnricher) Collect(ctx context.Context, inventory Inventory)
 	if err != nil {
 		return AdapterResult{}, err
 	}
-	return deviceMapperResult(infos, maps, paths, inventory), nil
+	return multipathResult(maps, paths, inventory), nil
 }
 
 func parseDMInfo(input []byte) ([]dmInfo, error) {
@@ -119,11 +135,10 @@ func parseMultipathPaths(input []byte) ([]multipathPath, error) {
 	return result, nil
 }
 
-func deviceMapperResult(infos []dmInfo, maps []multipathMap, paths []multipathPath, inventory Inventory) AdapterResult {
+func deviceMapperResult(infos []dmInfo, inventory Inventory) AdapterResult {
 	result := AdapterResult{}
 	coreByPath := map[string]Resource{}
 	coreByMajorMinor := map[string]Resource{}
-	mapByName := map[string]multipathMap{}
 	for _, resource := range inventory.Resources {
 		if resource.Path == filepath.Clean(resource.Path) && strings.HasPrefix(resource.Path, "/dev/mapper/") {
 			coreByPath[resource.Path] = resource
@@ -133,9 +148,6 @@ func deviceMapperResult(infos []dmInfo, maps []multipathMap, paths []multipathPa
 				coreByMajorMinor[detail.Value] = resource
 			}
 		}
-	}
-	for _, m := range maps {
-		mapByName[m.Name] = m
 	}
 	for _, info := range infos {
 		path := "/dev/mapper/" + info.Name
@@ -157,16 +169,6 @@ func deviceMapperResult(infos []dmInfo, maps []multipathMap, paths []multipathPa
 			result.Resources = append(result.Resources, Resource{ID: encryptionID, Kind: "encryption", Name: info.Name, Health: resource.Health, State: resource.State})
 			result.Relations = append(result.Relations, Relation{From: encryptionID, To: id, Kind: "maps-to"})
 		}
-		if multipath, ok := mapByName[info.Name]; ok {
-			health, detail := multipathHealth(multipath, paths)
-			resource.Health = higherHealth(resource.Health, health)
-			switch health {
-			case HealthCritical:
-				result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: health, Title: "Multipath map has failed paths", Detail: detail})
-			case HealthWarning:
-				result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: health, Title: "Multipath map is degraded", Detail: detail})
-			}
-		}
 		if len(result.Resources) < maxResources {
 			result.Resources = append(result.Resources, resource)
 		}
@@ -174,6 +176,45 @@ func deviceMapperResult(infos []dmInfo, maps []multipathMap, paths []multipathPa
 	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].ID < result.Resources[j].ID })
 	sortRelations(result.Relations)
 	return result
+}
+
+func multipathResult(maps []multipathMap, paths []multipathPath, inventory Inventory) AdapterResult {
+	result := AdapterResult{}
+	resources := make(map[string]Resource, len(inventory.Resources))
+	for _, resource := range inventory.Resources {
+		if resource.Kind == "mapping" && resource.Path == filepath.Clean(resource.Path) && strings.HasPrefix(resource.Path, "/dev/mapper/") {
+			resources[resource.Path] = resource
+		}
+	}
+	for _, mapping := range maps {
+		resource, ok := resources["/dev/mapper/"+mapping.Name]
+		if !ok {
+			continue
+		}
+		health, detail := multipathHealth(mapping, paths)
+		resource.Name = mapping.Name
+		resource.Health = higherHealth(resource.Health, health)
+		resource.Details = append(resource.Details, Detail{Label: "Paths", Value: pathSummary(mapping, paths)})
+		result.Resources = append(result.Resources, resource)
+		switch health {
+		case HealthCritical:
+			result.Findings = append(result.Findings, Finding{ResourceID: resource.ID, Severity: health, Title: "Multipath map has failed paths", Detail: detail})
+		case HealthWarning:
+			result.Findings = append(result.Findings, Finding{ResourceID: resource.ID, Severity: health, Title: "Multipath map is degraded", Detail: detail})
+		}
+	}
+	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].ID < result.Resources[j].ID })
+	return result
+}
+
+func pathSummary(mapping multipathMap, paths []multipathPath) string {
+	observed := 0
+	for _, path := range paths {
+		if path.Map == mapping.Name {
+			observed++
+		}
+	}
+	return fmt.Sprintf("%d of %d observed", observed, mapping.DeclaredPaths)
 }
 
 func multipathHealth(mapping multipathMap, paths []multipathPath) (Health, string) {

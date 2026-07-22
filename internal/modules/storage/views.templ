@@ -147,16 +147,22 @@ templ ResourceInventory(resources []Resource) {
 				<thead><tr><th>Resource</th><th>Kind</th><th>Path</th><th>Capacity</th><th>Health</th></tr></thead>
 				<tbody>
 					for _, resource := range resources {
-						<tr><td><strong>{ resource.Name }</strong><small class="table-detail">{ resource.State }</small></td><td>{ resource.Kind }</td><td>{ resource.Path }</td><td>{ capacity(resource.SizeBytes) }</td><td><span class={ "badge", string(resource.Health) }>{ healthLabel(resource.Health) }</span><div class="storage-details">
-							for _, detail := range resource.Details {
-								<small>{ detail.Label }: { detail.Value }</small>
-							}
-						</div></td></tr>
+						<tr><td><strong>{ resource.Name }</strong><small class="table-detail">{ resource.State }</small></td><td>{ resource.Kind }</td><td>{ resource.Path }</td><td>{ capacity(resource.SizeBytes) }</td><td><span class={ "badge", string(resource.Health) }>{ healthLabel(resource.Health) }</span>
+							@ResourceDetails(resource.Details)
+						</td></tr>
 					}
 				</tbody>
 			</table>
 		}
 	</article>
+}
+
+templ ResourceDetails(details []Detail) {
+	<div class="storage-details">
+		for _, detail := range details {
+			<small>{ detail.Label }: { detail.Value }</small>
+		}
+	</div>
 }
 
 templ BackendStates(backends []BackendStatus) {

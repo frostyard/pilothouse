@@ -75,6 +75,14 @@ type Toolset struct {
 	LSBLK   string
 }
 
+type ToolResolver func([]string) (string, bool, error)
+
+func NewOptionalToolResolver() ToolResolver {
+	return func(candidates []string) (string, bool, error) {
+		return ResolveOptionalTool(candidates, os.Lstat)
+	}
+}
+
 func NewToolset() (Toolset, error) {
 	lsblk, err := resolveSystemTool("lsblk", []string{"/usr/bin/lsblk", "/bin/lsblk"})
 	if err != nil {
@@ -83,6 +91,24 @@ func NewToolset() (Toolset, error) {
 	findmnt, err := resolveSystemTool("findmnt", []string{"/usr/bin/findmnt", "/bin/findmnt"})
 	if err != nil {
 		return Toolset{}, err
+	}
+	return Toolset{LSBLK: lsblk, Findmnt: findmnt}, nil
+}
+
+func NewToolsetWithResolver(resolve ToolResolver) (Toolset, error) {
+	lsblk, present, err := resolve([]string{"/usr/bin/lsblk", "/bin/lsblk"})
+	if err != nil {
+		return Toolset{}, err
+	}
+	if !present {
+		return Toolset{}, errors.New("lsblk is unavailable")
+	}
+	findmnt, present, err := resolve([]string{"/usr/bin/findmnt", "/bin/findmnt"})
+	if err != nil {
+		return Toolset{}, err
+	}
+	if !present {
+		return Toolset{}, errors.New("findmnt is unavailable")
 	}
 	return Toolset{LSBLK: lsblk, Findmnt: findmnt}, nil
 }
@@ -134,6 +160,7 @@ func resolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, e
 }
 
 func ResolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, error)) (string, bool, error) {
+	var resolved string
 	for _, path := range candidates {
 		info, err := lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -155,7 +182,9 @@ func ResolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, e
 		if info.Mode().Perm()&0o022 != 0 {
 			return "", false, fmt.Errorf("optional tool %s is group- or world-writable", path)
 		}
-		return path, true, nil
+		if resolved == "" {
+			resolved = path
+		}
 	}
-	return "", false, nil
+	return resolved, resolved != "", nil
 }

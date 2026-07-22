@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -133,4 +134,43 @@ func TestRegisterStorageRejectsParameters(t *testing.T) {
 
 	_, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, map[string]string{"unexpected": "value"})
 	assert.EqualError(t, err, "storage state query does not accept parameters")
+}
+
+func TestStorageManagerCompositionReportsUnsupportedOptionalBackends(t *testing.T) {
+	root := t.TempDir()
+	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
+	findmnt := writeStorageTool(t, root, `{"filesystems":[]}`)
+	manager, err := newStorageManager(func(candidates []string) (string, bool, error) {
+		switch candidates[0] {
+		case "/usr/bin/lsblk":
+			return lsblk, true, nil
+		case "/usr/bin/findmnt":
+			return findmnt, true, nil
+		default:
+			return "", false, nil
+		}
+	}, root)
+	require.NoError(t, err)
+
+	snapshot, err := manager.State(context.Background())
+	require.NoError(t, err)
+	for _, name := range []string{"smart", "mdraid", "lvm", "device-mapper", "multipath", "zfs", "btrfs"} {
+		assert.Equal(t, storage.BackendUnsupported, backendAvailability(snapshot.Backends, name), name)
+	}
+}
+
+func writeStorageTool(t *testing.T, directory, output string) string {
+	t.Helper()
+	path := filepath.Join(directory, "tool-"+output[2:3])
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+output+"'\n"), 0o700))
+	return path
+}
+
+func backendAvailability(backends []storage.BackendStatus, name string) storage.Availability {
+	for _, backend := range backends {
+		if backend.Name == name {
+			return backend.Availability
+		}
+	}
+	return ""
 }

@@ -47,6 +47,10 @@ func NewSystemManager(adapters ...Adapter) *SystemManager {
 	return newSystemManagerWithEnrichers(adapters, nil)
 }
 
+func NewSystemManagerWithEnrichers(adapters []Adapter, enrichers []Enricher) *SystemManager {
+	return newSystemManagerWithEnrichers(adapters, enrichers)
+}
+
 func newSystemManagerWithEnrichers(adapters []Adapter, enrichers []Enricher) *SystemManager {
 	return &SystemManager{adapters: slices.Clone(adapters), cache: NewHealthCache(), enrichers: slices.Clone(enrichers), enricherTimeout: 5 * time.Second, lstat: os.Lstat, now: time.Now}
 }

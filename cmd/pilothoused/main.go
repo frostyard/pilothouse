@@ -86,14 +86,10 @@ func run() error {
 	if err := registerJobs(queries, jobStore); err != nil {
 		return err
 	}
-	storageTools, err := storage.NewToolset()
+	storageManager, err := newStorageManager(storage.NewOptionalToolResolver(), "/")
 	if err != nil {
 		return fmt.Errorf("resolve storage tools: %w", err)
 	}
-	storageManager := storage.NewSystemManager(
-		storage.NewBlockAdapter(storageTools.LSBLK),
-		storage.NewMountAdapter(storageTools.Findmnt),
-	)
 	if err := registerStorage(queries, storageManager); err != nil {
 		return err
 	}
@@ -178,6 +174,70 @@ func run() error {
 		return fmt.Errorf("serve broker: %w", serveErr)
 	}
 	return nil
+}
+
+func newStorageManager(resolve storage.ToolResolver, root string) (*storage.SystemManager, error) {
+	tools, err := storage.NewToolsetWithResolver(resolve)
+	if err != nil {
+		return nil, err
+	}
+	optional := func(name string, candidates []string, newEnricher func(string) storage.Enricher) (storage.Enricher, error) {
+		path, present, err := resolve(candidates)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", name, err)
+		}
+		if !present {
+			return storage.NewUnsupportedEnricher(name), nil
+		}
+		return newEnricher(path), nil
+	}
+	all := func(name string, candidates [][]string, newEnricher func([]string) storage.Enricher) (storage.Enricher, error) {
+		paths := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			path, present, err := resolve(candidate)
+			if err != nil {
+				return nil, fmt.Errorf("resolve %s: %w", name, err)
+			}
+			if !present {
+				return storage.NewUnsupportedEnricher(name), nil
+			}
+			paths = append(paths, path)
+		}
+		return newEnricher(paths), nil
+	}
+	smart, err := optional("smart", []string{"/usr/sbin/smartctl", "/sbin/smartctl"}, storage.NewSMARTEnricher)
+	if err != nil {
+		return nil, err
+	}
+	mdraid, err := optional("mdraid", []string{"/usr/sbin/mdadm", "/sbin/mdadm"}, func(path string) storage.Enricher { return storage.NewMDRAIDEnricher(root, path) })
+	if err != nil {
+		return nil, err
+	}
+	lvm, err := all("lvm", [][]string{{"/usr/sbin/pvs", "/sbin/pvs"}, {"/usr/sbin/vgs", "/sbin/vgs"}, {"/usr/sbin/lvs", "/sbin/lvs"}}, func(paths []string) storage.Enricher {
+		return storage.NewLVMEnricher(storage.LVMTools{PVS: paths[0], VGS: paths[1], LVS: paths[2]})
+	})
+	if err != nil {
+		return nil, err
+	}
+	deviceMapper, err := optional("device-mapper", []string{"/usr/sbin/dmsetup", "/sbin/dmsetup", "/usr/bin/dmsetup", "/bin/dmsetup"}, storage.NewDeviceMapperEnricher)
+	if err != nil {
+		return nil, err
+	}
+	multipath, err := optional("multipath", []string{"/usr/sbin/multipathd", "/sbin/multipathd"}, storage.NewMultipathEnricher)
+	if err != nil {
+		return nil, err
+	}
+	zfs, err := all("zfs", [][]string{{"/usr/sbin/zpool", "/sbin/zpool"}, {"/usr/sbin/zfs", "/sbin/zfs"}}, func(paths []string) storage.Enricher {
+		return storage.NewZFSEnricher(storage.ZFSTools{ZPool: paths[0], ZFS: paths[1]})
+	})
+	if err != nil {
+		return nil, err
+	}
+	btrfs, err := optional("btrfs", []string{"/usr/bin/btrfs", "/bin/btrfs"}, storage.NewBtrfsEnricher)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewSystemManagerWithEnrichers([]storage.Adapter{storage.NewBlockAdapter(tools.LSBLK), storage.NewMountAdapter(tools.Findmnt)}, []storage.Enricher{smart, mdraid, lvm, deviceMapper, multipath, zfs, btrfs}), nil
 }
 
 type stringListFlag []string
