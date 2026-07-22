@@ -143,7 +143,9 @@ func TestRenderAdvancedStorageDetails(t *testing.T) {
 	require.NoError(t, err)
 	mdraid := newMDRAIDEnricher("/fixture", "mdadm")
 	mdraid.readFile = func(string) ([]byte, error) { return mustFixture(t, "mdstat-degraded.txt"), nil }
-	mdraid.runner.run = func(context.Context, string, ...string) ([]byte, error) { return mustFixture(t, "mdadm-detail.txt"), nil }
+	mdraid.runner.run = func(context.Context, string, ...string) ([]byte, error) {
+		return mustFixture(t, "mdadm-detail.txt"), nil
+	}
 	raid, err := mdraid.Collect(context.Background(), Inventory{})
 	require.NoError(t, err)
 	deviceMapper := deviceMapperResult([]dmInfo{{Name: "crypt", UUID: "CRYPT-LUKS2-test", MajorMinor: "253:0", Open: 1}}, Inventory{})
