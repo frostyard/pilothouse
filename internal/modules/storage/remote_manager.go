@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -20,17 +21,31 @@ type UnitController interface {
 	Stop(context.Context, string) error
 }
 
+// ArtifactWriter isolates only the mutations performed by Create. ArtifactStore
+// remains the source of paths, reads, and ownership verification.
+type ArtifactWriter interface {
+	WriteCredentials(string, string, string) error
+	WriteMountUnit(Definition) error
+	WriteAutomountUnit(Definition) error
+	WriteManifest(Definition) error
+}
+
 // SystemRemoteManager adds managed remote mount lifecycle operations to a
 // read-only storage manager.
 type SystemRemoteManager struct {
 	artifacts ArtifactStore
+	writer    ArtifactWriter
 	manager   Manager
 	units     UnitController
 	mu        sync.Mutex
 }
 
 func NewSystemRemoteManager(manager Manager, artifacts ArtifactStore, units UnitController) *SystemRemoteManager {
-	return &SystemRemoteManager{artifacts: artifacts, manager: manager, units: units}
+	return NewSystemRemoteManagerWithWriter(manager, artifacts, artifacts, units)
+}
+
+func NewSystemRemoteManagerWithWriter(manager Manager, artifacts ArtifactStore, writer ArtifactWriter, units UnitController) *SystemRemoteManager {
+	return &SystemRemoteManager{artifacts: artifacts, writer: writer, manager: manager, units: units}
 }
 
 func (manager *SystemRemoteManager) Create(ctx context.Context, request CreateRequest) error {
@@ -69,16 +84,28 @@ func (manager *SystemRemoteManager) Create(ctx context.Context, request CreateRe
 		}
 	}
 
-	undos := make([]func() error, 0, 6)
+	type undo struct {
+		operation string
+		run       func() error
+	}
+	undos := make([]undo, 0, 6)
+	unitArtifactsWritten := false
 	rollback := func(cause error) error {
+		failures := make([]string, 0, len(undos))
 		for index := len(undos) - 1; index >= 0; index-- {
-			if err := undos[index](); err != nil {
-				definition.State = "needs-attention"
-				if manager.artifacts.UpdateManifest(definition) != nil {
-					_ = manager.artifacts.WriteManifest(definition)
-				}
-				return fmt.Errorf("remote mount needs attention: %w", cause)
+			if err := undos[index].run(); err != nil {
+				failures = append(failures, undos[index].operation)
 			}
+		}
+		if unitArtifactsWritten && manager.units.DaemonReload(ctx) != nil {
+			failures = append(failures, "reload systemd")
+		}
+		if len(failures) > 0 {
+			definition.State = "needs-attention"
+			if manager.artifacts.UpdateManifest(definition) != nil {
+				_ = manager.artifacts.WriteManifest(definition)
+			}
+			return fmt.Errorf("remote mount needs attention: cleanup failed: %s", strings.Join(failures, ", "))
 		}
 		return cause
 	}
@@ -88,38 +115,39 @@ func (manager *SystemRemoteManager) Create(ctx context.Context, request CreateRe
 	}
 	definition.CreatedTarget = created
 	if created {
-		undos = append(undos, func() error { return paths.RemoveTarget(ctx, definition.Target, true, &inventory) })
+		undos = append(undos, undo{operation: "remove target", run: func() error { return paths.RemoveTarget(ctx, definition.Target, true, &inventory) }})
 	}
 	if request.Password != "" {
-		if err := manager.artifacts.WriteCredentials(definition.ID, request.Username, request.Password); err != nil {
+		if err := manager.writer.WriteCredentials(definition.ID, request.Username, request.Password); err != nil {
 			return rollback(err)
 		}
 		credential, _ := manager.artifacts.CredentialPath(definition.ID)
-		undos = append(undos, func() error { return os.Remove(credential) })
+		undos = append(undos, undo{operation: "remove credentials", run: func() error { return os.Remove(credential) }})
 	}
-	if err := manager.artifacts.WriteMountUnit(definition); err != nil {
+	if err := manager.writer.WriteMountUnit(definition); err != nil {
 		return rollback(err)
 	}
 	mountPath, _ := manager.artifacts.MountUnitPath(definition)
-	undos = append(undos, func() error { return os.Remove(mountPath) })
-	if err := manager.artifacts.WriteAutomountUnit(definition); err != nil {
+	undos = append(undos, undo{operation: "remove mount unit", run: func() error { return os.Remove(mountPath) }})
+	unitArtifactsWritten = true
+	if err := manager.writer.WriteAutomountUnit(definition); err != nil {
 		return rollback(err)
 	}
 	automountPath, _ := manager.artifacts.AutomountUnitPath(definition)
-	undos = append(undos, func() error { return os.Remove(automountPath) })
-	if err := manager.artifacts.WriteManifest(definition); err != nil {
+	undos = append(undos, undo{operation: "remove automount unit", run: func() error { return os.Remove(automountPath) }})
+	if err := manager.writer.WriteManifest(definition); err != nil {
 		return rollback(err)
 	}
 	manifestPath, _ := manager.artifacts.ManifestPath(definition.ID)
-	undos = append(undos, func() error { return os.Remove(manifestPath) })
+	undos = append(undos, undo{operation: "remove manifest", run: func() error { return os.Remove(manifestPath) }})
 	if err := manager.units.DaemonReload(ctx); err != nil {
 		return rollback(err)
 	}
-	undos = append(undos, func() error { return manager.units.DaemonReload(ctx) })
+	undos = append(undos, undo{operation: "reload systemd", run: func() error { return manager.units.DaemonReload(ctx) }})
 	if err := manager.units.Enable(ctx, automountUnitName(definition.Target)); err != nil {
 		return rollback(err)
 	}
-	undos = append(undos, func() error { return manager.units.Disable(ctx, automountUnitName(definition.Target)) })
+	undos = append(undos, undo{operation: "disable automount", run: func() error { return manager.units.Disable(ctx, automountUnitName(definition.Target)) }})
 	if err := manager.units.Start(ctx, automountUnitName(definition.Target)); err != nil {
 		return rollback(err)
 	}
@@ -164,15 +192,23 @@ func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error
 	}
 	mountPath, _ := manager.artifacts.MountUnitPath(definition)
 	automountPath, _ := manager.artifacts.AutomountUnitPath(definition)
-	if err := os.Remove(mountPath); err != nil {
+	mount, err := RenderMountUnit(definition)
+	if err != nil {
 		return manager.retainAttention(definition, err)
 	}
-	if err := os.Remove(automountPath); err != nil {
+	if err := manager.removeVerifiedArtifact(mountPath, mount, 0o644); err != nil {
+		return manager.retainAttention(definition, err)
+	}
+	automount, err := RenderAutomountUnit(definition)
+	if err != nil {
+		return manager.retainAttention(definition, err)
+	}
+	if err := manager.removeVerifiedArtifact(automountPath, automount, 0o644); err != nil {
 		return manager.retainAttention(definition, err)
 	}
 	if definition.Username != "" {
 		credential, _ := manager.artifacts.CredentialPath(definition.ID)
-		if err := os.Remove(credential); err != nil {
+		if err := manager.removeVerifiedArtifact(credential, nil, 0o600); err != nil {
 			return manager.retainAttention(definition, err)
 		}
 	}
@@ -192,6 +228,32 @@ func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error
 	}
 	manifest, _ := manager.artifacts.ManifestPath(id)
 	return os.Remove(manifest)
+}
+
+// removeVerifiedArtifact accepts an absent canonical artifact during recovery,
+// but never removes an existing file until its managed contents or metadata are
+// verified.
+func (manager *SystemRemoteManager) removeVerifiedArtifact(path string, contents []byte, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return errArtifactNotManaged
+	}
+	if !info.Mode().IsRegular() {
+		return errArtifactNotManaged
+	}
+	if contents == nil {
+		if err := manager.artifacts.verifyMetadata(path, mode); err != nil {
+			return err
+		}
+	} else if err := manager.artifacts.verifyFile(path, contents, mode); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (manager *SystemRemoteManager) State(ctx context.Context) (Snapshot, error) {

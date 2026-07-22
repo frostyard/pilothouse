@@ -18,6 +18,7 @@ type recordingUnitController struct {
 	calls       []string
 	fail        string
 	cleanupFail string
+	failCalls   map[string]map[int]bool
 }
 
 func (controller *recordingUnitController) DaemonReload(context.Context) error {
@@ -41,10 +42,90 @@ func (controller *recordingUnitController) Stop(_ context.Context, name string) 
 	return controller.errorFor("stop")
 }
 func (controller *recordingUnitController) errorFor(operation string) error {
+	if controller.failCalls != nil && controller.failCalls[operation][len(controller.calls)] {
+		return errors.New("injected " + operation + " failure")
+	}
 	if controller.fail == operation || controller.cleanupFail == operation {
 		return errors.New("injected " + operation + " failure")
 	}
 	return nil
+}
+
+type failingArtifactWriter struct {
+	ArtifactStore
+	fail string
+}
+
+func (writer failingArtifactWriter) WriteCredentials(id, username, password string) error {
+	if writer.fail == "credentials" {
+		return errors.New("injected credentials failure")
+	}
+	return writer.ArtifactStore.WriteCredentials(id, username, password)
+}
+
+func (writer failingArtifactWriter) WriteMountUnit(definition Definition) error {
+	if writer.fail == "mount" {
+		return errors.New("injected mount failure")
+	}
+	return writer.ArtifactStore.WriteMountUnit(definition)
+}
+
+func (writer failingArtifactWriter) WriteAutomountUnit(definition Definition) error {
+	if writer.fail == "automount" {
+		return errors.New("injected automount failure")
+	}
+	return writer.ArtifactStore.WriteAutomountUnit(definition)
+}
+
+func (writer failingArtifactWriter) WriteManifest(definition Definition) error {
+	if writer.fail == "manifest" {
+		return errors.New("injected manifest failure")
+	}
+	return writer.ArtifactStore.WriteManifest(definition)
+}
+
+func TestRemoteManagerCreateWriteFailuresRollBackOnlyCompletedArtifacts(t *testing.T) {
+	for _, step := range []string{"credentials", "mount", "automount", "manifest"} {
+		t.Run(step, func(t *testing.T) {
+			store := testArtifactStore(t)
+			request := testSMBRequest(t)
+			unrelated := filepath.Join(store.UnitRoot, "unrelated.mount")
+			require.NoError(t, os.MkdirAll(store.UnitRoot, 0o700))
+			require.NoError(t, os.WriteFile(unrelated, []byte("foreign"), 0o600))
+			manager := NewSystemRemoteManagerWithWriter(staticManager{}, store, failingArtifactWriter{ArtifactStore: store, fail: step}, &recordingUnitController{})
+
+			require.Error(t, manager.Create(context.Background(), request))
+
+			assert.NoFileExists(t, filepath.Join(store.CredentialRoot, request.ID))
+			assert.NoFileExists(t, filepath.Join(store.UnitRoot, mountUnitName(request.Target)))
+			assert.NoFileExists(t, filepath.Join(store.UnitRoot, automountUnitName(request.Target)))
+			assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+			assert.FileExists(t, unrelated)
+			assert.NoDirExists(t, request.Target)
+		})
+	}
+}
+
+func TestRemoteManagerRollbackAttemptsEveryUndoAfterFailures(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testNFSRequest(t)
+	controller := &recordingUnitController{failCalls: map[string]map[int]bool{
+		"start":   {3: true},
+		"disable": {4: true},
+		"reload":  {5: true},
+	}}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+
+	err := manager.Create(context.Background(), request)
+
+	require.Error(t, err)
+	assert.Equal(t, []string{
+		"reload", "enable " + automountUnitName(request.Target), "start " + automountUnitName(request.Target),
+		"disable " + automountUnitName(request.Target), "reload", "reload",
+	}, controller.calls)
+	definition, loadErr := store.LoadDefinition(request.ID)
+	require.NoError(t, loadErr)
+	assert.Equal(t, "needs-attention", definition.State)
 }
 
 func TestRemoteManagerRecordsNeedsAttentionWhenRollbackCleanupFails(t *testing.T) {
@@ -93,7 +174,7 @@ func TestRemoteManagerCreateRollsBackArtifactsWhenStartFails(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(store.UnitRoot, mountUnitName(request.Target)))
 	assert.NoFileExists(t, filepath.Join(store.UnitRoot, automountUnitName(request.Target)))
 	assert.NoDirExists(t, request.Target)
-	assert.Equal(t, []string{"reload", "enable " + automountUnitName(request.Target), "start " + automountUnitName(request.Target), "disable " + automountUnitName(request.Target), "reload"}, controller.calls)
+	assert.Equal(t, []string{"reload", "enable " + automountUnitName(request.Target), "start " + automountUnitName(request.Target), "disable " + automountUnitName(request.Target), "reload", "reload"}, controller.calls)
 }
 
 func TestRemoteManagerCreateRollsBackForEachUnitFailure(t *testing.T) {
@@ -106,7 +187,13 @@ func TestRemoteManagerCreateRollsBackForEachUnitFailure(t *testing.T) {
 
 			require.Error(t, manager.Create(context.Background(), request))
 
-			assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+			if operation == "reload" {
+				definition, err := store.LoadDefinition(request.ID)
+				require.NoError(t, err)
+				assert.Equal(t, "needs-attention", definition.State)
+			} else {
+				assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+			}
 			assert.NoFileExists(t, filepath.Join(store.UnitRoot, mountUnitName(request.Target)))
 			assert.NoFileExists(t, filepath.Join(store.UnitRoot, automountUnitName(request.Target)))
 			assert.NoDirExists(t, request.Target)
@@ -174,6 +261,74 @@ func TestRemoteManagerDeleteDeactivatesBeforeRemovingCredentialAndCreatedTarget(
 	assert.NoDirExists(t, request.Target)
 }
 
+func TestRemoteManagerDeleteNeedsAttentionAcceptsMissingCanonicalArtifacts(t *testing.T) {
+	store := testArtifactStore(t)
+	controller := &recordingUnitController{}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+	request := testSMBRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	definition.State = "needs-attention"
+	require.NoError(t, store.UpdateManifest(definition))
+	mountPath, _ := store.MountUnitPath(definition)
+	automountPath, _ := store.AutomountUnitPath(definition)
+	credentialPath, _ := store.CredentialPath(definition.ID)
+	require.NoError(t, os.Remove(mountPath))
+	require.NoError(t, os.Remove(automountPath))
+	require.NoError(t, os.Remove(credentialPath))
+
+	require.NoError(t, manager.Delete(context.Background(), request.ID))
+
+	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+}
+
+func TestRemoteManagerDeleteNeedsAttentionPreservesForeignArtifact(t *testing.T) {
+	store := testArtifactStore(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	request := testSMBRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	definition.State = "needs-attention"
+	require.NoError(t, store.UpdateManifest(definition))
+	mountPath, _ := store.MountUnitPath(definition)
+	require.NoError(t, os.WriteFile(mountPath, []byte("foreign"), 0o644))
+
+	require.Error(t, manager.Delete(context.Background(), request.ID))
+
+	contents, err := os.ReadFile(mountPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("foreign"), contents)
+	definition, err = store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "needs-attention", definition.State)
+}
+
+func TestRemoteManagerDeleteNeedsAttentionPreservesForeignArtifactSymlink(t *testing.T) {
+	store := testArtifactStore(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	request := testNFSRequest(t)
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	definition.State = "needs-attention"
+	require.NoError(t, store.UpdateManifest(definition))
+	mountPath, _ := store.MountUnitPath(definition)
+	mount, err := RenderMountUnit(definition)
+	require.NoError(t, err)
+	foreign := filepath.Join(t.TempDir(), "foreign.mount")
+	require.NoError(t, os.WriteFile(foreign, mount, 0o644))
+	require.NoError(t, os.Remove(mountPath))
+	require.NoError(t, os.Symlink(foreign, mountPath))
+
+	require.Error(t, manager.Delete(context.Background(), request.ID))
+
+	info, err := os.Lstat(mountPath)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+}
+
 func TestManagedDefinitionSnapshotContainsNoPasswordOrCredentialPath(t *testing.T) {
 	store := testArtifactStore(t)
 	controller := &recordingUnitController{}
@@ -188,6 +343,36 @@ func TestManagedDefinitionSnapshotContainsNoPasswordOrCredentialPath(t *testing.
 	assert.Equal(t, Mount{ID: "remote:" + request.ID, Filesystem: "cifs", Health: HealthHealthy, Managed: true, ReadOnly: false, Source: "//files.example/media", State: "active", Target: request.Target}, snapshot.Mounts[0])
 	assert.NotContains(t, fmt.Sprintf("%+v", snapshot), request.Password)
 	assert.NotContains(t, fmt.Sprintf("%+v", snapshot), filepath.Join(store.CredentialRoot, request.ID))
+}
+
+func TestManagedDefinitionSnapshotSummaryCountsMergedAndInactiveDefinitions(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testNFSRequest(t)
+	core := Mount{Filesystem: "nfs", Source: request.Host + ":" + request.Export, State: "mounted", Target: request.Target}
+	manager := NewSystemRemoteManager(staticManager{snapshot: Snapshot{Mounts: []Mount{core}}}, store, &recordingUnitController{})
+	definition, err := manager.definition(request)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.WriteManifest(definition))
+
+	snapshot, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Len(t, snapshot.Mounts, 1)
+	assert.Equal(t, 1, snapshot.Summary.ActiveMounts)
+
+	store = testArtifactStore(t)
+	request = testNFSRequest(t)
+	manager = NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	definition, err = manager.definition(request)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.WriteManifest(definition))
+	snapshot, err = manager.State(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, snapshot.Summary.ActiveMounts)
 }
 
 func testArtifactStore(t *testing.T) ArtifactStore {
