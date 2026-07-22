@@ -112,7 +112,28 @@ broker daemon accesses the root-equivalent Docker socket.
 Storage inventory uses the fixed `broker.QueryStorageState` query. The web
 process never invokes storage tools; the broker collects each supported backend
 independently, so an unavailable optional backend does not prevent other
-inventory from being returned. This first phase is read-only.
+inventory from being returned. Unmanaged mounts, including NFS and SMB mounts,
+remain read-only inventory.
+
+## Managed remote mounts
+
+Storage remote-mount mutations are administrator-only broker actions:
+`org.frostyard.pilothouse.storage.create-nfs`,
+`org.frostyard.pilothouse.storage.create-smb-guest`,
+`org.frostyard.pilothouse.storage.create-smb-credentials`,
+`org.frostyard.pilothouse.storage.mount`,
+`org.frostyard.pilothouse.storage.unmount`, and
+`org.frostyard.pilothouse.storage.delete`. Pilothouse owns only definitions it
+created: manifests are `/var/lib/pilothouse/storage/mounts/<id>.json`, SMB
+credentials are `/etc/pilothouse/storage/credentials/<id>`, and generated
+`.mount`/`.automount` units are rooted at `/etc/systemd/system`.
+
+The supported NFS versions are `auto`, `3`, `4`, `4.1`, and `4.2`; supported
+SMB versions are `auto`, `2.1`, `3.0`, and `3.1.1`. Forms accept no free-form
+mount options. The manager generates only its fixed safe options, including
+`nosuid,nodev`, read-only mode, the selected protocol version, and an SMB
+credential path when needed. Unmanaged mounts are never modified, activated,
+deactivated, or deleted by these actions.
 
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The
