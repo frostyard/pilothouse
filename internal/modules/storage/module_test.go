@@ -173,6 +173,22 @@ func TestStorageActionCreateCredentialsUsesExactParametersWithoutConfirmation(t 
 	assert.NotContains(t, response.Header().Get("Location"), "secret")
 }
 
+func TestStorageActionCreateCredentialsWithOwnershipUsesOwnedAction(t *testing.T) {
+	host := &fakeHost{admin: true, confirmResult: true, validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	request := httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader("protocol=smb-credentials&server=nas.example&share=media&username=mount-user&password=secret&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false&uid=001000&gid=000100"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	mux.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, broker.ActionStorageCreateSMBCredentialsOwned, host.executeID)
+	assert.Equal(t, map[string]string{"server": "nas.example", "share": "media", "username": "mount-user", "password": "secret", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000", "gid": "100"}, host.executeParams)
+	assert.NotContains(t, response.Header().Get("Location"), "secret")
+}
+
 func TestStorageActionRejectsNonAdminBeforeValidationOrBroker(t *testing.T) {
 	host := &fakeHost{validateResult: true}
 	mux := http.NewServeMux()
@@ -227,6 +243,7 @@ func TestStorageActionCreateNFSAndSMBGuestUsePasswordFreeParameters(t *testing.T
 	}{
 		{"nfs", "protocol=nfs&host=nas.example&export=%2Fmedia&target=%2Fmnt%2Fmedia&version=4.2&read_only=true", broker.ActionStorageCreateNFS, map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "true"}},
 		{"smb guest", "protocol=smb-guest&server=nas.example&share=media&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false", broker.ActionStorageCreateSMBGuest, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false"}},
+		{"smb guest owned", "protocol=smb-guest&server=nas.example&share=media&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false&uid=001000&gid=000100", broker.ActionStorageCreateSMBGuestOwned, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false", "uid": "1000", "gid": "100"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			host := &fakeHost{admin: true, validateResult: true}
@@ -239,6 +256,35 @@ func TestStorageActionCreateNFSAndSMBGuestUsePasswordFreeParameters(t *testing.T
 			assert.Equal(t, test.actionID, host.executeID)
 			assert.Equal(t, test.params, host.executeParams)
 			assert.NotContains(t, host.executeParams, "password")
+		})
+	}
+}
+
+func TestStorageActionCreateRejectsInvalidSMBOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		form string
+	}{
+		{"uid only", "uid=1000"},
+		{"gid only", "gid=100"},
+		{"sentinel", "uid=4294967295&gid=100"},
+		{"signed", "uid=%2B1000&gid=100"},
+		{"malformed", "uid=nope&gid=100"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &fakeHost{admin: true, validateResult: true}
+			mux := http.NewServeMux()
+			New().Mount(mux, host)
+			request := httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader("protocol=smb-guest&server=nas.example&share=media&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false&"+test.form))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+
+			mux.ServeHTTP(response, request)
+
+			assert.Equal(t, http.StatusSeeOther, response.Code)
+			assert.Empty(t, host.executeID)
+			assert.Equal(t, "/storage?kind=error&notice=Action+failed.+Review+Activity+for+the+recorded+outcome.", response.Header().Get("Location"))
+			assert.NotContains(t, response.Header().Get("Location"), test.form)
 		})
 	}
 }
