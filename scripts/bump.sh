@@ -24,8 +24,19 @@ preflight() {
     [ -z "$(run_git status --porcelain)" ] ||
         die 'working tree is not clean; commit or stash changes.'
     run_git remote get-url origin >/dev/null 2>&1 || die 'origin remote is missing.'
+    fetch_failed=0
     run_git fetch --tags origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1 ||
-        die 'could not synchronize origin/main and tags.'
+        fetch_failed=1
+    local_tag_refs=$(run_git for-each-ref --format='%(objectname) %(refname)' refs/tags | LC_ALL=C sort)
+    if ! remote_tag_refs=$(run_git ls-remote --tags origin); then
+        [ "$fetch_failed" -eq 0 ] || die 'could not synchronize origin/main and tags.'
+        die 'could not compare local and origin tag refs.'
+    fi
+    remote_tag_refs=$(printf '%s\n' "$remote_tag_refs" |
+        awk 'NF == 2 && $2 !~ /\^\{\}$/ { print $1 " " $2 }' | LC_ALL=C sort)
+    [ "$local_tag_refs" = "$remote_tag_refs" ] ||
+        die 'local and origin tag refs differ; reconcile tags before bumping.'
+    [ "$fetch_failed" -eq 0 ] || die 'could not synchronize origin/main and tags.'
 
     local_head=$(run_git rev-parse HEAD)
     remote_head=$(run_git rev-parse refs/remotes/origin/main 2>/dev/null) ||
@@ -43,11 +54,6 @@ preflight() {
 
 validate_version() {
     version=$1
-    case "$version" in
-        v0|v0.*) ;;
-        v[0-9]*.[0-9]*.[0-9]*) ;;
-        *) die "svu returned invalid version: $version" ;;
-    esac
     printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
         die "svu returned invalid version: $version"
     [ "$(printf '%s\n' "$version" | wc -l | tr -d ' ')" = 1 ] ||
@@ -112,7 +118,7 @@ release() {
             die "push failed; origin lacks $version, but the local tag could not be removed."
         die "push failed; origin lacks $version and the new local tag was removed. Retry make bump."
     fi
-    die "push failed and publication state is indeterminate; local tag $version was preserved."
+    die "push failed due to a remote tag conflict; local tag $version was preserved."
 }
 
 git_command=${BUMP_GIT_COMMAND:-git}

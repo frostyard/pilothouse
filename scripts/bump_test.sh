@@ -55,6 +55,16 @@ write_git_wrapper() {
         '    case "$mode" in' \
         '        absent|indeterminate) exit 41 ;;' \
         '        accepted) git "$@"; exit 41 ;;' \
+        '        conflict)' \
+        '            peer=$(mktemp -d)' \
+        '            trap "rm -rf \"$peer\"" EXIT HUP INT TERM' \
+        '            git clone "$(git remote get-url origin)" "$peer" >/dev/null 2>&1' \
+        '            git -C "$peer" config user.name Test' \
+        '            git -C "$peer" config user.email test@example.invalid' \
+        '            git -C "$peer" commit --allow-empty -m competing-release >/dev/null' \
+        '            git -C "$peer" tag -a v9.8.7 -m competing-release' \
+        '            git -C "$peer" push origin refs/tags/v9.8.7 >/dev/null 2>&1' \
+        '            exit 41 ;;' \
         '    esac' \
         'fi' \
         'if [ "$mode" = indeterminate ] && [ "$1" = ls-remote ] &&' \
@@ -107,6 +117,20 @@ pass 'rejects unformatted Go files'
 repo=$(new_repo clean)
 run_preflight "$repo" >/dev/null || fail 'accepts clean synchronized main'
 pass 'accepts clean synchronized main'
+
+repo=$(new_repo local-only-tag)
+git -C "$repo" tag -a v1.2.3 -m local-only
+if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'accepts local-only semver tag'; fi
+grep -q 'local and origin tag refs differ' "$ROOT/out" || fail 'explains local-only tag failure'
+pass 'rejects local-only semver tag'
+
+repo=$(new_repo mismatched-tag)
+git -C "$repo" commit --allow-empty -m local-tag-target >/dev/null
+git -C "$repo" tag -a v1.2.3 -m local-tag
+git --git-dir="$ROOT/mismatched-tag.git" tag v1.2.3 "$(git -C "$repo" rev-parse HEAD~1)"
+if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'accepts mismatched semver tag'; fi
+grep -q 'local and origin tag refs differ' "$ROOT/out" || fail 'explains mismatched tag failure'
+pass 'rejects mismatched semver tag'
 
 git -C "$repo" switch -c feature >/dev/null
 if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'rejects feature branch'; fi
@@ -171,7 +195,8 @@ if run_preflight "$repo" >"$ROOT/out" 2>&1; then fail 'rejects diverged main'; f
 grep -q 'diverged' "$ROOT/out" || fail 'explains diverged state'
 pass 'rejects diverged main'
 
-if DOCKER=definitely-missing "$SCRIPT" preflight >"$ROOT/out" 2>&1; then
+repo=$(new_repo missing-docker)
+if (cd "$repo" && DOCKER=definitely-missing "$SCRIPT" preflight) >"$ROOT/out" 2>&1; then
     fail 'rejects missing Docker command'
 fi
 grep -q 'Docker command' "$ROOT/out" || fail 'explains missing Docker'
@@ -257,6 +282,18 @@ run_release "$repo" "$verify" "$version" "$wrapper" >"$ROOT/out" 2>&1 ||
 git --git-dir="$ROOT/push-accepted.git" rev-parse 'v9.8.7^{}' >/dev/null ||
     fail 'accepted remote tag missing'
 pass 'recognizes accepted push despite transport failure'
+
+repo=$(new_repo push-conflict)
+verify=$(write_command verify-push-conflict 'exit 0')
+version=$(write_command version-push-conflict 'printf "%s\\n" v9.8.7')
+wrapper=$(write_git_wrapper git-push-conflict conflict)
+if run_release "$repo" "$verify" "$version" "$wrapper" >"$ROOT/out" 2>&1; then
+    fail 'reports remote tag conflict as success'
+fi
+grep -q 'remote tag conflict' "$ROOT/out" || fail 'does not explain remote tag conflict'
+grep -q 'local tag v9.8.7 was preserved' "$ROOT/out" || fail 'does not explain preserved local tag'
+git -C "$repo" rev-parse v9.8.7 >/dev/null || fail 'deletes tag after remote tag conflict'
+pass 'preserves local tag after remote tag conflict'
 
 repo=$(new_repo push-indeterminate)
 verify=$(write_command verify-push-indeterminate 'exit 0')
