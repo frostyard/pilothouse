@@ -16,7 +16,7 @@
 - Create actions do not require confirmation; unmount and delete require exact confirmation for `storage/mount/<opaque-id>`.
 - Accept NFS versions `auto`, `3`, `4`, `4.1`, `4.2`; accept SMB versions `auto`, `2.1`, `3.0`, `3.1.1`; accept read-only only as `true` or `false`.
 - Generated mount options always include `nosuid,nodev`; do not accept a free-form option string.
-- Reject target `/`, symlinks, non-directories, non-empty existing targets, nested mounts, unit conflicts, and protected trees `/proc`, `/sys`, `/dev`, `/run`, `/boot`, `/etc`, `/usr`, `/var/lib/pilothouse`, and descendants.
+- Reject target `/`, symlinks, non-directories, non-empty existing targets, active mounts nested below the target, any ancestor/descendant overlap with another managed target, unit conflicts, and protected trees `/proc`, `/sys`, `/dev`, `/run`, `/boot`, `/etc`, `/usr`, `/var/lib/pilothouse`, and descendants.
 - Write manifests/credentials as root `0600` and units as root `0644`, atomically and durably.
 - Never edit `/etc/fstab`, force/lazy unmount, alter unmanaged units, return stored passwords, or display privileged errors.
 - Never send credentialed-create actions through the generic confirmation page, because it preserves submitted form fields.

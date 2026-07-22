@@ -251,6 +251,25 @@ func TestRemoteManagerCreateRejectsTargetNestedUnderInactiveDefinition(t *testin
 	assert.NoDirExists(t, request.Target)
 }
 
+func TestRemoteManagerCreateRejectsTargetContainingInactiveDefinition(t *testing.T) {
+	store := testArtifactStore(t)
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+	request := testNFSRequest(t)
+	parent := filepath.Join(filepath.Dir(request.Target), "parent")
+	require.NoError(t, os.Mkdir(parent, 0o755))
+	request.Target = filepath.Join(parent, "child")
+	definition, err := manager.definition(request)
+	require.NoError(t, err)
+	definition.State = "inactive"
+	require.NoError(t, store.WriteMountUnit(definition))
+	require.NoError(t, store.WriteAutomountUnit(definition))
+	require.NoError(t, store.WriteManifest(definition))
+
+	request.ID = "fedcba9876543210fedcba9876543210"
+	request.Target = parent
+	assert.Error(t, manager.Create(context.Background(), request))
+}
+
 func TestRemoteMountCredentialOnlyAppearsInCredentialArtifact(t *testing.T) {
 	store := testArtifactStore(t)
 	request := testSMBRequest(t)

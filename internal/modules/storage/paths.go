@@ -21,8 +21,9 @@ var protectedTargetRoots = []string{
 
 // TargetInventory contains only data collected through trusted, fixed queries.
 type TargetInventory struct {
-	Mounts     []string
-	UnitOwners map[string]string
+	ManagedTargets []string
+	Mounts         []string
+	UnitOwners     map[string]string
 }
 
 // PathManager validates and changes mount target directories without resolving
@@ -228,7 +229,12 @@ func (manager PathManager) hasConflict(target string, inventory *TargetInventory
 		return false
 	}
 	for _, mount := range inventory.Mounts {
-		if mount == target || strings.HasPrefix(mount, target+"/") || strings.HasPrefix(target, mount+"/") {
+		if mount == target || strings.HasPrefix(mount, target+"/") {
+			return true
+		}
+	}
+	for _, managedTarget := range inventory.ManagedTargets {
+		if managedTarget == target || strings.HasPrefix(managedTarget, target+"/") || strings.HasPrefix(target, managedTarget+"/") {
 			return true
 		}
 	}
@@ -246,6 +252,11 @@ func validateTargetInventory(inventory *TargetInventory) error {
 	}
 	for _, mount := range inventory.Mounts {
 		if ValidateTarget(mount) != nil {
+			return errInvalidTargetInventory
+		}
+	}
+	for _, target := range inventory.ManagedTargets {
+		if ValidateTarget(target) != nil {
 			return errInvalidTargetInventory
 		}
 	}

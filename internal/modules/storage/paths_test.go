@@ -110,11 +110,38 @@ func TestValidateTargetRejectsMountAndUnitConflicts(t *testing.T) {
 	assert.NoError(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): manager.DefinitionID}}))
 }
 
+func TestValidateTargetAllowsChildOfUnmanagedActiveMount(t *testing.T) {
+	base := t.TempDir()
+	parent := filepath.Join(base, "srv")
+	require.NoError(t, os.Mkdir(parent, 0o755))
+
+	assert.NoError(t, newPathManager(t).ValidateTarget(context.Background(), filepath.Join(parent, "media"), &TargetInventory{Mounts: []string{parent}}))
+}
+
+func TestValidateTargetRejectsUnmanagedActiveMountChild(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "srv")
+	require.NoError(t, os.Mkdir(target, 0o755))
+
+	assert.Error(t, newPathManager(t).ValidateTarget(context.Background(), target, &TargetInventory{Mounts: []string{filepath.Join(target, "media")}}))
+}
+
+func TestValidateTargetRejectsSymmetricManagedTargetConflicts(t *testing.T) {
+	base := t.TempDir()
+	managed := filepath.Join(base, "managed")
+	require.NoError(t, os.Mkdir(managed, 0o755))
+	manager := newPathManager(t)
+
+	assert.Error(t, manager.ValidateTarget(context.Background(), managed, &TargetInventory{ManagedTargets: []string{filepath.Join(managed, "child")}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), filepath.Join(managed, "child"), &TargetInventory{ManagedTargets: []string{managed}}))
+}
+
 func TestValidateTargetRejectsInvalidInventory(t *testing.T) {
 	manager := newPathManager(t)
 	target := filepath.Join(t.TempDir(), "target")
 
 	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{Mounts: []string{"relative"}}))
+	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{ManagedTargets: []string{"relative"}}))
 	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{"unsafe/name.mount": testDefinitionID}}))
 	assert.Error(t, manager.ValidateTarget(context.Background(), target, &TargetInventory{UnitOwners: map[string]string{mountUnitName(target): "invalid"}}))
 }

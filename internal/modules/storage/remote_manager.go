@@ -372,7 +372,7 @@ func (manager *SystemRemoteManager) inventory(ctx context.Context, exclude ...st
 		}
 		// Definitions reserve their targets even while inactive so a later
 		// activation cannot overlap a subsequently-created managed target.
-		inventory.Mounts = append(inventory.Mounts, definition.Target)
+		inventory.ManagedTargets = append(inventory.ManagedTargets, definition.Target)
 		inventory.UnitOwners[definition.UnitName] = definition.ID
 		inventory.UnitOwners[automountUnitName(definition.Target)] = definition.ID
 	}
