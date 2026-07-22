@@ -74,6 +74,7 @@ func run() error {
 	}
 	defer func() { _ = auditStore.Close() }()
 	actions := broker.NewActionRegistry(auditStore)
+	streamActions := broker.NewStreamActionRegistry(auditStore)
 	jobStore, err := jobs.Open(*jobsDB, 1_000)
 	if err != nil {
 		return err
@@ -81,6 +82,7 @@ func run() error {
 	defer func() { _ = jobStore.Close() }()
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
+	streamQueries := broker.NewStreamQueryRegistry()
 	if err := registerActivity(queries, auditStore); err != nil {
 		return err
 	}
@@ -141,6 +143,8 @@ func run() error {
 		sessions,
 		actions,
 		queries,
+		streamActions,
+		streamQueries,
 		logger,
 	)
 	listener, err := listenUnix(*socket, *socketGroup)

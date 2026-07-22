@@ -3,12 +3,14 @@ package broker
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -65,6 +67,105 @@ func (c *Client) Session(ctx context.Context, token string) (SessionResponse, er
 	var response SessionResponse
 	err := c.do(ctx, http.MethodGet, "/v1/session", token, nil, &response)
 	return response, err
+}
+
+func (c *Client) StreamQuery(ctx context.Context, token, id string, parameters map[string]string) (StreamResult, error) {
+	encoded, err := json.Marshal(QueryRequest{Parameters: parameters})
+	if err != nil {
+		return StreamResult{}, fmt.Errorf("encode broker stream query: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/stream-queries/"+id, bytes.NewReader(encoded))
+	if err != nil {
+		return StreamResult{}, fmt.Errorf("create broker stream query: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return StreamResult{}, fmt.Errorf("%w at %s: %v", ErrUnavailable, c.socket, err)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		defer func() { _ = response.Body.Close() }()
+		return StreamResult{}, streamResponseError(response)
+	}
+	if response.ContentLength < 0 {
+		_ = response.Body.Close()
+		return StreamResult{}, fmt.Errorf("decode broker stream response: missing content length")
+	}
+	filename, err := base64.RawURLEncoding.DecodeString(response.Header.Get(StreamNameHeader))
+	if err != nil {
+		_ = response.Body.Close()
+		return StreamResult{}, fmt.Errorf("decode broker stream filename: %w", err)
+	}
+	return StreamResult{Body: newStreamBody(ctx, response.Body), Filename: string(filename), MediaType: response.Header.Get("Content-Type"), Size: response.ContentLength}, nil
+}
+
+func (c *Client) StreamAction(ctx context.Context, token, id string, parameters map[string]string, body io.Reader) error {
+	encoded, err := json.Marshal(QueryRequest{Parameters: parameters})
+	if err != nil {
+		return fmt.Errorf("encode broker stream action: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/stream-actions/"+id, body)
+	if err != nil {
+		return fmt.Errorf("create broker stream action: %w", err)
+	}
+	if sized, ok := body.(interface{ Len() int }); ok {
+		request.ContentLength = int64(sized.Len())
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(StreamMetadataHeader, base64.RawURLEncoding.EncodeToString(encoded))
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("%w at %s: %v", ErrUnavailable, c.socket, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return streamResponseError(response)
+	}
+	return nil
+}
+
+func streamResponseError(response *http.Response) error {
+	limited := io.LimitReader(response.Body, 4<<10)
+	var brokerError ErrorResponse
+	_ = json.NewDecoder(limited).Decode(&brokerError)
+	if brokerError.Error == "" {
+		brokerError.Error = response.Status
+	}
+	err := NewPublicError(response.StatusCode, brokerError.Error, "", nil)
+	if response.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("%w: %w", ErrUnauthorized, err)
+	}
+	return err
+}
+
+type streamBody struct {
+	body io.ReadCloser
+	done chan struct{}
+	once sync.Once
+}
+
+func newStreamBody(ctx context.Context, body io.ReadCloser) *streamBody {
+	result := &streamBody{body: body, done: make(chan struct{})}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = result.Close()
+		case <-result.done:
+		}
+	}()
+	return result
+}
+
+func (b *streamBody) Read(p []byte) (int, error) { return b.body.Read(p) }
+
+func (b *streamBody) Close() error {
+	var err error
+	b.once.Do(func() {
+		close(b.done)
+		err = b.body.Close()
+	})
+	return err
 }
 
 func (c *Client) do(ctx context.Context, method, path, token string, requestBody, responseBody any) error {
