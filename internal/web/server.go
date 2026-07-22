@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,6 +30,8 @@ type BrokerClient interface {
 	Logout(context.Context, string) error
 	Query(context.Context, string, string, map[string]string, any) error
 	Session(context.Context, string) (broker.SessionResponse, error)
+	StreamAction(context.Context, string, string, map[string]string, io.Reader) error
+	StreamQuery(context.Context, string, string, map[string]string) (broker.StreamResult, error)
 }
 
 type Server struct {
@@ -150,6 +153,22 @@ func (s *Server) Query(ctx context.Context, id string, parameters map[string]str
 	return s.broker.Query(ctx, session.token, id, parameters, target)
 }
 
+func (s *Server) StreamAction(ctx context.Context, r *http.Request, id string, parameters map[string]string, body io.Reader) error {
+	session := sessionFromContext(r.Context())
+	if session.token == "" {
+		return broker.ErrUnauthorized
+	}
+	return s.broker.StreamAction(ctx, session.token, id, parameters, body)
+}
+
+func (s *Server) StreamQuery(ctx context.Context, id string, parameters map[string]string) (broker.StreamResult, error) {
+	session := sessionFromContext(ctx)
+	if session.token == "" {
+		return broker.StreamResult{}, broker.ErrUnauthorized
+	}
+	return s.broker.StreamQuery(ctx, session.token, id, parameters)
+}
+
 func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Page) error {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -178,6 +197,18 @@ func (s *Server) ValidateAction(w http.ResponseWriter, r *http.Request) bool {
 	}
 	provided := r.FormValue("csrf")
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(s.CSRFToken(r))) != 1 {
+		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		return false
+	}
+	return s.validateOrigin(w, r)
+}
+
+func (s *Server) ValidateActionToken(w http.ResponseWriter, r *http.Request, token string) bool {
+	if sessionFromContext(r.Context()).token == "" {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.CSRFToken(r))) != 1 {
 		http.Error(w, "invalid csrf token", http.StatusForbidden)
 		return false
 	}

@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,6 +52,15 @@ func (h *logsHost) Render(w http.ResponseWriter, _ *http.Request, page platform.
 	return page.Body.Render(context.Background(), w)
 }
 func (*logsHost) ValidateAction(http.ResponseWriter, *http.Request) bool { return true }
+func (*logsHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return true
+}
+func (*logsHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (*logsHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
 
 func TestManifestAndDashboard(t *testing.T) {
 	module := New()

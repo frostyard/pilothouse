@@ -17,9 +17,16 @@ import (
 )
 
 type fakeBroker struct {
-	confirmation string
-	healthErr    error
-	session      broker.SessionResponse
+	confirmation           string
+	healthErr              error
+	session                broker.SessionResponse
+	streamActionBody       string
+	streamActionID         string
+	streamActionParameters map[string]string
+	streamActionToken      string
+	streamQueryID          string
+	streamQueryParameters  map[string]string
+	streamQueryToken       string
 }
 
 func (b *fakeBroker) Action(_ context.Context, _, _ string, _ map[string]string, confirmation string) error {
@@ -34,6 +41,19 @@ func (b *fakeBroker) Logout(context.Context, string) error                      
 func (b *fakeBroker) Query(context.Context, string, string, map[string]string, any) error { return nil }
 func (b *fakeBroker) Session(context.Context, string) (broker.SessionResponse, error) {
 	return b.session, nil
+}
+func (b *fakeBroker) StreamAction(_ context.Context, token, id string, parameters map[string]string, body io.Reader) error {
+	b.streamActionToken, b.streamActionID, b.streamActionParameters = token, id, parameters
+	contents, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	b.streamActionBody = string(contents)
+	return nil
+}
+func (b *fakeBroker) StreamQuery(_ context.Context, token, id string, parameters map[string]string) (broker.StreamResult, error) {
+	b.streamQueryToken, b.streamQueryID, b.streamQueryParameters = token, id, parameters
+	return broker.StreamResult{}, nil
 }
 
 func newTestServer(t *testing.T) *Server {
@@ -93,6 +113,69 @@ func TestExecuteForwardsConfirmation(t *testing.T) {
 	require.NoError(t, request.ParseForm())
 	require.NoError(t, server.Execute(context.Background(), request, "action", nil))
 	assert.Equal(t, "resource/one", fake.confirmation)
+}
+
+func TestStreamActionRequiresSessionAndForwardsRequestBody(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	body := strings.NewReader("stream body")
+	request := httptest.NewRequest(http.MethodPost, "/files/root/upload", nil)
+
+	err := server.StreamAction(context.Background(), request, "files.upload", map[string]string{"path": "/root"}, body)
+	require.ErrorIs(t, err, broker.ErrUnauthorized)
+
+	request = withTestSession(request, "csrf", "opaque-token")
+	require.NoError(t, server.StreamAction(context.Background(), request, "files.upload", map[string]string{"path": "/root"}, body))
+	assert.Equal(t, "opaque-token", fake.streamActionToken)
+	assert.Equal(t, "files.upload", fake.streamActionID)
+	assert.Equal(t, map[string]string{"path": "/root"}, fake.streamActionParameters)
+	assert.Equal(t, "stream body", fake.streamActionBody)
+}
+
+func TestStreamQueryRequiresSessionAndForwardsToken(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+
+	_, err := server.StreamQuery(context.Background(), "files.download", map[string]string{"path": "/root/file"})
+	require.ErrorIs(t, err, broker.ErrUnauthorized)
+
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, requestSession{token: "opaque-token"})
+	_, err = server.StreamQuery(ctx, "files.download", map[string]string{"path": "/root/file"})
+	require.NoError(t, err)
+	assert.Equal(t, "opaque-token", fake.streamQueryToken)
+	assert.Equal(t, "files.download", fake.streamQueryID)
+	assert.Equal(t, map[string]string{"path": "/root/file"}, fake.streamQueryParameters)
+}
+
+func TestValidateActionTokenChecksExplicitCSRFWithoutReadingBody(t *testing.T) {
+	server := newTestServer(t)
+	body := &countingReader{Reader: strings.NewReader("unread")}
+	request := httptest.NewRequest(http.MethodPost, "/files/root/upload", body)
+	request = withTestSession(request, "csrf", "token")
+	response := httptest.NewRecorder()
+
+	assert.True(t, server.ValidateActionToken(response, request, "csrf"))
+	assert.Zero(t, body.reads)
+}
+
+func TestValidateActionTokenRejectsMissingSessionWrongCSRFAndForeignOrigin(t *testing.T) {
+	server := newTestServer(t)
+
+	missingSession := httptest.NewRequest(http.MethodPost, "/files/root/upload", nil)
+	missingResponse := httptest.NewRecorder()
+	assert.False(t, server.ValidateActionToken(missingResponse, missingSession, "csrf"))
+	assert.Equal(t, http.StatusUnauthorized, missingResponse.Code)
+
+	wrongCSRF := withTestSession(httptest.NewRequest(http.MethodPost, "/files/root/upload", nil), "csrf", "token")
+	wrongResponse := httptest.NewRecorder()
+	assert.False(t, server.ValidateActionToken(wrongResponse, wrongCSRF, "wrong"))
+	assert.Equal(t, http.StatusForbidden, wrongResponse.Code)
+
+	foreignOrigin := withTestSession(httptest.NewRequest(http.MethodPost, "/files/root/upload", nil), "csrf", "token")
+	foreignOrigin.Header.Set("Origin", "https://evil.example")
+	foreignResponse := httptest.NewRecorder()
+	assert.False(t, server.ValidateActionToken(foreignResponse, foreignOrigin, "csrf"))
+	assert.Equal(t, http.StatusForbidden, foreignResponse.Code)
 }
 
 func TestServerReadinessRequiresBroker(t *testing.T) {
@@ -203,4 +286,21 @@ func TestInvalidPublicOriginIsRejectedAtStartup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = NewServer(registry, &fakeBroker{}, slog.New(slog.NewTextHandler(io.Discard, nil)), false, "https://admin.example.test/pilothouse")
 	assert.ErrorContains(t, err, "must not contain a path")
+}
+
+type countingReader struct {
+	io.Reader
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	return r.Reader.Read(p)
+}
+
+func withTestSession(r *http.Request, csrf, token string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), sessionContextKey{}, requestSession{
+		data:  broker.SessionResponse{CSRF: csrf},
+		token: token,
+	}))
 }
