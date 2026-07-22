@@ -286,3 +286,10 @@ Rendering tests cover:
 Existing System tests will continue to assert its `/var` storage metric and health thresholds unchanged.
 
 After templ changes, run `make generate`. Before handoff, run `make build`, `make test`, `make fmt`, and `make lint`, using matching Docker targets if native dependencies are unavailable.
+
+## Follow-up: SMB Ownership Mapping
+
+Issue 44 later added optional paired numeric local UID/GID mapping for
+Pilothouse-managed SMB mounts. This is intentionally a follow-up to the v1
+exclusion above, not a change to the original decision: see
+`docs/superpowers/specs/2026-07-22-smb-uid-gid-mapping-design.md`.

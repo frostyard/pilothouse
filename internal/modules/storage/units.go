@@ -152,6 +152,9 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 		if definition.ProtocolVersion != "auto" {
 			options = append(options, "vers="+definition.ProtocolVersion)
 		}
+		if definition.UID != "" {
+			options = append(options, "uid="+definition.UID, "gid="+definition.GID)
+		}
 		sort.Strings(options)
 		return "//" + definition.Server + "/" + definition.Share, "cifs", options, nil
 	default:
@@ -160,7 +163,7 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 }
 
 func validateRenderDefinition(definition Definition) error {
-	if definition.FormatVersion != ManifestFormatVersion || ValidateDefinitionID(definition.ID) != nil || ValidateProtocol(definition.Protocol) != nil || ValidateTarget(definition.Target) != nil || definition.State == "" || definition.UnitName != mountUnitName(definition.Target) {
+	if validateDefinitionOwnership(definition.FormatVersion, definition.Protocol, definition.SMBOwnership) != nil || ValidateDefinitionID(definition.ID) != nil || ValidateProtocol(definition.Protocol) != nil || ValidateTarget(definition.Target) != nil || definition.State == "" || definition.UnitName != mountUnitName(definition.Target) {
 		return errInvalidManifest
 	}
 	switch definition.Protocol {

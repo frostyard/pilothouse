@@ -36,11 +36,11 @@ func TestRenderSMBMountUnitGuestAndCredentialOptions(t *testing.T) {
 		username string
 		want     string
 	}{
-		{"guest", "", "guest,nodev,nosuid,rw,vers=3.1.1"},
-		{"credentials", "mount-user", "credentials=/etc/pilothouse/storage/credentials/0123456789abcdef0123456789abcdef,nodev,nosuid,rw,vers=3.1.1"},
+		{"guest", "", "gid=100,guest,nodev,nosuid,rw,uid=1000,vers=3.1.1"},
+		{"credentials", "mount-user", "credentials=/etc/pilothouse/storage/credentials/0123456789abcdef0123456789abcdef,gid=100,nodev,nosuid,rw,uid=1000,vers=3.1.1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			definition := Definition{FormatVersion: ManifestFormatVersion, ID: testDefinitionID, Protocol: "smb", ProtocolVersion: "3.1.1", Server: "nas.example", Share: "media", State: "active", Target: "/mnt/media", UnitName: "mnt-media.mount", Username: test.username}
+			definition := Definition{FormatVersion: ManifestFormatVersion, ID: testDefinitionID, Protocol: "smb", ProtocolVersion: "3.1.1", Server: "nas.example", Share: "media", State: "active", Target: "/mnt/media", UnitName: "mnt-media.mount", Username: test.username, SMBOwnership: SMBOwnership{UID: "1000", GID: "100"}}
 			if definition.Username != "" {
 				definition.Credential = "/etc/pilothouse/storage/credentials/" + definition.ID
 			}
@@ -49,6 +49,19 @@ func TestRenderSMBMountUnitGuestAndCredentialOptions(t *testing.T) {
 			assert.Equal(t, "# Managed by Pilothouse; definition=0123456789abcdef0123456789abcdef\n[Unit]\nDescription=Pilothouse remote storage 0123456789abcdef0123456789abcdef\nWants=network-online.target\nAfter=network-online.target\n[Mount]\nWhat=//nas.example/media\nWhere=/mnt/media\nType=cifs\nOptions="+test.want+"\nTimeoutSec=30\n", string(actual))
 		})
 	}
+}
+
+func TestRenderMountUnitRetainsUnmappedSMBAndLegacyNFSOptions(t *testing.T) {
+	smb := Definition{FormatVersion: ManifestFormatVersion, ID: testDefinitionID, Protocol: "smb", ProtocolVersion: "3.1.1", Server: "nas.example", Share: "media", State: "active", Target: "/mnt/media", UnitName: "mnt-media.mount"}
+	actual, err := RenderMountUnit(smb)
+	require.NoError(t, err)
+	assert.Contains(t, string(actual), "Options=guest,nodev,nosuid,rw,vers=3.1.1\n")
+
+	nfs := testDefinition()
+	nfs.FormatVersion = LegacyManifestFormatVersion
+	actual, err = RenderMountUnit(nfs)
+	require.NoError(t, err)
+	assert.Contains(t, string(actual), "Options=nfsvers=4,nodev,nosuid,rw\n")
 }
 
 func TestRenderMountUnitBracketsIPv6NFSHost(t *testing.T) {

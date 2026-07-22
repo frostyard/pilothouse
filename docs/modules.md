@@ -135,6 +135,8 @@ Storage remote-mount mutations are administrator-only broker actions:
 `org.frostyard.pilothouse.storage.create-nfs`,
 `org.frostyard.pilothouse.storage.create-smb-guest`,
 `org.frostyard.pilothouse.storage.create-smb-credentials`,
+`org.frostyard.pilothouse.storage.create-smb-guest-owned`,
+`org.frostyard.pilothouse.storage.create-smb-credentials-owned`,
 `org.frostyard.pilothouse.storage.mount`,
 `org.frostyard.pilothouse.storage.unmount`, and
 `org.frostyard.pilothouse.storage.delete`. Pilothouse owns only definitions it
@@ -149,6 +151,12 @@ mount options. The manager generates only its fixed safe options, including
 credential path when needed. IPv6 NFS hosts are rendered in bracketed
 `[host]:/export` form. Unmanaged mounts are never modified, activated,
 deactivated, or deleted by these actions.
+
+The two owned SMB actions require canonicalized numeric `uid` and `gid`
+parameters together and persist them in version 2 manifests. The manager
+renders those values only as fixed deterministic CIFS `uid=` and `gid=`
+options; names and free-form options are never accepted. Version 1 managed
+definitions remain supported without migration.
 
 Lifecycle operations wait for systemd job completion before touching
 artifacts. Unmount stops the `.automount` trigger before the `.mount` unit so
