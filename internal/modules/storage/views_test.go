@@ -224,3 +224,67 @@ func TestRemoteMountFormRendersAllowlistedFieldsAndEscapesValues(t *testing.T) {
 	assert.NotContains(t, html, `name="unit"`)
 	assert.NotContains(t, html, `@web.`)
 }
+
+func TestRemoteMountFormsRenderExactProtocolFields(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		protocol string
+		present  []string
+		absent   []string
+	}{
+		{"nfs", "nfs", []string{`name="host"`, `name="export"`, `value="3"`, `value="4"`, `value="4.1"`, `value="4.2"`}, []string{`name="server"`, `name="username"`, `name="password"`}},
+		{"smb guest", "smb-guest", []string{`name="server"`, `name="share"`, `value="2.1"`, `value="3.0"`, `value="3.1.1"`, `protocol=smb-credentials`}, []string{`name="host"`, `name="export"`, `name="username"`, `name="password"`}},
+		{"smb credentials", "smb-credentials", []string{`name="server"`, `name="share"`, `name="username"`, `name="password"`, `protocol=smb-guest`}, []string{`name="host"`, `name="export"`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output strings.Builder
+			require.NoError(t, RemoteMountForm(test.protocol, "csrf-token").Render(context.Background(), &output))
+			for _, value := range test.present {
+				assert.Contains(t, output.String(), value)
+			}
+			for _, value := range test.absent {
+				assert.NotContains(t, output.String(), value)
+			}
+			for _, value := range []string{`name="options"`, `credential-path`, `name="unit"`, `name="executable"`, `@web.`} {
+				assert.NotContains(t, output.String(), value)
+			}
+		})
+	}
+}
+
+func TestManagedPageShowsControlsOnlyForAdminManagedMounts(t *testing.T) {
+	snapshot := Snapshot{Mounts: []Mount{{ID: "remote:0123456789abcdef0123456789abcdef", Managed: true, Target: "/managed"}, {ID: "local:unmanaged", Target: "/local"}}}
+	for _, test := range []struct {
+		name  string
+		admin bool
+		want  bool
+	}{{"administrator", true, true}, {"non-administrator", false, false}} {
+		t.Run(test.name, func(t *testing.T) {
+			var output strings.Builder
+			require.NoError(t, ManagedPage(snapshot, false, "csrf-token", test.admin).Render(context.Background(), &output))
+			for _, control := range []string{"Add remote mount", `>Mount</button>`, `>Unmount</button>`, `>Delete</button>`} {
+				if test.want {
+					assert.Contains(t, output.String(), control)
+				} else {
+					assert.NotContains(t, output.String(), control)
+				}
+			}
+			if test.want {
+				assert.Contains(t, output.String(), `/storage/mounts/0123456789abcdef0123456789abcdef/delete`)
+			}
+			assert.NotContains(t, output.String(), `local:unmanaged/delete`)
+		})
+	}
+}
+
+func TestManagedMountPathFailsClosedForMalformedIDs(t *testing.T) {
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", managedMountID("remote:0123456789abcdef0123456789abcdef"))
+	assert.Empty(t, managedMountID("malformed"))
+}
+
+func TestRemoteMountFormEscapesCSRFToken(t *testing.T) {
+	var output strings.Builder
+	require.NoError(t, RemoteMountForm("nfs", `"><script>alert(1)</script>`).Render(context.Background(), &output))
+	assert.Contains(t, output.String(), `value="&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`)
+	assert.NotContains(t, output.String(), `<script>alert(1)</script>`)
+}

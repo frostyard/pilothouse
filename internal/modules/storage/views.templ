@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/frostyard/pilothouse/internal/web"
 )
@@ -176,8 +177,8 @@ templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bo
 			<table class="data-table"><thead><tr><th>Mount</th><th>Source</th><th>Filesystem</th><th>Usage</th><th>State</th><th></th></tr></thead><tbody>
 				for index, mount := range mounts {
 					<tr id={ mountIDs[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td><span class={ "badge", string(mount.Health) }>{ mount.State }</span></td><td>
-						if admin && mount.Managed {
-							<div class="actions"><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/mount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Mount</button></form><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/unmount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Unmount</button></form><form method="post" action={ "/storage/mounts/" + mount.ID[7:] + "/delete" }><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Delete</button></form></div>
+						if id := managedMountID(mount.ID); admin && mount.Managed && id != "" {
+							<div class="actions"><form method="post" action={ "/storage/mounts/" + id + "/mount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Mount</button></form><form method="post" action={ "/storage/mounts/" + id + "/unmount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Unmount</button></form><form method="post" action={ "/storage/mounts/" + id + "/delete" }><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Delete</button></form></div>
 						}
 					</td></tr>
 				}
@@ -297,6 +298,14 @@ func backendLabel(availability Availability) string {
 	default:
 		return "available"
 	}
+}
+
+func managedMountID(id string) string {
+	value, ok := strings.CutPrefix(id, "remote:")
+	if !ok || ValidateDefinitionID(value) != nil {
+		return ""
+	}
+	return value
 }
 
 type topologyEndpoint struct {

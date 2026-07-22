@@ -209,3 +209,58 @@ func TestStorageActionFailureDoesNotExposeBrokerError(t *testing.T) {
 	assert.Contains(t, response.Header().Get("Location"), "Action+failed.+Review+Activity+for+the+recorded+outcome.")
 	assert.NotContains(t, response.Header().Get("Location"), "credential")
 }
+
+func TestStorageActionCreateNFSAndSMBGuestUsePasswordFreeParameters(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		form     string
+		actionID string
+		params   map[string]string
+	}{
+		{"nfs", "protocol=nfs&host=nas.example&export=%2Fmedia&target=%2Fmnt%2Fmedia&version=4.2&read_only=true", broker.ActionStorageCreateNFS, map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "true"}},
+		{"smb guest", "protocol=smb-guest&server=nas.example&share=media&target=%2Fmnt%2Fmedia&version=3.1.1&read_only=false", broker.ActionStorageCreateSMBGuest, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &fakeHost{admin: true, validateResult: true}
+			mux := http.NewServeMux()
+			New().Mount(mux, host)
+			request := httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader(test.form))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			mux.ServeHTTP(httptest.NewRecorder(), request)
+
+			assert.Equal(t, test.actionID, host.executeID)
+			assert.Equal(t, test.params, host.executeParams)
+			assert.NotContains(t, host.executeParams, "password")
+		})
+	}
+}
+
+func TestStorageNewMountAndCreateRejectNonAdminWithoutActionValidation(t *testing.T) {
+	host := &fakeHost{validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	newForm := httptest.NewRecorder()
+	mux.ServeHTTP(newForm, httptest.NewRequest(http.MethodGet, "/storage/mounts/new", nil))
+	create := httptest.NewRecorder()
+	mux.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader("protocol=nfs")))
+
+	assert.Equal(t, http.StatusForbidden, newForm.Code)
+	assert.Equal(t, http.StatusForbidden, create.Code)
+	assert.Zero(t, host.validateCalls)
+	assert.Empty(t, host.executeID)
+}
+
+func TestStorageActionDeleteConfirmsAndExecutes(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	host := &fakeHost{admin: true, confirmResult: true, validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/storage/mounts/"+id+"/delete", nil))
+
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, []string{"storage/mount/" + id}, host.confirmCalls)
+	assert.Equal(t, broker.ActionStorageDelete, host.executeID)
+	assert.Equal(t, map[string]string{"id": id}, host.executeParams)
+}
