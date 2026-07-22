@@ -154,44 +154,44 @@ func (manager *SystemRemoteManager) Delete(ctx context.Context, id string) error
 		return err
 	}
 	if err := manager.units.Stop(ctx, definition.UnitName); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	if err := manager.units.Stop(ctx, automountUnitName(definition.Target)); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	if err := manager.units.Disable(ctx, automountUnitName(definition.Target)); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	mountPath, _ := manager.artifacts.MountUnitPath(definition)
 	automountPath, _ := manager.artifacts.AutomountUnitPath(definition)
 	if err := os.Remove(mountPath); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	if err := os.Remove(automountPath); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	if definition.Username != "" {
 		credential, _ := manager.artifacts.CredentialPath(definition.ID)
 		if err := os.Remove(credential); err != nil {
-			return err
+			return manager.retainAttention(definition, err)
 		}
 	}
 	if err := manager.units.DaemonReload(ctx); err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
-	manifest, _ := manager.artifacts.ManifestPath(id)
-	if err := os.Remove(manifest); err != nil {
-		return err
-	}
-	inventory, err := manager.inventory(ctx)
+	inventory, err := manager.inventory(ctx, id)
 	if err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
 	paths, err := NewPathManager(id)
 	if err != nil {
-		return err
+		return manager.retainAttention(definition, err)
 	}
-	return paths.RemoveTarget(ctx, definition.Target, definition.CreatedTarget, &inventory)
+	if err := paths.RemoveTarget(ctx, definition.Target, definition.CreatedTarget, &inventory); err != nil {
+		return manager.retainAttention(definition, err)
+	}
+	manifest, _ := manager.artifacts.ManifestPath(id)
+	return os.Remove(manifest)
 }
 
 func (manager *SystemRemoteManager) State(ctx context.Context) (Snapshot, error) {
@@ -217,7 +217,22 @@ func (manager *SystemRemoteManager) State(ctx context.Context) (Snapshot, error)
 			mount.Health = HealthWarning
 			snapshot.Findings = append(snapshot.Findings, Finding{ResourceID: mount.ID, Severity: HealthWarning, Title: "Managed remote mount needs attention", Detail: "Review the managed remote mount lifecycle."})
 		}
-		snapshot.Mounts = append(snapshot.Mounts, mount)
+		merged := false
+		for index := range snapshot.Mounts {
+			if snapshot.Mounts[index].Target == mount.Target && snapshot.Mounts[index].Source == mount.Source {
+				snapshot.Mounts[index].Managed = true
+				snapshot.Mounts[index].ID = mount.ID
+				snapshot.Mounts[index].ReadOnly = mount.ReadOnly
+				if definition.State != "active" {
+					snapshot.Mounts[index].State = definition.State
+				}
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			snapshot.Mounts = append(snapshot.Mounts, mount)
+		}
 	}
 	sortSnapshot(&snapshot)
 	recalculateSummary(&snapshot)
@@ -232,8 +247,10 @@ func (manager *SystemRemoteManager) loadVerified(id string) (Definition, error) 
 	if err != nil {
 		return Definition{}, err
 	}
-	if err := manager.artifacts.VerifyOwnedArtifacts(definition); err != nil {
-		return Definition{}, err
+	if definition.State != "needs-attention" {
+		if err := manager.artifacts.VerifyOwnedArtifacts(definition); err != nil {
+			return Definition{}, err
+		}
 	}
 	return definition, nil
 }
@@ -263,7 +280,7 @@ func (manager *SystemRemoteManager) definition(request CreateRequest) (Definitio
 	return definition, nil
 }
 
-func (manager *SystemRemoteManager) inventory(ctx context.Context) (TargetInventory, error) {
+func (manager *SystemRemoteManager) inventory(ctx context.Context, exclude ...string) (TargetInventory, error) {
 	snapshot, err := manager.manager.State(ctx)
 	if err != nil {
 		return TargetInventory{}, err
@@ -277,13 +294,26 @@ func (manager *SystemRemoteManager) inventory(ctx context.Context) (TargetInvent
 		return TargetInventory{}, err
 	}
 	for _, definition := range definitions {
-		if err := manager.artifacts.VerifyOwnedArtifacts(definition); err != nil {
-			return TargetInventory{}, err
+		if len(exclude) > 0 && definition.ID == exclude[0] {
+			continue
+		}
+		if definition.State != "needs-attention" {
+			if err := manager.artifacts.VerifyOwnedArtifacts(definition); err != nil {
+				return TargetInventory{}, err
+			}
 		}
 		inventory.UnitOwners[definition.UnitName] = definition.ID
 		inventory.UnitOwners[automountUnitName(definition.Target)] = definition.ID
 	}
 	return inventory, nil
+}
+
+func (manager *SystemRemoteManager) retainAttention(definition Definition, cause error) error {
+	definition.State = "needs-attention"
+	if manager.artifacts.UpdateManifest(definition) != nil {
+		_ = manager.artifacts.WriteManifest(definition)
+	}
+	return fmt.Errorf("remote mount needs attention: %w", cause)
 }
 
 func (manager *SystemRemoteManager) definitions() ([]Definition, error) {
