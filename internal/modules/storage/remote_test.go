@@ -20,7 +20,27 @@ func TestRemoteBrokerIDs(t *testing.T) {
 }
 
 func TestValidateNFSHost(t *testing.T) {
-	for _, test := range []struct {
+	for _, test := range hostValidationTests() {
+		t.Run(test.name, func(t *testing.T) {
+			assertValidation(t, ValidateNFSHost(test.value), test.valid, test.value)
+		})
+	}
+}
+
+func TestValidateSMBServer(t *testing.T) {
+	for _, test := range hostValidationTests() {
+		t.Run(test.name, func(t *testing.T) {
+			assertValidation(t, ValidateSMBServer(test.value), test.valid, test.value)
+		})
+	}
+}
+
+func hostValidationTests() []struct {
+	name  string
+	value string
+	valid bool
+} {
+	return []struct {
 		name  string
 		value string
 		valid bool
@@ -30,14 +50,11 @@ func TestValidateNFSHost(t *testing.T) {
 		{"ipv6", "2001:db8::1", true},
 		{"underscore", "nas_server.example", false},
 		{"traversal", "../nas", false},
+		{"port", "nas.example:2049", false},
 		{"control", "nas\x00.example", false},
 		{"newline", "nas\n.example", false},
 		{"empty", "", false},
 		{"too long", strings.Repeat("a", 513), false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			assertValidation(t, ValidateNFSHost(test.value), test.valid, test.value)
-		})
 	}
 }
 
@@ -101,6 +118,23 @@ func TestValidateVersions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			assertValidation(t, test.validate(test.value), test.valid, test.value)
+		})
+	}
+}
+
+func TestValidateProtocol(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		valid bool
+	}{
+		{"nfs", true},
+		{"smb", true},
+		{"NFS", false},
+		{"nfs4", false},
+		{"", false},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			assertValidation(t, ValidateProtocol(test.value), test.valid, test.value)
 		})
 	}
 }
@@ -209,6 +243,31 @@ func TestValidateTarget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			assertValidation(t, ValidateTarget(test.value), test.valid, test.value)
+		})
+	}
+}
+
+func TestRemoteTextValidatorsRejectInvalidUTF8(t *testing.T) {
+	invalid := string([]byte{0xff})
+	for _, test := range []struct {
+		name     string
+		validate func(string) error
+	}{
+		{"definition ID", ValidateDefinitionID},
+		{"NFS host", ValidateNFSHost},
+		{"NFS export", ValidateNFSExport},
+		{"NFS version", ValidateNFSVersion},
+		{"password", ValidatePassword},
+		{"read only", func(value string) error { _, err := ParseReadOnly(value); return err }},
+		{"protocol", ValidateProtocol},
+		{"SMB server", ValidateSMBServer},
+		{"SMB share", ValidateSMBShare},
+		{"SMB version", ValidateSMBVersion},
+		{"target", ValidateTarget},
+		{"username", ValidateUsername},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertValidation(t, test.validate(invalid), false, invalid)
 		})
 	}
 }

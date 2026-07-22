@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const ManifestFormatVersion = 1
@@ -16,10 +17,12 @@ const ManifestFormatVersion = 1
 var (
 	errInvalidDefinitionID = errors.New("invalid definition ID")
 	errInvalidEntropy      = errors.New("invalid definition ID entropy")
-	errInvalidNFSHost      = errors.New("invalid NFS host")
+	errInvalidHost         = errors.New("invalid host")
 	errInvalidNFSExport    = errors.New("invalid NFS export")
+	errInvalidNFSHost      = errors.New("invalid NFS host")
 	errInvalidNFSVersion   = errors.New("invalid NFS version")
 	errInvalidPassword     = errors.New("invalid password")
+	errInvalidProtocol     = errors.New("invalid protocol")
 	errInvalidReadOnly     = errors.New("invalid read-only value")
 	errInvalidSMBShare     = errors.New("invalid SMB share")
 	errInvalidSMBVersion   = errors.New("invalid SMB version")
@@ -76,7 +79,7 @@ func NewDefinitionID(random io.Reader) (string, error) {
 }
 
 func ValidateDefinitionID(value string) error {
-	if len(value) != 32 {
+	if !validText(value) || len(value) != 32 {
 		return errInvalidDefinitionID
 	}
 	for _, r := range value {
@@ -88,20 +91,37 @@ func ValidateDefinitionID(value string) error {
 }
 
 func ValidateNFSHost(value string) error {
+	if err := ValidateHost(value); err != nil {
+		return errInvalidNFSHost
+	}
+	return nil
+}
+
+func ValidateSMBServer(value string) error {
+	return ValidateHost(value)
+}
+
+func ValidateHost(value string) error {
+	if !validText(value) {
+		return errInvalidHost
+	}
 	if net.ParseIP(value) != nil || validDNSName(value) {
 		return nil
 	}
-	return errInvalidNFSHost
+	return errInvalidHost
 }
 
 func ValidateNFSExport(value string) error {
-	if !path.IsAbs(value) || strings.Contains(value, ",") || hasControl(value) {
+	if !validText(value) || !path.IsAbs(value) || strings.Contains(value, ",") || hasControl(value) {
 		return errInvalidNFSExport
 	}
 	return nil
 }
 
 func ValidateNFSVersion(value string) error {
+	if !validText(value) {
+		return errInvalidNFSVersion
+	}
 	if value == "auto" || value == "3" || value == "4" || value == "4.1" || value == "4.2" {
 		return nil
 	}
@@ -109,13 +129,23 @@ func ValidateNFSVersion(value string) error {
 }
 
 func ValidatePassword(value string) error {
-	if len(value) == 0 || len(value) > 512 || strings.ContainsAny(value, "\x00\r\n") {
+	if !validText(value) || len(value) == 0 || len(value) > 512 || strings.ContainsAny(value, "\x00\r\n") {
 		return errInvalidPassword
 	}
 	return nil
 }
 
+func ValidateProtocol(value string) error {
+	if !validText(value) || value != "nfs" && value != "smb" {
+		return errInvalidProtocol
+	}
+	return nil
+}
+
 func ParseReadOnly(value string) (bool, error) {
+	if !validText(value) {
+		return false, errInvalidReadOnly
+	}
 	switch value {
 	case "true":
 		return true, nil
@@ -127,13 +157,16 @@ func ParseReadOnly(value string) (bool, error) {
 }
 
 func ValidateSMBShare(value string) error {
-	if value == "" || strings.ContainsAny(value, "/\\") || hasControl(value) {
+	if !validText(value) || value == "" || strings.ContainsAny(value, "/\\") || hasControl(value) {
 		return errInvalidSMBShare
 	}
 	return nil
 }
 
 func ValidateSMBVersion(value string) error {
+	if !validText(value) {
+		return errInvalidSMBVersion
+	}
 	if value == "auto" || value == "2.1" || value == "3.0" || value == "3.1.1" {
 		return nil
 	}
@@ -141,14 +174,14 @@ func ValidateSMBVersion(value string) error {
 }
 
 func ValidateTarget(value string) error {
-	if !path.IsAbs(value) || path.Clean(value) != value || hasControl(value) {
+	if !validText(value) || !path.IsAbs(value) || path.Clean(value) != value || hasControl(value) {
 		return errInvalidTarget
 	}
 	return nil
 }
 
 func ValidateUsername(value string) error {
-	if len(value) == 0 || len(value) > 256 || hasControl(value) {
+	if !validText(value) || len(value) == 0 || len(value) > 256 || hasControl(value) {
 		return errInvalidUsername
 	}
 	return nil
@@ -157,6 +190,8 @@ func ValidateUsername(value string) error {
 func hasControl(value string) bool {
 	return strings.IndexFunc(value, unicode.IsControl) >= 0
 }
+
+func validText(value string) bool { return utf8.ValidString(value) }
 
 func validDNSName(value string) bool {
 	if len(value) == 0 || len(value) > 253 {
