@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/coreos/go-systemd/v22/unit"
 	"golang.org/x/sys/unix"
 )
 
@@ -295,24 +296,4 @@ func protectedTarget(target string) bool {
 func mountUnitName(target string) string     { return systemdEscapePath(target) + ".mount" }
 func automountUnitName(target string) string { return systemdEscapePath(target) + ".automount" }
 
-func systemdEscapePath(target string) string {
-	target = strings.TrimPrefix(target, "/")
-	if target == "" {
-		return "-"
-	}
-	var escaped strings.Builder
-	for index, byteValue := range []byte(target) {
-		if byteValue == '/' {
-			escaped.WriteByte('-')
-			continue
-		}
-		if (byteValue >= 'a' && byteValue <= 'z') || (byteValue >= 'A' && byteValue <= 'Z') || (byteValue >= '0' && byteValue <= '9') || byteValue == ':' || byteValue == '_' || byteValue == '.' {
-			if index != 0 || byteValue != '.' {
-				escaped.WriteByte(byteValue)
-				continue
-			}
-		}
-		fmt.Fprintf(&escaped, "\\x%02x", byteValue)
-	}
-	return escaped.String()
-}
+func systemdEscapePath(target string) string { return unit.UnitNamePathEscape(target) }
