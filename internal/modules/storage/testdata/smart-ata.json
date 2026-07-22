@@ -1,0 +1,14 @@
+{
+  "device": {"name": "/dev/sda", "info_name": "/dev/sda", "protocol": "ATA"},
+  "model_name": "Example ATA SSD",
+  "serial_number": "ATA-1234",
+  "smart_status": {"passed": false},
+  "temperature": {"current": 42},
+  "power_on_time": {"hours": 1234},
+  "ata_smart_attributes": {
+    "table": [
+      {"id": 5, "raw": {"value": 8}},
+      {"id": 197, "raw": {"value": 2}}
+    ]
+  }
+}

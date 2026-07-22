@@ -1,0 +1,44 @@
+{
+  "blockdevices": [
+    {
+      "name": "sda",
+      "kname": "sda",
+      "path": "/dev/sda",
+      "type": "disk",
+      "maj:min": "8:0",
+      "pkname": null,
+      "size": "100000000000",
+      "fstype": null,
+      "fsver": null,
+      "label": null,
+      "uuid": null,
+      "mountpoints": [null],
+      "model": "Example Disk",
+      "serial": "ABC123",
+      "rota": true,
+      "rm": false,
+      "ro": false,
+      "children": [
+        {
+          "name": "sda1",
+          "kname": "sda1",
+          "path": "/dev/sda1",
+          "type": "part",
+          "maj:min": "8:1",
+          "pkname": "sda",
+          "size": "99900000000",
+          "fstype": "ext4",
+          "fsver": "1.0",
+          "label": "root",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "mountpoints": ["/"],
+          "model": null,
+          "serial": null,
+          "rota": true,
+          "rm": false,
+          "ro": false
+        }
+      ]
+    }
+  ]
+}

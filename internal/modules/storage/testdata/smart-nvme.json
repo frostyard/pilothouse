@@ -1,0 +1,13 @@
+{
+  "device": {"name": "/dev/nvme0n1", "info_name": "/dev/nvme0n1", "protocol": "NVMe"},
+  "model_name": "Example NVMe",
+  "serial_number": "NVME-1234",
+  "smart_status": {"passed": true},
+  "nvme_smart_health_information_log": {
+    "temperature": 71,
+    "percentage_used": 82,
+    "media_errors": 4,
+    "num_err_log_entries": 9,
+    "power_on_hours": 321
+  }
+}

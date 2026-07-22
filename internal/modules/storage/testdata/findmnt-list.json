@@ -1,0 +1,37 @@
+{
+  "filesystems": [
+    {
+      "target": "/",
+      "source": "/dev/mapper/root",
+      "fstype": "ext4",
+      "options": "rw,relatime",
+      "size": 100,
+      "used": 20,
+      "avail": 80,
+      "use%": "20%",
+      "maj:min": "253:0"
+    },
+    {
+      "target": "/data",
+      "source": "/dev/sda1",
+      "fstype": "xfs",
+      "options": "rw,relatime",
+      "size": 200,
+      "used": 40,
+      "avail": 160,
+      "use%": "20%",
+      "maj:min": "8:1"
+    },
+    {
+      "target": "/sys",
+      "source": "sysfs",
+      "fstype": "sysfs",
+      "options": "rw,nosuid,nodev,noexec,relatime",
+      "size": 0,
+      "used": 0,
+      "avail": 0,
+      "use%": "-",
+      "maj:min": "0:24"
+    }
+  ]
+}

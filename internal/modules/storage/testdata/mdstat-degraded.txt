@@ -1,0 +1,6 @@
+Personalities : [raid1]
+md0 : active raid1 sda1[0] sdb1[1](F)
+      1047552 blocks super 1.2 [2/1] [U_]
+      [=>...................] recovery =  5.0% (52377/1047552) finish=10.0min speed=1664K/sec
+
+unused devices: <none>

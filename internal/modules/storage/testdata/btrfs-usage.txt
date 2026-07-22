@@ -1,0 +1,11 @@
+Overall:
+    Device size:                 1073741824
+    Device allocated:             536870912
+    Device unallocated:           536870912
+    Device missing:                       0
+    Used:                          402653184
+    Free (estimated):              671088640
+
+Data,single: Size:536870912, Used:402653184
+   /dev/sda	536870912
+   /dev/sdb	536870912

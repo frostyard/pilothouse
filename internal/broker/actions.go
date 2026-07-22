@@ -15,6 +15,7 @@ import (
 )
 
 type ActionHandler func(context.Context, auth.Identity, map[string]string) error
+type ActionPrepare func(context.Context, auth.Identity, map[string]string) (map[string]string, error)
 type QueryHandler func(context.Context, auth.Identity, map[string]string) (any, error)
 
 type ActionRegistry struct {
@@ -41,6 +42,7 @@ type ActionDefinition struct {
 	LockResource         func(map[string]string) (string, error)
 	NonBlocking          bool
 	Parameters           []string
+	Prepare              ActionPrepare
 	RebootRequired       bool
 	Resource             func(map[string]string) (string, error)
 	Timeout              time.Duration
@@ -99,6 +101,16 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 	}
 	if err := validateParameters(definition.Parameters, parameters); err != nil {
 		return fmt.Errorf("action parameters: %w", err)
+	}
+	if definition.Prepare != nil {
+		prepared, err := definition.Prepare(ctx, identity, cloneParameters(parameters))
+		if err != nil {
+			return fmt.Errorf("prepare action: %w", err)
+		}
+		if err := validatePreparedParameters(parameters, prepared); err != nil {
+			return fmt.Errorf("prepared action parameters: %w", err)
+		}
+		parameters = cloneParameters(prepared)
 	}
 	resource, err := definition.Resource(parameters)
 	if err != nil {
@@ -270,6 +282,29 @@ func validateParameters(expected []string, parameters map[string]string) error {
 		value, ok := parameters[name]
 		if !ok || value == "" || len(value) > 512 || strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("parameter %q is missing or invalid", name)
+		}
+	}
+	return nil
+}
+
+func validatePreparedParameters(external, prepared map[string]string) error {
+	if len(prepared) != len(external) && len(prepared) != len(external)+1 {
+		return fmt.Errorf("prepared parameters differ from external parameters")
+	}
+	for name, value := range external {
+		if prepared[name] != value {
+			return fmt.Errorf("parameter %q was changed", name)
+		}
+	}
+	for name, value := range prepared {
+		if name == "_id" {
+			if value == "" || len(value) > 512 || strings.ContainsAny(value, "\r\n\x00") {
+				return fmt.Errorf("parameter %q is missing or invalid", name)
+			}
+			continue
+		}
+		if external[name] != value {
+			return fmt.Errorf("parameter %q is not external", name)
 		}
 	}
 	return nil

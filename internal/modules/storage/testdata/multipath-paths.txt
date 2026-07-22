@@ -1,0 +1,2 @@
+mpatha|sda|active|ready
+mpatha|sdb|failed|faulty
