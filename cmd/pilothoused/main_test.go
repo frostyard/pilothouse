@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
@@ -25,6 +27,44 @@ type fakeBackupsManager struct{}
 type fakeStorageManager struct{ snapshot storage.Snapshot }
 
 func (m fakeStorageManager) State(context.Context) (storage.Snapshot, error) { return m.snapshot, nil }
+
+type fakeRemoteManager struct {
+	create  storage.CreateRequest
+	deleted string
+	mounted string
+	stopped string
+}
+
+func (m *fakeRemoteManager) Create(_ context.Context, request storage.CreateRequest) error {
+	m.create = request
+	return nil
+}
+func (m *fakeRemoteManager) Delete(_ context.Context, id string) error  { m.deleted = id; return nil }
+func (m *fakeRemoteManager) Mount(_ context.Context, id string) error   { m.mounted = id; return nil }
+func (m *fakeRemoteManager) Unmount(_ context.Context, id string) error { m.stopped = id; return nil }
+func (*fakeRemoteManager) State(context.Context) (storage.Snapshot, error) {
+	return storage.Snapshot{}, nil
+}
+
+type recordingAuditStore struct {
+	mu       sync.Mutex
+	attempts []audit.Attempt
+}
+
+func (s *recordingAuditStore) Begin(_ context.Context, attempt audit.Attempt) (audit.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts = append(s.attempts, attempt)
+	return audit.Record{ID: uint64(len(s.attempts))}, nil
+}
+
+func (*recordingAuditStore) Complete(context.Context, uint64, string, string) error { return nil }
+
+func (s *recordingAuditStore) last() audit.Attempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[len(s.attempts)-1]
+}
 
 func (fakeBackupsManager) State(context.Context) (backups.State, error) {
 	return backups.State{Configured: true}, nil
@@ -134,6 +174,137 @@ func TestRegisterStorageRejectsParameters(t *testing.T) {
 
 	_, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, map[string]string{"unexpected": "value"})
 	assert.EqualError(t, err, "storage state query does not accept parameters")
+}
+
+func TestRegisterStorageCreateActionsUseTrustedIDsAndGlobalLock(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		action     string
+		parameters map[string]string
+		want       storage.CreateRequest
+	}{
+		{"nfs", broker.ActionStorageCreateNFS, map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "true"}, storage.CreateRequest{Protocol: "nfs", Host: "nas.example", Export: "/media", Target: "/mnt/media", Version: "4.2", ReadOnly: true}},
+		{"smb guest", broker.ActionStorageCreateSMBGuest, map[string]string{"server": "nas.example", "share": "media", "target": "/mnt/media", "version": "3.1.1", "read_only": "false"}, storage.CreateRequest{Protocol: "smb", Server: "nas.example", Share: "media", Target: "/mnt/media", Version: "3.1.1"}},
+		{"smb credentials", broker.ActionStorageCreateSMBCredentials, map[string]string{"server": "nas.example", "share": "media", "username": "mount-user", "password": "secret", "target": "/mnt/media", "version": "3.1.1", "read_only": "false"}, storage.CreateRequest{Protocol: "smb", Server: "nas.example", Share: "media", Username: "mount-user", Password: "secret", Target: "/mnt/media", Version: "3.1.1"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
+			actions := broker.NewActionRegistry(store)
+			require.NoError(t, registerStorageActions(actions, manager))
+
+			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, test.parameters, "")
+			assert.Error(t, err)
+			require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, test.action, test.parameters, ""))
+			assert.Equal(t, test.want.Protocol, manager.create.Protocol)
+			assert.Equal(t, test.want.Host, manager.create.Host)
+			assert.Equal(t, test.want.Export, manager.create.Export)
+			assert.Equal(t, test.want.Server, manager.create.Server)
+			assert.Equal(t, test.want.Share, manager.create.Share)
+			assert.Equal(t, test.want.Username, manager.create.Username)
+			assert.Equal(t, test.want.Password, manager.create.Password)
+			assert.Equal(t, test.want.Target, manager.create.Target)
+			assert.Equal(t, test.want.Version, manager.create.Version)
+			assert.Equal(t, test.want.ReadOnly, manager.create.ReadOnly)
+			require.NoError(t, storage.ValidateDefinitionID(manager.create.ID))
+			assert.Equal(t, "storage/mount/"+manager.create.ID, store.last().Resource)
+			for _, secret := range test.parameters {
+				assert.NotContains(t, store.last().Resource, secret)
+			}
+		})
+	}
+}
+
+func TestRegisterStorageLifecycleActionsValidateIDAndConfirmation(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		name         string
+		action       string
+		confirmation bool
+		called       func(*fakeRemoteManager) string
+	}{
+		{"mount", broker.ActionStorageMount, false, func(m *fakeRemoteManager) string { return m.mounted }},
+		{"unmount", broker.ActionStorageUnmount, true, func(m *fakeRemoteManager) string { return m.stopped }},
+		{"delete", broker.ActionStorageDelete, true, func(m *fakeRemoteManager) string { return m.deleted }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
+			actions := broker.NewActionRegistry(store)
+			require.NoError(t, registerStorageActions(actions, manager))
+			parameters := map[string]string{"id": id}
+
+			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, parameters, "")
+			assert.Error(t, err)
+			confirmation := ""
+			if test.confirmation {
+				assert.ErrorIs(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, parameters, ""), broker.ErrConfirmationRequired)
+				confirmation = "storage/mount/" + id
+			}
+			require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, parameters, confirmation))
+			assert.Equal(t, id, test.called(manager))
+			assert.Equal(t, "storage/mount/"+id, store.last().Resource)
+
+			err = actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, map[string]string{"id": "bad-id"}, confirmation)
+			assert.Error(t, err)
+			assert.NotContains(t, err.Error(), "bad-id")
+			assert.Equal(t, id, test.called(manager))
+		})
+	}
+}
+
+func TestRegisterStorageActionsRejectUnexpectedParameters(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}))
+	err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageMount, map[string]string{"id": "0123456789abcdef0123456789abcdef", "target": "/secret"}, "")
+	assert.Error(t, err)
+	assert.NotContains(t, err.Error(), "/secret")
+}
+
+func TestRegisterStorageCreateActionUsesGlobalLock(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	manager := &blockingRemoteManager{started: started, release: release}
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerStorageActions(actions, manager))
+	parameters := map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "false"}
+	first := make(chan error, 1)
+	go func() {
+		first <- actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateNFS, parameters, "")
+	}()
+	<-started
+	second := make(chan error, 1)
+	go func() {
+		second <- actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateNFS, parameters, "")
+	}()
+	select {
+	case err := <-second:
+		t.Fatalf("second create bypassed global lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-first)
+	require.NoError(t, <-second)
+}
+
+type blockingRemoteManager struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingRemoteManager) Create(context.Context, storage.CreateRequest) error {
+	block := false
+	m.once.Do(func() { block = true })
+	if block {
+		m.started <- struct{}{}
+		<-m.release
+	}
+	return nil
+}
+func (*blockingRemoteManager) Delete(context.Context, string) error  { return nil }
+func (*blockingRemoteManager) Mount(context.Context, string) error   { return nil }
+func (*blockingRemoteManager) Unmount(context.Context, string) error { return nil }
+func (*blockingRemoteManager) State(context.Context) (storage.Snapshot, error) {
+	return storage.Snapshot{}, nil
 }
 
 func TestStorageManagerCompositionReportsUnsupportedOptionalBackends(t *testing.T) {

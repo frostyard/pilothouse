@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
@@ -91,6 +94,15 @@ func run() error {
 		return fmt.Errorf("resolve storage tools: %w", err)
 	}
 	if err := registerStorage(queries, storageManager); err != nil {
+		return err
+	}
+	unitClient, err := dbus.NewSystemConnectionContext(context.Background())
+	if err != nil {
+		return fmt.Errorf("connect storage systemd controller: %w", err)
+	}
+	defer unitClient.Close()
+	remoteManager := storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: unitClient})
+	if err := registerStorageActions(actions, remoteManager); err != nil {
 		return err
 	}
 	backupManager, err := backups.NewSystemManager(backupTimers, *backupMaxAge)
@@ -272,6 +284,127 @@ func registerStorage(queries *broker.QueryRegistry, manager storage.Manager) err
 		}
 		return manager.State(ctx)
 	})
+}
+
+const storageActionTimeout = 2 * time.Minute
+
+func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager) error {
+	for _, action := range []struct {
+		id         string
+		parameters []string
+		request    func(map[string]string) (storage.CreateRequest, error)
+	}{
+		{id: broker.ActionStorageCreateNFS, parameters: []string{"host", "export", "target", "version", "read_only"}, request: func(parameters map[string]string) (storage.CreateRequest, error) {
+			readOnly, err := storage.ParseReadOnly(parameters["read_only"])
+			if err != nil {
+				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
+			}
+			return storage.CreateRequest{ID: parameters["_id"], Protocol: "nfs", Host: parameters["host"], Export: parameters["export"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
+		}},
+		{id: broker.ActionStorageCreateSMBGuest, parameters: []string{"server", "share", "target", "version", "read_only"}, request: func(parameters map[string]string) (storage.CreateRequest, error) {
+			readOnly, err := storage.ParseReadOnly(parameters["read_only"])
+			if err != nil {
+				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
+			}
+			return storage.CreateRequest{ID: parameters["_id"], Protocol: "smb", Server: parameters["server"], Share: parameters["share"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
+		}},
+		{id: broker.ActionStorageCreateSMBCredentials, parameters: []string{"server", "share", "username", "password", "target", "version", "read_only"}, request: func(parameters map[string]string) (storage.CreateRequest, error) {
+			readOnly, err := storage.ParseReadOnly(parameters["read_only"])
+			if err != nil {
+				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
+			}
+			return storage.CreateRequest{ID: parameters["_id"], Protocol: "smb", Server: parameters["server"], Share: parameters["share"], Username: parameters["username"], Password: parameters["password"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
+		}},
+	} {
+		request := action.request
+		if err := actions.RegisterDefinition(broker.ActionDefinition{
+			ID: action.id, Admin: true, Parameters: action.parameters, Prepare: prepareStorageCreate,
+			Resource: storageMountResource, LockResource: func(map[string]string) (string, error) { return "storage/mounts", nil },
+			Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+				request, err := request(parameters)
+				if err != nil {
+					return err
+				}
+				actionCtx, cancel := context.WithTimeout(ctx, storageActionTimeout)
+				defer cancel()
+				return manager.Create(actionCtx, request)
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	for _, action := range []struct {
+		confirmation bool
+		id           string
+		handler      func(context.Context, string) error
+	}{
+		{id: broker.ActionStorageMount, handler: manager.Mount},
+		{id: broker.ActionStorageUnmount, confirmation: true, handler: manager.Unmount},
+		{id: broker.ActionStorageDelete, confirmation: true, handler: manager.Delete},
+	} {
+		handler := action.handler
+		if err := actions.RegisterDefinition(broker.ActionDefinition{
+			ID: action.id, Admin: true, Parameters: []string{"id"}, ConfirmationRequired: action.confirmation,
+			Resource: storageMountResource, LockResource: storageMountResource,
+			Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+				if storage.ValidateDefinitionID(parameters["id"]) != nil {
+					return errors.New("invalid remote mount ID")
+				}
+				actionCtx, cancel := context.WithTimeout(ctx, storageActionTimeout)
+				defer cancel()
+				return handler(actionCtx, parameters["id"])
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func prepareStorageCreate(_ context.Context, _ auth.Identity, parameters map[string]string) (map[string]string, error) {
+	id, err := storage.NewDefinitionID(rand.Reader)
+	if err != nil {
+		return nil, errors.New("allocate remote mount ID")
+	}
+	parameters["_id"] = id
+	return parameters, nil
+}
+
+func storageMountResource(parameters map[string]string) (string, error) {
+	id := parameters["_id"]
+	if id == "" {
+		id = parameters["id"]
+	}
+	if storage.ValidateDefinitionID(id) != nil {
+		return "", errors.New("invalid remote mount ID")
+	}
+	return "storage/mount/" + id, nil
+}
+
+type storageUnitController struct{ client *dbus.Conn }
+
+func (controller storageUnitController) DaemonReload(ctx context.Context) error {
+	return controller.client.ReloadContext(ctx)
+}
+
+func (controller storageUnitController) Disable(ctx context.Context, unit string) error {
+	_, err := controller.client.DisableUnitFilesContext(ctx, []string{unit}, false)
+	return err
+}
+
+func (controller storageUnitController) Enable(ctx context.Context, unit string) error {
+	_, _, err := controller.client.EnableUnitFilesContext(ctx, []string{unit}, false, false)
+	return err
+}
+
+func (controller storageUnitController) Start(ctx context.Context, unit string) error {
+	_, err := controller.client.StartUnitContext(ctx, unit, "replace", nil)
+	return err
+}
+
+func (controller storageUnitController) Stop(ctx context.Context, unit string) error {
+	_, err := controller.client.StopUnitContext(ctx, unit, "replace", nil)
+	return err
 }
 
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager) error {
