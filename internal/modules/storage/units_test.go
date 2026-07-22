@@ -51,6 +51,16 @@ func TestRenderSMBMountUnitGuestAndCredentialOptions(t *testing.T) {
 	}
 }
 
+func TestRenderMountUnitBracketsIPv6NFSHost(t *testing.T) {
+	definition := testDefinition()
+	definition.Host = "fd00::5"
+
+	actual, err := RenderMountUnit(definition)
+
+	require.NoError(t, err)
+	assert.Contains(t, string(actual), "What=[fd00::5]:/exports/media\n")
+}
+
 func TestRenderAutomountUnit(t *testing.T) {
 	actual, err := RenderAutomountUnit(testDefinition())
 	require.NoError(t, err)

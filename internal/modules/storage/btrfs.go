@@ -40,8 +40,10 @@ func (e *btrfsEnricher) Collect(ctx context.Context, inventory Inventory) (Adapt
 		if uuid == "" {
 			continue
 		}
+		// Subvolume layouts mount one filesystem at several targets; enrich the
+		// filesystem once and let btrfsResult attach every matching mount.
 		if seen[uuid] {
-			return AdapterResult{}, fmt.Errorf("duplicate Btrfs filesystem UUID %q", uuid)
+			continue
 		}
 		usage, err := e.runner.Run(ctx, e.path, "filesystem", "usage", "-b", "--raw", mount.Target)
 		if err != nil {
@@ -67,7 +69,7 @@ func (e *btrfsEnricher) Collect(ctx context.Context, inventory Inventory) (Adapt
 		if err != nil {
 			return AdapterResult{}, err
 		}
-		if strings.HasPrefix(mount.Source, "/dev/") && !containsString(fs.devices, mount.Source) {
+		if device := btrfsSourceDevice(mount.Source); strings.HasPrefix(device, "/dev/") && !containsString(fs.devices, device) {
 			return AdapterResult{}, fmt.Errorf("btrfs usage does not identify mount device")
 		}
 		fs.uuid, seen[uuid] = uuid, true
@@ -80,8 +82,9 @@ func btrfsMountUUID(mount Mount, resources []Resource) string {
 	if uuid, ok := strings.CutPrefix(mount.Source, "UUID="); ok && uuid != "" && validateStrings(uuid) == nil {
 		return uuid
 	}
+	device := btrfsSourceDevice(mount.Source)
 	for _, resource := range resources {
-		if resource.Path != mount.Source {
+		if resource.Path != device {
 			continue
 		}
 		for _, detail := range resource.Details {
@@ -91,6 +94,13 @@ func btrfsMountUUID(mount Mount, resources []Resource) string {
 		}
 	}
 	return ""
+}
+
+// btrfsSourceDevice strips the "[/subvolume]" suffix mount tables append to
+// subvolume mount sources.
+func btrfsSourceDevice(source string) string {
+	device, _, _ := strings.Cut(source, "[")
+	return device
 }
 
 func containsString(values []string, expected string) bool {
@@ -173,9 +183,13 @@ func parseBtrfsStats(input []byte) (map[string]uint64, error) {
 }
 
 func parseBtrfsSubvolumes(input []byte) ([]btrfsSubvolume, error) {
+	trimmed := strings.TrimSpace(string(input))
+	if trimmed == "" {
+		return nil, nil
+	}
 	var result []btrfsSubvolume
 	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(input)), "\n") {
+	for _, line := range strings.Split(trimmed, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 9 || fields[0] != "ID" || fields[2] != "gen" || fields[4] != "top" || fields[5] != "level" || fields[7] != "path" || len(result) >= maxResources {
 			return nil, fmt.Errorf("invalid Btrfs subvolume")

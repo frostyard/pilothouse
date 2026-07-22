@@ -169,14 +169,18 @@ func zfsResult(pools []zfsPool, states map[string]zfsStatus, datasets []zfsDatas
 			state = status.state
 		}
 		health := HealthHealthy
-		if state == "DEGRADED" || state == "FAULTED" || state == "UNAVAIL" {
+		switch state {
+		case "ONLINE":
+		case "DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED", "REMOVED", "OFFLINE":
 			health = HealthCritical
+		default:
+			health = HealthWarning
 		}
 		id := stableID("zfs-pool", pool.name)
 		details := []Detail{{Label: "ZFS pool health", Value: state}, {Label: "Allocated", Value: fmt.Sprint(pool.alloc)}, {Label: "Free", Value: fmt.Sprint(pool.free)}, {Label: "Capacity", Value: fmt.Sprintf("%d%%", pool.cap)}, {Label: "Read errors", Value: fmt.Sprint(status.read)}, {Label: "Write errors", Value: fmt.Sprint(status.write)}, {Label: "Checksum errors", Value: fmt.Sprint(status.checksum)}}
 		result.Resources = append(result.Resources, Resource{ID: id, Kind: "zfs-pool", Name: pool.name, SizeBytes: pool.size, Health: health, State: strings.ToLower(state), Details: details})
 		if health == HealthCritical {
-			result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: health, Title: "ZFS pool is degraded", Detail: "one or more devices are unavailable"})
+			result.Findings = append(result.Findings, Finding{ResourceID: id, Severity: health, Title: "ZFS pool is " + strings.ToLower(state), Detail: "the pool is not in a healthy state"})
 		}
 	}
 	for pool := range states {

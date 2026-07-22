@@ -42,6 +42,12 @@ func (r commandRunner) Run(ctx context.Context, path string, args ...string) ([]
 		return nil, errOutputTooLarge
 	}
 	if err != nil {
+		// Tools such as smartctl exit non-zero while still emitting complete
+		// output; callers decide whether the captured output is usable.
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			return stdout.data, fmt.Errorf("run %s: %w", path, err)
+		}
 		return nil, fmt.Errorf("run %s: %w", path, err)
 	}
 	return stdout.data, nil

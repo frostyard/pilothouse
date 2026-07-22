@@ -136,7 +136,7 @@ func mountSettings(definition Definition) (string, string, []string, error) {
 			options = append(options, "nfsvers="+definition.ProtocolVersion)
 		}
 		sort.Strings(options)
-		return definition.Host + ":" + definition.Export, "nfs", options, nil
+		return nfsMountSource(definition.Host, definition.Export), "nfs", options, nil
 	case "smb":
 		if ValidateSMBServer(definition.Server) != nil || ValidateSMBShare(definition.Share) != nil || ValidateSMBVersion(definition.ProtocolVersion) != nil {
 			return "", "", nil, errInvalidManifest

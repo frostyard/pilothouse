@@ -54,6 +54,12 @@ func (e *smartEnricher) Collect(ctx context.Context, inventory Inventory) (Adapt
 			for path := range jobs {
 				output, err := e.runner.Run(ctx, e.path, append(slices.Clone(smartctlArgs), path)...)
 				if err != nil {
+					// smartctl exits non-zero for failing disks while still
+					// emitting complete data; surface it instead of dropping it.
+					if health, parseErr := parseSMART(output, path); parseErr == nil {
+						results <- collected{health: health, path: path}
+						continue
+					}
 					results <- collected{path: path, err: err}
 					continue
 				}
