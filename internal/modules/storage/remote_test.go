@@ -14,6 +14,8 @@ func TestRemoteBrokerIDs(t *testing.T) {
 	assert.Equal(t, "org.frostyard.pilothouse.storage.create-nfs", broker.ActionStorageCreateNFS)
 	assert.Equal(t, "org.frostyard.pilothouse.storage.create-smb-guest", broker.ActionStorageCreateSMBGuest)
 	assert.Equal(t, "org.frostyard.pilothouse.storage.create-smb-credentials", broker.ActionStorageCreateSMBCredentials)
+	assert.Equal(t, "org.frostyard.pilothouse.storage.create-smb-guest-owned", broker.ActionStorageCreateSMBGuestOwned)
+	assert.Equal(t, "org.frostyard.pilothouse.storage.create-smb-credentials-owned", broker.ActionStorageCreateSMBCredentialsOwned)
 	assert.Equal(t, "org.frostyard.pilothouse.storage.mount", broker.ActionStorageMount)
 	assert.Equal(t, "org.frostyard.pilothouse.storage.unmount", broker.ActionStorageUnmount)
 	assert.Equal(t, "org.frostyard.pilothouse.storage.delete", broker.ActionStorageDelete)
