@@ -60,15 +60,43 @@ func TestNormalizeRejectsDepthOverLimit(t *testing.T) {
 	assert.ErrorContains(t, err, "depth")
 }
 
-func TestNormalizeCreatesMountFindings(t *testing.T) {
+func TestNormalizeIgnoresExpectedEROFSState(t *testing.T) {
 	snapshot, err := normalize(time.Unix(1, 0), []collectedResult{{result: AdapterResult{Mounts: []Mount{
-		{ID: "warning", ResourceID: "warning", UsedPercent: 80, State: "mounted"},
-		{ID: "critical", ResourceID: "critical", UsedPercent: 90, State: "mounted"},
-		{ID: "readonly", ResourceID: "readonly", ReadOnly: true, State: "mounted"},
+		{ID: "root", ResourceID: "root", Target: "/", Filesystem: "erofs", ReadOnly: true, UsedPercent: 100, State: "mounted", Health: HealthHealthy},
+		{ID: "root-home", ResourceID: "root-home", Target: "/root", Filesystem: "erofs", ReadOnly: true, UsedPercent: 100, State: "mounted", Health: HealthHealthy},
+		{ID: "usr", ResourceID: "usr", Target: "/usr", Filesystem: "erofs", ReadOnly: true, UsedPercent: 100, State: "mounted", Health: HealthHealthy},
+	}}}})
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Findings)
+	for _, mount := range snapshot.Mounts {
+		assert.Equal(t, HealthHealthy, mount.Health)
+		assert.True(t, mount.ReadOnly)
+		assert.Equal(t, float64(100), mount.UsedPercent)
+	}
+}
+
+func TestNormalizeCreatesFindingsForNonEROFSState(t *testing.T) {
+	snapshot, err := normalize(time.Unix(1, 0), []collectedResult{{result: AdapterResult{Mounts: []Mount{
+		{ID: "warning", ResourceID: "warning", Filesystem: "ext4", UsedPercent: 80, State: "mounted"},
+		{ID: "critical", ResourceID: "critical", Filesystem: "xfs", UsedPercent: 90, State: "mounted"},
+		{ID: "readonly", ResourceID: "readonly", Filesystem: "ext4", ReadOnly: true, State: "mounted"},
 	}}}})
 	require.NoError(t, err)
 	assert.Equal(t, []Health{HealthCritical, HealthWarning, HealthWarning}, findingSeverities(snapshot.Findings))
+	assert.Contains(t, findingTitles(snapshot.Findings), "Mount capacity is critical")
+	assert.Contains(t, findingTitles(snapshot.Findings), "Mount capacity is high")
 	assert.Contains(t, findingTitles(snapshot.Findings), "Mount is read-only")
+}
+
+func TestNormalizeAppliesMountHealthPolicyPerMount(t *testing.T) {
+	snapshot, err := normalize(time.Unix(1, 0), []collectedResult{{result: AdapterResult{Mounts: []Mount{
+		{ID: "root", ResourceID: "root", Target: "/", Filesystem: "erofs", ReadOnly: true, UsedPercent: 100, State: "mounted", Health: HealthHealthy},
+		{ID: "data", ResourceID: "data", Target: "/data", Filesystem: "ext4", UsedPercent: 90, State: "mounted", Health: HealthHealthy},
+	}}}})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Findings, 1)
+	assert.Equal(t, "data", snapshot.Findings[0].ResourceID)
+	assert.Equal(t, "Mount capacity is critical", snapshot.Findings[0].Title)
 }
 
 func TestNormalizeTruncatesSerializedSnapshot(t *testing.T) {

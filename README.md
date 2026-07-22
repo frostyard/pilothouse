@@ -9,6 +9,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics
 - Automatic dashboard refresh every 15 seconds
 - Live attention view for disk, memory, load, failed systemd units, and unavailable status sources
+- Storage health that distinguishes expected immutable EROFS mounts from unexpected read-only or capacity-exhausted writable filesystems
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
 - Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` Snosi definitions through updex
 - Installed and merged state from `systemd-sysext`
