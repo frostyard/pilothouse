@@ -26,6 +26,11 @@ Run `make build`, `make test`, `make fmt`, and `make lint` before handing off ch
 
 If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
 
+Run releases with `make bump` from a clean, synchronized `main`. The target
+uses the development image for build dependencies, lint, and `svu`, then uses
+authenticated host Git to create and push the tag. Do not run the full bump
+target inside an ad hoc container or pass Git credentials into the image.
+
 ## Documentation
 
 **update documentation** After any change to source code, update
