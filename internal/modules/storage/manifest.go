@@ -80,6 +80,47 @@ func (store ArtifactStore) WriteManifest(definition Definition) error {
 	return store.writeArtifact(path, contents, 0o600)
 }
 
+// UpdateManifest replaces a verified managed manifest when lifecycle recovery
+// must record its durable state.
+func (store ArtifactStore) UpdateManifest(definition Definition) error {
+	existing, err := store.LoadDefinition(definition.ID)
+	if err != nil {
+		return err
+	}
+	state := existing.State
+	existing.State = definition.State
+	if existing != definition || state == definition.State {
+		return errArtifactNotManaged
+	}
+	path, _ := store.ManifestPath(definition.ID)
+	contents, err := marshalManifest(definition)
+	if err != nil {
+		return errInvalidManifest
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".pilothouse-")
+	if err != nil {
+		return errInvalidManifest
+	}
+	temporary := file.Name()
+	defer func() { _ = os.Remove(temporary) }()
+	if _, err := file.Write(contents); err != nil || unix.Fdatasync(int(file.Fd())) != nil || file.Chmod(0o600) != nil || file.Chown(store.UID, store.GID) != nil || file.Close() != nil {
+		_ = file.Close()
+		return errInvalidManifest
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return errInvalidManifest
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return errInvalidManifest
+	}
+	defer func() { _ = directory.Close() }()
+	if err := directory.Sync(); err != nil {
+		return errInvalidManifest
+	}
+	return nil
+}
+
 func (store ArtifactStore) LoadDefinition(id string) (Definition, error) {
 	path, err := store.ManifestPath(id)
 	if err != nil {

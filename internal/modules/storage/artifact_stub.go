@@ -23,7 +23,8 @@ func (ArtifactStore) MountUnitPath(Definition) (string, error) { return "", errA
 func (ArtifactStore) AutomountUnitPath(Definition) (string, error) {
 	return "", errArtifactsUnsupported
 }
-func (ArtifactStore) WriteManifest(Definition) error { return errArtifactsUnsupported }
+func (ArtifactStore) WriteManifest(Definition) error  { return errArtifactsUnsupported }
+func (ArtifactStore) UpdateManifest(Definition) error { return errArtifactsUnsupported }
 func (ArtifactStore) LoadDefinition(string) (Definition, error) {
 	return Definition{}, errArtifactsUnsupported
 }
