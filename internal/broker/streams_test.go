@@ -18,6 +18,7 @@ import (
 type trackingBody struct {
 	io.Reader
 	closed bool
+	mu     sync.Mutex
 }
 
 type stagedReader struct {
@@ -42,8 +43,16 @@ func (r *stagedReader) Read(p []byte) (int, error) {
 }
 
 func (b *trackingBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+func (b *trackingBody) Closed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed
 }
 
 func TestStreamRegistriesAuthorizeValidateAndLimit(t *testing.T) {
@@ -73,7 +82,7 @@ func TestStreamRegistriesAuthorizeValidateAndLimit(t *testing.T) {
 	}))
 	_, err = queries.Execute(context.Background(), auth.Identity{}, "test.close", map[string]string{"path": "file"})
 	assert.ErrorIs(t, err, ErrStreamTooLarge)
-	assert.True(t, body.closed)
+	assert.True(t, body.Closed())
 }
 
 func TestStreamParametersRejectInvalidMetadata(t *testing.T) {
@@ -201,6 +210,22 @@ func TestStreamActionCancellationReleasesLock(t *testing.T) {
 	registry.locks.mu.Lock()
 	assert.Empty(t, registry.locks.locks)
 	registry.locks.mu.Unlock()
+}
+
+func TestStreamActionRegistryPreservesSafeResourceResolverErrors(t *testing.T) {
+	registry := NewStreamActionRegistry()
+	require.NoError(t, registry.Register(StreamActionDefinition{
+		ID: "test.upload", Limit: 1,
+		Resource: func(map[string]string) (string, error) {
+			return "", NewPublicError(400, "invalid request", "invalid_request", errors.New("detail"))
+		},
+		Handler: func(context.Context, auth.Identity, map[string]string, io.Reader) error { return nil },
+	}))
+
+	err := registry.Execute(context.Background(), auth.Identity{}, "test.upload", nil, strings.NewReader("x"))
+
+	assert.Equal(t, 400, StatusCode(err))
+	assert.NotContains(t, err.Error(), "detail")
 }
 
 func TestStreamActionStreamsBodyWithoutPrereading(t *testing.T) {

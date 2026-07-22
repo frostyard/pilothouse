@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -89,6 +90,50 @@ func TestBrokerClientLoginSessionAndAuthorizedAction(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnauthorized)
 }
 
+func TestBrokerClientPreservesJSONQueryPublicErrorStatus(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+	}{
+		{name: "not found", status: http.StatusNotFound},
+		{name: "unavailable", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			queries := NewQueryRegistry()
+			require.NoError(t, queries.Register("test.query", false, func(context.Context, auth.Identity, map[string]string) (any, error) {
+				return nil, NewPublicError(test.status, "safe query failure", "test", errors.New("private query detail"))
+			}))
+			server := NewServer(fakeAuthenticator{}, fakeResolver{identity: auth.Identity{Username: "snow"}}, NewSessionStore(time.Minute, time.Hour), NewActionRegistry(), queries, NewStreamActionRegistry(), NewStreamQueryRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			client := &Client{baseURL: "http://broker", http: &http.Client{Transport: handlerTransport{handler: server.Handler()}}, socket: "test"}
+			login, err := client.Login(context.Background(), "snow", "secret", "local")
+			require.NoError(t, err)
+
+			var result map[string]string
+			err = client.Query(context.Background(), login.Token, "test.query", nil, &result)
+
+			assert.Equal(t, test.status, StatusCode(err))
+			assert.NotContains(t, err.Error(), "private query detail")
+		})
+	}
+}
+
+func TestBrokerClientSanitizesGenericQueryErrors(t *testing.T) {
+	queries := NewQueryRegistry()
+	require.NoError(t, queries.Register("test.query", false, func(context.Context, auth.Identity, map[string]string) (any, error) {
+		return nil, errors.New("private query detail")
+	}))
+	server := NewServer(fakeAuthenticator{}, fakeResolver{identity: auth.Identity{Username: "snow"}}, NewSessionStore(time.Minute, time.Hour), NewActionRegistry(), queries, NewStreamActionRegistry(), NewStreamQueryRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client := &Client{baseURL: "http://broker", http: &http.Client{Transport: handlerTransport{handler: server.Handler()}}, socket: "test"}
+	login, err := client.Login(context.Background(), "snow", "secret", "local")
+	require.NoError(t, err)
+
+	var result map[string]string
+	err = client.Query(context.Background(), login.Token, "test.query", nil, &result)
+
+	assert.Equal(t, http.StatusForbidden, StatusCode(err))
+	assert.NotContains(t, err.Error(), "private query detail")
+}
+
 func TestBrokerClientStreamsQueryAndChunkedAction(t *testing.T) {
 	var uploaded strings.Builder
 	queryBody := &trackingBody{Reader: strings.NewReader("data")}
@@ -121,7 +166,7 @@ func TestBrokerClientStreamsQueryAndChunkedAction(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, result.Body.Close())
 	assert.Equal(t, "data", string(body))
-	assert.True(t, queryBody.closed)
+	assert.True(t, queryBody.Closed())
 
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
@@ -169,6 +214,8 @@ func TestBrokerClientStreamsRejectOversizedBodiesAndRefreshAuthorization(t *test
 
 	resolver.identity.Admin = false
 	err = client.StreamAction(context.Background(), login.Token, "test.upload", nil, strings.NewReader("ok"))
+	assert.Equal(t, http.StatusForbidden, StatusCode(err))
+	err = client.StreamAction(context.Background(), login.Token, "test.upload", nil, strings.NewReader("too-large"))
 	assert.Equal(t, http.StatusForbidden, StatusCode(err))
 }
 

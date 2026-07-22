@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -248,7 +249,7 @@ func registerFiles(queries *broker.QueryRegistry, streamQueries *broker.StreamQu
 			if err != nil {
 				return broker.StreamResult{}, filesPublicError(err)
 			}
-			return broker.StreamResult{Body: download.Body, Filename: download.Name, MediaType: "application/octet-stream", Size: download.Size}, nil
+			return broker.StreamResult{Body: download.Body, Filename: path.Base(download.Name), MediaType: "application/octet-stream", Size: download.Size}, nil
 		},
 	}); err != nil {
 		return err
@@ -256,10 +257,10 @@ func registerFiles(queries *broker.QueryRegistry, streamQueries *broker.StreamQu
 	return streamActions.Register(broker.StreamActionDefinition{
 		ID: broker.ActionFilesUpload, Admin: true, Parameters: []string{"root", "directory", "name"}, Limit: files.MaxTransferBytes, Timeout: 15 * time.Minute,
 		Resource: func(parameters map[string]string) (string, error) {
-			return filesResource(parameters), nil
+			return filesResource(parameters)
 		},
 		LockResource: func(parameters map[string]string) (string, error) {
-			return filesResource(parameters), nil
+			return filesResource(parameters)
 		},
 		Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string, body io.Reader) error {
 			return filesPublicError(manager.Upload(ctx, parameters["root"], parameters["directory"], parameters["name"], body))
@@ -267,8 +268,15 @@ func registerFiles(queries *broker.QueryRegistry, streamQueries *broker.StreamQu
 	})
 }
 
-func filesResource(parameters map[string]string) string {
-	return "files/" + parameters["root"] + "/" + parameters["directory"] + "/" + parameters["name"]
+func filesResource(parameters map[string]string) (string, error) {
+	destination := parameters["name"]
+	if directory := parameters["directory"]; directory != "" {
+		destination = directory + "/" + destination
+	}
+	if len(destination) > files.MaxPathBytes {
+		return "", filesPublicError(files.ErrInvalid)
+	}
+	return "files/" + parameters["root"] + "/" + destination, nil
 }
 
 func filesPublicError(err error) error {

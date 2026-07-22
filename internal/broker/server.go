@@ -116,6 +116,10 @@ func (s *Server) streamAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.streamActionRequiresAdmin(r.PathValue("id")) && !identity.Admin {
+		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "not authorized"})
+		return
+	}
 	metadata := r.Header.Get(StreamMetadataHeader)
 	if len(metadata) == 0 || len(metadata) > 8<<10 {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
@@ -135,10 +139,6 @@ func (s *Server) streamAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if limit, ok := s.streamActionLimit(r.PathValue("id")); ok && r.ContentLength > limit {
 		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "stream exceeds registered limit"})
-		return
-	}
-	if s.streamActionRequiresAdmin(r.PathValue("id")) && !identity.Admin {
-		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: "not authorized"})
 		return
 	}
 	if err := s.streamActions.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters, r.Body); err != nil {
@@ -202,7 +202,12 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	result, err := s.queries.Execute(r.Context(), identity, r.PathValue("id"), request.Parameters)
 	if err != nil {
 		s.logger.Warn("broker query denied or failed", "error", err, "query", r.PathValue("id"), "user", session.Identity.Username)
-		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: err.Error()})
+		status, message := http.StatusForbidden, "query denied"
+		var public *PublicError
+		if errors.As(err, &public) {
+			status, message, _ = PublicErrorDetails(err)
+		}
+		writeJSON(w, status, ErrorResponse{Error: message})
 		return
 	}
 	encoded, err := json.Marshal(result)

@@ -173,13 +173,27 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 		return fmt.Errorf("stream action parameters: %w", err)
 	}
 	resource, err := definition.Resource(parameters)
-	if err != nil || !validStreamResource(resource) {
+	if err != nil {
+		var public *PublicError
+		if errors.As(err, &public) {
+			return err
+		}
+		return fmt.Errorf("stream action resource is invalid")
+	}
+	if !validStreamResource(resource) {
 		return fmt.Errorf("stream action resource is invalid")
 	}
 	lockResource := resource
 	if definition.LockResource != nil {
 		lockResource, err = definition.LockResource(parameters)
-		if err != nil || !validStreamResource(lockResource) {
+		if err != nil {
+			var public *PublicError
+			if errors.As(err, &public) {
+				return err
+			}
+			return fmt.Errorf("stream action lock resource is invalid")
+		}
+		if !validStreamResource(lockResource) {
 			return fmt.Errorf("stream action lock resource is invalid")
 		}
 	}

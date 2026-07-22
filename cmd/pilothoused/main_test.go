@@ -226,6 +226,20 @@ func TestRegisterFilesRequiresAdministratorAndUsesFixedParameters(t *testing.T) 
 	assert.Error(t, err)
 }
 
+func TestRegisterFilesUsesDownloadBaseName(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	streamQueries := broker.NewStreamQueryRegistry()
+	streamActions := broker.NewStreamActionRegistry()
+	manager := &fakeFilesManager{download: files.Download{Body: io.NopCloser(strings.NewReader("contents")), Name: "nested/report.txt", Size: 8}}
+	require.NoError(t, registerFiles(queries, streamQueries, streamActions, manager))
+
+	download, err := streamQueries.Execute(context.Background(), auth.Identity{Admin: true}, broker.QueryFilesDownload, map[string]string{"root": "logs", "path": "nested/report.txt"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "report.txt", download.Filename)
+	require.NoError(t, download.Body.Close())
+}
+
 func TestRegisterFilesMapsDomainErrorsToPublicErrors(t *testing.T) {
 	for _, test := range []struct {
 		name, message, category string
@@ -278,4 +292,26 @@ func TestRegisterFilesAuditsExactUploadDestination(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	assert.Equal(t, "files/logs/recent/report.txt", records[0].Resource)
+}
+
+func TestRegisterFilesBoundsAndAuditsUploadDestination(t *testing.T) {
+	store, err := audit.Open(filepath.Join(t.TempDir(), "audit.db"), 10)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	queries := broker.NewQueryRegistry()
+	streamQueries := broker.NewStreamQueryRegistry()
+	streamActions := broker.NewStreamActionRegistry(store)
+	require.NoError(t, registerFiles(queries, streamQueries, streamActions, &fakeFilesManager{}))
+
+	nearDirectory := strings.Repeat("a", files.MaxPathBytes-2)
+	err = streamActions.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, broker.ActionFilesUpload, map[string]string{"root": "logs", "directory": nearDirectory, "name": "x"}, strings.NewReader("contents"))
+	require.NoError(t, err)
+	err = streamActions.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, broker.ActionFilesUpload, map[string]string{"root": "logs", "directory": strings.Repeat("a", files.MaxPathBytes-1), "name": "x"}, strings.NewReader("contents"))
+	assert.Equal(t, 400, broker.StatusCode(err))
+
+	err = streamActions.Execute(context.Background(), auth.Identity{Admin: true, Username: "admin"}, broker.ActionFilesUpload, map[string]string{"root": "logs", "directory": "", "name": "root.txt"}, strings.NewReader("contents"))
+	require.NoError(t, err)
+	records, err := store.List(context.Background(), audit.Filter{Action: broker.ActionFilesUpload, Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, "files/logs/root.txt", records[0].Resource)
 }

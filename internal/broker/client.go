@@ -192,15 +192,7 @@ func (c *Client) do(ctx context.Context, method, path, token string, requestBody
 	defer func() { _ = response.Body.Close() }()
 	limited := io.LimitReader(response.Body, 2<<20)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var brokerError ErrorResponse
-		_ = json.NewDecoder(limited).Decode(&brokerError)
-		if response.StatusCode == http.StatusUnauthorized {
-			return ErrUnauthorized
-		}
-		if brokerError.Error == "" {
-			brokerError.Error = response.Status
-		}
-		return fmt.Errorf("broker: %s", brokerError.Error)
+		return streamResponseError(response)
 	}
 	if responseBody != nil {
 		if err := json.NewDecoder(limited).Decode(responseBody); err != nil {

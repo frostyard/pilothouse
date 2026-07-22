@@ -83,7 +83,7 @@ func (h *filesHost) StreamQuery(_ context.Context, id string, parameters map[str
 	h.streamCalls++
 	h.streamID, h.parameters = id, parameters
 	if h.streamErr != nil {
-		return broker.StreamResult{}, h.streamErr
+		return h.stream, h.streamErr
 	}
 	return h.stream, nil
 }
@@ -147,6 +147,16 @@ func TestFilesPageRendersUnavailableWithoutRawError(t *testing.T) {
 	assert.NotContains(t, response.Body.String(), "private broker detail")
 }
 
+func TestFilesPageRendersMissingStateForNotFoundQuery(t *testing.T) {
+	host := &filesHost{admin: true, queryErr: broker.NewPublicError(http.StatusNotFound, "private", "not_found", errors.New("detail"))}
+
+	response := serveFiles(t, host, http.MethodGet, "/files/safe", nil)
+
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "This directory is inaccessible or no longer exists.")
+	assert.NotContains(t, response.Body.String(), "Files are temporarily unavailable.")
+}
+
 func TestFilesDownloadStreamsExactResponse(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("payload-extra"))
 	host := &filesHost{admin: true, stream: broker.StreamResult{Body: body, Filename: "report.txt", MediaType: "text/plain", Size: 7}}
@@ -161,6 +171,16 @@ func TestFilesDownloadStreamsExactResponse(t *testing.T) {
 	assert.Equal(t, "nosniff", response.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "7", response.Header().Get("Content-Length"))
 	assert.Equal(t, "payload", response.Body.String())
+}
+
+func TestFilesDownloadClosesBodyReturnedWithError(t *testing.T) {
+	body := &trackingBody{Reader: strings.NewReader("payload")}
+	host := &filesHost{admin: true, stream: broker.StreamResult{Body: body}, streamErr: errors.New("private")}
+
+	response := serveFiles(t, host, http.MethodGet, "/files/safe/download?path=report.txt", nil)
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.True(t, body.closed)
 }
 
 func TestFilesDownloadRejectsRangeWithoutBrokerCall(t *testing.T) {
@@ -396,4 +416,14 @@ func (zeroReader) Read(buffer []byte) (int, error) {
 		buffer[index] = 0
 	}
 	return len(buffer), nil
+}
+
+type trackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
 }
