@@ -168,6 +168,37 @@ func TestListAppliesScanEntryAndJSONBounds(t *testing.T) {
 	})
 }
 
+func TestListClosesResolvedDescriptorExactlyOnce(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "entry"), nil, 0o600))
+	manager := newTestManager(t, RootSpec{ID: "safe", Path: root})
+	var closed []int
+	manager.closeFD = func(fd int) error {
+		closed = append(closed, fd)
+		return unix.Close(fd)
+	}
+
+	_, err := manager.List(context.Background(), ListRequest{Root: "safe"})
+
+	require.NoError(t, err)
+	assert.Len(t, closed, 1)
+}
+
+func TestListProductionJSONBudgetLeavesBrokerEnvelopeHeadroom(t *testing.T) {
+	root := t.TempDir()
+	for i := range 400 {
+		require.NoError(t, os.Symlink(strings.Repeat("x", 4000), filepath.Join(root, fmt.Sprintf("link-%03d", i))))
+	}
+	manager := newTestManager(t, RootSpec{ID: "safe", Path: root})
+
+	assert.Equal(t, 1536<<10, manager.maxJSONBytes)
+	assert.Less(t, manager.maxJSONBytes, maxBrokerJSONBytes)
+	state, err := manager.List(context.Background(), ListRequest{Root: "safe"})
+	require.NoError(t, err)
+	assert.True(t, state.Truncated)
+	assert.Less(t, len(state.Entries), 400)
+}
+
 func newTestManager(t *testing.T, specs ...RootSpec) *SystemManager {
 	t.Helper()
 	manager, err := NewSystemManager(specs)

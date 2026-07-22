@@ -124,7 +124,7 @@ func TestRootManagerAllowsNoRoots(t *testing.T) {
 	assert.Equal(t, MaxTransferBytes, manager.maxTransfer)
 	assert.Equal(t, MaxEntries, manager.maxEntries)
 	assert.Equal(t, MaxScannedEntries, manager.maxScanned)
-	assert.Equal(t, maxJSONBytes, manager.maxJSONBytes)
+	assert.Equal(t, maxEntryJSONBytes, manager.maxJSONBytes)
 	assert.NoError(t, manager.Close())
 	assert.NoError(t, manager.Close())
 }

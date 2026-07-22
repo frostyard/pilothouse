@@ -123,7 +123,7 @@ func (m *SystemManager) List(ctx context.Context, request ListRequest) (State, e
 	if err != nil {
 		return State{}, err
 	}
-	defer func() { _ = unix.Close(fd) }()
+	defer func() { _ = m.closeFD(fd) }()
 
 	entries, truncated, err := m.readDirectory(ctx, fd, request)
 	if err != nil {
@@ -168,7 +168,11 @@ func openBeneath(rootFD int, path string, flags int) (int, error) {
 }
 
 func (m *SystemManager) readDirectory(ctx context.Context, fd int, request ListRequest) ([]Entry, bool, error) {
-	directory := os.NewFile(uintptr(fd), "directory")
+	directoryFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, false, fmt.Errorf("duplicate directory descriptor: %w", err)
+	}
+	directory := os.NewFile(uintptr(directoryFD), "directory")
 	defer func() { _ = directory.Close() }()
 	var entries []Entry
 	scanned := 0
@@ -188,12 +192,12 @@ func (m *SystemManager) readDirectory(ctx context.Context, fd int, request ListR
 			if (!request.Hidden && strings.HasPrefix(name, ".")) || !strings.Contains(strings.ToLower(name), strings.ToLower(request.Filter)) {
 				continue
 			}
-			entry, statErr := entryAt(fd, name)
-			if errors.Is(statErr, unix.ENOENT) {
+			entry, entryErr := entryAt(fd, name)
+			if errors.Is(entryErr, unix.ENOENT) {
 				continue
 			}
-			if statErr != nil {
-				return nil, false, fmt.Errorf("stat directory entry: %w", statErr)
+			if entryErr != nil {
+				return nil, false, fmt.Errorf("read directory entry: %w", entryErr)
 			}
 			entries = append(entries, entry)
 		}

@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	maxRootPathBytes = 4 << 10
-	maxJSONBytes     = 2 << 20
+	maxRootPathBytes   = 4 << 10
+	maxBrokerJSONBytes = 2 << 20
+	maxEntryJSONBytes  = 1536 << 10
 )
 
 var rootIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -97,6 +98,7 @@ type SystemManager struct {
 	maxEntries   int
 	maxScanned   int
 	maxJSONBytes int
+	closeFD      func(int) error
 	closeOnce    sync.Once
 	closeErr     error
 }
@@ -121,7 +123,8 @@ func NewSystemManager(specs []RootSpec) (*SystemManager, error) {
 		maxTransfer:  MaxTransferBytes,
 		maxEntries:   MaxEntries,
 		maxScanned:   MaxScannedEntries,
-		maxJSONBytes: maxJSONBytes,
+		maxJSONBytes: maxEntryJSONBytes,
+		closeFD:      unix.Close,
 	}
 	for _, spec := range specs {
 		fd, err := unix.Open(spec.Path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
