@@ -91,6 +91,19 @@ func TestHealthMapsStorageSeverity(t *testing.T) {
 	assert.Equal(t, "/storage#disk-abc", findings[0].Path)
 }
 
+func TestHealthUsesAllocatedFindingAnchors(t *testing.T) {
+	host := &fakeHost{snapshot: Snapshot{
+		Resources: []Resource{{ID: "disk:abc"}, {ID: "disk/abc"}},
+		Findings:  []Finding{{ResourceID: "disk/abc", Severity: HealthWarning}, {Severity: HealthWarning}},
+	}}
+
+	findings, err := New().Health(context.Background(), host)
+	require.NoError(t, err)
+	require.Len(t, findings, 2)
+	assert.Equal(t, "/storage#disk-abc-", findings[0].Path)
+	assert.Equal(t, "/storage", findings[1].Path)
+}
+
 func TestHealthMapsAllStorageSeverities(t *testing.T) {
 	host := &fakeHost{snapshot: Snapshot{Findings: []Finding{
 		{ResourceID: "healthy", Severity: HealthHealthy},

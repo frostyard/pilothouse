@@ -30,11 +30,16 @@ func (*Module) Health(ctx context.Context, host platform.Host) ([]platform.Findi
 	if err != nil {
 		return nil, err
 	}
+	anchors := snapshotAnchorSet(snapshot)
 	findings := make([]platform.Finding, 0, len(snapshot.Findings))
-	for _, finding := range snapshot.Findings {
+	for index, finding := range snapshot.Findings {
+		path := "/storage"
+		if anchors.findingTargets[index] != "" {
+			path += "#" + anchors.findingTargets[index]
+		}
 		findings = append(findings, platform.Finding{
 			Detail: finding.Detail, ID: "storage." + finding.ResourceID,
-			Path: "/storage#" + storageAnchor(finding.ResourceID), Severity: storageSeverity(finding.Severity),
+			Path: path, Severity: storageSeverity(finding.Severity),
 			Source: "Storage", Title: finding.Title,
 		})
 	}

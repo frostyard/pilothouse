@@ -149,6 +149,11 @@ model and deployment rules (cookie flags, allowed origins, PAM policy).
   actual output is present and that no literal `@web.` call syntax leaked
   into the HTML (grep existing `*_test.go` next to a `.templ` file for the
   pattern).
+- **Storage snapshot anchors.** Storage allocates fragment IDs once per
+  snapshot and puts them on visible inventory, mount, or Attention rows.
+  Topology links consume the same resource-to-fragment map. Do not restore
+  empty anchor spans as direct children of `.storage-snapshot`: it is a CSS
+  grid, so each span creates an empty grid row and accumulates visible gaps.
 
 ### Module contract (`internal/platform/module.go`)
 
