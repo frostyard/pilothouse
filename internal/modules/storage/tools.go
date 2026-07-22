@@ -85,7 +85,7 @@ type ToolResolver func([]string) (string, bool, error)
 
 func NewOptionalToolResolver() ToolResolver {
 	return func(candidates []string) (string, bool, error) {
-		return ResolveOptionalTool(candidates, os.Lstat)
+		return ResolveOptionalTool(candidates, os.Lstat, os.Stat)
 	}
 }
 
@@ -161,28 +161,32 @@ func resolveTool(candidates []string, identity func(string) (fileIdentity, error
 	return "", fmt.Errorf("resolve tool: %w", lastErr)
 }
 
-func resolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, error)) (string, bool, error) {
-	return ResolveOptionalTool(candidates, lstat)
+func resolveOptionalTool(candidates []string, lstat, stat func(string) (os.FileInfo, error)) (string, bool, error) {
+	return ResolveOptionalTool(candidates, lstat, stat)
 }
 
-func ResolveOptionalTool(candidates []string, lstat func(string) (os.FileInfo, error)) (string, bool, error) {
+func ResolveOptionalTool(candidates []string, lstat, stat func(string) (os.FileInfo, error)) (string, bool, error) {
 	var resolved string
 	for _, path := range candidates {
-		info, err := lstat(path)
+		_, err := lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return "", false, fmt.Errorf("inspect optional tool %s: %w", path, err)
 		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		info, err := stat(path)
+		if err != nil {
+			return "", false, fmt.Errorf("resolve optional tool %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
 			return "", false, fmt.Errorf("optional tool %s is not a regular file", path)
 		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
+		identity, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
 			return "", false, fmt.Errorf("inspect %s ownership", path)
 		}
-		if stat.Uid != 0 {
+		if identity.Uid != 0 {
 			return "", false, fmt.Errorf("optional tool %s is not root-owned", path)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
