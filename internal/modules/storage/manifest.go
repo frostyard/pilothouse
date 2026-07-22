@@ -255,7 +255,7 @@ func marshalManifest(definition Definition) ([]byte, error) {
 }
 
 func validateArtifactDefinition(definition Definition, store ArtifactStore) error {
-	if definition.FormatVersion != ManifestFormatVersion || ValidateDefinitionID(definition.ID) != nil || ValidateProtocol(definition.Protocol) != nil || ValidateTarget(definition.Target) != nil || definition.State == "" {
+	if validateDefinitionOwnership(definition.FormatVersion, definition.Protocol, definition.SMBOwnership) != nil || ValidateDefinitionID(definition.ID) != nil || ValidateProtocol(definition.Protocol) != nil || ValidateTarget(definition.Target) != nil || definition.State == "" {
 		return errInvalidManifest
 	}
 	if definition.UnitName != mountUnitName(definition.Target) {

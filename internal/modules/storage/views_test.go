@@ -266,9 +266,9 @@ func TestRemoteMountFormsRenderExactProtocolFields(t *testing.T) {
 		present  []string
 		absent   []string
 	}{
-		{"nfs", "nfs", []string{`name="host"`, `name="export"`, `value="3"`, `value="4"`, `value="4.1"`, `value="4.2"`}, []string{`name="server"`, `name="username"`, `name="password"`}},
-		{"smb guest", "smb-guest", []string{`name="server"`, `name="share"`, `value="2.1"`, `value="3.0"`, `value="3.1.1"`, `protocol=smb-credentials`}, []string{`name="host"`, `name="export"`, `name="username"`, `name="password"`}},
-		{"smb credentials", "smb-credentials", []string{`name="server"`, `name="share"`, `name="username"`, `name="password"`, `protocol=smb-guest`}, []string{`name="host"`, `name="export"`}},
+		{"nfs", "nfs", []string{`name="host"`, `name="export"`, `value="3"`, `value="4"`, `value="4.1"`, `value="4.2"`}, []string{`name="server"`, `name="username"`, `name="password"`, `name="uid"`, `name="gid"`}},
+		{"smb guest", "smb-guest", []string{`name="server"`, `name="share"`, `value="2.1"`, `value="3.0"`, `value="3.1.1"`, `protocol=smb-credentials`, `name="uid"`, `name="gid"`, `type="number"`, `min="0"`, `max="4294967294"`, `step="1"`, `Owner UID`, `Owner GID`, `both`}, []string{`name="host"`, `name="export"`, `name="username"`, `name="password"`}},
+		{"smb credentials", "smb-credentials", []string{`name="server"`, `name="share"`, `name="username"`, `name="password"`, `protocol=smb-guest`, `name="uid"`, `name="gid"`, `type="number"`, `min="0"`, `max="4294967294"`, `step="1"`, `Owner UID`, `Owner GID`, `both`}, []string{`name="host"`, `name="export"`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output strings.Builder

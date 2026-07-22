@@ -75,6 +75,9 @@ func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, erro
 	}
 	for i := range snapshot.Mounts {
 		mount := &snapshot.Mounts[i]
+		if isExpectedImmutableMount(*mount) {
+			continue
+		}
 		if mount.UsedPercent >= 90 {
 			mount.Health = HealthCritical
 			appendFinding(&snapshot, &state.truncated, "", Finding{ResourceID: mount.ResourceID, Severity: HealthCritical, Title: "Mount capacity is critical", Detail: mount.Target})
@@ -101,6 +104,10 @@ func normalize(collectedAt time.Time, results []collectedResult) (Snapshot, erro
 	}
 	recalculateSummary(&snapshot)
 	return snapshot, nil
+}
+
+func isExpectedImmutableMount(mount Mount) bool {
+	return mount.Filesystem == "erofs"
 }
 
 func availabilityFor(err error) Availability {

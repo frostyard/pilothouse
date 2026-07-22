@@ -7,12 +7,16 @@ import (
 	"io"
 	"net"
 	"path"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-const ManifestFormatVersion = 1
+const (
+	LegacyManifestFormatVersion = 1
+	ManifestFormatVersion       = 2
+)
 
 var (
 	errInvalidDefinitionID = errors.New("invalid definition ID")
@@ -25,6 +29,7 @@ var (
 	errInvalidProtocol     = errors.New("invalid protocol")
 	errInvalidReadOnly     = errors.New("invalid read-only value")
 	errInvalidSMBShare     = errors.New("invalid SMB share")
+	errInvalidSMBOwnership = errors.New("invalid SMB ownership")
 	errInvalidSMBVersion   = errors.New("invalid SMB version")
 	errInvalidTarget       = errors.New("invalid target")
 	errInvalidUsername     = errors.New("invalid username")
@@ -50,6 +55,7 @@ type CreateRequest struct {
 	Target   string
 	Username string
 	Version  string
+	SMBOwnership
 }
 
 type Definition struct {
@@ -68,6 +74,12 @@ type Definition struct {
 	Target          string `json:"target"`
 	UnitName        string `json:"unit_name"`
 	Username        string `json:"username,omitempty"`
+	SMBOwnership
+}
+
+type SMBOwnership struct {
+	UID string `json:"uid,omitempty"`
+	GID string `json:"gid,omitempty"`
 }
 
 func NewDefinitionID(random io.Reader) (string, error) {
@@ -136,7 +148,7 @@ func ValidatePassword(value string) error {
 }
 
 func ValidateProtocol(value string) error {
-	if !validText(value) || value != "nfs" && value != "smb" {
+	if !validText(value) || (value != "nfs" && value != "smb") {
 		return errInvalidProtocol
 	}
 	return nil
@@ -154,6 +166,34 @@ func ParseReadOnly(value string) (bool, error) {
 	default:
 		return false, errInvalidReadOnly
 	}
+}
+
+func ParseSMBOwnership(uid, gid string) (SMBOwnership, error) {
+	if uid == "" && gid == "" {
+		return SMBOwnership{}, nil
+	}
+	if uid == "" || gid == "" {
+		return SMBOwnership{}, errInvalidSMBOwnership
+	}
+	parse := func(value string) (string, error) {
+		if !validText(value) || strings.IndexFunc(value, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return "", errInvalidSMBOwnership
+		}
+		number, err := strconv.ParseUint(value, 10, 32)
+		if err != nil || number == uint64(^uint32(0)) {
+			return "", errInvalidSMBOwnership
+		}
+		return strconv.FormatUint(number, 10), nil
+	}
+	canonicalUID, err := parse(uid)
+	if err != nil {
+		return SMBOwnership{}, err
+	}
+	canonicalGID, err := parse(gid)
+	if err != nil {
+		return SMBOwnership{}, err
+	}
+	return SMBOwnership{UID: canonicalUID, GID: canonicalGID}, nil
 }
 
 func ValidateSMBShare(value string) error {
@@ -201,6 +241,23 @@ func hasControl(value string) bool {
 }
 
 func validText(value string) bool { return utf8.ValidString(value) }
+
+func validateDefinitionOwnership(formatVersion int, protocol string, ownership SMBOwnership) error {
+	if formatVersion != LegacyManifestFormatVersion && formatVersion != ManifestFormatVersion {
+		return errInvalidSMBOwnership
+	}
+	if formatVersion == LegacyManifestFormatVersion {
+		if ownership != (SMBOwnership{}) {
+			return errInvalidSMBOwnership
+		}
+		return nil
+	}
+	canonical, err := ParseSMBOwnership(ownership.UID, ownership.GID)
+	if err != nil || canonical != ownership || (protocol != "smb" && ownership != (SMBOwnership{})) {
+		return errInvalidSMBOwnership
+	}
+	return nil
+}
 
 func validDNSName(value string) bool {
 	if len(value) == 0 || len(value) > 253 {

@@ -180,6 +180,20 @@ func TestRemoteManagerCreateRollsBackArtifactsWhenStartFails(t *testing.T) {
 	assert.Equal(t, []string{"reload", "enable " + automountUnitName(request.Target), "start " + automountUnitName(request.Target), "disable " + automountUnitName(request.Target), "reload", "reload"}, controller.calls)
 }
 
+func TestRemoteManagerMappedCreateRollsBackWhenStartFails(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testSMBRequest(t)
+	request.SMBOwnership = SMBOwnership{UID: "1000", GID: "100"}
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{fail: "start"})
+
+	require.Error(t, manager.Create(context.Background(), request))
+	assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+	assert.NoFileExists(t, filepath.Join(store.UnitRoot, mountUnitName(request.Target)))
+	assert.NoFileExists(t, filepath.Join(store.UnitRoot, automountUnitName(request.Target)))
+	assert.NoFileExists(t, filepath.Join(store.CredentialRoot, request.ID))
+	assert.NoDirExists(t, request.Target)
+}
+
 func TestRemoteManagerCreateRollsBackForEachUnitFailure(t *testing.T) {
 	for _, operation := range []string{"reload", "enable", "start"} {
 		t.Run(operation, func(t *testing.T) {
@@ -216,6 +230,69 @@ func TestRemoteManagerMountAndUnmountUseExactUnits(t *testing.T) {
 	require.NoError(t, manager.Unmount(context.Background(), request.ID))
 
 	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
+}
+
+func TestRemoteManagerMountAndUnmountVerifyMappedUnit(t *testing.T) {
+	store := testArtifactStore(t)
+	controller := &recordingUnitController{}
+	manager := NewSystemRemoteManager(staticManager{}, store, controller)
+	request := testSMBRequest(t)
+	request.SMBOwnership = SMBOwnership{UID: "1000", GID: "100"}
+	require.NoError(t, manager.Create(context.Background(), request))
+	controller.calls = nil
+
+	require.NoError(t, manager.Mount(context.Background(), request.ID))
+	require.NoError(t, manager.Unmount(context.Background(), request.ID))
+	assert.Equal(t, []string{"start " + automountUnitName(request.Target), "stop " + automountUnitName(request.Target), "stop " + mountUnitName(request.Target)}, controller.calls)
+
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	mountPath, err := store.MountUnitPath(definition)
+	require.NoError(t, err)
+	contents, err := os.ReadFile(mountPath)
+	require.NoError(t, err)
+	require.Contains(t, string(contents), "uid=1000")
+	require.NoError(t, os.WriteFile(mountPath, []byte(strings.Replace(string(contents), "uid=1000", "uid=1001", 1)), 0o644))
+	controller.calls = nil
+
+	assert.Error(t, manager.Mount(context.Background(), request.ID))
+	assert.Empty(t, controller.calls)
+}
+
+func TestRemoteManagerCreateNormalizesAndPersistsSMBOwnership(t *testing.T) {
+	store := testArtifactStore(t)
+	request := testSMBRequest(t)
+	request.SMBOwnership = SMBOwnership{UID: "001000", GID: "000100"}
+	manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+
+	require.NoError(t, manager.Create(context.Background(), request))
+	definition, err := store.LoadDefinition(request.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ManifestFormatVersion, definition.FormatVersion)
+	assert.Equal(t, SMBOwnership{UID: "1000", GID: "100"}, definition.SMBOwnership)
+	mountPath, err := store.MountUnitPath(definition)
+	require.NoError(t, err)
+	contents, err := os.ReadFile(mountPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(contents), "gid=100")
+	assert.Contains(t, string(contents), "uid=1000")
+}
+
+func TestRemoteManagerRejectsInvalidOrNFSOwnershipBeforeMutation(t *testing.T) {
+	for _, request := range []CreateRequest{
+		func() CreateRequest { value := testSMBRequest(t); value.UID = "1000"; return value }(),
+		func() CreateRequest {
+			value := testNFSRequest(t)
+			value.SMBOwnership = SMBOwnership{UID: "1000", GID: "100"}
+			return value
+		}(),
+	} {
+		store := testArtifactStore(t)
+		manager := NewSystemRemoteManager(staticManager{}, store, &recordingUnitController{})
+		require.Error(t, manager.Create(context.Background(), request))
+		assert.NoDirExists(t, request.Target)
+		assert.NoFileExists(t, filepath.Join(store.ManifestRoot, request.ID+".json"))
+	}
 }
 
 func TestRemoteManagerStateDoesNotWaitForLifecycleOperation(t *testing.T) {

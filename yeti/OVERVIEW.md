@@ -64,7 +64,7 @@ directory. Current modules:
 | Module | Purpose |
 |---|---|
 | `system` | Unprivileged host telemetry (CPU/mem/disk/load/net/os) from `/proc`, `/sys`, `/etc/os-release`; emits health findings. |
-| `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. |
+| `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. SMB creation optionally supports paired numeric local UID/GID mapping. Expected immutable EROFS mounts retain their inventory usage and read-only state but are excluded from capacity and read-only health findings; other filesystems retain those checks. |
 | `attention` | Aggregates `platform.HealthProvider` findings from other modules (bounded 2s/provider) into one "needs attention" view. |
 | `services` | Systemd service/socket/timer inventory and lifecycle/enablement control via system D-Bus; bounded journal diagnostics. |
 | `sysext` | Snosi `updex` feature discovery/install state and `systemd-sysext` merge state; install/remove/update/refresh actions. |
@@ -114,6 +114,15 @@ rules for adding a new module (routes, actions, queries).
   target as a root-owned, non-group/world-writable regular file while executing
   the original entry-point path. Broken or unsafe present candidates fail
   startup; absent optional tools degrade only their backend to unsupported.
+- **Storage SMB ownership mapping.** The fixed administrator-only
+  `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
+  `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
+  require paired canonical numeric `uid` and `gid` values. The privileged
+  manager validates them independently, persists mapped definitions as manifest
+  version 2, and deterministically renders manager-controlled CIFS `uid=` and
+  `gid=` options. Version 1 definitions remain supported without migration.
+  The web process cannot resolve names or provide free-form mount options, and
+  no generic command, filesystem, or socket capability is introduced.
 
 See `docs/authentication.md` for the full login/session/authorization/audit
 model and deployment rules (cookie flags, allowed origins, PAM policy).

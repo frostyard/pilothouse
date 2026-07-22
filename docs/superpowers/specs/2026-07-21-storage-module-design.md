@@ -106,7 +106,7 @@ The model normalizes backend-specific observations into `healthy`, `warning`, `c
 - LUKS/device-mapper and multipath: active mapping state, path counts, and degraded path state.
 - ZFS: pool health, degraded/faulted devices, capacity, and reported error counts.
 - Btrfs: device completeness, allocation, and reported device error counters.
-- Filesystems and mounts: capacity thresholds, read-only transitions, inaccessible sources, and inactive managed definitions.
+- Filesystems and mounts: capacity thresholds, unexpected read-only transitions, inaccessible sources, and inactive managed definitions. EROFS mounts are expected immutable image content, so their read-only state and fully allocated image capacity remain visible in inventory but do not produce health findings.
 
 Expensive health reads are cached for five minutes in the broker daemon. Each health result includes its collection time; a result older than five minutes is stale and remains labeled stale if a refresh attempt fails. Capacity and mount state are recollected for each snapshot.
 
@@ -286,3 +286,10 @@ Rendering tests cover:
 Existing System tests will continue to assert its `/var` storage metric and health thresholds unchanged.
 
 After templ changes, run `make generate`. Before handoff, run `make build`, `make test`, `make fmt`, and `make lint`, using matching Docker targets if native dependencies are unavailable.
+
+## Follow-up: SMB Ownership Mapping
+
+Issue 44 later added optional paired numeric local UID/GID mapping for
+Pilothouse-managed SMB mounts. This is intentionally a follow-up to the v1
+exclusion above, not a change to the original decision: see
+`docs/superpowers/specs/2026-07-22-smb-uid-gid-mapping-design.md`.

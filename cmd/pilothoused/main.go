@@ -328,20 +328,10 @@ func registerStorageActions(actions *broker.ActionRegistry, manager storage.Remo
 			}
 			return storage.CreateRequest{ID: parameters["_id"], Protocol: "nfs", Host: parameters["host"], Export: parameters["export"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
 		}},
-		{id: broker.ActionStorageCreateSMBGuest, parameters: []string{"server", "share", "target", "version", "read_only"}, request: func(parameters map[string]string) (storage.CreateRequest, error) {
-			readOnly, err := storage.ParseReadOnly(parameters["read_only"])
-			if err != nil {
-				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
-			}
-			return storage.CreateRequest{ID: parameters["_id"], Protocol: "smb", Server: parameters["server"], Share: parameters["share"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
-		}},
-		{id: broker.ActionStorageCreateSMBCredentials, parameters: []string{"server", "share", "username", "password", "target", "version", "read_only"}, request: func(parameters map[string]string) (storage.CreateRequest, error) {
-			readOnly, err := storage.ParseReadOnly(parameters["read_only"])
-			if err != nil {
-				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
-			}
-			return storage.CreateRequest{ID: parameters["_id"], Protocol: "smb", Server: parameters["server"], Share: parameters["share"], Username: parameters["username"], Password: parameters["password"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly}, nil
-		}},
+		{id: broker.ActionStorageCreateSMBGuest, parameters: []string{"server", "share", "target", "version", "read_only"}, request: smbCreateRequest(false, false)},
+		{id: broker.ActionStorageCreateSMBCredentials, parameters: []string{"server", "share", "username", "password", "target", "version", "read_only"}, request: smbCreateRequest(true, false)},
+		{id: broker.ActionStorageCreateSMBGuestOwned, parameters: []string{"server", "share", "target", "version", "read_only", "uid", "gid"}, request: smbCreateRequest(false, true)},
+		{id: broker.ActionStorageCreateSMBCredentialsOwned, parameters: []string{"server", "share", "username", "password", "target", "version", "read_only", "uid", "gid"}, request: smbCreateRequest(true, true)},
 	} {
 		request := action.request
 		if err := actions.RegisterDefinition(broker.ActionDefinition{
@@ -386,6 +376,27 @@ func registerStorageActions(actions *broker.ActionRegistry, manager storage.Remo
 		}
 	}
 	return nil
+}
+
+func smbCreateRequest(credentials, owned bool) func(map[string]string) (storage.CreateRequest, error) {
+	return func(parameters map[string]string) (storage.CreateRequest, error) {
+		readOnly, err := storage.ParseReadOnly(parameters["read_only"])
+		if err != nil {
+			return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
+		}
+		ownership := storage.SMBOwnership{}
+		if owned {
+			ownership, err = storage.ParseSMBOwnership(parameters["uid"], parameters["gid"])
+			if err != nil || ownership == (storage.SMBOwnership{}) {
+				return storage.CreateRequest{}, errors.New("invalid remote mount parameter")
+			}
+		}
+		request := storage.CreateRequest{ID: parameters["_id"], Protocol: "smb", Server: parameters["server"], Share: parameters["share"], Target: parameters["target"], Version: parameters["version"], ReadOnly: readOnly, SMBOwnership: ownership}
+		if credentials {
+			request.Username, request.Password = parameters["username"], parameters["password"]
+		}
+		return request, nil
+	}
 }
 
 func prepareStorageCreate(_ context.Context, _ auth.Identity, parameters map[string]string) (map[string]string, error) {

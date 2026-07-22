@@ -148,13 +148,27 @@ func remoteCreateAction(form url.Values) (string, map[string]string, string, err
 		if ValidateSMBServer(parameters["server"]) != nil || ValidateSMBShare(parameters["share"]) != nil || ValidateSMBVersion(parameters["version"]) != nil {
 			return "", nil, "", fmt.Errorf("invalid remote mount form")
 		}
+		ownership, err := ParseSMBOwnership(strings.TrimSpace(form.Get("uid")), strings.TrimSpace(form.Get("gid")))
+		if err != nil {
+			return "", nil, "", fmt.Errorf("invalid remote mount form")
+		}
+		owned := ownership != (SMBOwnership{})
+		if owned {
+			parameters["uid"], parameters["gid"] = ownership.UID, ownership.GID
+		}
 		if protocol == "smb-credentials" {
 			parameters["username"] = strings.TrimSpace(form.Get("username"))
 			parameters["password"] = form.Get("password")
 			if ValidateUsername(parameters["username"]) != nil || ValidatePassword(parameters["password"]) != nil {
 				return "", nil, "", fmt.Errorf("invalid remote mount form")
 			}
+			if owned {
+				return broker.ActionStorageCreateSMBCredentialsOwned, parameters, "Remote mount added", nil
+			}
 			return broker.ActionStorageCreateSMBCredentials, parameters, "Remote mount added", nil
+		}
+		if owned {
+			return broker.ActionStorageCreateSMBGuestOwned, parameters, "Remote mount added", nil
 		}
 		return broker.ActionStorageCreateSMBGuest, parameters, "Remote mount added", nil
 	default:
