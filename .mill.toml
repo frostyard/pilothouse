@@ -32,3 +32,8 @@ broker handler without a capability guard, or expose an unaudited action.
 [harvest]
 # The only paths the harvest step may modify; everything else is reverted.
 allowlist = ["docs/agents/skills/", "AGENTS.md"]
+
+[limits]
+# Big multi-module specs (like the bootc capability work) need more plan
+# review rounds to converge.
+plan_rounds = 6
