@@ -83,7 +83,7 @@ func TestManagedPagePlacesFindingAnchorOnManagedMountRow(t *testing.T) {
 	}
 
 	var output strings.Builder
-	require.NoError(t, ManagedPage(snapshot, false, "csrf", true).Render(context.Background(), &output))
+	require.NoError(t, ManagedPage(snapshot, false, "csrf", true, true).Render(context.Background(), &output))
 	html := output.String()
 
 	assert.Contains(t, html, `<tr id="remote-0123456789abcdef0123456789abcdef">`)
@@ -295,7 +295,7 @@ func TestManagedPageShowsControlsOnlyForAdminManagedMounts(t *testing.T) {
 	}{{"administrator", true, true}, {"non-administrator", false, false}} {
 		t.Run(test.name, func(t *testing.T) {
 			var output strings.Builder
-			require.NoError(t, ManagedPage(snapshot, false, "csrf-token", test.admin).Render(context.Background(), &output))
+			require.NoError(t, ManagedPage(snapshot, false, "csrf-token", test.admin, true).Render(context.Background(), &output))
 			for _, control := range []string{"Add remote mount", `>Delete</button>`} {
 				if test.want {
 					assert.Contains(t, output.String(), control)
@@ -324,10 +324,41 @@ func TestManagedPageRendersLifecycleControlsForMountState(t *testing.T) {
 	} {
 		t.Run(test.state, func(t *testing.T) {
 			var output strings.Builder
-			require.NoError(t, ManagedPage(Snapshot{Mounts: []Mount{{ID: id, Managed: true, State: test.state}}}, false, "csrf", true).Render(context.Background(), &output))
+			require.NoError(t, ManagedPage(Snapshot{Mounts: []Mount{{ID: id, Managed: true, State: test.state}}}, false, "csrf", true, true).Render(context.Background(), &output))
 			assert.Equal(t, test.mount, strings.Contains(output.String(), `>Mount</button>`))
 			assert.Equal(t, test.unmount, strings.Contains(output.String(), `>Unmount</button>`))
 			assert.Contains(t, output.String(), `>Delete</button>`)
+		})
+	}
+}
+
+// TestManagedPageHidesAllRemoteMountControlsWhenUnavailable proves that
+// remoteMountsAvailable=false collapses Mount, Unmount, and Delete together
+// as one unit — including for a mount state ("mounted" or "active") that
+// would otherwise render one of Mount/Unmount — since all three post to the
+// same three systemd-gated remote-mount routes and none may survive
+// independently of the others (see docs/agents/skills/
+// partial-gate-modules-need-full-view-element-audit.md).
+func TestManagedPageHidesAllRemoteMountControlsWhenUnavailable(t *testing.T) {
+	id := "remote:0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		state string
+	}{
+		{"mounted"},
+		{"active"},
+		{"needs-attention"},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			var output strings.Builder
+			require.NoError(t, ManagedPage(Snapshot{Mounts: []Mount{{ID: id, Managed: true, State: test.state}}}, false, "csrf", true, false).Render(context.Background(), &output))
+			html := output.String()
+			assert.NotContains(t, html, `>Mount</button>`)
+			assert.NotContains(t, html, `>Unmount</button>`)
+			assert.NotContains(t, html, `>Delete</button>`)
+			assert.NotContains(t, html, "Add remote mount")
+			assert.NotContains(t, html, `class="actions"`)
+			assert.NotContains(t, html, `/storage/mounts/`)
+			assert.NotContains(t, html, `@web.`)
 		})
 	}
 }

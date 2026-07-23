@@ -13,7 +13,7 @@ templ SummaryCard(state State) {
 		</a></div><div class="mini-list"><div class="mini-row"><div><strong>Active units</strong><small>services, sockets, and timers</small></div><span class="badge active">{ fmt.Sprint(state.Summary.Active) }</span></div><div class="mini-row"><div><strong>Failed units</strong></div><span class="badge">{ fmt.Sprint(state.Summary.Failed) }</span></div></div></article>
 }
 
-templ Page(state State, filters Filters, options FilterOptions, csrf string, admin bool) {
+templ Page(state State, filters Filters, options FilterOptions, csrf string, admin bool, journalAvailable bool) {
 	<div class="page-stack">
 		<div class="page-intro">
 			<p>System-wide units managed by systemd through the authenticated broker. Only services, sockets, and timers are exposed.</p>
@@ -68,7 +68,9 @@ templ Page(state State, filters Filters, options FilterOptions, csrf string, adm
 								<td>{ unit.UnitFileState }</td>
 								<td>
 									<div class="actions">
-										<a class="button secondary" href={ templ.SafeURL("/services/" + unit.Name + "/logs") }>Logs</a>
+										if journalAvailable {
+											<a class="button secondary" href={ templ.SafeURL("/services/" + unit.Name + "/logs") }>Logs</a>
+										}
 										if !admin {
 											<span class="card-subtle">Controls unavailable</span>
 										} else {

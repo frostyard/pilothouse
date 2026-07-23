@@ -18,6 +18,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -36,6 +37,7 @@ type BrokerClient interface {
 
 type Server struct {
 	broker       BrokerClient
+	capabilities capabilityCache
 	crossOrigin  *http.CrossOriginProtection
 	logger       *slog.Logger
 	loginCSRF    string
@@ -94,6 +96,10 @@ func NewServer(registry *platform.Registry, brokerClient BrokerClient, logger *s
 	return s, nil
 }
 
+func (s *Server) Capabilities(context.Context) capability.Set {
+	return s.capabilities.get()
+}
+
 func (s *Server) CSRFToken(r *http.Request) string {
 	return sessionFromContext(r.Context()).data.CSRF
 }
@@ -134,7 +140,9 @@ func (s *Server) Execute(ctx context.Context, r *http.Request, action string, pa
 	if session.token == "" {
 		return broker.ErrUnauthorized
 	}
-	return s.broker.Action(ctx, session.token, action, parameters, r.FormValue("confirmation"))
+	err := s.broker.Action(ctx, session.token, action, parameters, r.FormValue("confirmation"))
+	s.capabilities.noteResult(err)
+	return err
 }
 
 func (s *Server) Handler() http.Handler {
@@ -150,7 +158,9 @@ func (s *Server) Query(ctx context.Context, id string, parameters map[string]str
 	if session.token == "" {
 		return broker.ErrUnauthorized
 	}
-	return s.broker.Query(ctx, session.token, id, parameters, target)
+	err := s.broker.Query(ctx, session.token, id, parameters, target)
+	s.capabilities.noteResult(err)
+	return err
 }
 
 func (s *Server) StreamAction(ctx context.Context, r *http.Request, id string, parameters map[string]string, body io.Reader) error {
@@ -158,7 +168,9 @@ func (s *Server) StreamAction(ctx context.Context, r *http.Request, id string, p
 	if session.token == "" {
 		return broker.ErrUnauthorized
 	}
-	return s.broker.StreamAction(ctx, session.token, id, parameters, body)
+	err := s.broker.StreamAction(ctx, session.token, id, parameters, body)
+	s.capabilities.noteResult(err)
+	return err
 }
 
 func (s *Server) StreamQuery(ctx context.Context, id string, parameters map[string]string) (broker.StreamResult, error) {
@@ -166,7 +178,9 @@ func (s *Server) StreamQuery(ctx context.Context, id string, parameters map[stri
 	if session.token == "" {
 		return broker.StreamResult{}, broker.ErrUnauthorized
 	}
-	return s.broker.StreamQuery(ctx, session.token, id, parameters)
+	result, err := s.broker.StreamQuery(ctx, session.token, id, parameters)
+	s.capabilities.noteResult(err)
+	return result, err
 }
 
 func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Page) error {
@@ -179,10 +193,38 @@ func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Pa
 		Flash:     r.URL.Query().Get("notice"),
 		FlashKind: r.URL.Query().Get("kind"),
 		Identity:  s.Identity(r),
-		Modules:   s.registry.Manifests(),
+		Modules:   s.availableManifests(r.Context()),
 		Path:      r.URL.Path,
 		Title:     page.Title,
 	}, page.Body).Render(r.Context(), w)
+}
+
+// availableManifests returns the Manifest of every registered module whose
+// capability requirement (if any) is satisfied by the currently cached
+// capability.Set. A module with no capability requirement (it does not
+// implement platform.CapabilityGate) is always included, matching the
+// spec's default for system/files/activity/fleet/storage-inventory.
+func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
+	caps := s.Capabilities(ctx)
+	modules := s.registry.Modules()
+	manifests := make([]platform.Manifest, 0, len(modules))
+	for _, module := range modules {
+		if !moduleAvailable(module, caps) {
+			continue
+		}
+		manifests = append(manifests, module.Manifest())
+	}
+	return manifests
+}
+
+// moduleAvailable reports whether module is available given caps: a module
+// implementing platform.CapabilityGate is available only when caps has every
+// one of its RequiredCapabilities; a module that does not implement
+// CapabilityGate has no capability requirement and is always available. It
+// delegates to platform.Available so the gating decision has exactly one
+// implementation, shared with internal/platform's own tests.
+func moduleAvailable(module platform.Module, caps capability.Set) bool {
+	return platform.Available(module, caps)
 }
 
 func (s *Server) ValidateAction(w http.ResponseWriter, r *http.Request) bool {
@@ -238,13 +280,21 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		defer cancel()
 		session, err := s.broker.Session(ctx, cookie.Value)
 		if err != nil {
-			s.clearSessionCookie(w, r)
 			if errors.Is(err, broker.ErrUnauthorized) {
+				s.clearSessionCookie(w, r)
 				s.redirectToLogin(w, r)
 				return
 			}
+			// Transient broker outage: keep the session cookie so the
+			// capability set is refetched once the broker recovers (the
+			// staleAfterOutage path below), rather than logging the user
+			// out and losing that recovery signal.
+			s.capabilities.noteResult(err)
 			http.Error(w, "privileged broker unavailable", http.StatusServiceUnavailable)
 			return
+		}
+		if s.capabilities.staleAfterOutage() {
+			s.refreshCapabilities(r.Context(), cookie.Value)
 		}
 		requestContext := context.WithValue(r.Context(), sessionContextKey{}, requestSession{data: session, token: cookie.Value})
 		next.ServeHTTP(w, r.WithContext(requestContext))
@@ -254,8 +304,12 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
+	caps := s.Capabilities(ctx)
 	cards := make([]platform.DashboardCard, 0)
 	for _, module := range s.registry.Modules() {
+		if !moduleAvailable(module, caps) {
+			continue
+		}
 		moduleCards, err := module.Dashboard(ctx, s)
 		if err != nil {
 			s.logger.Warn("dashboard module unavailable", "error", err, "module", module.Manifest().ID)
@@ -321,8 +375,26 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.renderLogin(w, r, "Invalid username or password.", username)
 		return
 	}
+	s.refreshCapabilities(r.Context(), response.Token)
 	s.setSessionCookie(w, r, response.Token)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// refreshCapabilities fetches the broker's current capability.Set and
+// caches it. It derives its own bounded timeout from ctx (never
+// context.Background()) so an unresponsive broker cannot hang the caller
+// indefinitely. On failure, the previous cached Set (or the zero Set before
+// any successful fetch) is left in place and the failure is logged.
+func (s *Server) refreshCapabilities(ctx context.Context, token string) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var caps capability.Set
+	if err := s.broker.Query(fetchCtx, token, broker.QueryCapabilities, nil, &caps); err != nil {
+		s.logger.Warn("refresh capabilities", "error", err)
+		s.capabilities.noteResult(err)
+		return
+	}
+	s.capabilities.set(caps)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

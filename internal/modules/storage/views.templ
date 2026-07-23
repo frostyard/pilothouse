@@ -33,19 +33,19 @@ templ Page(snapshot Snapshot, unavailable bool) {
 	</div>
 }
 
-templ ManagedPage(snapshot Snapshot, unavailable bool, csrf string, admin bool) {
+templ ManagedPage(snapshot Snapshot, unavailable bool, csrf string, admin bool, remoteMountsAvailable bool) {
 	<div class="page-stack">
 		<div class="page-intro">
 			<p>{ fmt.Sprintf("%d active mounts · %s usable · %s used", snapshot.Summary.ActiveMounts, capacity(snapshot.Summary.UsableBytes), capacity(snapshot.Summary.UsedBytes)) }</p>
-			if admin {
+			if admin && remoteMountsAvailable {
 				<a class="button" href="/storage/mounts/new">Add remote mount</a>
 			}
 		</div>
-		@ManagedSnapshotRegion(snapshot, unavailable, csrf, admin)
+		@ManagedSnapshotRegion(snapshot, unavailable, csrf, admin, remoteMountsAvailable)
 	</div>
 }
 
-templ ManagedSnapshotRegion(snapshot Snapshot, unavailable bool, csrf string, admin bool) {
+templ ManagedSnapshotRegion(snapshot Snapshot, unavailable bool, csrf string, admin bool, remoteMountsAvailable bool) {
 	<section id="storage-snapshot" class="storage-snapshot" hx-get="/storage" hx-trigger="every 30s" hx-select="#storage-snapshot" hx-target="#storage-snapshot" hx-swap="outerHTML">
 		if unavailable {
 			<div class="empty-state">Storage status is unavailable.</div>
@@ -53,7 +53,7 @@ templ ManagedSnapshotRegion(snapshot Snapshot, unavailable bool, csrf string, ad
 			{{ anchors := snapshotAnchorSet(snapshot) }}
 			@StorageMetrics(snapshot.Summary)
 			@StorageAttention(snapshot.Findings, snapshot.Truncated, anchors.findings)
-			@ManagedMountTable(snapshot.Mounts, anchors.mounts, csrf, admin)
+			@ManagedMountTable(snapshot.Mounts, anchors.mounts, csrf, admin, remoteMountsAvailable)
 			@Topology(snapshot.Resources, snapshot.Relations, anchors.resourceByID)
 			@ResourceInventory(snapshot.Resources, anchors.resources)
 			@BackendStates(snapshot.Backends)
@@ -174,7 +174,7 @@ templ MountTable(mounts []Mount, mountIDs []string) {
 	</article>
 }
 
-templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bool) {
+templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bool, remoteMountsAvailable bool) {
 	<article class="card table-card">
 		<div class="table-toolbar"><h2>Mounted storage</h2><span>{ fmt.Sprintf("%d mounts", len(mounts)) }</span></div>
 		if len(mounts) == 0 {
@@ -184,15 +184,17 @@ templ ManagedMountTable(mounts []Mount, mountIDs []string, csrf string, admin bo
 				for index, mount := range mounts {
 					<tr id={ mountIDs[index] }><td>{ mount.Target }</td><td>{ mount.Source }</td><td>{ mount.Filesystem }</td><td>{ fmt.Sprintf("%.0f%%", mount.UsedPercent) }</td><td><span class={ "badge", string(mount.Health) }>{ mount.State }</span></td><td>
 						if id := managedMountID(mount.ID); admin && mount.Managed && id != "" {
-							<div class="actions">
-								if mount.State != "mounted" && mount.State != "needs-attention" {
-									<form method="post" action={ "/storage/mounts/" + id + "/mount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Mount</button></form>
-								}
-								if mount.State == "mounted" {
-									<form method="post" action={ "/storage/mounts/" + id + "/unmount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Unmount</button></form>
-								}
-								<form method="post" action={ "/storage/mounts/" + id + "/delete" }><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Delete</button></form>
-							</div>
+							if remoteMountsAvailable {
+								<div class="actions">
+									if mount.State != "mounted" && mount.State != "needs-attention" {
+										<form method="post" action={ "/storage/mounts/" + id + "/mount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Mount</button></form>
+									}
+									if mount.State == "mounted" {
+										<form method="post" action={ "/storage/mounts/" + id + "/unmount" }><input type="hidden" name="csrf" value={ csrf }/><button class="button secondary" type="submit">Unmount</button></form>
+									}
+									<form method="post" action={ "/storage/mounts/" + id + "/delete" }><input type="hidden" name="csrf" value={ csrf }/><button class="button danger" type="submit">Delete</button></form>
+								</div>
+							}
 						}
 					</td></tr>
 				}

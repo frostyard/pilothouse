@@ -10,8 +10,17 @@ import (
 	"unicode"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
+
+// remoteMountCapabilities are the capabilities required by storage's three
+// remote-mount routes (add/create/lifecycle). Storage's own inventory
+// (GET /storage, Dashboard, Health) has no capability requirement per
+// docs/capabilities.md's QueryStorageState exception, so Module
+// deliberately does not implement platform.CapabilityGate — only these
+// routes are wrapped in platform.Gate.
+var remoteMountCapabilities = []capability.ID{capability.Systemd}
 
 type Module struct{}
 
@@ -55,9 +64,10 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 		defer cancel()
 		snapshot, err := queryState(ctx, host)
-		_ = host.Render(w, r, platform.Page{Active: "storage", Body: ManagedPage(snapshot, err != nil, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Storage capacity", Title: "Storage"})
+		remoteMountsAvailable := host.Capabilities(r.Context()).Has(capability.Systemd)
+		_ = host.Render(w, r, platform.Page{Active: "storage", Body: ManagedPage(snapshot, err != nil, host.CSRFToken(r), host.Identity(r).Admin, remoteMountsAvailable), Eyebrow: "Storage capacity", Title: "Storage"})
 	})
-	mux.HandleFunc("GET /storage/mounts/new", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /storage/mounts/new", platform.Gate(host, remoteMountCapabilities, func(w http.ResponseWriter, r *http.Request) {
 		if !host.Identity(r).Admin {
 			http.Error(w, "administrator access required", http.StatusForbidden)
 			return
@@ -71,8 +81,8 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		_ = host.Render(w, r, platform.Page{Active: "storage", Body: RemoteMountForm(protocol, host.CSRFToken(r)), Eyebrow: "Managed remote storage", Title: "Add remote mount"})
-	})
-	mux.HandleFunc("POST /storage/mounts", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /storage/mounts", platform.Gate(host, remoteMountCapabilities, func(w http.ResponseWriter, r *http.Request) {
 		if !host.Identity(r).Admin {
 			http.Error(w, "administrator access required", http.StatusForbidden)
 			return
@@ -91,8 +101,8 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			cancel()
 		}
 		storageRedirect(w, r, success, err)
-	})
-	mux.HandleFunc("POST /storage/mounts/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /storage/mounts/{id}/{action}", platform.Gate(host, remoteMountCapabilities, func(w http.ResponseWriter, r *http.Request) {
 		if !host.Identity(r).Admin {
 			http.Error(w, "administrator access required", http.StatusForbidden)
 			return
@@ -117,7 +127,7 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
 		cancel()
 		storageRedirect(w, r, success, err)
-	})
+	}))
 }
 
 func validRemoteProtocol(protocol string) bool {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -55,8 +56,16 @@ func (*Module) Manifest() platform.Manifest {
 	return platform.Manifest{ID: "services", Name: "Services", Description: "Inspect and manage systemd services, sockets, and timers", Icon: "server", Order: 35, Path: "/services"}
 }
 
+// RequiredCapabilities makes the whole module — its nav entry, dashboard
+// card, and every route mounted below — available only on a host that
+// advertises systemd. The journal sub-feature (GET /services/{unit}/logs)
+// additionally requires journald; see the route-level platform.Gate below.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Systemd}
+}
+
 func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /services", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /services", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		state, err := queryState(ctx, host)
@@ -73,9 +82,10 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		options := filterOptions(state)
 		filters = normalizeFilters(filters, options)
 		state = filterState(state, filters)
-		_ = host.Render(w, r, platform.Page{Active: "services", Body: Page(state, filters, options, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "systemd control plane", Title: "Services"})
-	})
-	mux.HandleFunc("GET /services/{unit}/logs", func(w http.ResponseWriter, r *http.Request) {
+		journalAvailable := host.Capabilities(r.Context()).Has(capability.Journald)
+		_ = host.Render(w, r, platform.Page{Active: "services", Body: Page(state, filters, options, host.CSRFToken(r), host.Identity(r).Admin, journalAvailable), Eyebrow: "systemd control plane", Title: "Services"})
+	}))
+	mux.HandleFunc("GET /services/{unit}/logs", platform.Gate(host, []capability.ID{capability.Systemd, capability.Journald}, func(w http.ResponseWriter, r *http.Request) {
 		unit := r.PathValue("unit")
 		if !validUnitName(unit) {
 			http.NotFound(w, r)
@@ -89,8 +99,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			journal = Journal{Unit: unit}
 		}
 		_ = host.Render(w, r, platform.Page{Active: "services", Body: Logs(journal, unavailable), Eyebrow: "systemd diagnostics", Title: unit + " logs"})
-	})
-	mux.HandleFunc("POST /services/{unit}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /services/{unit}/{action}", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
@@ -111,7 +121,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"unit": unit})
 		m.redirect(w, r, fmt.Sprintf("%s %s", unit, actionNotices[action]), err)
-	})
+	}))
 }
 
 func normalizeFilters(filters Filters, options FilterOptions) Filters {

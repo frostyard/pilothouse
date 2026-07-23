@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -44,8 +45,15 @@ func (m *Module) Manifest() platform.Manifest {
 	}
 }
 
+// RequiredCapabilities makes the whole module — its nav entry, dashboard
+// card, and every route mounted below — available only on a host that
+// advertises docker.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Docker}
+}
+
 func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /docker", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /docker", platform.Gate(host, []capability.ID{capability.Docker}, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		state, err := queryState(ctx, host)
@@ -57,8 +65,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			Active: "docker", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin),
 			Eyebrow: "Moby workloads", Title: "Docker",
 		})
-	})
-	mux.HandleFunc("GET /docker/containers/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /docker/containers/{id}/logs", platform.Gate(host, []capability.ID{capability.Docker}, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validContainerID(id) {
 			http.NotFound(w, r)
@@ -72,8 +80,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			logs = Logs{ID: id, Name: id}
 		}
 		_ = host.Render(w, r, platform.Page{Active: "docker", Body: LogsView(logs, unavailable), Eyebrow: "container diagnostics", Title: logs.Name + " logs"})
-	})
-	mux.HandleFunc("POST /docker/containers/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /docker/containers/{id}/{action}", platform.Gate(host, []capability.ID{capability.Docker}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
@@ -91,8 +99,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
 		m.redirect(w, r, fmt.Sprintf("Container %sd", r.PathValue("action")), err)
-	})
-	mux.HandleFunc("POST /docker/images/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /docker/images/{id}/{action}", platform.Gate(host, []capability.ID{capability.Docker}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
@@ -108,7 +116,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		defer cancel()
 		err := host.Execute(ctx, r, broker.ActionDockerRemoveImage, map[string]string{"id": id})
 		m.redirect(w, r, "Image removed", err)
-	})
+	}))
 }
 
 func queryLogs(ctx context.Context, host platform.Host, id string) (Logs, error) {

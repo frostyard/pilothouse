@@ -13,7 +13,7 @@ import (
 func TestPageRendersUnitActionsAndProtectsBrokerUnits(t *testing.T) {
 	state := State{Units: []Unit{{Name: "backup.timer", ActiveState: "active"}, {Name: "pilothouse.service", ActiveState: "active"}}}
 	var output strings.Builder
-	require.NoError(t, Page(state, Filters{}, FilterOptions{}, "token", true).Render(context.Background(), &output))
+	require.NoError(t, Page(state, Filters{}, FilterOptions{}, "token", true, true).Render(context.Background(), &output))
 	html := output.String()
 	assert.Contains(t, html, "/services/backup.timer/stop")
 	assert.Contains(t, html, "/services/backup.timer/disable")
@@ -31,7 +31,7 @@ func TestPageRendersFiltersAndUnitDescriptionSpacing(t *testing.T) {
 	filters := Filters{Query: "backup", Status: "failed", Type: "timer", UnitFileState: "enabled"}
 	options := FilterOptions{Statuses: []string{"active", "inactive", "failed", "activating"}, UnitFileStates: []string{"disabled", "enabled"}}
 	var output strings.Builder
-	require.NoError(t, Page(state, filters, options, "token", true).Render(context.Background(), &output))
+	require.NoError(t, Page(state, filters, options, "token", true, true).Render(context.Background(), &output))
 
 	html := output.String()
 	for _, value := range []string{`class="card filter-bar"`, `class="filter-bar-actions"`, `type="search"`, `value="backup"`, `value="failed" selected`, `value="timer" selected`, `value="enabled" selected`, `name="query" value="backup"`, `name="status" value="failed"`, `name="type" value="timer"`, `name="unit-file" value="enabled"`, `href="/services"`, "Reset filters", "1 of 4 shown", `<small class="table-detail">Nightly backup</small>`} {
@@ -42,8 +42,31 @@ func TestPageRendersFiltersAndUnitDescriptionSpacing(t *testing.T) {
 
 func TestPageRendersFilteredEmptyState(t *testing.T) {
 	var output strings.Builder
-	require.NoError(t, Page(State{Summary: Summary{Total: 3}}, Filters{Status: "failed"}, FilterOptions{Statuses: []string{"failed"}}, "", false).Render(context.Background(), &output))
+	require.NoError(t, Page(State{Summary: Summary{Total: 3}}, Filters{Status: "failed"}, FilterOptions{Statuses: []string{"failed"}}, "", false, true).Render(context.Background(), &output))
 	assert.Contains(t, output.String(), "No units match these filters.")
+}
+
+// TestPageLogsControlFollowsJournalAvailable asserts, per AGENTS.md's
+// rendering-test rule for a changed component invocation, that Page's
+// rendered HTML contains the Logs link/button when journalAvailable is
+// true and omits it entirely when false — and that neither rendering ever
+// leaks the literal "@web." call syntax.
+func TestPageLogsControlFollowsJournalAvailable(t *testing.T) {
+	state := State{Units: []Unit{{Name: "backup.timer", ActiveState: "active"}}}
+
+	var withJournal strings.Builder
+	require.NoError(t, Page(state, Filters{}, FilterOptions{}, "token", true, true).Render(context.Background(), &withJournal))
+	htmlWithJournal := withJournal.String()
+	assert.Contains(t, htmlWithJournal, `href="/services/backup.timer/logs"`)
+	assert.Contains(t, htmlWithJournal, ">Logs<")
+	assert.NotContains(t, htmlWithJournal, "@web.")
+
+	var withoutJournal strings.Builder
+	require.NoError(t, Page(state, Filters{}, FilterOptions{}, "token", true, false).Render(context.Background(), &withoutJournal))
+	htmlWithoutJournal := withoutJournal.String()
+	assert.NotContains(t, htmlWithoutJournal, "/services/backup.timer/logs")
+	assert.NotContains(t, htmlWithoutJournal, ">Logs<")
+	assert.NotContains(t, htmlWithoutJournal, "@web.")
 }
 
 func TestLogsRendersEntriesDisclosureAndBackLink(t *testing.T) {

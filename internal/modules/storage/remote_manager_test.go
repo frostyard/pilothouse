@@ -511,7 +511,7 @@ func TestRemoteMountCredentialOnlyAppearsInCredentialArtifact(t *testing.T) {
 	snapshot, err := manager.State(context.Background())
 	require.NoError(t, err)
 	var html strings.Builder
-	require.NoError(t, ManagedPage(snapshot, false, "csrf-token", true).Render(context.Background(), &html))
+	require.NoError(t, ManagedPage(snapshot, false, "csrf-token", true, true).Render(context.Background(), &html))
 	invalid := request
 	invalid.Target = "/etc/never-record-this-secret"
 	createErr := manager.Create(context.Background(), invalid)

@@ -128,6 +128,113 @@ doesn't actually need `Journald`, instead of losing the whole module.
 `registerLogs` needs both `Systemd` and `Journald` uniformly, so its single
 registration is guarded by one `caps.HasAll(...)` check.
 
+## Whole-module web-side capability gating
+
+The guard above is daemon-side and per-registration. A separate,
+web-side mechanism lets a whole `platform.Module` declare that its entire
+surface — nav entry, dashboard cards, and routes — depends on host
+capabilities the web process itself can check per request, via the
+`capability.Set` cache described in `yeti/OVERVIEW.md`'s "Web-side
+capability fetch/cache". The set reaches both halves of the mechanism
+through `Host.Capabilities(context.Context) capability.Set`, a method added
+to the `platform.Host` interface in #54 and satisfied by
+`internal/web.Server` from the cache above; because it takes a
+`context.Context` (not `*http.Request`), it is callable from both HTTP
+handlers and `Module.Dashboard(ctx, host)`. `platform.Gate` calls it itself
+(`host.Capabilities(r.Context())`) on every request it wraps;
+`platform.Available` instead takes an already-fetched `capability.Set` as a
+parameter, which `internal/web.Server` obtains from that same method before
+filtering the nav list or the dashboard loop. Implement
+`platform.CapabilityGate` on your `Module`:
+
+```go
+func (m *Module) RequiredCapabilities() []capability.ID {
+    return []capability.ID{capability.Docker}
+}
+```
+
+A module that does not implement `CapabilityGate` has no requirement and is
+always available — this is the default for `system`, `files`, `activity`,
+`fleet`, and storage's own inventory reads. `internal/web.Server` filters
+`CapabilityGate` modules out of both the shell's navigation list and the
+dashboard's per-module loop when a required capability is absent; skipped
+dashboard modules are omitted entirely (no `Dashboard()` call, no card, no
+error placeholder), since an unavailable surface is not rendered, not shown
+degraded.
+
+Routes stay mounted on the shared mux regardless — never register a route
+conditionally at startup based on capability. Instead, wrap the handler
+passed to `mux.HandleFunc` in `Mount` with `platform.Gate`:
+
+```go
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+    mux.HandleFunc("GET /docker", platform.Gate(host, m.RequiredCapabilities(), m.page(host)))
+}
+```
+
+`Gate` 404s the request when `host.Capabilities(ctx)` doesn't have every
+required capability, and otherwise delegates to the wrapped handler
+unchanged — including the zero-capabilities case, which always delegates.
+This keeps a capability-gated module indistinguishable from a route that
+simply doesn't exist, both in navigation/dashboard and at the URL itself.
+
+`Gate`/`Available`/the dashboard loop only cover requests that arrive
+through a module's own `Mount`-registered routes, or the web-side
+nav/dashboard registries in `internal/web/server.go` — they do nothing for
+other in-process code that holds a reference to the module (or one of its
+narrower interfaces) and calls it directly. `internal/modules/attention`
+is exactly that: it holds a `[]platform.HealthProvider` and calls
+`provider.Health(ctx, host)` on each one to build the aggregated
+"Attention" view. If your module implements `CapabilityGate` and is also
+passed to `attention.New(...)` in `cmd/pilothouse/main.go`, its `Health`
+must not be reachable when the required capability is absent either —
+`attention.Module.findings` handles this by type-asserting each provider
+to `platform.CapabilityGate` and skipping both the `Health` call and any
+"unavailable" finding when `host.Capabilities(ctx)` doesn't satisfy its
+`RequiredCapabilities`. When adding a new capability-gated module, grep
+for every caller of its exported methods and every cross-module interface
+it implements — not just `Mount()` — and apply the same
+type-assert-and-check wherever one of those calls happens outside the
+module's own package.
+
+### Route-level gating for a partial-gate module
+
+Not every module fits the whole-module shape above. `storage` gates only
+its three remote-mount routes on `capability.Systemd`
+(`GET /storage/mounts/new`, `POST /storage/mounts`, and
+`POST /storage/mounts/{id}/{action}`, which covers mount, unmount, and
+delete) while its inventory (nav entry, dashboard card, `GET /storage`)
+stays available with no capability requirement at all, per
+`docs/capabilities.md`'s `QueryStorageState` exception. `storage.Module`
+deliberately does **not** implement `platform.CapabilityGate` — implementing
+it would make the whole module (including inventory) disappear when
+`Systemd` is absent, which is wrong here. Instead, `Mount` wraps just the
+three routes directly:
+
+```go
+var remoteMountCapabilities = []capability.ID{capability.Systemd}
+
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+    mux.HandleFunc("GET /storage", m.page(host)) // ungated
+    mux.HandleFunc("GET /storage/mounts/new", platform.Gate(host, remoteMountCapabilities, m.newMount(host)))
+    // ...POST /storage/mounts and POST /storage/mounts/{id}/{action} likewise
+}
+```
+
+When a module gates only a subset of its routes like this, audit every
+view element that targets one of the gated routes — not just the ones a
+spec happens to name by example — and collapse them behind one flag as a
+unit. `storage`'s `GET /storage` handler computes
+`host.Capabilities(r.Context()).Has(capability.Systemd)` once and threads
+it into `views.templ`'s `ManagedPage`/`ManagedSnapshotRegion`/
+`ManagedMountTable` as a `remoteMountsAvailable bool` parameter (a sibling
+of the existing `admin bool`): the "Add remote mount" link and the entire
+per-mount `Mount`/`Unmount`/`Delete` actions block are gated on that single
+flag, so a host missing `Systemd` never renders a link, button, or form
+pointing at a route that would 404 — see
+`docs/agents/skills/partial-gate-modules-need-full-view-element-audit.md`
+for the failure mode this avoids.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
