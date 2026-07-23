@@ -522,6 +522,107 @@ rules for adding a new module (routes, actions, queries).
 See `docs/authentication.md` for the full login/session/authorization/audit
 model and deployment rules (cookie flags, allowed origins, PAM policy).
 
+### Web-side capability gating (end state, #54)
+
+Several bullets above narrate individual pieces of #54 (phase 1b of the #35
+decomposition, per `docs/capabilities.md`) as they landed — the web-side
+fetch/cache, the gating mechanism, and each adopting module. This subsection
+is the consolidated end-state contract for the whole issue. The unprivileged web
+process (`cmd/pilothouse`) derives its navigation, dashboard cards, routes,
+and actions from the broker's advertised `capability.Set`, so a host missing
+optional tooling never shows a dead link or a button that always fails.
+
+- **Capability fetch/cache lifecycle** (`internal/web/capabilities.go`,
+  `internal/web/server.go`). `broker.QueryCapabilities` is an *authenticated*
+  query, so the set cannot be fetched before login. `Server.refreshCapabilities`
+  fetches it (1) on each successful `login`, once a session token exists, and
+  (2) in the `authenticate` middleware on the first successful authenticated
+  request *after* a broker transport/unavailable failure — the cache's `down`
+  flag is set by `capabilityCache.noteResult`, which the `Session` branch of
+  `authenticate` and the `Query`/`Execute`/`StreamAction`/`StreamQuery`
+  wrappers call after their underlying broker call whenever the error wraps
+  `broker.ErrUnavailable` (as does `refreshCapabilities` itself on a failed
+  fetch, so an outage that also swallows the refetch stays marked and is
+  retried on the following request). Only `staleAfterOutage()` triggers a
+  refetch, at most one per request, and it runs inside `authenticate` *after*
+  that request's own `Session()` validation has already succeeded — not at the
+  literal top of the handler, and never for `publicPath` requests, which skip
+  the authenticated branch entirely. It is **never fetched pre-login**
+  (the login page needs no capabilities; `Server.Capabilities` returns the
+  zero, all-absent `Set` until the first successful fetch) and **never cached
+  for the process lifetime**: the filtered nav/dashboard/route view is
+  re-derived from the latest fetched set on every request, and any
+  `ErrUnavailable` — which is what a broker restart looks like to the
+  stateless per-request client — marks the cache stale (the previously fetched
+  set is kept and still served meanwhile, only the `down` flag flips) so the
+  next successful authenticated request refetches. A restarted broker advertising a different
+  set is therefore followed without restarting the web process. Authorization
+  failures, request-validation errors, and domain errors never mark the cache
+  down or trigger a refetch. `refreshCapabilities` derives a bounded 2s
+  timeout from the caller's context and, on failure, leaves the previous set
+  in place rather than clearing it.
+- **`platform.CapabilityGate` / `platform.Gate` mechanism**
+  (`internal/platform/capability.go`). A `Module` optionally implements
+  `CapabilityGate` (`RequiredCapabilities() []capability.ID`) to declare that
+  its whole surface — nav entry, dashboard cards, routes — needs those
+  capabilities present (`Set.HasAll` semantics). `platform.Available(module,
+  caps)` applies that test to a whole module (default-available when the
+  module doesn't implement the interface); `internal/web/server.go`'s
+  `moduleAvailable`/`availableManifests` filter the shell's nav list, and the
+  `dashboard` loop skips a gated-absent module entirely (no `Dashboard()`
+  call, no card, no error placeholder). `platform.Gate(host, ids, next)`
+  wraps an individual `Mount`-registered handler and 404s when
+  `host.Capabilities(r.Context())` doesn't `HasAll(ids...)`. `Gate` reads the
+  set itself per request; `Available` takes an already-fetched set, which
+  `web.Server` obtains from the same source: `Capabilities(context.Context)
+  capability.Set`, added to the `platform.Host` interface in #54 and satisfied
+  by `web.Server` from the cache above. Because it takes a `context.Context`
+  rather than an `*http.Request`, it is callable from both HTTP handlers and
+  `Module.Dashboard(ctx, host)`. Modules implementing `CapabilityGate`
+  (whole-module gate):
+  - `services` → `Systemd` (plus a `Systemd AND Journald` `Gate` on just
+    `GET /services/{unit}/logs`)
+  - `logs` → `Systemd AND Journald`
+  - `backups` → `Systemd`
+  - `maintenance` → `Systemd`
+  - `podman` → `Podman`
+  - `docker` → `Docker`
+  - `incus` → `Incus`
+
+  Modules with partial or no gating: `storage` deliberately does *not*
+  implement `CapabilityGate` — its inventory (nav, dashboard card,
+  `GET /storage`) is always available, and only its three remote-mount routes
+  (`GET /storage/mounts/new`, `POST /storage/mounts`, and
+  `POST /storage/mounts/{id}/{action}`, which covers mount, unmount, and
+  delete) are wrapped in `platform.Gate(host, {Systemd}, ...)`, with the "Add
+  remote mount" link and the entire per-mount actions block collapsed behind
+  the same `Systemd` flag in `views.templ`. `system`, `files`, `activity`, and
+  `fleet` declare no capability requirement and are always available.
+- **Attention's per-provider capability skip**
+  (`internal/modules/attention/module.go`). The attention aggregator holds
+  `[]platform.HealthProvider` and calls `Health` directly — outside any
+  `Mount` route or the nav/dashboard filter — so its `findings` type-asserts
+  each provider to `platform.CapabilityGate` and, when `host.Capabilities(ctx)`
+  doesn't `HasAll` its `RequiredCapabilities`, skips it outright: no `Health`
+  call and no "unavailable" finding, since an absent module is not a failed
+  one. On a no-systemd host, `services`/`maintenance`/`backups` contribute
+  nothing to `/attention` rather than a degraded placeholder.
+- **Routes stay mounted; absence 404s at request time.** No route is ever
+  conditionally registered at startup based on capability — every module's
+  `Mount` runs unconditionally and mounts all its routes on the shared mux.
+  Absence is enforced at request time by `platform.Gate` (per route) and
+  reflected in nav/dashboard by `moduleAvailable` (per render), so a gated-off
+  surface is indistinguishable from a route that does not exist, both in the
+  UI and at the URL.
+- **sysext is out of scope for #54.** The sysext web surface is unchanged:
+  `cmd/pilothouse`'s `newRegistry` still constructs `sysext.NewSystemManager`
+  directly from the web process's own `--updex` config, and `sysext.Module`
+  implements neither `CapabilityGate` nor any route-level `platform.Gate`.
+  Web-side capability-gating of sysext reads is deferred to #52, when those
+  reads move behind the broker. The daemon-side per-action
+  `registerSysextActions` guard described earlier is #50's phase-1a work in
+  `cmd/pilothoused`, not a web-side gate.
+
 ### templ + HTMX, server-rendered, progressive enhancement
 
 - `internal/web/shell.templ` provides the base `Layout`, sidebar navigation

@@ -259,3 +259,32 @@ like `QueryActivity`/`QueryJobs`), and its handler returns exactly the
 therefore `none` in the same sense as `QueryActivity`/`QueryJobs` above: no
 guard is possible or needed, because the query's entire purpose is to
 report what the guard inputs currently are.
+
+## Phase 1b (#54) — web-side gating complete
+
+Phase 1a (#50) taught `pilothoused` to gate its own privileged registrations
+on the probed `capability.Set` and published this table as the binding
+ID→capability map. Phase 1b (#54) is complete: the unprivileged web process
+(`cmd/pilothouse`) now derives its **effective module set, navigation, routes,
+dashboard cards, and actions** from this same table. It fetches the advertised
+`capability.Set` via `QueryCapabilities` on login (and re-fetches on the first
+successful authenticated request after a broker outage), filters navigation
+and dashboard cards through `platform.Available`, and gates individual routes
+with `platform.Gate`. `platform.Registry` itself is still built
+unconditionally at startup and every module's `Mount` still runs — routes stay
+mounted on the shared mux, and absence is enforced per request: a request for
+a route whose capability is missing 404s at request time, and the module's
+nav entry and dashboard card are omitted from that render. See `docs/modules.md`'s
+"Whole-module web-side capability gating" and `yeti/OVERVIEW.md`'s "Web-side
+capability gating (end state, #54)" for the mechanism and the exact
+module→capability mapping the web process applies.
+
+The **sysext web surface is unchanged and out of scope for #54.** The web
+process still constructs `sysext.NewSystemManager` directly from its own
+`--updex` config, and no `platform.CapabilityGate` or `platform.Gate` is
+applied to any sysext route, navigation entry, dashboard card, or action.
+Web-side capability-gating of sysext reads is deferred to **#52**, where
+those reads move behind the broker. The sysext *action* rows above
+(`ActionSysext*`) describe the daemon-side (`cmd/pilothoused`) per-action guard
+from phase 1a (#50); they are the broker's registration guard, not a web-side
+gate, and #54 does not touch them.

@@ -128,8 +128,17 @@ web-side mechanism lets a whole `platform.Module` declare that its entire
 surface — nav entry, dashboard cards, and routes — depends on host
 capabilities the web process itself can check per request, via the
 `capability.Set` cache described in `yeti/OVERVIEW.md`'s "Web-side
-capability fetch/cache". Implement `platform.CapabilityGate` on your
-`Module`:
+capability fetch/cache". The set reaches both halves of the mechanism
+through `Host.Capabilities(context.Context) capability.Set`, a method added
+to the `platform.Host` interface in #54 and satisfied by
+`internal/web.Server` from the cache above; because it takes a
+`context.Context` (not `*http.Request`), it is callable from both HTTP
+handlers and `Module.Dashboard(ctx, host)`. `platform.Gate` calls it itself
+(`host.Capabilities(r.Context())`) on every request it wraps;
+`platform.Available` instead takes an already-fetched `capability.Set` as a
+parameter, which `internal/web.Server` obtains from that same method before
+filtering the nav list or the dashboard loop. Implement
+`platform.CapabilityGate` on your `Module`:
 
 ```go
 func (m *Module) RequiredCapabilities() []capability.ID {
