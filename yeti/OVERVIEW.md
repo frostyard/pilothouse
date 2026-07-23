@@ -85,6 +85,41 @@ directory. Current modules:
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
+**In progress (#51, host-image status): the bootc status parser.**
+`internal/modules/maintenance/hostimage.go` adds the read-only host-image
+domain types — `Deployment` (image reference + manifest digest) and
+`HostImageStatus` (the booted/staged/rollback deployment slots, a three-state
+`SoftRebootCapable`, and `BootcAvailable`/`BootcError`) — plus
+`ParseBootcStatus`, a pure decoder for `bootc status --json` output. As of
+this commit nothing calls it: there is no broker query, no manager, and no
+view for host-image status yet, and the `maintenance` module's behavior is
+unchanged. Contracts worth knowing before wiring it up:
+
+- The file executes nothing. Its imports are limited to
+  `encoding/json`/`fmt`/`strings`, enforced mechanically by a test over the
+  file's AST, so no bootc invocation — least of all a mutation such as
+  upgrade, switch, rebase, or rollback — can originate here. Obtaining the
+  bytes is a later caller's job: no code in the tree runs bootc for host-image
+  status yet, and when one does it will run only `bootc status --json`, through
+  an injected command runner.
+- A structurally malformed payload returns a non-nil error together with a
+  zero `HostImageStatus` (`BootcAvailable` false), never partial data. The
+  caller decides whether to record that as `HostImageStatus.BootcError` on an
+  otherwise usable report; `ParseBootcStatus` itself never sets `BootcError`.
+- `SoftRebootCapable` is three-state: non-nil true/false when the host's bootc
+  exposes soft-reboot eligibility, nil when it does not. The key is
+  `softRebootCapable` on a boot entry, confirmed against bootc's published
+  schema (`crates/lib/src/spec.rs`: `BootEntry.soft_reboot_capable`, camelCase,
+  `#[serde(default)]`; `HostStatus` has no such field). The parser prefers the
+  staged entry — the deployment a soft reboot would activate — and falls back
+  to the booted entry when nothing is staged (upstream computes the flag per
+  deployment for every reported slot, booted included, so that fallback is not
+  a reinterpretation of a staged-only field). A bootc new enough to have the
+  field always emits it — it is a plain `bool` with no `skip_serializing_if`,
+  so it serializes even when false — which means an absent key reliably
+  indicates a bootc predating soft-reboot support: unknown, never a parse
+  error and never false.
+
 ## Key Patterns
 
 ### The broker is the only privilege boundary
