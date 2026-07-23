@@ -120,9 +120,17 @@ rules for adding a new module (routes, actions, queries).
   constructed) — systemd, journald, `updex`, `systemd-sysext`, bootc,
   rpm-ostree, the `rpm-ostreed-automatic`/`bootc-fetch-apply-updates`
   automatic-update unit-file pairs, and the Podman/Docker/Incus engine
-  sockets — and never fails fatally: every probe narrows to "absent" on
-  any error instead of erroring, so a host missing any combination of this
-  optional tooling still starts the daemon. The probed `capability.Set` is
+  sockets — and probing itself never fails fatally: every probe narrows to
+  "absent" on any error instead of erroring. As of this chunk that
+  guarantee is fully wired through to daemon startup only for the engine
+  capabilities: a host with Podman, Docker, and/or Incus absent or
+  unreachable still starts the daemon, registering only the engines
+  actually present. It is *not yet* true for the rest of the probed set —
+  manager construction for services/logs/backups/storage (each of which
+  opens a system D-Bus connection) is still unconditional and can still
+  return a fatal `run()` error on a host missing systemd, independent of
+  what the probe itself observed; that construction-safety gap is closed
+  in a later chunk of this same phase. The probed `capability.Set` is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
   (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —

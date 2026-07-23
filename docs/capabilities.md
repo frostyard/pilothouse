@@ -5,16 +5,19 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. This chunk is documentation-only: no registration is
-guarded yet. Later chunks in this phase convert registrations to match this
+capability-guarded. As of c6, only `registerPodman`/`registerDocker`/
+`registerIncus` (and the new `QueryCapabilities` itself) are actually
+capability-guarded; every other row below still reflects a *future*
+guarantee that its own conversion chunk (c7-c11) has not landed yet. Later
+chunks in this phase convert the remaining registrations to match this
 table module by module; the final chunk's contract test enforces it.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
-constants and 15 `Query*` constants today — 50 IDs total, reproducible with:
+constants and 16 `Query*` constants today — 51 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 35
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 15
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 16
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -22,16 +25,19 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 50 IDs is registered exactly once across the four
+Every one of the 51 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 35/15 above, not IDs
-added on top. This table therefore has exactly 50 rows.
+via `StreamQueryRegistry`) — both are members of the 35/16 above, not IDs
+added on top. This table therefore has exactly 51 rows.
 
-This total becomes **51** once c6 lands `QueryCapabilities` (the new
-authenticated query that advertises the probed capability set). c12's
-contract test cross-checks its own ID count against this document — 50
-pre-phase, 51 once c6 has landed.
+`QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`) landed in
+c6 alongside the engine conversions and is included in both the count above
+and the query table below — this document is updated in the same chunk
+that registers the new ID, per the "every currently registered broker ID"
+invariant stated above. c12's contract test cross-checks its own ID count
+against this document, which is now 51 pre- and post- that chunk (the count
+does not change again for the rest of this phase).
 
 Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
@@ -77,12 +83,13 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionStorageUnmount` | storage (remote-mount) | systemd |
 | `ActionStorageDelete` | storage (remote-mount) | systemd |
 
-## Queries (15)
+## Queries (16)
 
 | Broker ID | Module | Capability |
 |---|---|---|
 | `QueryActivity` | activity | none |
 | `QueryBackupsState` | backups | systemd |
+| `QueryCapabilities` | capability | none *(unconditional — see below)* |
 | `QueryDockerLogs` | docker | docker |
 | `QueryDockerState` | docker | docker |
 | `QueryIncusState` | incus | incus |
@@ -186,3 +193,19 @@ table only fixes `QueryMaintenanceState`'s registration-level capability at
 list, but it is generic job-store infrastructure tied to no probed
 capability, exactly like `QueryActivity` — treated the same way:
 unconditional/`none`.
+
+## `QueryCapabilities` query
+
+`QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`), added in
+c6, is registered unconditionally by `registerCapabilities` in
+`cmd/pilothoused/main.go` — capability discovery itself requires no
+capability, since it is what reports the probed `capability.Set` in the
+first place. It is an ordinary authenticated broker query, not a new
+unauthenticated endpoint: any authenticated identity may call it (non-admin,
+like `QueryActivity`/`QueryJobs`), and its handler returns exactly the
+`capability.Set` produced by `internal/capability.Probe` at startup, whose
+`MarshalJSON` already yields the sorted, present-only
+`{"capabilities": [...]}` shape the query contract requires. This row is
+therefore `none` in the same sense as `QueryActivity`/`QueryJobs` above: no
+guard is possible or needed, because the query's entire purpose is to
+report what the guard inputs currently are.
