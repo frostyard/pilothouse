@@ -122,15 +122,41 @@ rules for adding a new module (routes, actions, queries).
   automatic-update unit-file pairs, and the Podman/Docker/Incus engine
   sockets — and probing itself never fails fatally: every probe narrows to
   "absent" on any error instead of erroring. As of this chunk that
-  guarantee is fully wired through to daemon startup only for the engine
-  capabilities: a host with Podman, Docker, and/or Incus absent or
-  unreachable still starts the daemon, registering only the engines
-  actually present. It is *not yet* true for the rest of the probed set —
-  manager construction for services/logs/backups/storage (each of which
-  opens a system D-Bus connection) is still unconditional and can still
-  return a fatal `run()` error on a host missing systemd, independent of
-  what the probe itself observed; that construction-safety gap is closed
-  in a later chunk of this same phase. The probed `capability.Set` is
+  guarantee is fully wired through to daemon startup for the engine
+  capabilities (Podman/Docker/Incus) and for systemd: a host with any of
+  these absent or unreachable still starts the daemon.
+- **Capability-gated, non-fatal construction of systemd-backed managers.**
+  Storage's remote-mount unit controller and the backups/services/logs
+  managers all need a live system D-Bus connection, and their exported
+  constructors (`backups.NewSystemManager`, `services.NewSystemManager`,
+  `logs.NewSystemManager`) no longer open that connection themselves — each
+  accepts a pre-opened client (an unexported `systemdClient` interface per
+  package, structurally satisfied by `*dbus.Conn`) from its caller.
+  `cmd/pilothoused/main.go`'s `connectSystemd(ctx, caps, connect, logger)`
+  opens that connection at most once, only when the probed `Systemd`
+  capability is present; a connection failure is logged as a warning and
+  degrades to a nil client exactly like an absent capability — never a
+  fatal `run()` error. `buildSystemdManagers` constructs the remote-mount
+  controller and the backups/services/logs managers only when that client
+  is non-nil, leaving each nil otherwise; `registerStorageActions`/
+  `registerBackups`/`registerServices`/`registerLogs` no-op on a nil
+  manager as a stopgap (the full `capability.Set`-based registration guard
+  mirroring `registerPodman`/`registerDocker`/`registerIncus` lands in a
+  later chunk). `QueryStorageState` is registered separately against the
+  plain, non-systemd `storageManager` built earlier in `run()`, so storage
+  inventory reads never depend on systemd at all — not even via a
+  registration-level guard, unlike the remote-mount actions. Independent of
+  systemd's presence, `backups.ValidateConfiguration` (timer name pattern,
+  positive max age) still runs unconditionally in `run()` before any of
+  this and fails startup fatally on genuine flag misconfiguration; only the
+  D-Bus reachability failure mode is non-fatal. Later modules that
+  construct a privileged manager from an optional host resource should
+  follow this same shape: accept a pre-opened/pre-resolved dependency from
+  the caller, gate opening that dependency on the relevant probed
+  capability, and never let its absence fail `run()`. Maintenance and
+  sysext manager construction (which use `sysext.ExecRunner`, not systemd
+  D-Bus) are unaffected by this chunk and remain unconditionally
+  registered until their own conversion. The probed `capability.Set` is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
   (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
@@ -140,13 +166,14 @@ rules for adding a new module (routes, actions, queries).
   table mapping every broker ID to its required capability, and
   `docs/modules.md`'s "Capability-guarded registration" section for the
   convention new modules follow. `registerPodman`/`registerDocker`/
-  `registerIncus` are the first conversions — each takes `caps
+  `registerIncus` are the first full conversions — each takes `caps
   capability.Set` and registers nothing for its engine when the
   corresponding capability is absent (an unreachable or misconfigured
   engine, including a Docker client that fails to construct, is logged as
-  a warning, never a fatal `run()` error). Remaining modules
-  (services/logs/backups/storage/maintenance/sysext) stay unconditionally
-  registered until their own conversion.
+  a warning, never a fatal `run()` error). Storage/backups/services/logs
+  registration is nil-guarded (this chunk) but not yet `capability.Set`-
+  guarded; maintenance and sysext stay unconditionally registered until
+  their own conversion.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

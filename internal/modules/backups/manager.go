@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/coreos/go-systemd/v22/dbus"
 )
 
 var timerNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@-]+\.timer$`)
@@ -57,15 +55,24 @@ type SystemManager struct {
 	now    func() time.Time
 }
 
-func NewSystemManager(names []string, maxAge time.Duration) (*SystemManager, error) {
-	if err := validateConfiguration(names, maxAge); err != nil {
-		return nil, err
-	}
-	client, err := dbus.NewSystemConnectionContext(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("connect to systemd: %w", err)
-	}
+// NewSystemManager builds a backups manager from a pre-opened systemd D-Bus
+// client. The caller (cmd/pilothoused) is responsible for opening that
+// connection -- this package no longer dials systemd itself, so a manager
+// can never fail to construct because systemd is absent or unreachable. Flag
+// configuration (timer names, max age) is still validated here; call
+// ValidateConfiguration directly if that check needs to run before a
+// systemd client is available.
+func NewSystemManager(client systemdClient, names []string, maxAge time.Duration) (*SystemManager, error) {
 	return newSystemManager(client, names, maxAge)
+}
+
+// ValidateConfiguration exposes the flag-configuration validation
+// (timer name pattern, positive max age, no duplicates) independent of
+// systemd connectivity, so callers can fail fast on a misconfigured
+// -backup-timer/-backup-max-age flag regardless of whether the systemd
+// capability is present.
+func ValidateConfiguration(names []string, maxAge time.Duration) error {
+	return validateConfiguration(names, maxAge)
 }
 
 func newSystemManager(client systemdClient, names []string, maxAge time.Duration) (*SystemManager, error) {

@@ -122,6 +122,15 @@ func TestStateFiltersAndSummarizesSupportedUnits(t *testing.T) {
 	assert.Equal(t, Unit{Name: "idle.service", Description: "idle.service", LoadState: "not-found", ActiveState: "inactive", SubState: "dead", UnitFileState: "disabled"}, state.Units[2])
 }
 
+func TestNewSystemManagerAcceptsPreOpenedClientAndRejectsNil(t *testing.T) {
+	manager, err := NewSystemManager(&fakeClient{}, &fakeJournalReader{})
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	_, err = NewSystemManager(nil, &fakeJournalReader{})
+	assert.Error(t, err)
+}
+
 func TestProtectedAndMalformedUnitMutationsAreRejected(t *testing.T) {
 	client := &fakeClient{files: []dbus.UnitFile{{Path: "/etc/systemd/system/backup.timer"}}}
 	manager := newSystemManager(client)

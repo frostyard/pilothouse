@@ -116,38 +116,39 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve storage tools: %w", err)
 	}
-	unitClient, err := dbus.NewSystemConnectionContext(context.Background())
-	if err != nil {
-		return fmt.Errorf("connect storage systemd controller: %w", err)
-	}
-	defer unitClient.Close()
-	remoteManager := storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: unitClient})
-	if err := registerStorage(queries, remoteManager); err != nil {
+	// QueryStorageState is registered against the plain storageManager, which
+	// has no systemd dependency, so storage inventory reads work regardless
+	// of whether systemd is present -- see buildSystemdManagers below for the
+	// remote-mount controller, which does depend on systemd.
+	if err := registerStorage(queries, storageManager); err != nil {
 		return err
 	}
-	if err := registerStorageActions(actions, remoteManager); err != nil {
+	// Flag misconfiguration (bad timer name, non-positive max age) is a real
+	// startup error and fails run() regardless of systemd's presence; only
+	// the D-Bus reachability failure mode below is non-fatal.
+	if err := backups.ValidateConfiguration(backupTimers, *backupMaxAge); err != nil {
 		return err
 	}
-	backupManager, err := backups.NewSystemManager(backupTimers, *backupMaxAge)
-	if err != nil {
-		return err
+	systemdClient := connectSystemd(context.Background(), caps, func(ctx context.Context) (*dbus.Conn, error) {
+		return dbus.NewSystemConnectionContext(ctx)
+	}, logger)
+	if systemdClient != nil {
+		defer systemdClient.Close()
 	}
-	defer backupManager.Close()
-	if err := registerBackups(queries, backupManager); err != nil {
-		return err
-	}
-	servicesManager, err := services.NewSystemManager(servicejournal.New())
-	if err != nil {
-		return err
-	}
-	if err := registerServices(actions, queries, servicesManager); err != nil {
-		return err
-	}
-	logsManager, err := logs.NewSystemManager(logjournal.New())
+	managers, err := buildSystemdManagers(systemdClient, storageManager, backupTimers, *backupMaxAge, servicejournal.New(), logjournal.New())
 	if err != nil {
 		return err
 	}
-	if err := registerLogs(queries, logsManager); err != nil {
+	if err := registerStorageActions(actions, managers.remoteManager); err != nil {
+		return err
+	}
+	if err := registerBackups(queries, managers.backupManager); err != nil {
+		return err
+	}
+	if err := registerServices(actions, queries, managers.servicesManager); err != nil {
+		return err
+	}
+	if err := registerLogs(queries, managers.logsManager); err != nil {
 		return err
 	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
@@ -290,6 +291,65 @@ func newStorageManager(resolve storage.ToolResolver, root string) (*storage.Syst
 	return storage.NewSystemManagerWithEnrichers([]storage.Adapter{storage.NewBlockAdapter(tools.LSBLK), storage.NewMountAdapter(tools.Findmnt)}, []storage.Enricher{smart, mdraid, lvm, deviceMapper, multipath, zfs, btrfs}), nil
 }
 
+// connectSystemd opens the system D-Bus connection used by every
+// systemd-backed manager, but only when the probed Systemd capability is
+// present, and it never turns a connection failure into a fatal error: a
+// missing capability skips calling connect at all, and a failed connect
+// attempt is logged as a warning and degrades exactly like an absent
+// capability (nil is returned either way). This is what lets run() start on
+// a host without systemd instead of aborting before it ever registers
+// QueryCapabilities.
+func connectSystemd(ctx context.Context, caps capability.Set, connect func(context.Context) (*dbus.Conn, error), logger *slog.Logger) *dbus.Conn {
+	if !caps.Has(capability.Systemd) {
+		return nil
+	}
+	client, err := connect(ctx)
+	if err != nil {
+		logger.Warn("systemd connection unavailable; systemd-backed managers disabled", "error", err)
+		return nil
+	}
+	return client
+}
+
+// systemdManagers holds every daemon manager that depends on a live systemd
+// D-Bus connection. buildSystemdManagers leaves every field nil when client
+// is nil (systemd absent, or present but unreachable per connectSystemd),
+// and registerStorageActions/registerBackups/registerServices/registerLogs
+// each no-op on a nil manager -- so the daemon never fails to start over a
+// missing systemd connection, only over a genuine flag misconfiguration
+// (checked separately, before this function runs, via
+// backups.ValidateConfiguration).
+type systemdManagers struct {
+	remoteManager   storage.RemoteManager
+	backupManager   backups.Manager
+	servicesManager services.Manager
+	logsManager     logs.Manager
+}
+
+func buildSystemdManagers(client *dbus.Conn, storageManager storage.Manager, backupTimers []string, backupMaxAge time.Duration, servicesJournal services.JournalReader, logsJournal logs.JournalReader) (systemdManagers, error) {
+	if client == nil {
+		return systemdManagers{}, nil
+	}
+	backupManager, err := backups.NewSystemManager(client, backupTimers, backupMaxAge)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	servicesManager, err := services.NewSystemManager(client, servicesJournal)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	logsManager, err := logs.NewSystemManager(client, logsJournal)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	return systemdManagers{
+		remoteManager:   storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: client}),
+		backupManager:   backupManager,
+		servicesManager: servicesManager,
+		logsManager:     logsManager,
+	}, nil
+}
+
 type stringListFlag []string
 
 func (values *stringListFlag) String() string { return fmt.Sprint([]string(*values)) }
@@ -322,7 +382,16 @@ func registerCapabilities(queries *broker.QueryRegistry, caps capability.Set) er
 	})
 }
 
+// registerBackups registers QueryBackupsState iff manager is non-nil.
+// manager is nil exactly when construction skipped it -- systemd absent or
+// unreachable per buildSystemdManagers -- in which case this is a no-op
+// stopgap (superseded by a full capability.Set-based guard in a later
+// chunk) rather than a handler that would panic dereferencing a nil
+// manager at request time.
 func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
+	if manager == nil {
+		return nil
+	}
 	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	})
@@ -339,7 +408,17 @@ func registerStorage(queries *broker.QueryRegistry, manager storage.Manager) err
 
 const storageActionTimeout = 2 * time.Minute
 
+// registerStorageActions registers the remote-mount lifecycle actions iff
+// manager is non-nil. manager is nil exactly when buildSystemdManagers
+// skipped constructing the remote-mount controller (systemd absent or
+// unreachable), in which case this is a no-op rather than a handler that
+// would panic dereferencing a nil manager at request time. QueryStorageState
+// itself (registered separately via registerStorage against the plain,
+// non-systemd storageManager) is unaffected.
 func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager) error {
+	if manager == nil {
+		return nil
+	}
 	for _, action := range []struct {
 		id         string
 		parameters []string
@@ -485,7 +564,16 @@ func waitForStorageUnitJob(ctx context.Context, unit string, operation func(cont
 	}
 }
 
+// registerLogs registers QueryLogs iff manager is non-nil. manager is nil
+// exactly when construction skipped it -- systemd absent or unreachable per
+// buildSystemdManagers, since logs.SystemManager's unit-listing calls
+// require a live systemd connection -- in which case this is a no-op
+// stopgap rather than a handler that would panic dereferencing a nil
+// manager at request time.
 func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {
+	if manager == nil {
+		return nil
+	}
 	return queries.Register(broker.QueryLogs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		filters, err := logs.ParseBrokerFilters(parameters)
 		if err != nil {
@@ -717,7 +805,15 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 	return nil
 }
 
+// registerServices registers every Services query/action iff manager is
+// non-nil. manager is nil exactly when construction skipped it -- systemd
+// absent or unreachable per buildSystemdManagers -- in which case this is a
+// no-op stopgap rather than handlers that would panic dereferencing a nil
+// manager at request time.
 func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager) error {
+	if manager == nil {
+		return nil
+	}
 	if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.Journal(ctx, parameters["unit"])
 	}); err != nil {

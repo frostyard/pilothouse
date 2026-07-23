@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -830,5 +834,158 @@ func TestRegisterIncusRegistersEverythingWithIncusCapability(t *testing.T) {
 	assert.True(t, queries.Registered(broker.QueryIncusState))
 	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
 		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestConnectSystemdNeverCallsConnectWithoutSystemdCapability(t *testing.T) {
+	called := false
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	client := connectSystemd(context.Background(), capability.New(capability.Docker, capability.Journald), func(context.Context) (*dbus.Conn, error) {
+		called = true
+		return &dbus.Conn{}, nil
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.False(t, called, "connect must never be invoked when the Systemd capability is absent")
+}
+
+func TestConnectSystemdReturnsNilAndWarnsWhenConnectFails(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+
+	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+		return nil, errors.New("dial unix /run/systemd/private: connect: no such file or directory")
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.Contains(t, logged.String(), "systemd connection unavailable")
+	assert.Contains(t, logged.String(), "level=WARN")
+}
+
+func TestConnectSystemdReturnsConnectionWhenCapabilityPresentAndConnectSucceeds(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	want := &dbus.Conn{}
+
+	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+		return want, nil
+	}, logger)
+
+	assert.Same(t, want, client)
+}
+
+func TestBuildSystemdManagersSkipsConstructionWithoutClient(t *testing.T) {
+	root := t.TempDir()
+	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
+	findmnt := writeStorageTool(t, root, `{"filesystems":[]}`)
+	storageManager, err := newStorageManager(func(candidates []string) (string, bool, error) {
+		switch candidates[0] {
+		case "/usr/bin/lsblk":
+			return lsblk, true, nil
+		case "/usr/bin/findmnt":
+			return findmnt, true, nil
+		default:
+			return "", false, nil
+		}
+	}, root)
+	require.NoError(t, err)
+
+	managers, err := buildSystemdManagers(nil, storageManager, []string{"backup.timer"}, time.Hour, nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, managers.remoteManager, "remote-mount unit controller must not be constructed without a systemd client")
+	assert.Nil(t, managers.backupManager, "backups.SystemManager must not be constructed without a systemd client")
+	assert.Nil(t, managers.servicesManager, "services.SystemManager must not be constructed without a systemd client")
+	assert.Nil(t, managers.logsManager, "logs.SystemManager must not be constructed without a systemd client")
+}
+
+// TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd is the
+// fixture-style test proving, at the construction level rather than by a
+// later registration guard, that QueryStorageState is registered and
+// backed by a working manager even when the Systemd capability is absent:
+// it builds managers exactly the way run() does (buildSystemdManagers with
+// a nil client), registers every dependent handler the same way run() does,
+// and asserts the daemon (a) never errors, (b) still answers
+// QueryStorageState with real data, and (c) leaves every systemd-dependent
+// handler unregistered rather than backed by a nil manager.
+func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
+	root := t.TempDir()
+	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
+	findmnt := writeStorageTool(t, root, `{"filesystems":[]}`)
+	storageManager, err := newStorageManager(func(candidates []string) (string, bool, error) {
+		switch candidates[0] {
+		case "/usr/bin/lsblk":
+			return lsblk, true, nil
+		case "/usr/bin/findmnt":
+			return findmnt, true, nil
+		default:
+			return "", false, nil
+		}
+	}, root)
+	require.NoError(t, err)
+
+	// No Systemd capability: connectSystemd (already proven above to never
+	// invoke connect in this case) yields a nil client.
+	client := connectSystemd(context.Background(), capability.New(), func(context.Context) (*dbus.Conn, error) {
+		t.Fatal("connect must never be invoked when the Systemd capability is absent")
+		return nil, nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.Nil(t, client)
+
+	managers, err := buildSystemdManagers(client, storageManager, []string{"backup.timer"}, time.Hour, nil, nil)
+	require.NoError(t, err, "construction must never fail fatally because systemd is absent")
+
+	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
+	require.NoError(t, registerStorage(queries, storageManager))
+	require.NoError(t, registerStorageActions(actions, managers.remoteManager))
+	require.NoError(t, registerBackups(queries, managers.backupManager))
+	require.NoError(t, registerServices(actions, queries, managers.servicesManager))
+	require.NoError(t, registerLogs(queries, managers.logsManager))
+
+	require.True(t, queries.Registered(broker.QueryStorageState))
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
+	require.NoError(t, err)
+	snapshot, ok := result.(storage.Snapshot)
+	require.True(t, ok)
+	assert.NotEmpty(t, snapshot.Backends, "storage inventory must run its real enrichers, not a stub, independent of systemd")
+
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+	for _, id := range []string{broker.ActionStorageCreateNFS, broker.ActionStorageMount, broker.ActionStorageUnmount, broker.ActionStorageDelete} {
+		assert.False(t, actions.Registered(id))
+	}
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterBackupsNoOpsWithNilManager(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerBackups(queries, nil))
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterServicesNoOpsWithNilManager(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerServices(actions, queries, nil))
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterLogsNoOpsWithNilManager(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerLogs(queries, nil))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterStorageActionsNoOpsWithNilManager(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerStorageActions(actions, nil))
+	for _, id := range []string{broker.ActionStorageCreateNFS, broker.ActionStorageMount, broker.ActionStorageUnmount, broker.ActionStorageDelete} {
+		assert.False(t, actions.Registered(id))
 	}
 }
