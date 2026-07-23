@@ -94,7 +94,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.Error(w, "Maintenance status is unavailable.", http.StatusServiceUnavailable)
 			return
 		}
-		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(inputs.state, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
+		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(inputs.state, inputs.hostImage, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
 	}))
 	mux.HandleFunc("POST /maintenance/reboot", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) || !host.ConfirmAction(w, r, "Reboot the host", "maintenance/reboot") {
@@ -123,13 +123,18 @@ type pageInputs struct {
 	// state is QueryMaintenanceState's response when the host advertises
 	// Systemd, and the zero State otherwise (see queryState).
 	state State
-	// hostImageAvailable records HasAny(Bootc, RPMOStree): whether the host
-	// has a source QueryHostImageStatus could be read from at all. Nothing
-	// renders from it yet — views.templ has no capability-conditional
-	// content as of this commit, and no web-side code calls
-	// QueryHostImageStatus — it is the flag the host-image page section
-	// will attempt (or skip) its fetch on.
-	hostImageAvailable bool
+	// hostImage is QueryHostImageStatus's response when the host advertises
+	// HasAny(Bootc, RPMOStree), and nil when it advertises neither (see
+	// queryHostImage). Page renders the whole "Host image" section — the
+	// booted/staged/rollback deployments, the per-source unavailable
+	// indicators, and the page's single soft-reboot-eligibility indicator —
+	// only when this is non-nil, so a host with no host-image source omits
+	// the section entirely rather than showing an empty placeholder.
+	//
+	// Nil-ness is the availability flag: the page can only render host-image
+	// content it actually fetched, so there is no separate boolean that
+	// could disagree with the data.
+	hostImage *HostImageStatus
 }
 
 // collectPage gathers GET /maintenance's inputs, reading the host's
@@ -141,7 +146,41 @@ func collectPage(ctx context.Context, host platform.Host) (pageInputs, error) {
 	if err != nil {
 		return pageInputs{}, err
 	}
-	return pageInputs{state: state, hostImageAvailable: caps.HasAny(capability.Bootc, capability.RPMOStree)}, nil
+	hostImage, err := queryHostImage(ctx, host, caps)
+	if err != nil {
+		return pageInputs{}, err
+	}
+	return pageInputs{state: state, hostImage: hostImage}, nil
+}
+
+// queryHostImage returns QueryHostImageStatus's response when caps advertises
+// at least one host-image source, and nil when it advertises neither. The
+// daemon registers that query only under HasAny(Bootc, RPMOStree)
+// (docs/capabilities.md's one any-of row), so on a systemd-only host it is
+// absent rather than empty: calling it there would fail. Returning nil instead
+// is what makes the page omit the host-image section on such a host rather
+// than 503 or render an error placeholder.
+//
+// The gate is HasAny(Bootc, RPMOStree) and deliberately says nothing about
+// Systemd, so everything the section renders — including soft-reboot
+// eligibility, which the page renders from HostImageStatus.SoftRebootCapable
+// and not from the Systemd-gated State.SoftRebootCapable — is available on a
+// bootc-only host exactly as it is on a bootc-plus-systemd one.
+//
+// A non-nil error here means the broker call itself failed, which takes the
+// page down as any other failed page query does. It is not how a *source*
+// failure arrives: a host whose bootc or rpm-ostree is present but did not
+// answer still gets a successful response, carrying BootcError/RPMOStreeError,
+// which the section renders as a per-source unavailable indicator.
+func queryHostImage(ctx context.Context, host platform.Host, caps capability.Set) (*HostImageStatus, error) {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil, nil
+	}
+	var status HostImageStatus
+	if err := host.Query(ctx, broker.QueryHostImageStatus, nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 // queryState returns QueryMaintenanceState's response, or the zero State

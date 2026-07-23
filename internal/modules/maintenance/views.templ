@@ -23,10 +23,27 @@ templ Summary(state State) {
 	</article>
 }
 
-templ Page(state State, csrf string, admin bool) {
+// Page renders the Maintenance page.
+//
+// hostImage is the host's image picture as reported by
+// broker.QueryHostImageStatus, or nil when the host advertises neither bootc
+// nor rpm-ostree and the handler therefore never fetched it. A nil value omits
+// the whole "Host image" section rather than rendering an empty or errored
+// placeholder: a host with no host-image source has nothing to report there,
+// which is not a failure.
+//
+// The section is deliberately independent of state (the Systemd-gated
+// QueryMaintenanceState response): it renders on a bootc-only host with no
+// systemd exactly as it does on a bootc-plus-systemd one. Only the
+// reboot-required card and its reboot form still key off state, as they always
+// have. No control in this page mutates the host image in any way.
+templ Page(state State, hostImage *HostImageStatus, csrf string, admin bool) {
 	<div class="page-stack">
 		<div class="page-intro"><p>Update availability, durable maintenance jobs, and host reboot posture.</p></div>
 		<section class="engine-stats" aria-label="Maintenance summary"><div class="engine-stat"><span>System</span><strong class="version">{ state.OSVersion }</strong><small>running image</small></div><div class="engine-stat"><span>Updates</span><strong>{ fmt.Sprint(len(state.Updates)) }</strong><small>available components</small></div><div class="engine-stat"><span>Jobs</span><strong>{ fmt.Sprint(activeJobs(state)) }</strong><small>queued or running</small></div></section>
+		if hostImage != nil {
+			@hostImageSection(*hostImage)
+		}
 		if state.RebootRequired {
 			<article class="card error-card">
 				<div class="card-heading"><span class="card-icon danger">@web.Icon("alert")</span><div><h2>Reboot required</h2><p>Installed changes are not fully active.</p></div></div>
@@ -68,6 +85,138 @@ templ Page(state State, csrf string, admin bool) {
 			}
 		</article>
 	</div>
+}
+
+// hostImageSection renders the read-only "Host image" section: the deployments
+// the host's image stack reports, one visible unavailable/error indicator per
+// source that is present but failed to answer, and — exactly once on the whole
+// page — soft-reboot eligibility. It is unexported because Page is the only
+// caller: the section is part of the Maintenance page, not a component other
+// modules compose.
+//
+// Everything here is descriptive. The section contains no form, button, or
+// link that upgrades, switches, rebases, rolls back, or reconfigures automatic
+// updates for bootc or rpm-ostree; Pilothouse reports host-image state and
+// never changes it. The "Rollback" row names the rollback *deployment* the
+// host already has, it is not a control that rolls back to it.
+//
+// The bootc and rpm-ostree indicators are independent and symmetric, mirroring
+// HostImageStatus's own symmetric BootcAvailable/BootcError and
+// RPMOStreeAvailable/RPMOStreeError pairs: one source failing never hides the
+// other's data, and the section still renders whatever the surviving source
+// reported.
+templ hostImageSection(status HostImageStatus) {
+	<article class="card" id="host-image" aria-label="Host image">
+		<div class="card-heading">
+			<span class="card-icon">
+				@web.Icon("server")
+			</span>
+			<div><h2>Host image</h2><p>Read-only deployment status reported by the host image stack.</p></div>
+		</div>
+		if status.BootcError != "" {
+			<div class="empty-state" data-source-error="bootc">
+				<span class="card-icon danger">
+					@web.Icon("alert")
+				</span>
+				{ sourceErrorLabel("bootc", status.BootcError) }
+			</div>
+		}
+		if status.RPMOStreeError != "" {
+			<div class="empty-state" data-source-error="rpm-ostree">
+				<span class="card-icon danger">
+					@web.Icon("alert")
+				</span>
+				{ sourceErrorLabel("rpm-ostree", status.RPMOStreeError) }
+			</div>
+		}
+		if hasDeployments(status) {
+			<div class="mini-list">
+				@hostImageDeployment("booted", "Booted", status.Booted)
+				@hostImageDeployment("staged", "Staged", status.Staged)
+				@hostImageDeployment("rollback", "Rollback", status.Rollback)
+			</div>
+		} else if status.BootcError == "" && status.RPMOStreeError == "" {
+			<div class="empty-state">No host image deployment was reported.</div>
+		}
+		if status.SoftRebootCapable != nil {
+			<div class="mini-list" data-soft-reboot={ softRebootState(status.SoftRebootCapable) }>
+				<div class="mini-row"><div><strong>Soft reboot</strong><small>{ softRebootLabel(status.SoftRebootCapable) }</small></div></div>
+			</div>
+		}
+	</article>
+}
+
+// hostImageDeployment renders one deployment slot, or nothing at all when the
+// host's image stack does not report that slot (the ordinary case for staged
+// and rollback on a host with nothing pending and nothing to roll back to).
+//
+// Image and Digest are bootc's authoritative identity for the deployment;
+// Version and Checksum are rpm-ostree's supplementary detail, already merged
+// broker-side by MergeHostImage, which never lets rpm-ostree override what
+// bootc reported. Each is shown only when it is populated, so a bootc-only
+// host simply shows fewer lines rather than empty ones.
+templ hostImageDeployment(slug string, label string, deployment *Deployment) {
+	if deployment != nil {
+		<div class="mini-row" data-deployment={ slug }>
+			<div>
+				<strong>{ label }</strong>
+				<small class="table-detail">{ deploymentImage(deployment) }</small>
+				if deployment.Digest != "" {
+					<small class="table-detail">{ "Digest " + deployment.Digest }</small>
+				}
+				if deployment.Version != "" {
+					<small class="table-detail">{ "Version " + deployment.Version }</small>
+				}
+				if deployment.Checksum != "" {
+					<small class="table-detail">{ "Checksum " + deployment.Checksum }</small>
+				}
+			</div>
+		</div>
+	}
+}
+
+// hasDeployments reports whether the status names any deployment slot at all.
+func hasDeployments(status HostImageStatus) bool {
+	return status.Booted != nil || status.Staged != nil || status.Rollback != nil
+}
+
+// deploymentImage is the container image reference for a deployment, or a
+// plain statement that there is none — a deployment that was not provisioned
+// from a container image is a real, reportable state, not a blank.
+func deploymentImage(deployment *Deployment) string {
+	if deployment.Image == "" {
+		return "No container image reference reported"
+	}
+	return deployment.Image
+}
+
+// sourceErrorLabel is the per-source unavailable indicator's text. It names the
+// source explicitly so a page carrying both bootc's and rpm-ostree's indicators
+// says which one failed.
+func sourceErrorLabel(source string, detail string) string {
+	if detail == "" {
+		return source + " status is unavailable."
+	}
+	return source + " status is unavailable: " + detail
+}
+
+// softRebootLabel renders bootc's soft-reboot eligibility. It is only ever
+// called with a non-nil flag: nil means this bootc does not expose the fact at
+// all, and the page renders nothing rather than guessing either way.
+func softRebootLabel(capable *bool) string {
+	if *capable {
+		return "A soft reboot may be sufficient to activate pending host image changes."
+	}
+	return "A full reboot is required to activate pending host image changes."
+}
+
+// softRebootState is the machine-readable form of the same flag, so a test (or
+// a stylesheet) can distinguish the two rendered states without matching prose.
+func softRebootState(capable *bool) string {
+	if *capable {
+		return "capable"
+	}
+	return "required"
 }
 
 func maintenanceSummary(state State) string {

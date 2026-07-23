@@ -34,6 +34,11 @@ type moduleHost struct {
 	action       string
 	confirmation string
 	state        State
+	// hostImage is the canned QueryHostImageStatus response. It is only ever
+	// returned when the handler actually asks for that query, so a fixture
+	// can populate it richly and still prove the whole "Host image" section
+	// is absent on a host advertising neither bootc nor rpm-ostree.
+	hostImage HostImageStatus
 	// queries records every broker query ID this host was asked for, in
 	// order, so a test can prove a capability-gated call (notably
 	// QueryMaintenanceState, which the daemon registers only under Systemd)
@@ -72,8 +77,11 @@ func (h *moduleHost) Execute(_ context.Context, _ *http.Request, action string, 
 func (*moduleHost) Identity(*http.Request) auth.Identity { return auth.Identity{Admin: true} }
 func (h *moduleHost) Query(_ context.Context, id string, _ map[string]string, target any) error {
 	h.queries = append(h.queries, id)
-	if id == broker.QueryMaintenanceState {
+	switch id {
+	case broker.QueryMaintenanceState:
 		*target.(*State) = h.state
+	case broker.QueryHostImageStatus:
+		*target.(*HostImageStatus) = h.hostImage
 	}
 	return nil
 }
@@ -241,7 +249,7 @@ func TestPageRendersWithoutSystemdQueryOnHostImageOnlyHosts(t *testing.T) {
 			assert.Equal(t, http.StatusOK, response.Code)
 			assert.NotContains(t, host.queries, broker.QueryMaintenanceState)
 			require.True(t, host.rendered)
-			assert.Equal(t, renderComponent(t, Page(State{}, "csrf", true)), renderComponent(t, host.page.Body), "the page must render from the zero State when systemd is absent")
+			assert.Equal(t, renderComponent(t, Page(State{}, &HostImageStatus{}, "csrf", true)), renderComponent(t, host.page.Body), "the page must render from the zero State when systemd is absent")
 			assert.NotContains(t, renderComponent(t, host.page.Body), "/maintenance/reboot", "the page must not render a control targeting the systemd-only reboot route on a host where that route 404s")
 		})
 	}
@@ -318,7 +326,7 @@ func TestRoutesServeWhenSystemdPresent(t *testing.T) {
 	assert.Equal(t, "maintenance", host.page.Active)
 	assert.Equal(t, "Host lifecycle", host.page.Eyebrow)
 	assert.Equal(t, "Maintenance", host.page.Title)
-	assert.Equal(t, renderComponent(t, Page(state, "csrf", true)), renderComponent(t, host.page.Body))
+	assert.Equal(t, renderComponent(t, Page(state, &HostImageStatus{}, "csrf", true)), renderComponent(t, host.page.Body))
 
 	response = httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/maintenance/reboot", nil))
@@ -347,26 +355,39 @@ func TestDashboardAndHealthUnchangedWhenSystemdPresent(t *testing.T) {
 	assert.Equal(t, "maintenance.reboot", findings[1].ID)
 }
 
-// TestCollectPageRecordsHostImageAvailability pins the second half of the
-// page handler's capability decision: alongside skipping the systemd-only
-// query, it records whether the host has any host-image source at all
-// (HasAny(Bootc, RPMOStree)) — the flag the page's host-image section will
-// attempt or skip its fetch on. Nothing renders from it yet.
-func TestCollectPageRecordsHostImageAvailability(t *testing.T) {
+// TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised pins the second
+// half of the page handler's capability decision: alongside skipping the
+// systemd-only query, it fetches QueryHostImageStatus exactly when the host
+// advertises HasAny(Bootc, RPMOStree) and never otherwise. The fake host
+// counts every query it is asked for, so this proves the gated-off call is not
+// made at all — the daemon registers it only under that any-of gate, so
+// calling it on a systemd-only host would fail.
+func TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised(t *testing.T) {
 	for _, fixture := range []struct {
 		name string
 		caps capability.Set
 		want bool
 	}{
 		{name: "systemd only", caps: capability.New(capability.Systemd), want: false},
+		{name: "journald only", caps: capability.New(capability.Journald), want: false},
 		{name: "bootc only", caps: capability.New(capability.Bootc), want: true},
 		{name: "rpm-ostree only", caps: capability.New(capability.RPMOStree), want: true},
+		{name: "bootc and rpm-ostree", caps: capability.New(capability.Bootc, capability.RPMOStree), want: true},
 		{name: "systemd and bootc", caps: capability.New(capability.Systemd, capability.Bootc), want: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			inputs, err := collectPage(context.Background(), &moduleHost{caps: fixture.caps, capsSet: true})
+			host := &moduleHost{caps: fixture.caps, capsSet: true, hostImage: HostImageStatus{BootcAvailable: true, Booted: &Deployment{Image: "quay.io/example/os:stable"}}}
+			inputs, err := collectPage(context.Background(), host)
 			require.NoError(t, err)
-			assert.Equal(t, fixture.want, inputs.hostImageAvailable)
+
+			if fixture.want {
+				assert.Contains(t, host.queries, broker.QueryHostImageStatus)
+				require.NotNil(t, inputs.hostImage, "an advertised host-image source must yield a fetched status")
+				assert.Equal(t, host.hostImage, *inputs.hostImage)
+			} else {
+				assert.NotContains(t, host.queries, broker.QueryHostImageStatus, "the query must not be attempted without bootc or rpm-ostree")
+				assert.Nil(t, inputs.hostImage, "with no host-image source the page must omit the section, not render an empty one")
+			}
 		})
 	}
 }

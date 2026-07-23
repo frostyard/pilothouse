@@ -86,7 +86,8 @@ See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
 **In progress (#51, host-image status): the parsers, the manager, the broker
-query, and the reboot posture that consumes it.**
+query, the reboot posture that consumes it, and the Maintenance page section
+that renders it.**
 `internal/modules/maintenance/hostimage.go` adds the read-only host-image
 domain types — `Deployment` (bootc's image reference + manifest digest, plus
 rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
@@ -105,9 +106,12 @@ which in turn has exactly two consumers, both wired to the *same* instance in
 (`org.frostyard.pilothouse.maintenance.host_image_status`, registered by
 `registerHostImage`), and `maintenance.SystemManager`, which takes it as a
 `HostImageSource` and reads it while computing `QueryMaintenanceState`'s
-posture. There is still no web-side consumer and no view for host-image
-status; `QueryMaintenanceState`'s response is the one thing that changed
-shape (see the `State` bullet below). The `maintenance` module's own
+posture. The query now has a web-side consumer as well: `GET /maintenance`
+fetches it when the host advertises `HasAny(Bootc, RPMOStree)` and renders it
+as the page's "Host image" section — see the "Maintenance: whole-module
+`HasAny(Systemd, Bootc, RPMOStree)` gate" bullet below for exactly what that
+section renders. `QueryMaintenanceState`'s response also changed shape (see
+the `State` bullet below). The `maintenance` module's own
 nav/route/dashboard gating was reworked separately, to
 `HasAny(Systemd, Bootc, RPMOStree)` — see the "Maintenance: whole-module
 `HasAny(Systemd, Bootc, RPMOStree)` gate" bullet in the web-side gating
@@ -574,17 +578,42 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   substitutes the zero `State` otherwise, so `Page`, `Summary`, and `Health`
   degrade to "nothing to report" on a bootc-only host rather than the
   handler 503ing (or the dashboard card/`attention` finding erroring) on a
-  query the daemon never registered there; the page handler also records
-  `HasAny(Bootc, RPMOStree)` as the flag the host-image section will attempt
-  or skip its fetch on. As of this commit maintenance's `views.templ` still
-  has **no** conditional capability-based content, and no web-side code
-  calls `QueryHostImageStatus`. It needs none yet for the dead-control
-  audit a whole-module-present/route-gated combination normally demands:
-  the only view element targeting the systemd-only reboot route is the admin
-  "Reboot host" form nested inside `if state.RebootRequired`, and the zero
-  `State` substituted when `Systemd` is absent leaves that condition false,
-  so the form cannot render on a host where the route 404s
-  (`TestPageRendersNoRebootControlWithoutSystemd` pins both ends of that).
+  query the daemon never registered there; symmetrically, `queryHostImage`
+  calls `QueryHostImageStatus` only when the host advertises
+  `HasAny(Bootc, RPMOStree)` and returns `nil` otherwise, which is what the
+  page renders from. `views.templ`'s `Page` therefore takes a
+  `hostImage *HostImageStatus` alongside `state`, and nil-ness *is* the
+  availability flag — the page can only render host-image content it actually
+  fetched. When it is non-nil, `Page` renders the conditional
+  `hostImageSection` (unexported — `Page` is its only caller): the booted,
+  staged, and rollback deployments bootc reported (image
+  reference and digest, plus rpm-ostree's supplementary version and checksum
+  where the broker-side merge attached them), an independent per-source
+  unavailable indicator for each of `BootcError` and `RPMOStreeError` so one
+  failed source never hides the other's data, and — exactly once on the whole
+  page — the soft-reboot-eligibility indicator, read straight from
+  `HostImageStatus.SoftRebootCapable` (non-nil true renders "a soft reboot may
+  be sufficient…", non-nil false "a full reboot is required…", nil renders
+  nothing). That indicator is gated on `HasAny(Bootc, RPMOStree)`, **not** on
+  `Systemd`, so it renders identically on a bootc-only host and a
+  bootc-plus-systemd one; it is deliberately not duplicated inside the
+  `Systemd`-gated reboot-posture area, which still renders only the
+  pre-existing reboot-required card and reboot form.
+  `State.SoftRebootCapable` remains the same fact's API-surface leg on
+  `QueryMaintenanceState`'s full posture response, it is just not the page's
+  rendering source. With neither bootc nor rpm-ostree advertised the section
+  is omitted outright rather than rendered empty or errored. Nothing in the
+  section is a control: no upgrade, switch, rebase, rollback, or
+  automatic-update link, button, or form exists anywhere on the page for
+  bootc or rpm-ostree, and `views_test.go` asserts that mechanically across
+  every host-image fixture. The dead-control audit a
+  whole-module-present/route-gated combination normally demands is unchanged
+  by all of this: the only view element targeting the systemd-only reboot
+  route is still the admin "Reboot host" form nested inside
+  `if state.RebootRequired`, and the zero `State` substituted when `Systemd`
+  is absent leaves that condition false, so the form cannot render on a host
+  where the route 404s (`TestPageRendersNoRebootControlWithoutSystemd` pins
+  both ends of that).
   Because the module's whole-module gate is
   now an any-of gate, `attention.Module.findings` reaches it through the
   `platform.CapabilityGateAny`/`AvailableAny` (`HasAny`) type-assert rather
@@ -684,7 +713,9 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   unaffected; with the capability present, both modules behave exactly as
   before this chunk. Neither module's `views.templ` changed: an absent
   module 404s before any page renders, so there is no conditional view
-  content to add, the same as backups/maintenance/logs. Neither module is a
+  content to add, the same as backups/logs (maintenance's `views.templ`
+  gained conditional host-image content in #51; see the Maintenance bullet
+  above for its now-different behavior). Neither module is a
   `platform.HealthProvider` (see the module table above), so no `attention`
   aggregator change was needed here either. Both `module_test.go` files
   gained the same configurable `caps capability.Set`/`capsSet bool` pair on
@@ -709,7 +740,9 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   unaffected; with incus present, the module behaves exactly as before this
   chunk. `views.templ` is unchanged: an absent module 404s before any page
   renders, so there is no conditional view content to add, the same as
-  podman/docker/backups/maintenance/logs. Incus is not a
+  podman/docker/backups/logs (maintenance's `views.templ` gained conditional
+  host-image content in #51; see the Maintenance bullet above for its
+  now-different behavior). Incus is not a
   `platform.HealthProvider` either, so no `attention` aggregator change was
   needed. `module_test.go` gained the same configurable
   `caps capability.Set`/`capsSet bool` pair on its fake `Host` that the other

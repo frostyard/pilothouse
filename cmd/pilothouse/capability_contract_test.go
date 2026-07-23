@@ -188,6 +188,22 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.QueryFilesList:        nil,
 }
 
+// capabilityAnyRequirements is the any-of counterpart of
+// capabilityRequirements, for broker IDs whose daemon-side registration guard
+// is HasAny rather than HasAll. It is likewise transcribed by hand from
+// docs/capabilities.md, which documents QueryHostImageStatus as the table's
+// one any-of row (`bootc OR rpm-ostree`) — a call the web side may make
+// whenever *either* source is advertised, so checking it with HasAll would
+// wrongly demand both.
+//
+// A broker ID must appear in exactly one of the two maps; appearing in both
+// fails the test, as does appearing in neither (see requireAvailable). This
+// mirrors the moduleRequiredCapabilities / moduleRequiredAnyCapabilities split
+// below, for the same reason.
+var capabilityAnyRequirements = map[string][]capability.ID{
+	broker.QueryHostImageStatus: {capability.Bootc, capability.RPMOStree},
+}
+
 // moduleRequiredCapabilities is the independent, hand-maintained oracle for
 // which whole-module capability gate each web module carries, transcribed
 // from docs/capabilities.md's "Module-level defaults applied" section — NOT
@@ -299,20 +315,30 @@ func newFakeCapabilityBroker(t *testing.T, caps capability.Set) *fakeCapabilityB
 }
 
 // requireAvailable fails the test immediately if id's required capabilities
-// (per capabilityRequirements) are not all present in the fixture's
-// capability.Set. An id missing from the table also fails the test, since
-// docs/capabilities.md's table is supposed to cover every registered broker
-// ID (c12 confirms this against the live source; here an unlisted ID most
-// likely means this table fell out of sync while a new ID was added).
+// are not satisfied by the fixture's capability.Set — all of them for an
+// all-of ID (capabilityRequirements), at least one of them for an any-of ID
+// (capabilityAnyRequirements). An id missing from both tables also fails the
+// test, since docs/capabilities.md's table is supposed to cover every
+// registered broker ID (c12 confirms this against the live source; here an
+// unlisted ID most likely means these tables fell out of sync while a new ID
+// was added).
 func (b *fakeCapabilityBroker) requireAvailable(id string) {
 	b.t.Helper()
 	required, known := capabilityRequirements[id]
-	if !known {
-		b.t.Fatalf("fake broker received call for broker ID %q, which is not present in capabilityRequirements; add it (see docs/capabilities.md)", id)
-		return
-	}
-	if !b.capabilities.HasAll(required...) {
-		b.t.Fatalf("fake broker received call for broker ID %q whose required capability %v is absent from the active fixture; the web side must never invoke a gated-off broker call", id, required)
+	requiredAny, knownAny := capabilityAnyRequirements[id]
+	switch {
+	case known && knownAny:
+		b.t.Fatalf("broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
+	case knownAny:
+		if !b.capabilities.HasAny(requiredAny...) {
+			b.t.Fatalf("fake broker received call for broker ID %q whose required capabilities %v are all absent from the active fixture; the web side must never invoke a gated-off broker call", id, requiredAny)
+		}
+	case known:
+		if !b.capabilities.HasAll(required...) {
+			b.t.Fatalf("fake broker received call for broker ID %q whose required capability %v is absent from the active fixture; the web side must never invoke a gated-off broker call", id, required)
+		}
+	default:
+		b.t.Fatalf("fake broker received call for broker ID %q, which is not present in capabilityRequirements or capabilityAnyRequirements; add it (see docs/capabilities.md)", id)
 	}
 }
 
