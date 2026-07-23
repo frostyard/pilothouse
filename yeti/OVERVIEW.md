@@ -313,14 +313,38 @@ rules for adding a new module (routes, actions, queries).
   registry's modules are wired to the mux) stays unfiltered: every module's
   routes remain mounted regardless of capability, per the "routes stay
   mounted" requirement above; only the nav list and the dashboard loop are
-  filtered by `moduleAvailable`. No production module implements
-  `CapabilityGate` yet as of this chunk — the mechanism is proven with a
+  filtered by `moduleAvailable`. No production module implemented
+  `CapabilityGate` in this chunk — the mechanism was proven with a
   synthetic fake module in `internal/platform/capability_test.go` (which
   exercises `Available` through a fake `Host`'s real `Capabilities()`
   method, not a capability.Set passed in directly, so the test covers the
   same `Host`-integration boundary the production code depends on) and
   `internal/web/server_test.go`, and every real module's
-  nav/dashboard/route behavior is unchanged.
+  nav/dashboard/route behavior was unchanged. `services` is the first real
+  module to adopt it — see the next bullet.
+- **Services module: the first real `CapabilityGate` adopter.**
+  `internal/modules/services.Module` now implements
+  `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Systemd}` — so the whole module (nav entry,
+  dashboard card, and future `Health` inclusion) is available only when the
+  web process's cached `capability.Set` has `Systemd`, matching #50's daemon-
+  side `registerServices` gating. Each route `services.Module.Mount`
+  registers is individually wrapped in `platform.Gate`: `GET /services` and
+  `POST /services/{unit}/{action}` require only `{capability.Systemd}`;
+  `GET /services/{unit}/logs` requires `{capability.Systemd,
+  capability.Journald}` (`Gate`'s `HasAll` semantics cover the AND), so a
+  host with `Systemd` but not `Journald` keeps full service state and
+  lifecycle control while the journal sub-feature 404s. `views.templ`'s
+  `Page(...)` takes a new `journalAvailable bool` parameter and only renders
+  the per-unit `Logs` link when it is true; the `GET /services` handler in
+  `module.go` derives it from `host.Capabilities(r.Context()).Has(capability.Journald)`
+  (Systemd is already guaranteed true inside a `Gate`-wrapped handler, so no
+  redundant check is needed there). `module_test.go`'s `testHost` gained a
+  configurable `caps capability.Set`/`capsSet bool` pair (defaulting to a
+  full-capability set matching the pre-#54 behavior) so tests can exercise
+  Systemd-present/-absent and Journald-present/-absent independently via
+  real `ServeMux` round trips through `Mount`, rather than calling handler
+  logic directly.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
