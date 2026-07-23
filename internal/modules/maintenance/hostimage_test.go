@@ -1,6 +1,8 @@
 package maintenance
 
 import (
+	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -91,6 +93,66 @@ const bootcBootedStagedRollback = `{
     "rollbackQueued": false,
     "type": "bootcHost"
   }
+}`
+
+// rpmOStreeBootedOnly, rpmOStreeBootedStagedRollback, and the fixtures below
+// are shaped after real `rpm-ostree status --json` output: a top-level
+// `deployments` array, newest first (staged, then booted, then the rollback
+// deployment), each entry carrying the ostree commit `checksum` and `version`
+// this package wants plus the container-image keys and unrelated keys
+// (`osname`, `origin`, `pinned`, `requested-packages`) it ignores. rpm-ostree
+// flags the booted and staged deployments explicitly and has no flag for a
+// rollback deployment, which is why the third entry below carries neither.
+//
+// The digests deliberately match the bootc fixtures above deployment for
+// deployment, so a merge of the two is a merge of two views of one host.
+const rpmOStreeBootedOnly = `{
+  "deployments": [
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+      "container-image-reference-digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checksum": "aaaa111111111111111111111111111111111111111111111111111111111111",
+      "version": "41.20260701.0",
+      "osname": "default",
+      "booted": true,
+      "staged": false,
+      "pinned": false,
+      "requested-packages": []
+    }
+  ],
+  "transaction": null
+}`
+
+const rpmOStreeBootedStagedRollback = `{
+  "deployments": [
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:next",
+      "container-image-reference-digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "checksum": "bbbb222222222222222222222222222222222222222222222222222222222222",
+      "version": "41.20260715.0",
+      "osname": "default",
+      "booted": false,
+      "staged": true
+    },
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+      "container-image-reference-digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checksum": "aaaa111111111111111111111111111111111111111111111111111111111111",
+      "version": "41.20260701.0",
+      "osname": "default",
+      "booted": true,
+      "staged": false
+    },
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:previous",
+      "container-image-reference-digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "checksum": "cccc333333333333333333333333333333333333333333333333333333333333",
+      "version": "41.20260610.0",
+      "osname": "default",
+      "booted": false,
+      "staged": false
+    }
+  ]
 }`
 
 func TestParseBootcStatusBootedOnly(t *testing.T) {
@@ -288,6 +350,390 @@ func TestParseBootcStatusAcceptsFutureAPIVersion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, status.Booted)
 	assert.Equal(t, "img:a", status.Booted.Image)
+}
+
+// bootcBootedStagedRollbackSoftReboot is bootcBootedStagedRollback plus the
+// soft-reboot eligibility key, so merge tests can prove the merge leaves that
+// three-state value alone rather than only proving it stays nil.
+const bootcBootedStagedRollbackSoftReboot = `{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "status": {
+    "staged": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:next", "transport": "registry"},
+        "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "softRebootCapable": true
+    },
+    "booted": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:stable", "transport": "registry"},
+        "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "rollback": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:previous", "transport": "registry"},
+        "imageDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    "type": "bootcHost"
+  }
+}`
+
+// TestParseBootcStatusLeavesSupplementaryFieldsEmpty pins the ownership split
+// the merge depends on: Version and Checksum are rpm-ostree's to report, so
+// bootc's parser must leave them empty even for a payload that does carry a
+// version string and an ostree checksum of its own (bootcBootedOnly has both:
+// `.status.booted.image.version` and `.status.booted.ostree.checksum`).
+// Likewise the parser sets neither rpm-ostree availability field.
+func TestParseBootcStatusLeavesSupplementaryFieldsEmpty(t *testing.T) {
+	status, err := ParseBootcStatus([]byte(bootcBootedOnly))
+	require.NoError(t, err)
+	require.NotNil(t, status.Booted)
+	assert.Empty(t, status.Booted.Version, "the version string is rpm-ostree's supplementary detail, not bootc's")
+	assert.Empty(t, status.Booted.Checksum, "the ostree checksum is rpm-ostree's supplementary detail, not bootc's")
+	assert.False(t, status.RPMOStreeAvailable, "parsing bootc says nothing about rpm-ostree")
+	assert.Empty(t, status.RPMOStreeError)
+}
+
+// TestParseRPMOStreeStatusExtractsSupplementaryDetail covers the shapes the
+// merge consumes: a single booted deployment, and a staged/booted/rollback
+// list where only the first two carry a role flag.
+func TestParseRPMOStreeStatusExtractsSupplementaryDetail(t *testing.T) {
+	t.Run("booted only", func(t *testing.T) {
+		supplement, err := ParseRPMOStreeStatus([]byte(rpmOStreeBootedOnly))
+		require.NoError(t, err)
+		require.Len(t, supplement.Deployments, 1)
+		assert.Equal(t, rpmOStreeDeployment{
+			Booted:   true,
+			Checksum: "aaaa111111111111111111111111111111111111111111111111111111111111",
+			Digest:   "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			Image:    "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+			Staged:   false,
+			Version:  "41.20260701.0",
+		}, supplement.Deployments[0])
+	})
+
+	t.Run("staged, booted, and rollback", func(t *testing.T) {
+		supplement, err := ParseRPMOStreeStatus([]byte(rpmOStreeBootedStagedRollback))
+		require.NoError(t, err)
+		require.Len(t, supplement.Deployments, 3)
+		assert.True(t, supplement.Deployments[0].Staged)
+		assert.False(t, supplement.Deployments[0].Booted)
+		assert.Equal(t, "41.20260715.0", supplement.Deployments[0].Version)
+		assert.Equal(t, "bbbb222222222222222222222222222222222222222222222222222222222222", supplement.Deployments[0].Checksum)
+		assert.True(t, supplement.Deployments[1].Booted)
+		assert.Equal(t, "41.20260701.0", supplement.Deployments[1].Version)
+		assert.False(t, supplement.Deployments[2].Booted, "rpm-ostree has no rollback flag")
+		assert.False(t, supplement.Deployments[2].Staged)
+		assert.Equal(t, "41.20260610.0", supplement.Deployments[2].Version)
+		assert.Equal(t, "cccc333333333333333333333333333333333333333333333333333333333333", supplement.Deployments[2].Checksum)
+	})
+}
+
+// TestParseRPMOStreeStatusEmptyDeploymentsIsSuccess pins the distinction the
+// caller needs: "rpm-ostree read fine and had nothing to add" is a success
+// with no deployments, not an error. TestParseRPMOStreeStatusMalformed covers
+// the other side of that distinction.
+func TestParseRPMOStreeStatusEmptyDeploymentsIsSuccess(t *testing.T) {
+	supplement, err := ParseRPMOStreeStatus([]byte(`{"deployments": [], "transaction": null}`))
+	require.NoError(t, err, "an empty deployment list is a readable status, not a parse failure")
+	assert.Empty(t, supplement.Deployments)
+	assert.Equal(t, rpmOStreeSupplement{}, supplement)
+}
+
+// TestParseRPMOStreeStatusMalformed asserts the error contract: a non-nil
+// error and a zero supplement, never partial data.
+//
+// The cases enumerate both halves of "structurally malformed" -- syntax
+// (non-JSON, truncated, wrong JSON type) and substance (no `deployments` array
+// at all, or one of the wrong type). rpm-ostree's document has no
+// apiVersion/kind discriminator, so the required `deployments` array is the
+// only thing separating its status output from any other JSON a caller might
+// capture; a payload without it must fail rather than decode into a confident,
+// empty success that the caller would then report as "rpm-ostree had nothing
+// to add."
+func TestParseRPMOStreeStatusMalformed(t *testing.T) {
+	cases := []struct {
+		input string
+		name  string
+	}{
+		{name: "empty input", input: ``},
+		{name: "not JSON at all", input: `error: Unknown command 'status --json'`},
+		{name: "truncated JSON", input: `{"deployments": [{"booted": true`},
+		{name: "JSON array", input: `[{"booted": true}]`},
+		{name: "JSON string", input: `"deployments"`},
+		{name: "JSON null", input: `null`},
+		{name: "empty JSON object", input: `{}`},
+		{name: "unrelated JSON object", input: `{"some":"json"}`},
+		{name: "an error object from another tool", input: `{"error":"cannot connect to rpm-ostreed"}`},
+		{name: "null deployments", input: `{"deployments": null}`},
+		{name: "deployments of the wrong type", input: `{"deployments": {"booted": true}}`},
+		{name: "deployment entry of the wrong type", input: `{"deployments": ["stable"]}`},
+		{name: "version of the wrong type", input: `{"deployments": [{"booted": true, "version": 41}]}`},
+		{name: "booted flag of the wrong type", input: `{"deployments": [{"booted": "yes"}]}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			supplement, err := ParseRPMOStreeStatus([]byte(testCase.input))
+			require.Error(t, err)
+			assert.Equal(t, rpmOStreeSupplement{}, supplement, "a failed parse must return a zero supplement, not partial data")
+		})
+	}
+}
+
+// TestMergeHostImageBootcOnly proves the no-rpm-ostree host is untouched: the
+// merged result is byte-for-byte bootc's own parse, with the supplementary
+// fields empty and -- critically -- the rpm-ostree availability fields left
+// alone. MergeHostImage receives an already-parsed supplement and cannot know
+// whether rpm-ostree failed, reported nothing, or was never run, so it must
+// not fabricate an answer for a source it was never given.
+func TestMergeHostImageBootcOnly(t *testing.T) {
+	for _, fixture := range []struct {
+		input string
+		name  string
+	}{
+		{name: "booted only", input: bootcBootedOnly},
+		{name: "booted and staged", input: bootcBootedStaged},
+		{name: "booted, staged, and rollback", input: bootcBootedStagedRollback},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			bootc, err := ParseBootcStatus([]byte(fixture.input))
+			require.NoError(t, err)
+
+			merged := MergeHostImage(bootc, rpmOStreeSupplement{})
+
+			assert.Equal(t, bootc, merged, "with no rpm-ostree data the merge must change nothing")
+			assert.False(t, merged.RPMOStreeAvailable, "the merge was never given rpm-ostree data")
+			assert.Empty(t, merged.RPMOStreeError, "no rpm-ostree data is not an rpm-ostree error")
+			for name, deployment := range map[string]*Deployment{"booted": merged.Booted, "staged": merged.Staged, "rollback": merged.Rollback} {
+				if deployment == nil {
+					continue
+				}
+				assert.Empty(t, deployment.Version, "%s version has no source without rpm-ostree", name)
+				assert.Empty(t, deployment.Checksum, "%s checksum has no source without rpm-ostree", name)
+			}
+		})
+	}
+}
+
+// TestMergeHostImageBootcAndRPMOStree is the uCore-shaped case: both sources
+// describe the same host, so every slot gains rpm-ostree's version and
+// checksum while every field bootc owns -- image, digest, which slots exist,
+// and soft-reboot eligibility -- comes through untouched.
+func TestMergeHostImageBootcAndRPMOStree(t *testing.T) {
+	bootc, err := ParseBootcStatus([]byte(bootcBootedStagedRollbackSoftReboot))
+	require.NoError(t, err)
+	supplement, err := ParseRPMOStreeStatus([]byte(rpmOStreeBootedStagedRollback))
+	require.NoError(t, err)
+
+	merged := MergeHostImage(bootc, supplement)
+
+	require.NotNil(t, merged.Booted)
+	assert.Equal(t, "quay.io/frostyard/snosi:stable", merged.Booted.Image, "bootc owns the image reference")
+	assert.Equal(t, "sha256:1111111111111111111111111111111111111111111111111111111111111111", merged.Booted.Digest)
+	assert.Equal(t, "41.20260701.0", merged.Booted.Version)
+	assert.Equal(t, "aaaa111111111111111111111111111111111111111111111111111111111111", merged.Booted.Checksum)
+
+	require.NotNil(t, merged.Staged, "bootc alone decides which slots exist")
+	assert.Equal(t, "quay.io/frostyard/snosi:next", merged.Staged.Image)
+	assert.Equal(t, "sha256:2222222222222222222222222222222222222222222222222222222222222222", merged.Staged.Digest)
+	assert.Equal(t, "41.20260715.0", merged.Staged.Version)
+	assert.Equal(t, "bbbb222222222222222222222222222222222222222222222222222222222222", merged.Staged.Checksum)
+
+	require.NotNil(t, merged.Rollback, "rpm-ostree flags no rollback, so this slot is matched by bootc's digest")
+	assert.Equal(t, "quay.io/frostyard/snosi:previous", merged.Rollback.Image)
+	assert.Equal(t, "sha256:3333333333333333333333333333333333333333333333333333333333333333", merged.Rollback.Digest)
+	assert.Equal(t, "41.20260610.0", merged.Rollback.Version)
+	assert.Equal(t, "cccc333333333333333333333333333333333333333333333333333333333333", merged.Rollback.Checksum)
+
+	require.NotNil(t, merged.SoftRebootCapable, "soft-reboot eligibility is bootc's and survives the merge")
+	assert.True(t, *merged.SoftRebootCapable)
+	assert.True(t, merged.BootcAvailable)
+	assert.Empty(t, merged.BootcError)
+	assert.False(t, merged.RPMOStreeAvailable, "recording rpm-ostree availability is the caller's job, not the merge's")
+	assert.Empty(t, merged.RPMOStreeError)
+}
+
+// TestMergeHostImageConflictKeepsBootc is the precedence test the spec's
+// round-3 clarification asks for. rpm-ostree describes the booted deployment
+// as a different image than bootc does; bootc wins outright and the
+// rpm-ostree value must not reach any field of the result -- neither by
+// overwriting an authoritative field nor by having its version/checksum
+// attached to a deployment it evidently does not describe.
+func TestMergeHostImageConflictKeepsBootc(t *testing.T) {
+	cases := []struct {
+		name      string
+		rpmOStree string
+	}{
+		{
+			name: "digest disagrees",
+			rpmOStree: `{"deployments": [{"booted": true,
+			  "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+			  "container-image-reference-digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+			  "checksum": "dddd999999999999999999999999999999999999999999999999999999999999",
+			  "version": "41.20260101.0"}]}`,
+		},
+		{
+			name: "image reference disagrees, neither side reports a digest",
+			rpmOStree: `{"deployments": [{"booted": true,
+			  "container-image-reference": "ostree-unverified-registry:quay.io/someone-else/other:stable",
+			  "checksum": "dddd999999999999999999999999999999999999999999999999999999999999",
+			  "version": "41.20260101.0"}]}`,
+		},
+		{
+			name: "both disagree",
+			rpmOStree: `{"deployments": [{"booted": true,
+			  "container-image-reference": "ostree-unverified-registry:quay.io/someone-else/other:stable",
+			  "container-image-reference-digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+			  "checksum": "dddd999999999999999999999999999999999999999999999999999999999999",
+			  "version": "41.20260101.0"}]}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// The no-digest case needs a bootc payload without one too, so
+			// the image reference is what the comparison actually falls to.
+			bootcInput := bootcBootedOnly
+			if testCase.name == "image reference disagrees, neither side reports a digest" {
+				bootcInput = `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"quay.io/frostyard/snosi:stable"}}}}}`
+			}
+			bootc, err := ParseBootcStatus([]byte(bootcInput))
+			require.NoError(t, err)
+			supplement, err := ParseRPMOStreeStatus([]byte(testCase.rpmOStree))
+			require.NoError(t, err)
+
+			merged := MergeHostImage(bootc, supplement)
+
+			require.NotNil(t, merged.Booted)
+			assert.Equal(t, bootc.Booted.Image, merged.Booted.Image, "bootc is authoritative for the image reference")
+			assert.Equal(t, bootc.Booted.Digest, merged.Booted.Digest, "bootc is authoritative for the digest")
+			assert.Equal(t, bootc, merged, "a conflicting entry is dropped whole: nothing from it reaches any field")
+
+			// Serialized rather than formatted with %+v: HostImageStatus is
+			// a struct of pointers, so %+v would print addresses and the
+			// no-leak assertion below would be vacuously true.
+			encoded, err := json.Marshal(merged)
+			require.NoError(t, err)
+			rendered := string(encoded)
+			for _, leaked := range []string{
+				"sha256:9999999999999999999999999999999999999999999999999999999999999999",
+				"quay.io/someone-else/other:stable",
+				"dddd999999999999999999999999999999999999999999999999999999999999",
+				"41.20260101.0",
+			} {
+				assert.NotContains(t, rendered, leaked, "no rpm-ostree value from a conflicting entry may appear anywhere in the merged result")
+			}
+		})
+	}
+}
+
+// TestMergeHostImageMatchesRollbackByIdentityOnly guards the one slot
+// rpm-ostree does not flag. An unflagged entry that is not the deployment
+// bootc reports as the rollback must not have its detail attached to it just
+// for being the only candidate left.
+func TestMergeHostImageMatchesRollbackByIdentityOnly(t *testing.T) {
+	bootc, err := ParseBootcStatus([]byte(bootcBootedStagedRollback))
+	require.NoError(t, err)
+	supplement, err := ParseRPMOStreeStatus([]byte(`{"deployments": [
+	  {"booted": true,
+	   "container-image-reference-digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+	   "checksum": "aaaa111111111111111111111111111111111111111111111111111111111111",
+	   "version": "41.20260701.0"},
+	  {"booted": false, "staged": false,
+	   "container-image-reference-digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+	   "checksum": "eeee888888888888888888888888888888888888888888888888888888888888",
+	   "version": "41.20260505.0"}
+	]}`))
+	require.NoError(t, err)
+
+	merged := MergeHostImage(bootc, supplement)
+
+	require.NotNil(t, merged.Booted)
+	assert.Equal(t, "41.20260701.0", merged.Booted.Version, "the booted entry still matches by role")
+	require.NotNil(t, merged.Rollback)
+	assert.Empty(t, merged.Rollback.Version, "an unflagged entry with a different digest is not this rollback")
+	assert.Empty(t, merged.Rollback.Checksum)
+	require.NotNil(t, merged.Staged)
+	assert.Empty(t, merged.Staged.Version, "rpm-ostree flagged nothing staged")
+}
+
+// TestMergeHostImageComparesNormalizedImageReferences covers the case where
+// identity has to fall back to the image reference: rpm-ostree spells it with
+// the ostree transport it deployed through, bootc spells it bare, and the two
+// describe the same deployment. Treating that spelling difference as a
+// conflict would drop supplementary detail on every real rpm-ostree host whose
+// bootc status omits a digest.
+func TestMergeHostImageComparesNormalizedImageReferences(t *testing.T) {
+	bootc, err := ParseBootcStatus([]byte(`{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"quay.io/frostyard/snosi:stable","transport":"registry"}}}}}`))
+	require.NoError(t, err)
+	require.Empty(t, bootc.Booted.Digest, "this fixture exists to exercise the reference comparison")
+
+	for _, reference := range []string{
+		"quay.io/frostyard/snosi:stable",
+		"ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+		"ostree-image-signed:docker://quay.io/frostyard/snosi:stable",
+		"ostree-remote-image:frostyard:docker://quay.io/frostyard/snosi:stable",
+	} {
+		t.Run(reference, func(t *testing.T) {
+			supplement, err := ParseRPMOStreeStatus([]byte(fmt.Sprintf(
+				`{"deployments": [{"booted": true, "container-image-reference": %q, "checksum": "aaaa", "version": "41.20260701.0"}]}`, reference)))
+			require.NoError(t, err)
+
+			merged := MergeHostImage(bootc, supplement)
+
+			require.NotNil(t, merged.Booted)
+			assert.Equal(t, "quay.io/frostyard/snosi:stable", merged.Booted.Image, "bootc's spelling is the one reported")
+			assert.Equal(t, "41.20260701.0", merged.Booted.Version)
+			assert.Equal(t, "aaaa", merged.Booted.Checksum)
+		})
+	}
+}
+
+// TestMergeHostImageNeverInventsDeployments pins the other half of "bootc owns
+// deployment identity": rpm-ostree can add detail to a slot bootc reported, but
+// it can never conjure a slot bootc did not report -- including on a host where
+// bootc failed entirely and the caller is about to record BootcError.
+func TestMergeHostImageNeverInventsDeployments(t *testing.T) {
+	supplement, err := ParseRPMOStreeStatus([]byte(rpmOStreeBootedStagedRollback))
+	require.NoError(t, err)
+
+	merged := MergeHostImage(HostImageStatus{BootcError: "bootc: exec failed"}, supplement)
+
+	assert.Nil(t, merged.Booted, "rpm-ostree may not report a deployment bootc did not")
+	assert.Nil(t, merged.Staged)
+	assert.Nil(t, merged.Rollback)
+	assert.False(t, merged.BootcAvailable)
+	assert.Equal(t, "bootc: exec failed", merged.BootcError, "the caller's bootc failure record survives the merge")
+	assert.False(t, merged.RPMOStreeAvailable)
+	assert.Empty(t, merged.RPMOStreeError)
+}
+
+// TestMergeHostImageDoesNotMutateItsInputs proves the result shares no memory
+// with either argument: HostImageStatus is a struct of pointers, so a merge
+// that wrote through them would silently rewrite the caller's own bootc parse.
+func TestMergeHostImageDoesNotMutateItsInputs(t *testing.T) {
+	bootc, err := ParseBootcStatus([]byte(bootcBootedStagedRollbackSoftReboot))
+	require.NoError(t, err)
+	supplement, err := ParseRPMOStreeStatus([]byte(rpmOStreeBootedStagedRollback))
+	require.NoError(t, err)
+
+	merged := MergeHostImage(bootc, supplement)
+	require.NotNil(t, merged.Booted)
+	require.NotEmpty(t, merged.Booted.Version)
+
+	assert.Empty(t, bootc.Booted.Version, "the merge must not write into the caller's bootc status")
+	assert.Empty(t, bootc.Staged.Version)
+	assert.Empty(t, bootc.Rollback.Version)
+
+	merged.Booted.Image = "quay.io/frostyard/mutated:latest"
+	*merged.SoftRebootCapable = false
+	assert.Equal(t, "quay.io/frostyard/snosi:stable", bootc.Booted.Image)
+	require.NotNil(t, bootc.SoftRebootCapable)
+	assert.True(t, *bootc.SoftRebootCapable)
+	assert.Equal(t, "41.20260701.0", supplement.Deployments[1].Version, "the supplement is read, never written")
 }
 
 // TestHostImageRunsNoBootcSubcommand mechanically enforces the read-only

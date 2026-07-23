@@ -85,15 +85,20 @@ directory. Current modules:
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
-**In progress (#51, host-image status): the bootc status parser.**
+**In progress (#51, host-image status): the host-image parsers and merge.**
 `internal/modules/maintenance/hostimage.go` adds the read-only host-image
-domain types — `Deployment` (image reference + manifest digest) and
-`HostImageStatus` (the booted/staged/rollback deployment slots, a three-state
-`SoftRebootCapable`, and `BootcAvailable`/`BootcError`) — plus
-`ParseBootcStatus`, a pure decoder for `bootc status --json` output. As of
-this commit nothing calls it: there is no broker query, no manager, and no
-view for host-image status yet, and the `maintenance` module's behavior is
-unchanged. Contracts worth knowing before wiring it up:
+domain types — `Deployment` (bootc's image reference + manifest digest, plus
+rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
+(the booted/staged/rollback deployment slots, a three-state
+`SoftRebootCapable`, and a symmetric availability/error pair per source:
+`BootcAvailable`/`BootcError` and `RPMOStreeAvailable`/`RPMOStreeError`) —
+plus `ParseBootcStatus`, a pure decoder for `bootc status --json`;
+`ParseRPMOStreeStatus`, a pure decoder for `rpm-ostree status --json` into an
+unexported supplement type; and `MergeHostImage`, which combines the two under
+a bootc-authoritative precedence rule. As of this commit nothing calls any of
+them: there is no broker query, no manager, and no view for host-image status
+yet, nothing sets either availability/error pair, and the `maintenance`
+module's behavior is unchanged. Contracts worth knowing before wiring it up:
 
 - The file executes nothing. Its imports are limited to
   `encoding/json`/`fmt`/`strings`, enforced mechanically by a test over the
@@ -132,6 +137,39 @@ unchanged. Contracts worth knowing before wiring it up:
   so it serializes even when false — which means an absent key reliably
   indicates a bootc predating soft-reboot support: unknown, never a parse
   error and never false.
+- rpm-ostree is the *supplementary* source, and its parser's return type says
+  so: `ParseRPMOStreeStatus` yields an unexported `rpmOStreeSupplement` (per
+  deployment: version string, ostree checksum, plus image/digest/role used
+  only for matching), never a `HostImageStatus`, so rpm-ostree output cannot
+  stand alone as a host-image report even by accident. rpm-ostree's document
+  has no apiVersion/kind discriminator, so the required top-level
+  `deployments` array plays that role: a payload without it is a parse error,
+  while a payload whose array is empty is a *success* with nothing to add.
+  That distinction is the point — it lets the caller tell "rpm-ostree ran but
+  its output could not be read" (record `RPMOStreeError`) from "rpm-ostree
+  read fine and had nothing to say."
+- `MergeHostImage(bootc, rpmOstree)` encodes the spec's precedence rule as
+  behavior, not prose. bootc owns deployment identity outright: which slots
+  exist, their image reference, their digest, and `SoftRebootCapable` all come
+  from bootc alone, and rpm-ostree can only ever fill in `Version`/`Checksum`
+  on a slot bootc already reported. It cannot add, remove, or rename a slot —
+  merging a full supplement into a failed bootc parse still yields no
+  deployments. Entries are matched by the role rpm-ostree itself flags (booted,
+  staged) and, for the rollback slot it does not flag, by identity — the digest
+  bootc reported, or the image reference when neither side reports a digest,
+  compared after stripping the ostree transport decoration rpm-ostree puts in
+  front of a reference (`ostree-unverified-registry:`, `…:docker://…`) and
+  bootc does not. On conflict the entry is dropped *whole*, version and
+  checksum included: a deployment the two sources describe differently is not
+  evidently the same deployment, so the failure direction is always less
+  detail, never wrong detail.
+- `MergeHostImage` returns `RPMOStreeAvailable`/`RPMOStreeError` at their zero
+  value and does not carry over an incoming value for either. It only ever
+  receives an already-parsed supplement, so it cannot know whether rpm-ostree
+  failed, reported nothing, or was never run; the caller that runs the command
+  owns those fields and sets them after merging, exactly as it does for bootc.
+  The merged result also shares no memory with either argument, so it never
+  writes back into the caller's own parse.
 
 ## Key Patterns
 
