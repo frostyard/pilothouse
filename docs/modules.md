@@ -108,6 +108,19 @@ than letting a missing or unreachable dependency fail daemon startup. See
 engine capability isn't present. New modules that depend on optional host
 tooling should follow the same shape from the start.
 
+When a module's registrations have *mixed* capability requirements —
+`registerServices` is the example: `QueryServicesState` and every services
+lifecycle action need only `Systemd`, while `QueryServicesJournal`
+additionally needs `Journald` because it resolves the unit against the
+systemd client before reading journal entries — guard each
+`Register`/`RegisterDefinition` call (or logical group of calls sharing the
+same requirement) individually against `caps.Has(...)`/`caps.HasAll(...)`
+rather than gating the whole function on the broadest requirement. That way
+a host with `Systemd` but not `Journald` still gets every registration that
+doesn't actually need `Journald`, instead of losing the whole module.
+`registerLogs` needs both `Systemd` and `Journald` uniformly, so its single
+registration is guarded by one `caps.HasAll(...)` check.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.

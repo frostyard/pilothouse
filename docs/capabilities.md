@@ -5,12 +5,13 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. As of c6, only `registerPodman`/`registerDocker`/
-`registerIncus` (and the new `QueryCapabilities` itself) are actually
-capability-guarded; every other row below still reflects a *future*
-guarantee that its own conversion chunk (c7-c11) has not landed yet. Later
-chunks in this phase convert the remaining registrations to match this
-table module by module; the final chunk's contract test enforces it.
+capability-guarded. As of c8, `registerPodman`/`registerDocker`/
+`registerIncus` (and the new `QueryCapabilities` itself), plus
+`registerServices` and `registerLogs`, are actually capability-guarded;
+every other row below still reflects a *future* guarantee that its own
+conversion chunk (c9-c11) has not landed yet. Later chunks in this phase
+convert the remaining registrations to match this table module by module;
+the final chunk's contract test enforces it.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
 constants and 16 `Query*` constants today — 51 IDs total, reproducible with:
@@ -154,19 +155,23 @@ The spec's module-default prose says "services journal → journald."
 `m.resolveUnit(ctx, name)` before reading journal entries, which uses the
 systemd D-Bus client (`m.client`) to validate/resolve the unit — so the
 query cannot function without systemd, regardless of journald availability.
-As of this chunk, `services.NewSystemManager` no longer opens that D-Bus
-connection itself: it accepts a pre-opened `systemdClient` from its caller
+As of c7, `services.NewSystemManager` no longer opens that D-Bus connection
+itself: it accepts a pre-opened `systemdClient` from its caller
 (`cmd/pilothoused/main.go`'s `buildSystemdManagers`), which only calls it at
 all when `connectSystemd` already obtained a live connection. A connection
 failure is therefore no longer a construction-time error from this
 package's constructor; it surfaces upstream as `connectSystemd` returning
 `nil` (logged as a warning, never fatal), and `services.NewSystemManager`
-simply never gets called in that case, leaving `QueryServicesJournal`
-unregistered (`registerServices` no-ops on a nil manager). This is recorded
-as a refinement of the spec's stated module default, not a deviation from
-it: the module-level default describes the feature's intent ("read the
-journal"), and the exception records the actual code dependency that intent
-doesn't mention.
+simply never gets called in that case. As of c8, `registerServices` also
+guards each registration individually against the probed `capability.Set`:
+`QueryServicesState` and every services lifecycle action register when
+`caps.Has(capability.Systemd)`, while `QueryServicesJournal` additionally
+requires `caps.HasAll(capability.Systemd, capability.Journald)` — so a host
+with systemd but no journald still gets full service management, with only
+the journal query withheld. This is recorded as a refinement of the spec's
+stated module default, not a deviation from it: the module-level default
+describes the feature's intent ("read the journal"), and the exception
+records the actual code dependency that intent doesn't mention.
 
 ### 3. `QueryLogs` (the whole logs module) is `systemd AND journald`, not `journald` alone
 
@@ -174,15 +179,17 @@ Same shape as above. `internal/modules/logs/manager.go`'s `Logs()` calls
 `m.client.ListUnitsContext(ctx)` and `m.client.ListUnitFilesContext(ctx)` —
 both systemd D-Bus calls — to build the returned unit allowlist before any
 journal entries are filtered, so the query's true requirement is `systemd
-AND journald`. As of this chunk, `logs.NewSystemManager` likewise no longer
-dials D-Bus itself; it accepts a pre-opened `systemdClient`, opened once by
+AND journald`. As of c7, `logs.NewSystemManager` likewise no longer dials
+D-Bus itself; it accepts a pre-opened `systemdClient`, opened once by
 `cmd/pilothoused/main.go`'s `connectSystemd` and passed through
 `buildSystemdManagers`. An absent or unreachable systemd bus means
-`connectSystemd` returns `nil`, `buildSystemdManagers` never calls
-`logs.NewSystemManager`, and `registerLogs` no-ops on the resulting nil
-manager — startup is never aborted by this path. Documented here as the
-exceptions section's job: recording a real code dependency that exceeds the
-module default's literal wording.
+`connectSystemd` returns `nil` and `buildSystemdManagers` never calls
+`logs.NewSystemManager` — startup is never aborted by this path. As of c8,
+`registerLogs` also guards its single registration directly against the
+probed `capability.Set`, requiring `caps.HasAll(capability.Systemd,
+capability.Journald)` before registering `QueryLogs` at all. Documented
+here as the exceptions section's job: recording a real code dependency that
+exceeds the module default's literal wording.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 

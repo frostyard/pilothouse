@@ -144,11 +144,15 @@ rules for adding a new module (routes, actions, queries).
   reachable at probe time but wedges before this second, real dial.
   `buildSystemdManagers` constructs the remote-mount
   controller and the backups/services/logs managers only when that client
-  is non-nil, leaving each nil otherwise; `registerStorageActions`/
-  `registerBackups`/`registerServices`/`registerLogs` no-op on a nil
-  manager as a stopgap (the full `capability.Set`-based registration guard
-  mirroring `registerPodman`/`registerDocker`/`registerIncus` lands in a
-  later chunk). `QueryStorageState` is registered separately against the
+  is non-nil, leaving each nil otherwise; `registerStorageActions` and
+  `registerBackups` still no-op purely on a nil manager as a stopgap (their
+  own `capability.Set`-based conversion lands in a later chunk).
+  `registerServices` and `registerLogs` have been converted to the full
+  `capability.Set`-based guard (see below); their nil-manager check is
+  retained alongside it as a defensive backstop, since manager and caps
+  agree in the real `run()` wiring but a directly-injected fake manager in
+  tests must still respect the capability guard on its own.
+  `QueryStorageState` is registered separately against the
   plain, non-systemd `storageManager` built earlier in `run()`, so storage
   inventory reads never depend on systemd at all — not even via a
   registration-level guard, unlike the remote-mount actions. Independent of
@@ -176,10 +180,19 @@ rules for adding a new module (routes, actions, queries).
   capability.Set` and registers nothing for its engine when the
   corresponding capability is absent (an unreachable or misconfigured
   engine, including a Docker client that fails to construct, is logged as
-  a warning, never a fatal `run()` error). Storage/backups/services/logs
-  registration is nil-guarded (this chunk) but not yet `capability.Set`-
-  guarded; maintenance and sysext stay unconditionally registered until
-  their own conversion.
+  a warning, never a fatal `run()` error). `registerServices` and
+  `registerLogs` are the next conversions: `registerServices` guards
+  `QueryServicesState` and every services lifecycle action on
+  `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
+  `caps.HasAll(capability.Systemd, capability.Journald)` — guarded
+  individually per `docs/capabilities.md`'s corrected mapping, so a host
+  with systemd but no journald still gets full service management with
+  only the journal query withheld; `registerLogs` guards its single
+  `QueryLogs` registration on that same `caps.HasAll(capability.Systemd,
+  capability.Journald)`. Storage (remote-mount actions) and backups
+  registration remain nil-guarded only, not yet `capability.Set`-guarded;
+  maintenance and sysext stay unconditionally registered until their own
+  conversion.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

@@ -162,7 +162,7 @@ func TestRegisterActivityRequiresAdministratorAndBoundsFilters(t *testing.T) {
 
 func TestServiceStopRequiresResourceConfirmation(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
-	require.NoError(t, registerServices(actions, queries, &fakeServicesManager{}))
+	require.NoError(t, registerServices(actions, queries, &fakeServicesManager{}, capability.New(capability.Systemd, capability.Journald)))
 	parameters := map[string]string{"unit": "backup.timer"}
 	err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionServicesStop, parameters, "")
 	assert.ErrorIs(t, err, broker.ErrConfirmationRequired)
@@ -206,7 +206,7 @@ func (m *fakeServicesManager) Journal(_ context.Context, unit string) (services.
 func TestRegisterServicesJournalAllowsReadOnlyIdentity(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	manager := &fakeServicesManager{}
-	require.NoError(t, registerServices(actions, queries, manager))
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd, capability.Journald)))
 	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryServicesJournal, map[string]string{"unit": "backup.timer"})
 	require.NoError(t, err)
 	assert.Equal(t, "backup.timer", manager.journalUnit)
@@ -555,7 +555,7 @@ func backendAvailability(backends []storage.BackendStatus, name string) storage.
 func TestRegisterLogsRequiresAdministratorAndValidatesParameters(t *testing.T) {
 	queries := broker.NewQueryRegistry()
 	manager := &fakeLogsManager{}
-	require.NoError(t, registerLogs(queries, manager))
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd, capability.Journald)))
 	parameters := map[string]string{
 		"query": "panic", "priority": "warning", "unit": "sshd.service", "window": "6h",
 	}
@@ -938,8 +938,8 @@ func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 	require.NoError(t, registerStorage(queries, storageManager))
 	require.NoError(t, registerStorageActions(actions, managers.remoteManager))
 	require.NoError(t, registerBackups(queries, managers.backupManager))
-	require.NoError(t, registerServices(actions, queries, managers.servicesManager))
-	require.NoError(t, registerLogs(queries, managers.logsManager))
+	require.NoError(t, registerServices(actions, queries, managers.servicesManager, capability.New()))
+	require.NoError(t, registerLogs(queries, managers.logsManager, capability.New()))
 
 	require.True(t, queries.Registered(broker.QueryStorageState))
 	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
@@ -968,7 +968,7 @@ func TestRegisterBackupsNoOpsWithNilManager(t *testing.T) {
 
 func TestRegisterServicesNoOpsWithNilManager(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
-	require.NoError(t, registerServices(actions, queries, nil))
+	require.NoError(t, registerServices(actions, queries, nil, capability.New(capability.Systemd, capability.Journald)))
 	assert.False(t, queries.Registered(broker.QueryServicesState))
 	assert.False(t, queries.Registered(broker.QueryServicesJournal))
 	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
@@ -978,8 +978,73 @@ func TestRegisterServicesNoOpsWithNilManager(t *testing.T) {
 
 func TestRegisterLogsNoOpsWithNilManager(t *testing.T) {
 	queries := broker.NewQueryRegistry()
-	require.NoError(t, registerLogs(queries, nil))
+	require.NoError(t, registerLogs(queries, nil, capability.New(capability.Systemd, capability.Journald)))
 	assert.False(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterServicesRegistersStateAndActionsWithSystemdOnly(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd)))
+
+	assert.True(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal), "journal query requires journald in addition to systemd")
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterServicesNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	// journald present, systemd absent: per c7, a real nil-manager fixture
+	// would already imply this, but registerServices' own caps guard must
+	// independently withhold every registration even given a non-nil fake
+	// manager, since QueryServicesJournal additionally requires systemd
+	// (docs/capabilities.md exception #2) and service management itself
+	// requires systemd.
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Journald)))
+
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterServicesRegistersJournalWithSystemdAndJournald(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd, capability.Journald)))
+
+	assert.True(t, queries.Registered(broker.QueryServicesState))
+	assert.True(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterLogsNoOpsWithSystemdOnlyNoJournald(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := &fakeLogsManager{}
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd)))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterLogsNoOpsWithoutSystemdRegardlessOfJournald(t *testing.T) {
+	for _, caps := range []capability.Set{capability.New(), capability.New(capability.Journald)} {
+		queries := broker.NewQueryRegistry()
+		manager := &fakeLogsManager{}
+		require.NoError(t, registerLogs(queries, manager, caps))
+		assert.False(t, queries.Registered(broker.QueryLogs))
+	}
+}
+
+func TestRegisterLogsRegistersWithSystemdAndJournald(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := &fakeLogsManager{}
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd, capability.Journald)))
+	assert.True(t, queries.Registered(broker.QueryLogs))
 }
 
 func TestRegisterStorageActionsNoOpsWithNilManager(t *testing.T) {

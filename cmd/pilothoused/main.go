@@ -147,10 +147,10 @@ func run() error {
 	if err := registerBackups(queries, managers.backupManager); err != nil {
 		return err
 	}
-	if err := registerServices(actions, queries, managers.servicesManager); err != nil {
+	if err := registerServices(actions, queries, managers.servicesManager, caps); err != nil {
 		return err
 	}
-	if err := registerLogs(queries, managers.logsManager); err != nil {
+	if err := registerLogs(queries, managers.logsManager, caps); err != nil {
 		return err
 	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
@@ -577,14 +577,18 @@ func waitForStorageUnitJob(ctx context.Context, unit string, operation func(cont
 	}
 }
 
-// registerLogs registers QueryLogs iff manager is non-nil. manager is nil
-// exactly when construction skipped it -- systemd absent or unreachable per
-// buildSystemdManagers, since logs.SystemManager's unit-listing calls
-// require a live systemd connection -- in which case this is a no-op
-// stopgap rather than a handler that would panic dereferencing a nil
-// manager at request time.
-func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {
-	if manager == nil {
+// registerLogs registers QueryLogs iff manager is non-nil and caps has both
+// Systemd and Journald. logs.Manager.Logs() calls
+// ListUnitsContext/ListUnitFilesContext on the systemd D-Bus client before
+// filtering journal entries, so it genuinely requires both capabilities
+// uniformly, not journald alone (docs/capabilities.md's exception #3).
+// manager is nil exactly when construction skipped it -- systemd absent or
+// unreachable per buildSystemdManagers, which per c7 already implies the
+// Systemd capability was absent -- so the manager check and the caps check
+// agree in the real run() wiring; both are kept so a fake, non-nil manager
+// passed directly in tests still respects the capability guard.
+func registerLogs(queries *broker.QueryRegistry, manager logs.Manager, caps capability.Set) error {
+	if manager == nil || !caps.HasAll(capability.Systemd, capability.Journald) {
 		return nil
 	}
 	return queries.Register(broker.QueryLogs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
@@ -818,33 +822,46 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 	return nil
 }
 
-// registerServices registers every Services query/action iff manager is
-// non-nil. manager is nil exactly when construction skipped it -- systemd
-// absent or unreachable per buildSystemdManagers -- in which case this is a
-// no-op stopgap rather than handlers that would panic dereferencing a nil
-// manager at request time.
-func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager) error {
-	if manager == nil {
-		return nil
+// registerServices registers Services queries/actions guarded by the
+// capabilities their manager call paths actually depend on, per
+// docs/capabilities.md: QueryServicesState and every services lifecycle
+// action require only Systemd, while QueryServicesJournal additionally
+// requires Journald because resolveUnit() needs the systemd client to
+// validate/resolve the unit before journal entries are read (exception #2).
+// Each group is guarded individually rather than the whole function behind
+// one check, so a host with systemd but no journald still gets full service
+// management with only the journal query withheld. manager is nil exactly
+// when construction skipped it -- systemd absent or unreachable per
+// buildSystemdManagers, which per c7 already implies Systemd was absent --
+// so the manager check and the caps check agree in the real run() wiring;
+// both are kept so a fake, non-nil manager passed directly in tests still
+// respects the capability guard.
+func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager, caps capability.Set) error {
+	if manager != nil && caps.Has(capability.Systemd) {
+		if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+			return manager.State(ctx)
+		}); err != nil {
+			return err
+		}
+		if err := registerNamedActions(actions, "unit", []actionRegistration{
+			{id: broker.ActionServicesDisable, resource: "services/unit", confirmation: true, handler: manager.Disable},
+			{id: broker.ActionServicesEnable, resource: "services/unit", handler: manager.Enable},
+			{id: broker.ActionServicesResetFailed, resource: "services/unit", handler: manager.ResetFailed},
+			{id: broker.ActionServicesRestart, resource: "services/unit", handler: manager.Restart},
+			{id: broker.ActionServicesStart, resource: "services/unit", handler: manager.Start},
+			{id: broker.ActionServicesStop, resource: "services/unit", confirmation: true, handler: manager.Stop},
+		}); err != nil {
+			return err
+		}
 	}
-	if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
-		return manager.Journal(ctx, parameters["unit"])
-	}); err != nil {
-		return err
+	if manager != nil && caps.HasAll(capability.Systemd, capability.Journald) {
+		if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+			return manager.Journal(ctx, parameters["unit"])
+		}); err != nil {
+			return err
+		}
 	}
-	if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
-		return manager.State(ctx)
-	}); err != nil {
-		return err
-	}
-	return registerNamedActions(actions, "unit", []actionRegistration{
-		{id: broker.ActionServicesDisable, resource: "services/unit", confirmation: true, handler: manager.Disable},
-		{id: broker.ActionServicesEnable, resource: "services/unit", handler: manager.Enable},
-		{id: broker.ActionServicesResetFailed, resource: "services/unit", handler: manager.ResetFailed},
-		{id: broker.ActionServicesRestart, resource: "services/unit", handler: manager.Restart},
-		{id: broker.ActionServicesStart, resource: "services/unit", handler: manager.Start},
-		{id: broker.ActionServicesStop, resource: "services/unit", confirmation: true, handler: manager.Stop},
-	})
+	return nil
 }
 
 // registerPodman registers every Podman query and action iff the podman
