@@ -85,8 +85,8 @@ directory. Current modules:
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
-**In progress (#51, host-image status): the parsers, the manager, and the
-broker query.**
+**In progress (#51, host-image status): the parsers, the manager, the broker
+query, and the reboot posture that consumes it.**
 `internal/modules/maintenance/hostimage.go` adds the read-only host-image
 domain types — `Deployment` (bootc's image reference + manifest digest, plus
 rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
@@ -100,12 +100,15 @@ a bootc-authoritative precedence rule.
 
 As of this commit those parsers have exactly one caller:
 `internal/modules/maintenance/hostimage_manager.go`'s `HostImageManager`,
-served over the broker as the new `QueryHostImageStatus`
-(`org.frostyard.pilothouse.maintenance.host_image_status`) registered by
-`registerHostImage` in `cmd/pilothoused/main.go`. There is still no web-side
-consumer and no view for host-image status, and the `maintenance` module's
-web behavior — nav, routes, dashboard, `QueryMaintenanceState`'s
-reboot-required posture — is unchanged. What the daemon side now does:
+which in turn has exactly two consumers, both wired to the *same* instance in
+`cmd/pilothoused/main.go`: the broker query `QueryHostImageStatus`
+(`org.frostyard.pilothouse.maintenance.host_image_status`, registered by
+`registerHostImage`), and `maintenance.SystemManager`, which takes it as a
+`HostImageSource` and reads it while computing `QueryMaintenanceState`'s
+posture. There is still no web-side consumer and no view for host-image
+status, and the `maintenance` module's nav, routes, and dashboard are
+unchanged; `QueryMaintenanceState`'s response is the one thing that changed
+shape (see the `State` bullet below). What the daemon side now does:
 
 - `NewHostImageManager(runner, bootcAvailable, rpmOstreeAvailable)` takes the
   probed `capability.Bootc`/`capability.RPMOStree` facts and runs, at most,
@@ -130,6 +133,32 @@ reboot-required posture — is unchanged. What the daemon side now does:
   withheld. `docs/capabilities.md`'s binding table carries the row (52 IDs,
   17 queries) and `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
+- `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
+  where reboot-required posture is assembled and, per the spec's
+  "reboot-required posture lives in exactly one place" rule, the only place a
+  staged bootc deployment becomes a reason:
+  `NewSystemManager(..., hostImage HostImageSource, ..., bootcAvailable bool)`
+  reads the source **once** per `State` call, when `bootcAvailable`, and uses
+  the single result for two independent purposes. A non-nil `Staged`
+  deployment appends "A staged host image deployment requires activation by
+  reboot." (`stagedHostImageReason`) alongside the `/run/reboot-required`
+  marker, the merged-but-disabled extension reasons, and the completed-job
+  reason, and factors into `RebootRequired` the same way. Independently,
+  `HostImageStatus.SoftRebootCapable` is copied verbatim onto the new
+  `State.SoftRebootCapable *bool` (`soft_reboot_capable,omitempty`) — copied,
+  never recomputed, so there is no second source of truth — and is purely
+  informational: it is reported whether or not anything is staged and never
+  makes `RebootRequired` true on its own. Its three states survive the copy:
+  nil means "this bootc does not report eligibility," never a synthesized
+  false. The bootc leg follows the same degrade convention as the
+  `updexAvailable`/`sysextAvailable` legs: with `bootcAvailable` false the
+  source is never called at all (no staged reason, `SoftRebootCapable` nil,
+  whatever the source would have said), and when it is called and fails, the
+  failure is dropped rather than propagated — per-source availability and
+  errors are `QueryHostImageStatus`'s to report (`BootcAvailable`/`BootcError`),
+  and the aggregate posture stays answerable. `State` never returns an error
+  because of bootc. Only the existing full reboot action is exposed; nothing
+  performs a soft reboot.
 
 Contracts of the parsers themselves, worth knowing before consuming them:
 
@@ -323,7 +352,10 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   reboot-marker-derived reasons are computed exactly as before regardless.
   See `docs/capabilities.md`'s extension-read note for the full table and
   `internal/modules/maintenance/manager_test.go` for one dedicated test case
-  per combination.
+  per combination. (`NewSystemManager` has since grown a third
+  `hostImage`/`bootcAvailable` pair for the host-image leg described in the
+  #51 section above; it follows the same degrade convention and leaves the
+  updex/sysext behavior here untouched.)
 - **Sysext: the one module guarded per-action, not per-function.**
   `registerSysextActions` (`cmd/pilothoused/main.go`) is the final capability
   conversion in this phase, and the only one where the four registrations

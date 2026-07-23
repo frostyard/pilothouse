@@ -244,7 +244,25 @@ reboot-required posture, which remains `QueryMaintenanceState`'s alone.
 bootc-only, rpm-ostree-only, bootc-plus-rpm-ostree, and
 neither-plus-systemd fixtures. No web-side code calls this query yet: as of
 this commit it is a registered, capability-guarded daemon surface with no
-consumer, and the maintenance module's web behavior is unchanged.
+web consumer, and the maintenance module's nav, routes, and dashboard are
+unchanged.
+
+It does have one in-process consumer, and only one: `cmd/pilothoused` passes
+the same `maintenance.HostImageManager` instance it registers this query
+from into `maintenance.NewSystemManager` as a `HostImageSource`, so
+`QueryMaintenanceState` can read the staged-deployment fact without a second
+path to bootc. That consumption does not blur the two queries'
+responsibilities — `QueryHostImageStatus` still returns raw facts and no
+reboot-required field, and `QueryMaintenanceState` is still the sole owner of
+reboot-required posture, which is exactly where the staged deployment becomes
+the reason "A staged host image deployment requires activation by reboot."
+`QueryMaintenanceState`'s response also gains `soft_reboot_capable`, copied
+verbatim from `HostImageStatus.SoftRebootCapable` (three-state: omitted when
+the host's bootc does not report eligibility, never a synthesized false) —
+an independent copy of the same parsed value, not a recomputation, and
+informational only: it never makes `reboot_required` true and no soft-reboot
+action exists. See the extension-read note below for how the bootc leg
+degrades.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
@@ -291,6 +309,30 @@ updex/sysext, and non-extension fields (`Jobs`, `OSVersion`, reboot-marker-
 derived reasons) are unaffected in every combination.
 `internal/modules/maintenance/manager_test.go` has one dedicated test case
 per combination.
+
+### Host-image read note (`QueryMaintenanceState` / bootc)
+
+`NewSystemManager` takes a third capability flag, `bootcAvailable`
+(`caps.Has(capability.Bootc)`), paired with the `HostImageSource` described
+above, and its host-image read follows the identical convention:
+
+- bootc present: the source is read exactly once per `State()` call. A
+  non-nil staged deployment adds the staged-deployment reboot reason and
+  factors into `reboot_required`; `SoftRebootCapable` is copied onto
+  `soft_reboot_capable` regardless of whether anything is staged.
+- bootc present but the read fails: the failure is not propagated — no
+  staged reason and no `soft_reboot_capable` for that call. Per-source
+  availability and errors belong to `QueryHostImageStatus`
+  (`bootc_available`/`bootc_error`); the aggregate posture stays answerable
+  when one input cannot be read.
+- bootc absent: the source is never called at all — not attempted and
+  failed, simply not attempted — so no staged reason appears and
+  `soft_reboot_capable` stays omitted, whatever the source would have
+  reported.
+
+`State()` never returns an error because bootc is absent or unreadable, and
+`internal/modules/maintenance/manager_test.go` covers each case, proving the
+absent-bootc case with a call-counting source.
 
 ## `jobs` query
 

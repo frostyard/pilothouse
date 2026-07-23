@@ -157,16 +157,20 @@ func run() error {
 	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext))
-	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
-		return err
-	}
 	// The host-image reporter is constructed unconditionally (it runs nothing
 	// until queried) and told which of its two sources the probe actually
 	// found; registerHostImage's own guard decides whether the query is
-	// exposed at all.
+	// exposed at all. It is built before the maintenance manager because that
+	// manager consumes this same instance as its HostImageSource: the staged
+	// deployment it reports is one input to reboot-required posture, and its
+	// soft-reboot eligibility is copied onto maintenance state. One reader,
+	// two consumers — never a second path to bootc.
 	hostImageManager := maintenance.NewHostImageManager(sysext.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
 	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
+		return err
+	}
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
+	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
@@ -707,9 +711,11 @@ const maintenanceLockResource = "maintenance/global"
 // backups/services/logs/storage there is no nil-manager backstop here: the
 // manager is always non-nil regardless of systemd's presence, and this
 // guard is the only thing withholding registration. Extension-derived
-// fields (Updates, Feature/merged-derived reboot reasons) degrade inside
-// SystemManager.State itself based on the probed updex/sysext capabilities
-// passed into NewSystemManager, independent of this systemd guard.
+// fields (Updates, Feature/merged-derived reboot reasons) and the
+// host-image-derived ones (the staged-deployment reboot reason,
+// SoftRebootCapable) all degrade inside SystemManager.State itself based on
+// the probed updex/sysext/bootc capabilities passed into NewSystemManager,
+// independent of this systemd guard.
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
 	if !caps.Has(capability.Systemd) {
 		return nil
