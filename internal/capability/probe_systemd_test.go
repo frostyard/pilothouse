@@ -7,7 +7,6 @@ import (
 
 	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // fakeUnitFileLister implements unitFileLister and nothing else -- it
@@ -27,25 +26,42 @@ func unitFile(name string) dbus.UnitFile {
 	return dbus.UnitFile{Path: "/usr/lib/systemd/system/" + name, Type: "enabled"}
 }
 
+// fakeSystemdSession implements systemdSession end-to-end (unit file
+// listing plus Close) entirely with fakes -- no *dbus.Conn is ever
+// constructed, so probeSystemd's whole success path is reachable from a
+// test, unlike a fake that only satisfies DBusConnector's
+// func(context.Context) (*dbus.Conn, error) shape (a zero-value *dbus.Conn
+// panics as soon as any of its methods, including Close, are called).
+type fakeSystemdSession struct {
+	fakeUnitFileLister
+	closed *bool
+}
+
+func (f fakeSystemdSession) Close() {
+	if f.closed != nil {
+		*f.closed = true
+	}
+}
+
 func TestSystemdAbsentWhenMarkerMissing(t *testing.T) {
-	connectCalled := false
+	openCalled := false
 	s := probeSystemd(context.Background(),
-		func(context.Context) (*dbus.Conn, error) {
-			connectCalled = true
-			return nil, nil
+		func(context.Context) (systemdSession, bool) {
+			openCalled = true
+			return nil, false
 		},
 		func() bool { return false },
 	)
 
 	assert.False(t, s.Has(Systemd))
 	assert.Empty(t, s.List())
-	assert.False(t, connectCalled, "connect must not be attempted when the marker file is absent")
+	assert.False(t, openCalled, "connect must not be attempted when the marker file is absent")
 }
 
 func TestSystemdAbsentWhenConnectionFails(t *testing.T) {
 	s := probeSystemd(context.Background(),
-		func(context.Context) (*dbus.Conn, error) {
-			return nil, errors.New("dial unix @/run/dbus/system_bus_socket: connect: no such file or directory")
+		func(context.Context) (systemdSession, bool) {
+			return nil, false
 		},
 		func() bool { return true },
 	)
@@ -54,19 +70,36 @@ func TestSystemdAbsentWhenConnectionFails(t *testing.T) {
 	assert.Empty(t, s.List())
 }
 
-func TestSystemdPresentWhenMarkerExistsAndConnectionSucceeds(t *testing.T) {
-	// dialSystemd is the connect-success/failure decision split out of
-	// probeSystemd specifically so it can be exercised here: the fake
-	// connection below is never used for anything beyond a non-nil check
-	// (dialSystemd never calls a method on it), so this test needs no real
-	// system bus.
-	fakeConn := &dbus.Conn{}
-	conn, ok := dialSystemd(context.Background(), func(context.Context) (*dbus.Conn, error) {
-		return fakeConn, nil
+func TestDialSystemdReportsConnectFailure(t *testing.T) {
+	session, ok := dialSystemd(context.Background(), func(context.Context) (*dbus.Conn, error) {
+		return nil, errors.New("dial unix @/run/dbus/system_bus_socket: connect: no such file or directory")
 	})
 
-	require.True(t, ok)
-	assert.Same(t, fakeConn, conn)
+	assert.False(t, ok)
+	assert.Nil(t, session)
+}
+
+func TestSystemdPresentWhenMarkerExistsAndConnectionSucceeds(t *testing.T) {
+	closed := false
+	session := fakeSystemdSession{
+		fakeUnitFileLister: fakeUnitFileLister{files: []dbus.UnitFile{
+			unitFile("rpm-ostreed-automatic.timer"),
+			unitFile("rpm-ostreed-automatic.service"),
+		}},
+		closed: &closed,
+	}
+
+	s := probeSystemd(context.Background(),
+		func(context.Context) (systemdSession, bool) {
+			return session, true
+		},
+		func() bool { return true },
+	)
+
+	assert.True(t, s.Has(Systemd))
+	assert.True(t, s.Has(AutoupdateRPMOStree), "pair matching must run against the same successful session")
+	assert.False(t, s.Has(AutoupdateBootc))
+	assert.True(t, closed, "the session must be closed once the probe is done with it")
 }
 
 func TestAutoupdatePairPresentOnlyWhenBothUnitFilesKnown(t *testing.T) {
