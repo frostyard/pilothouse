@@ -93,6 +93,43 @@ def staged_hash():
     return hashlib.sha256(p.stdout.encode()).hexdigest()
 
 
+def parse_review(text):
+    """Normalize a reviewer's free-form reply into (verdict, payload).
+
+    Reviewer output shapes must never be able to kill a run (conductor
+    treats schema ValidationError as fatal), so reviewers emit plain text
+    ending in a JSON block and this function does tolerant extraction:
+    full-JSON reply, fenced ```json block (last one wins), any {...} span,
+    dict-wrapped verdicts, then keyword fallback. Unparseable replies are
+    rejection-biased ("unparseable" — callers treat it as revise/fail).
+    """
+    text = text or ""
+    candidates = []
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    candidates.extend(reversed(fenced))
+    candidates.append(text.strip())
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            d = json.loads(c)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        v = d.get("verdict")
+        if isinstance(v, dict):
+            v = v.get("verdict") or v.get("decision") or v.get("value")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower(), d
+    low = text.lower()
+    for kw in ("approve", "revise", "pass", "fail"):
+        if re.search(rf"verdict\W{{0,20}}{kw}", low):
+            return kw, {}
+    return "unparseable", {}
+
+
 # ---------------------------------------------------------------- subcommands
 
 def cmd_init(source):
@@ -174,7 +211,9 @@ def cmd_check_plan():
     out(ok=True, num_chunks=len(chunks))
 
 
-def cmd_plan_verdict(verdict, objections_json):
+def cmd_plan_verdict(review_text):
+    verdict, payload = parse_review(review_text)
+    objections_json = json.dumps(payload.get("objections", []))
     prog = load_progress()
     dirty = tree_dirty_outside_mill()
     if dirty:
@@ -233,7 +272,9 @@ def cmd_pre_review():
     out(empty=False, stat=stat)
 
 
-def cmd_review_gate(verdict, objections_json):
+def cmd_review_gate(review_text):
+    verdict, payload = parse_review(review_text)
+    objections_json = json.dumps(payload.get("objections", []))
     prog = load_progress()
     unstaged = sh("git", "diff").stdout
     touched = bool(unstaged.strip()) or staged_hash() != (MILL / "review.sha256").read_text()
@@ -270,21 +311,22 @@ def cmd_commit_chunk():
     out(ok=True, committed=sha, next=prog["chunk"], total=len(chunks))
 
 
-def cmd_final_gate(sec_json, comp_json):
+def cmd_final_gate(sec_text, comp_text):
     dirty = tree_dirty_outside_mill()
     if dirty:
         sh("git", "checkout", "--", ".")
         sh("git", "clean", "-fd")
         out(action="abort", error=f"final reviewer modified the tree (reverted): {dirty[:10]}")
-    sec = json.loads(sec_json)
-    comp = json.loads(comp_json)
-    report = ["# Mill final review\n", "## Security review (claude)\n",
-              "```json", json.dumps(sec, indent=2), "```\n",
-              "## Spec compliance review (gpt)\n",
-              "```json", json.dumps(comp, indent=2), "```\n"]
+    sec_v, sec = parse_review(sec_text)
+    comp_v, comp = parse_review(comp_text)
+    report = ["# Mill final review\n",
+              f"## Security review — verdict: {sec_v}\n",
+              "```json", json.dumps(sec or {"raw": sec_text[-2000:]}, indent=2), "```\n",
+              f"## Spec compliance review — verdict: {comp_v}\n",
+              "```json", json.dumps(comp or {"raw": comp_text[-2000:]}, indent=2), "```\n"]
     (MILL / "final_report.md").write_text("\n".join(report))
-    ok = sec.get("verdict") == "pass" and comp.get("verdict") == "pass"
-    out(action="ship" if ok else "abort",
+    ok = sec_v in ("pass", "approve") and comp_v in ("pass", "approve")
+    out(action="ship" if ok else "abort", sec_verdict=sec_v, comp_verdict=comp_v,
         error="" if ok else "final review failed — see .mill/final_report.md")
 
 
@@ -343,11 +385,11 @@ def main():
         "init": (cmd_init, 1),
         "baseline": (cmd_baseline, 0),
         "check-plan": (cmd_check_plan, 0),
-        "plan-verdict": (cmd_plan_verdict, 2),
+        "plan-verdict": (cmd_plan_verdict, 1),
         "select": (cmd_select, 0),
         "impl-gate": (cmd_impl_gate, 0),
         "pre-review": (cmd_pre_review, 0),
-        "review-gate": (cmd_review_gate, 2),
+        "review-gate": (cmd_review_gate, 1),
         "commit-chunk": (cmd_commit_chunk, 0),
         "final-gate": (cmd_final_gate, 2),
         "harvest-gate": (cmd_harvest_gate, 0),
