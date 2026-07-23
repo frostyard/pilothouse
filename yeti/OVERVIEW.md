@@ -250,6 +250,35 @@ rules for adding a new module (routes, actions, queries).
   the per-action registration guards above are what withhold each action. See
   `docs/capabilities.md`'s sysext rows and module-level-defaults section for
   the full per-action table.
+- **Web-side capability fetch/cache (independent of module gating).**
+  `internal/web.Server` now keeps its own opportunistically-refreshed view
+  of the broker's advertised `capability.Set`, separate from `pilothoused`'s
+  own probe/advertise cycle above and from any per-module gating (which is a
+  daemon-side, registration-time concern only as of this chunk — no module
+  handler reads this cache yet). `internal/web/capabilities.go`'s
+  `capabilityCache` (a field on `Server`, zero-value valid) holds the last
+  fetched `Set` plus a `down` flag; `Server.Capabilities(ctx
+  context.Context)` (added to the widened `platform.Host` interface so both
+  HTTP handlers and `Module.Dashboard(ctx, host)` can call it) returns
+  whatever is cached, or the zero (all-absent) `Set` before any successful
+  login or fetch. `Server.refreshCapabilities(ctx, token)` issues a
+  `broker.QueryCapabilities` query under its own 2s bounded context derived
+  from the caller's `ctx` (never `context.Background()`, per the
+  reuse-bounded-context lesson from #50) and is wired at exactly two
+  checkpoints: right after a successful `login`, and in the `authenticate`
+  middleware after `Session()` succeeds, but only when the cache is
+  `staleAfterOutage()` — i.e. only the first authenticated request after a
+  prior `broker.ErrUnavailable`-wrapped failure triggers a refetch, not
+  every request. `Session()`'s own transport-failure branch, and the
+  `Query`/`Execute`/`StreamAction`/`StreamQuery` wrapper methods, all call
+  `capabilityCache.noteResult(err)` after their underlying broker call to
+  mark the cache down on an `ErrUnavailable`-wrapped error; none of them
+  ever clear the flag or trigger a refetch themselves — only the two
+  checkpoints above do that, so one request never issues more than one
+  capability refetch. Authorization failures, request-validation errors,
+  and arbitrary domain errors never mark the cache down or trigger a
+  refetch. `capability.Set` gained `UnmarshalJSON` (mirroring the existing
+  `MarshalJSON`) to decode this query's `{"capabilities": [...]}` response.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

@@ -89,6 +89,24 @@ func TestEmptySetMarshalsToEmptyArray(t *testing.T) {
 	assert.JSONEq(t, `{"capabilities":[]}`, string(out))
 }
 
+func TestSetRoundTripsThroughJSON(t *testing.T) {
+	populated := New(Systemd, Podman, Incus)
+	out, err := json.Marshal(populated)
+	require.NoError(t, err)
+
+	var decoded Set
+	require.NoError(t, json.Unmarshal(out, &decoded))
+	assert.Equal(t, populated.List(), decoded.List())
+
+	var zero Set
+	out, err = json.Marshal(zero)
+	require.NoError(t, err)
+
+	var decodedZero Set
+	require.NoError(t, json.Unmarshal(out, &decodedZero))
+	assert.Equal(t, zero.List(), decodedZero.List())
+}
+
 func TestSetMarshalJSONNeverEmitsFalseEntries(t *testing.T) {
 	s := New(Systemd)
 	out, err := json.Marshal(s)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 )
@@ -42,6 +43,9 @@ type filesHost struct {
 	page             platform.Page
 }
 
+func (*filesHost) Capabilities(context.Context) capability.Set {
+	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+}
 func (*filesHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }
 func (h *filesHost) CSRFToken(*http.Request) string                                      { return h.csrf }
 func (*filesHost) Execute(context.Context, *http.Request, string, map[string]string) error {

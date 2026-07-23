@@ -85,3 +85,17 @@ func (s Set) MarshalJSON() ([]byte, error) {
 		Capabilities []ID `json:"capabilities"`
 	}{Capabilities: s.List()})
 }
+
+// UnmarshalJSON decodes the {"capabilities": [...]} wire shape produced by
+// MarshalJSON (and returned by the broker's QueryCapabilities query) back
+// into a Set.
+func (s *Set) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Capabilities []ID `json:"capabilities"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*s = New(wire.Capabilities...)
+	return nil
+}

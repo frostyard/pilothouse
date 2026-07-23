@@ -13,6 +13,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,9 @@ type logsHost struct {
 	page       platform.Page
 }
 
+func (*logsHost) Capabilities(context.Context) capability.Set {
+	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+}
 func (*logsHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }
 func (*logsHost) CSRFToken(*http.Request) string                                        { return "" }
 func (*logsHost) Execute(context.Context, *http.Request, string, map[string]string) error {

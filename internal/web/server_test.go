@@ -2,6 +2,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,19 +14,27 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeBroker struct {
+	actionErr              error
+	capabilities           capability.Set
 	confirmation           string
 	healthErr              error
+	queryCalls             []string
+	queryErr               error
 	session                broker.SessionResponse
+	sessionErr             error
 	streamActionBody       string
+	streamActionErr        error
 	streamActionID         string
 	streamActionParameters map[string]string
 	streamActionToken      string
+	streamQueryErr         error
 	streamQueryID          string
 	streamQueryParameters  map[string]string
 	streamQueryToken       string
@@ -31,15 +42,31 @@ type fakeBroker struct {
 
 func (b *fakeBroker) Action(_ context.Context, _, _ string, _ map[string]string, confirmation string) error {
 	b.confirmation = confirmation
-	return nil
+	return b.actionErr
 }
 func (b *fakeBroker) Health(context.Context) error { return b.healthErr }
 func (b *fakeBroker) Login(context.Context, string, string, string) (broker.LoginResponse, error) {
 	return broker.LoginResponse{Session: b.session, Token: "token"}, nil
 }
-func (b *fakeBroker) Logout(context.Context, string) error                                { return nil }
-func (b *fakeBroker) Query(context.Context, string, string, map[string]string, any) error { return nil }
+func (b *fakeBroker) Logout(context.Context, string) error { return nil }
+func (b *fakeBroker) Query(_ context.Context, _, id string, _ map[string]string, target any) error {
+	b.queryCalls = append(b.queryCalls, id)
+	if b.queryErr != nil {
+		return b.queryErr
+	}
+	if id == broker.QueryCapabilities {
+		encoded, err := json.Marshal(b.capabilities)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(encoded, target)
+	}
+	return nil
+}
 func (b *fakeBroker) Session(context.Context, string) (broker.SessionResponse, error) {
+	if b.sessionErr != nil {
+		return broker.SessionResponse{}, b.sessionErr
+	}
 	return b.session, nil
 }
 func (b *fakeBroker) StreamAction(_ context.Context, token, id string, parameters map[string]string, body io.Reader) error {
@@ -49,11 +76,11 @@ func (b *fakeBroker) StreamAction(_ context.Context, token, id string, parameter
 		return err
 	}
 	b.streamActionBody = string(contents)
-	return nil
+	return b.streamActionErr
 }
 func (b *fakeBroker) StreamQuery(_ context.Context, token, id string, parameters map[string]string) (broker.StreamResult, error) {
 	b.streamQueryToken, b.streamQueryID, b.streamQueryParameters = token, id, parameters
-	return broker.StreamResult{}, nil
+	return broker.StreamResult{}, b.streamQueryErr
 }
 
 func newTestServer(t *testing.T) *Server {
@@ -286,6 +313,152 @@ func TestInvalidPublicOriginIsRejectedAtStartup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = NewServer(registry, &fakeBroker{}, slog.New(slog.NewTextHandler(io.Discard, nil)), false, "https://admin.example.test/pilothouse")
 	assert.ErrorContains(t, err, "must not contain a path")
+}
+
+func TestCapabilitiesIsZeroSetBeforeLogin(t *testing.T) {
+	server := newTestServer(t)
+	assert.Empty(t, server.Capabilities(context.Background()).List())
+}
+
+func TestLoginFetchesAndCachesCapabilities(t *testing.T) {
+	registry, err := platform.NewRegistry()
+	require.NoError(t, err)
+	caps := capability.New(capability.Systemd, capability.Docker)
+	fake := &fakeBroker{session: broker.SessionResponse{CSRF: "csrf"}, capabilities: caps}
+	server, err := NewServer(registry, fake, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+
+	request := httptest.NewRequest("POST", "/login", strings.NewReader("csrf="+server.loginCSRF+"&username=snow&password=secret"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, []string{broker.QueryCapabilities}, fake.queryCalls)
+	assert.Equal(t, caps.List(), server.Capabilities(context.Background()).List())
+}
+
+func TestAuthenticateRefetchesCapabilitiesAfterOutageRecovery(t *testing.T) {
+	registry, err := platform.NewRegistry()
+	require.NoError(t, err)
+	initialCaps := capability.New(capability.Systemd)
+	fake := &fakeBroker{session: broker.SessionResponse{CSRF: "csrf"}, capabilities: initialCaps}
+	server, err := NewServer(registry, fake, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+
+	server.refreshCapabilities(context.Background(), "token")
+	require.Equal(t, []string{broker.QueryCapabilities}, fake.queryCalls)
+	require.Equal(t, initialCaps.List(), server.Capabilities(context.Background()).List())
+	fake.queryCalls = nil
+
+	// A transport failure from Session marks the cache down but leaves the
+	// previously cached Set untouched.
+	fake.sessionErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
+	request := httptest.NewRequest("GET", "/", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.True(t, server.capabilities.staleAfterOutage())
+	assert.Equal(t, initialCaps.List(), server.Capabilities(context.Background()).List())
+	assert.Empty(t, fake.queryCalls)
+
+	// The next successful Session() triggers exactly one refetch and clears
+	// the down flag.
+	fake.sessionErr = nil
+	newCaps := capability.New(capability.Docker, capability.Incus)
+	fake.capabilities = newCaps
+	request = httptest.NewRequest("GET", "/", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, []string{broker.QueryCapabilities}, fake.queryCalls)
+	assert.False(t, server.capabilities.staleAfterOutage())
+	assert.Equal(t, newCaps.List(), server.Capabilities(context.Background()).List())
+}
+
+func TestAuthenticateDoesNotMarkCapabilitiesDownOnUnauthorized(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	fake.sessionErr = broker.ErrUnauthorized
+
+	request := httptest.NewRequest("GET", "/", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+	assert.False(t, server.capabilities.staleAfterOutage())
+}
+
+func TestExecuteMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, requestSession{token: "token"})
+	request := httptest.NewRequest("POST", "/action", nil).WithContext(ctx)
+
+	fake.actionErr = broker.ErrUnauthorized
+	err := server.Execute(ctx, request, "action", nil)
+	assert.ErrorIs(t, err, broker.ErrUnauthorized)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
+	fake.actionErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
+	err = server.Execute(ctx, request, "action", nil)
+	assert.Error(t, err)
+	assert.True(t, server.capabilities.staleAfterOutage())
+	assert.Empty(t, fake.queryCalls)
+}
+
+func TestQueryMarksCapabilitiesDownOnlyOnUnavailableAndNeverRefetchesItself(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, requestSession{token: "token"})
+	var target any
+
+	fake.queryErr = errors.New("some domain error")
+	err := server.Query(ctx, "some.query", nil, &target)
+	assert.Error(t, err)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
+	fake.queryErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
+	err = server.Query(ctx, "some.query", nil, &target)
+	assert.Error(t, err)
+	assert.True(t, server.capabilities.staleAfterOutage())
+
+	assert.Equal(t, []string{"some.query", "some.query"}, fake.queryCalls)
+}
+
+func TestStreamActionMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	request := withTestSession(httptest.NewRequest("POST", "/files/root/upload", nil), "csrf", "token")
+
+	fake.streamActionErr = broker.ErrUnauthorized
+	err := server.StreamAction(context.Background(), request, "id", nil, strings.NewReader(""))
+	assert.ErrorIs(t, err, broker.ErrUnauthorized)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
+	fake.streamActionErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
+	err = server.StreamAction(context.Background(), request, "id", nil, strings.NewReader(""))
+	assert.Error(t, err)
+	assert.True(t, server.capabilities.staleAfterOutage())
+}
+
+func TestStreamQueryMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
+	server := newTestServer(t)
+	fake := server.broker.(*fakeBroker)
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, requestSession{token: "token"})
+
+	fake.streamQueryErr = broker.ErrUnauthorized
+	_, err := server.StreamQuery(ctx, "id", nil)
+	assert.ErrorIs(t, err, broker.ErrUnauthorized)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
+	fake.streamQueryErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
+	_, err = server.StreamQuery(ctx, "id", nil)
+	assert.Error(t, err)
+	assert.True(t, server.capabilities.staleAfterOutage())
 }
 
 type countingReader struct {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,10 @@ type testHost struct {
 	parameters map[string]string
 	query      string
 	page       platform.Page
+}
+
+func (*testHost) Capabilities(context.Context) capability.Set {
+	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
 }
 
 func (*testHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }

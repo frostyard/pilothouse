@@ -9,6 +9,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/frostyard/pilothouse/internal/platform"
@@ -21,6 +22,9 @@ type moduleHost struct {
 	state        State
 }
 
+func (*moduleHost) Capabilities(context.Context) capability.Set {
+	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+}
 func (h *moduleHost) ConfirmAction(_ http.ResponseWriter, _ *http.Request, _ string, resource string) bool {
 	h.confirmation = resource
 	return true

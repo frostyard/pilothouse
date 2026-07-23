@@ -8,6 +8,7 @@ import (
 	"github.com/a-h/templ"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 )
 
 type DashboardCard struct {
@@ -35,6 +36,7 @@ type Finding struct {
 }
 
 type Host interface {
+	Capabilities(context.Context) capability.Set
 	ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool
 	CSRFToken(*http.Request) string
 	Execute(context.Context, *http.Request, string, map[string]string) error

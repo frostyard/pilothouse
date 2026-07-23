@@ -12,6 +12,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,9 @@ type fakeHost struct {
 	validateResult  bool
 }
 
+func (*fakeHost) Capabilities(context.Context) capability.Set {
+	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+}
 func (host *fakeHost) ConfirmAction(_ http.ResponseWriter, _ *http.Request, _ string, resource string) bool {
 	host.confirmCalls = append(host.confirmCalls, resource)
 	return host.confirmResult
