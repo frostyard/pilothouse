@@ -69,9 +69,9 @@ func (d *Deployment) clone() *Deployment {
 //
 // BootcAvailable reports whether bootc data was successfully obtained; it is
 // set by ParseBootcStatus on a successful parse. BootcError is not set by the
-// parser: a caller that runs bootc records the failure there (see the callers
-// added in later chunks) so a bootc-level failure degrades this one source
-// rather than failing the whole report.
+// parser: the caller that runs bootc (HostImageManager.Status) records the
+// failure there, so a bootc-level failure degrades this one source rather
+// than failing the whole report.
 //
 // RPMOStreeAvailable and RPMOStreeError are the exact symmetric pair for the
 // second source, so a report can say "bootc answered, rpm-ostree did not" (or
@@ -79,8 +79,9 @@ func (d *Deployment) clone() *Deployment {
 // in this file sets either: ParseRPMOStreeStatus returns a supplement rather
 // than a status, and MergeHostImage deliberately leaves both at their zero
 // value (see its doc comment). A caller that runs `rpm-ostree status --json`
-// records the outcome there, exactly as it does for bootc. No such caller
-// exists yet.
+// records the outcome there, exactly as it does for bootc -- today that
+// caller is HostImageManager.Status in hostimage_manager.go, which is also
+// the only thing that sets BootcError.
 type HostImageStatus struct {
 	BootcAvailable     bool        `json:"bootc_available"`
 	BootcError         string      `json:"bootc_error,omitempty"`
@@ -129,7 +130,8 @@ type bootcImageReference struct {
 // ParseBootcStatus decodes `bootc status --json` output into a
 // HostImageStatus. It runs nothing: the caller obtains the bytes -- only ever
 // by running `bootc status --json` through an injected command runner, never a
-// second bootc subcommand -- and hands them here. No such caller exists yet.
+// second bootc subcommand -- and hands them here. That caller is
+// HostImageManager.Status in hostimage_manager.go.
 //
 // On success the returned status has BootcAvailable set to true and one
 // Deployment per slot bootc reported. On a structurally malformed payload it
@@ -308,15 +310,16 @@ type rpmOStreeStatusDeployment struct {
 // supplementary detail MergeHostImage can attach to a bootc-sourced report. It
 // runs nothing: the caller obtains the bytes -- only ever by running
 // `rpm-ostree status --json` through an injected command runner -- and hands
-// them here. No such caller exists yet.
+// them here. That caller is HostImageManager.Status in
+// hostimage_manager.go.
 //
 // A structurally malformed payload returns a non-nil error and a zero
 // supplement. That failure is deliberately distinct from a successful parse of
 // a document whose deployment list is empty, which returns no error and a
 // supplement with no deployments: the first means rpm-ostree ran but its
 // output could not be read, the second means it read fine and had nothing to
-// add. A caller (added in a later chunk) needs that distinction to decide
-// whether to record RPMOStreeError.
+// add. The caller needs that distinction to decide whether to record
+// RPMOStreeError.
 //
 // "Structurally malformed" covers, as for bootc, both syntax and substance:
 // non-JSON, truncated JSON, a JSON value that is not an object, a field of the

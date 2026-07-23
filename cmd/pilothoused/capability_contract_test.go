@@ -14,6 +14,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
+	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/stretchr/testify/assert"
@@ -36,80 +37,107 @@ const (
 // capabilityRequirement is one row of docs/capabilities.md's binding table,
 // mirrored here in Go so the table is actually exercised by a test rather
 // than only documented. required is the exact set of capability.IDs the ID's
-// registration depends on: caps.HasAll(required...) must equal whether the
-// ID ends up Registered() in its registry. An empty required slice means
-// "none" -- always registered, unconditionally.
+// registration depends on. An empty required slice means "none" -- always
+// registered, unconditionally.
+//
+// requireAny selects which satisfaction rule the row uses, matching the
+// gating primitive its registerX function actually calls:
+//
+//   - false (the default, an AND row): caps.HasAll(required...) must equal
+//     whether the ID ends up Registered() in its registry.
+//   - true (an OR row, e.g. QueryHostImageStatus's HasAny(Bootc,
+//     RPMOStree)): caps.HasAny(required...) must equal it instead.
+//
+// Both sides are evaluated with capability.Set's own predicates -- the same
+// functions the production guards call -- rather than a second
+// reimplementation of set membership here.
 type capabilityRequirement struct {
-	id       string
-	registry registryKind
-	required []capability.ID
+	id         string
+	registry   registryKind
+	required   []capability.ID
+	requireAny bool
 }
 
-// capabilityTable is the complete 51-row mirror of docs/capabilities.md as
-// of c12. Every Action*/Query* constant declared in internal/broker/api.go
-// (35 Action* + 16 Query*, the 16 including QueryCapabilities added in c6)
-// appears exactly once. QueryServicesJournal and QueryLogs use the corrected
-// "systemd AND journald" requirement (docs/capabilities.md exceptions #2 and
-// #3), not "journald" alone.
+// satisfiedBy reports whether a fixture's capability set satisfies this row,
+// under whichever of the two satisfaction rules the row declares.
+func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
+	if row.requireAny {
+		return caps.HasAny(row.required...)
+	}
+	return caps.HasAll(row.required...)
+}
+
+// capabilityTable is the complete 52-row mirror of docs/capabilities.md.
+// Every Action*/Query* constant declared in internal/broker/api.go (35
+// Action* + 17 Query*, the 17 including QueryCapabilities and
+// QueryHostImageStatus) appears exactly once. QueryServicesJournal and
+// QueryLogs use the corrected "systemd AND journald" requirement
+// (docs/capabilities.md exceptions #2 and #3), not "journald" alone, and
+// QueryHostImageStatus is the table's one any-of row (exception #4).
+//
+// Columns, in positional order: broker ID, registry, required capabilities,
+// and whether the requirement is satisfied by any one of them (true) rather
+// than all of them (false).
 var capabilityTable = []capabilityRequirement{
 	// Actions (35).
-	{broker.ActionFilesUpload, inStreamActions, nil},
-	{broker.ActionDockerRemove, inActions, []capability.ID{capability.Docker}},
-	{broker.ActionDockerRemoveImage, inActions, []capability.ID{capability.Docker}},
-	{broker.ActionDockerRestart, inActions, []capability.ID{capability.Docker}},
-	{broker.ActionDockerStart, inActions, []capability.ID{capability.Docker}},
-	{broker.ActionDockerStop, inActions, []capability.ID{capability.Docker}},
-	{broker.ActionIncusRemove, inActions, []capability.ID{capability.Incus}},
-	{broker.ActionIncusRemoveImage, inActions, []capability.ID{capability.Incus}},
-	{broker.ActionIncusRestart, inActions, []capability.ID{capability.Incus}},
-	{broker.ActionIncusStart, inActions, []capability.ID{capability.Incus}},
-	{broker.ActionIncusStop, inActions, []capability.ID{capability.Incus}},
-	{broker.ActionMaintenanceReboot, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionPodmanRemove, inActions, []capability.ID{capability.Podman}},
-	{broker.ActionPodmanRemoveImage, inActions, []capability.ID{capability.Podman}},
-	{broker.ActionPodmanRestart, inActions, []capability.ID{capability.Podman}},
-	{broker.ActionPodmanStart, inActions, []capability.ID{capability.Podman}},
-	{broker.ActionPodmanStop, inActions, []capability.ID{capability.Podman}},
-	{broker.ActionSysextDisable, inActions, []capability.ID{capability.Updex, capability.Sysext}},
-	{broker.ActionSysextEnable, inActions, []capability.ID{capability.Updex, capability.Sysext}},
-	{broker.ActionSysextRefresh, inActions, []capability.ID{capability.Sysext}},
-	{broker.ActionSysextUpdate, inActions, []capability.ID{capability.Updex}},
-	{broker.ActionServicesDisable, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionServicesEnable, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionServicesResetFailed, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionServicesRestart, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionServicesStart, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionServicesStop, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageCreateNFS, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageCreateSMBGuest, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageCreateSMBCredentials, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageCreateSMBGuestOwned, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageCreateSMBCredentialsOwned, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageMount, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageUnmount, inActions, []capability.ID{capability.Systemd}},
-	{broker.ActionStorageDelete, inActions, []capability.ID{capability.Systemd}},
-	// Queries (16).
-	{broker.QueryActivity, inQueries, nil},
-	{broker.QueryBackupsState, inQueries, []capability.ID{capability.Systemd}},
-	{broker.QueryCapabilities, inQueries, nil},
-	{broker.QueryDockerLogs, inQueries, []capability.ID{capability.Docker}},
-	{broker.QueryDockerState, inQueries, []capability.ID{capability.Docker}},
-	{broker.QueryIncusState, inQueries, []capability.ID{capability.Incus}},
-	{broker.QueryJobs, inQueries, nil},
-	{broker.QueryLogs, inQueries, []capability.ID{capability.Systemd, capability.Journald}},
-	{broker.QueryMaintenanceState, inQueries, []capability.ID{capability.Systemd}},
-	{broker.QueryPodmanLogs, inQueries, []capability.ID{capability.Podman}},
-	{broker.QueryPodmanState, inQueries, []capability.ID{capability.Podman}},
-	{broker.QueryServicesJournal, inQueries, []capability.ID{capability.Systemd, capability.Journald}},
-	{broker.QueryServicesState, inQueries, []capability.ID{capability.Systemd}},
-	{broker.QueryStorageState, inQueries, nil},
-	{broker.QueryFilesDownload, inStreamQueries, nil},
-	{broker.QueryFilesList, inQueries, nil},
+	{broker.ActionFilesUpload, inStreamActions, nil, false},
+	{broker.ActionDockerRemove, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionDockerRemoveImage, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionDockerRestart, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionDockerStart, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionDockerStop, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionIncusRemove, inActions, []capability.ID{capability.Incus}, false},
+	{broker.ActionIncusRemoveImage, inActions, []capability.ID{capability.Incus}, false},
+	{broker.ActionIncusRestart, inActions, []capability.ID{capability.Incus}, false},
+	{broker.ActionIncusStart, inActions, []capability.ID{capability.Incus}, false},
+	{broker.ActionIncusStop, inActions, []capability.ID{capability.Incus}, false},
+	{broker.ActionMaintenanceReboot, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionPodmanRemove, inActions, []capability.ID{capability.Podman}, false},
+	{broker.ActionPodmanRemoveImage, inActions, []capability.ID{capability.Podman}, false},
+	{broker.ActionPodmanRestart, inActions, []capability.ID{capability.Podman}, false},
+	{broker.ActionPodmanStart, inActions, []capability.ID{capability.Podman}, false},
+	{broker.ActionPodmanStop, inActions, []capability.ID{capability.Podman}, false},
+	{broker.ActionSysextDisable, inActions, []capability.ID{capability.Updex, capability.Sysext}, false},
+	{broker.ActionSysextEnable, inActions, []capability.ID{capability.Updex, capability.Sysext}, false},
+	{broker.ActionSysextRefresh, inActions, []capability.ID{capability.Sysext}, false},
+	{broker.ActionSysextUpdate, inActions, []capability.ID{capability.Updex}, false},
+	{broker.ActionServicesDisable, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionServicesEnable, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionServicesResetFailed, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionServicesRestart, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionServicesStart, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionServicesStop, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageCreateNFS, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageCreateSMBGuest, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageCreateSMBCredentials, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageCreateSMBGuestOwned, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageCreateSMBCredentialsOwned, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageMount, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageUnmount, inActions, []capability.ID{capability.Systemd}, false},
+	{broker.ActionStorageDelete, inActions, []capability.ID{capability.Systemd}, false},
+	// Queries (17).
+	{broker.QueryActivity, inQueries, nil, false},
+	{broker.QueryBackupsState, inQueries, []capability.ID{capability.Systemd}, false},
+	{broker.QueryCapabilities, inQueries, nil, false},
+	{broker.QueryDockerLogs, inQueries, []capability.ID{capability.Docker}, false},
+	{broker.QueryDockerState, inQueries, []capability.ID{capability.Docker}, false},
+	{broker.QueryHostImageStatus, inQueries, []capability.ID{capability.Bootc, capability.RPMOStree}, true},
+	{broker.QueryIncusState, inQueries, []capability.ID{capability.Incus}, false},
+	{broker.QueryJobs, inQueries, nil, false},
+	{broker.QueryLogs, inQueries, []capability.ID{capability.Systemd, capability.Journald}, false},
+	{broker.QueryMaintenanceState, inQueries, []capability.ID{capability.Systemd}, false},
+	{broker.QueryPodmanLogs, inQueries, []capability.ID{capability.Podman}, false},
+	{broker.QueryPodmanState, inQueries, []capability.ID{capability.Podman}, false},
+	{broker.QueryServicesJournal, inQueries, []capability.ID{capability.Systemd, capability.Journald}, false},
+	{broker.QueryServicesState, inQueries, []capability.ID{capability.Systemd}, false},
+	{broker.QueryStorageState, inQueries, nil, false},
+	{broker.QueryFilesDownload, inStreamQueries, nil, false},
+	{broker.QueryFilesList, inQueries, nil, false},
 }
 
 // moduleLevelNoneIDs is the exact 7 broker IDs whose documented requirement
 // is "none" -- the only IDs a minimal (empty capability.Set) fixture should
-// register. Verified against capabilityTable at TestCapabilityTableHasExactlyFiftyOneRows.
+// register. Verified against capabilityTable at TestCapabilityTableHasExactlyFiftyTwoRows.
 var moduleLevelNoneIDs = []string{
 	broker.QueryFilesList,
 	broker.QueryFilesDownload,
@@ -120,8 +148,8 @@ var moduleLevelNoneIDs = []string{
 	broker.QueryCapabilities,
 }
 
-func TestCapabilityTableHasExactlyFiftyOneRows(t *testing.T) {
-	require.Len(t, capabilityTable, 51, "docs/capabilities.md documents 51 broker IDs (35 Action* + 16 Query*, including QueryCapabilities)")
+func TestCapabilityTableHasExactlyFiftyTwoRows(t *testing.T) {
+	require.Len(t, capabilityTable, 52, "docs/capabilities.md documents 52 broker IDs (35 Action* + 17 Query*, including QueryCapabilities and QueryHostImageStatus)")
 	seen := make(map[string]bool, len(capabilityTable))
 	actionCount, queryCount := 0, 0
 	for _, row := range capabilityTable {
@@ -133,9 +161,15 @@ func TestCapabilityTableHasExactlyFiftyOneRows(t *testing.T) {
 		case inQueries, inStreamQueries:
 			queryCount++
 		}
+		// An any-of row with no candidates would be satisfied by nothing
+		// (HasAny() is false), which is a broken row rather than a "none"
+		// row -- "none" is spelled as an all-of row with no requirements.
+		if row.requireAny {
+			assert.NotEmpty(t, row.required, "any-of row %s must list at least one capability", row.id)
+		}
 	}
 	assert.Equal(t, 35, actionCount, "expected 35 Action* IDs")
-	assert.Equal(t, 16, queryCount, "expected 16 Query* IDs")
+	assert.Equal(t, 17, queryCount, "expected 17 Query* IDs")
 	none := 0
 	for _, row := range capabilityTable {
 		if len(row.required) == 0 {
@@ -172,8 +206,8 @@ func (registries contractRegistries) registered(row capabilityRequirement) bool 
 
 // registerEverythingForFixture calls every registerX function from this
 // phase's conversion chunks (registerServices, registerLogs, registerBackups,
-// registerStorageActions, registerMaintenance, registerSysextActions,
-// registerPodman, registerDocker, registerIncus, plus the always-on
+// registerStorageActions, registerMaintenance, registerHostImage,
+// registerSysextActions, registerPodman, registerDocker, registerIncus, plus the always-on
 // registerStorage/registerFiles/registerActivity/registerJobs/
 // registerCapabilities) against fresh registries and fake managers for the
 // given capability.Set, following c7's nil-manager convention: for the four
@@ -234,6 +268,12 @@ func registerEverythingForFixture(t *testing.T, caps capability.Set) contractReg
 	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))
 	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, caps))
 
+	// The host-image reporter is the real maintenance.HostImageManager, built
+	// from this fixture's capability set exactly as run() builds it (only the
+	// bootc/rpm-ostree executables themselves are faked), so the fixture
+	// cannot register a manager production would have configured differently.
+	require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree)), caps))
+
 	// podman/docker/incus client construction never depends on a probed
 	// capability either (a bad socket/env just makes the engine
 	// unreachable, which capability.Probe already accounts for), so their
@@ -263,13 +303,22 @@ var allCapabilityIDs = []capability.ID{
 
 // TestCapabilityContractAcrossFixtureMatrix is the binding contract test the
 // spec requires as the final chunk of this phase: for every fixture
-// capability.Set below, every one of the 51 registered broker IDs must be
+// capability.Set below, every one of the 52 registered broker IDs must be
 // present in its registry iff the fixture's Set satisfies that ID's
-// documented required capabilities from capabilityTable (kept as a Go-side
-// mirror of docs/capabilities.md, cross-checked by inspection, not parsed
-// automatically). The all-on and minimal fixtures get additional dedicated
-// assertions below; every fixture (including the representative partials)
-// is walked against the full table.
+// documented requirement from capabilityTable (kept as a Go-side mirror of
+// docs/capabilities.md, cross-checked by inspection, not parsed
+// automatically) -- under HasAll for an ordinary row and HasAny for an any-of
+// row, each evaluated by capability.Set's own predicate, the same one the
+// production guard calls. The all-on and minimal fixtures get additional
+// dedicated assertions below; every fixture (including the representative
+// partials) is walked against the full table.
+//
+// The four host-image fixtures (bootc-only, rpm-ostree-only, both, and
+// neither-with-systemd) exist so QueryHostImageStatus's any-of row is
+// exercised in every direction the moment it lands: each source alone
+// registers it, both register it, neither withholds it, and none of that
+// changes with Systemd present or absent (bootc-only and rpm-ostree-only
+// carry no Systemd; neither-plus-systemd carries it without a source).
 func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 	fixtures := []struct {
 		name string
@@ -284,25 +333,29 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 		{"updex-without-sysext", capability.New(capability.Updex)},
 		{"sysext-without-updex", capability.New(capability.Sysext)},
 		{"systemd-plus-one-engine", capability.New(capability.Systemd, capability.Podman)},
+		{"bootc-only", capability.New(capability.Bootc)},
+		{"rpm-ostree-only", capability.New(capability.RPMOStree)},
+		{"bootc-plus-rpm-ostree", capability.New(capability.Bootc, capability.RPMOStree)},
+		{"neither-host-image-source-plus-systemd", capability.New(capability.Systemd, capability.Updex, capability.Sysext)},
 	}
 
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
 			registries := registerEverythingForFixture(t, fixture.caps)
 			for _, row := range capabilityTable {
-				want := fixture.caps.HasAll(row.required...)
+				want := row.satisfiedBy(fixture.caps)
 				got := registries.registered(row)
-				assert.Equal(t, want, got, "fixture=%s id=%s required=%v", fixture.name, row.id, row.required)
+				assert.Equal(t, want, got, "fixture=%s id=%s required=%v requireAny=%t", fixture.name, row.id, row.required, row.requireAny)
 			}
 		})
 	}
 }
 
 // TestCapabilityContractAllOnReproducesPrePhaseBehavior asserts the all-on
-// fixture registers every one of the 51 IDs -- reproducing pre-phase
+// fixture registers every one of the 52 IDs -- reproducing pre-phase
 // behavior exactly for the 50 pre-existing Action*/Query* constants, plus
-// QueryCapabilities (51 total), since every documented requirement is a
-// subset of the full capability vocabulary.
+// QueryCapabilities and QueryHostImageStatus (52 total), since every
+// documented requirement is a subset of the full capability vocabulary.
 func TestCapabilityContractAllOnReproducesPrePhaseBehavior(t *testing.T) {
 	registries := registerEverythingForFixture(t, capability.New(allCapabilityIDs...))
 	for _, row := range capabilityTable {

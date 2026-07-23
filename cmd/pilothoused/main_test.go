@@ -146,6 +146,75 @@ func (*fakeMaintenanceManager) State(context.Context) (maintenance.State, error)
 	return maintenance.State{OSVersion: "Snosi"}, nil
 }
 
+// cannedBootcStatus and cannedRPMOStreeStatus are realistically shaped
+// `bootc status --json` and `rpm-ostree status --json` payloads describing one
+// host from both sides: the same booted and staged deployments, matched by
+// manifest digest, with bootc reporting image identity plus soft-reboot
+// eligibility and rpm-ostree adding the version string and ostree checksum it
+// alone knows. They are populated (rather than minimal or empty) so a test
+// asserting which fields reach the broker response is proving real merge
+// behavior instead of comparing two zero values.
+const (
+	cannedBootcStatus = `{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "status": {
+    "staged": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:next", "transport": "registry"},
+        "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "softRebootCapable": true
+    },
+    "booted": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:stable", "transport": "registry"},
+        "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  }
+}`
+	cannedRPMOStreeStatus = `{
+  "deployments": [
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:next",
+      "container-image-reference-digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "checksum": "bbbb222222222222222222222222222222222222222222222222222222222222",
+      "version": "41.20260715.0",
+      "booted": false,
+      "staged": true
+    },
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+      "container-image-reference-digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checksum": "aaaa111111111111111111111111111111111111111111111111111111111111",
+      "version": "41.20260701.0",
+      "booted": true,
+      "staged": false
+    }
+  ]
+}`
+)
+
+// fakeHostImageRunner stands in for the host's bootc/rpm-ostree executables so
+// a real maintenance.HostImageManager -- the same type run() constructs -- can
+// be exercised without either tool installed. It records every command line it
+// is handed, and fails any command that is not one of the two read-only status
+// reads the manager is allowed to run.
+type fakeHostImageRunner struct{ calls []string }
+
+func (r *fakeHostImageRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
+	switch name {
+	case "bootc":
+		return []byte(cannedBootcStatus), nil
+	case "rpm-ostree":
+		return []byte(cannedRPMOStreeStatus), nil
+	default:
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+}
+
 // fakeSysextManager satisfies sysext.Manager so registerSysextActions'
 // per-action capability guards can be tested without exercising a real
 // updex/systemd-sysext dependency.
@@ -220,6 +289,102 @@ func TestRegisterMaintenanceNoOpsWithoutSystemdCapability(t *testing.T) {
 	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, capability.New(capability.Updex, capability.Sysext)))
 	assert.False(t, queries.Registered(broker.QueryMaintenanceState))
 	assert.False(t, actions.Registered(broker.ActionMaintenanceReboot))
+}
+
+// TestRegisterHostImageGatedOnAnyHostImageSource walks the gate's full truth
+// table: QueryHostImageStatus is registered iff caps.HasAny(Bootc,
+// RPMOStree) -- either source alone suffices, both suffice, neither does --
+// and the Systemd capability neither grants nor withholds it, in either
+// direction. The manager under test is the real
+// maintenance.NewHostImageManager wired exactly as run() wires it, from the
+// same capability set, so the fixture cannot drift from production.
+func TestRegisterHostImageGatedOnAnyHostImageSource(t *testing.T) {
+	for _, testCase := range []struct {
+		caps capability.Set
+		name string
+		want bool
+	}{
+		{name: "no capabilities at all", caps: capability.New(), want: false},
+		{name: "systemd host with no image stack", caps: capability.New(capability.Systemd, capability.Journald), want: false},
+		{name: "bootc only, no systemd", caps: capability.New(capability.Bootc), want: true},
+		{name: "rpm-ostree only, no systemd", caps: capability.New(capability.RPMOStree), want: true},
+		{name: "bootc plus rpm-ostree, no systemd", caps: capability.New(capability.Bootc, capability.RPMOStree), want: true},
+		{name: "bootc plus systemd", caps: capability.New(capability.Systemd, capability.Bootc), want: true},
+		{name: "rpm-ostree plus systemd", caps: capability.New(capability.Systemd, capability.RPMOStree), want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			queries := broker.NewQueryRegistry()
+			manager := maintenance.NewHostImageManager(&fakeHostImageRunner{}, testCase.caps.Has(capability.Bootc), testCase.caps.Has(capability.RPMOStree))
+			require.NoError(t, registerHostImage(queries, manager, testCase.caps))
+			assert.Equal(t, testCase.want, queries.Registered(broker.QueryHostImageStatus))
+		})
+	}
+}
+
+// TestRegisterHostImageIsIndependentOfMaintenanceSystemdGate pins the reason
+// the two registrations are separate functions: a bootc host with no systemd
+// gets host-image reporting while reboot posture and the reboot action stay
+// withheld, and a systemd host with no image stack gets the reverse.
+func TestRegisterHostImageIsIndependentOfMaintenanceSystemdGate(t *testing.T) {
+	t.Run("bootc without systemd", func(t *testing.T) {
+		caps := capability.New(capability.Bootc)
+		actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+		require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))
+		require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, true, false), caps))
+
+		assert.True(t, queries.Registered(broker.QueryHostImageStatus))
+		assert.False(t, queries.Registered(broker.QueryMaintenanceState), "reboot posture still requires systemd")
+		assert.False(t, actions.Registered(broker.ActionMaintenanceReboot), "the reboot action still requires systemd")
+	})
+
+	t.Run("systemd without an image stack", func(t *testing.T) {
+		caps := capability.New(capability.Systemd)
+		actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+		require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))
+		require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, false, false), caps))
+
+		assert.False(t, queries.Registered(broker.QueryHostImageStatus))
+		assert.True(t, queries.Registered(broker.QueryMaintenanceState))
+		assert.True(t, actions.Registered(broker.ActionMaintenanceReboot))
+	})
+}
+
+// TestRegisterHostImageServesRawHostImageFactsOnly executes the registered
+// query end to end through the broker registry -- the production path, not the
+// manager directly -- and asserts the response is raw host-image facts merged
+// from both sources, readable by a non-admin identity, and carries no
+// reboot-required posture (that stays QueryMaintenanceState's job, per the
+// spec's round-3 clarification).
+func TestRegisterHostImageServesRawHostImageFactsOnly(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	runner := &fakeHostImageRunner{}
+	caps := capability.New(capability.Bootc, capability.RPMOStree)
+	require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(runner, true, true), caps))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryHostImageStatus, nil)
+	require.NoError(t, err)
+	status, ok := result.(maintenance.HostImageStatus)
+	require.True(t, ok, "the query must answer with a maintenance.HostImageStatus")
+
+	assert.Equal(t, []string{"bootc status --json", "rpm-ostree status --json"}, runner.calls, "only the two read-only status reads may run")
+	assert.True(t, status.BootcAvailable)
+	assert.Empty(t, status.BootcError)
+	assert.True(t, status.RPMOStreeAvailable)
+	assert.Empty(t, status.RPMOStreeError)
+	require.NotNil(t, status.Booted)
+	assert.Equal(t, "quay.io/frostyard/snosi:stable", status.Booted.Image)
+	assert.Equal(t, "41.20260701.0", status.Booted.Version, "rpm-ostree's supplementary detail reaches the response")
+	require.NotNil(t, status.Staged)
+	assert.Equal(t, "quay.io/frostyard/snosi:next", status.Staged.Image)
+	assert.Equal(t, "bbbb222222222222222222222222222222222222222222222222222222222222", status.Staged.Checksum)
+	assert.Nil(t, status.Rollback, "the fixture host has nothing to roll back to")
+	require.NotNil(t, status.SoftRebootCapable)
+	assert.True(t, *status.SoftRebootCapable)
+
+	encoded, err := json.Marshal(status)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "reboot_required", "host-image status reports raw facts, never reboot-required posture")
+	assert.NotContains(t, string(encoded), "reboot_reasons")
 }
 
 // blockingMaintenanceManager parks inside Reboot until released so a test can

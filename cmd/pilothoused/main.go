@@ -161,6 +161,14 @@ func run() error {
 	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
+	// The host-image reporter is constructed unconditionally (it runs nothing
+	// until queried) and told which of its two sources the probe actually
+	// found; registerHostImage's own guard decides whether the query is
+	// exposed at all.
+	hostImageManager := maintenance.NewHostImageManager(sysext.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
+	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
+		return err
+	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
 	defer podmanClient.Close()
 	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient), caps); err != nil {
@@ -716,6 +724,32 @@ func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRe
 		Resource:     func(map[string]string) (string, error) { return "maintenance/reboot", nil },
 		LockResource: func(map[string]string) (string, error) { return maintenanceLockResource, nil },
 		Handler:      func(ctx context.Context, _ auth.Identity, _ map[string]string) error { return manager.Reboot(ctx) },
+	})
+}
+
+// registerHostImage registers QueryHostImageStatus iff the host advertises at
+// least one host-image source -- caps.HasAny(capability.Bootc,
+// capability.RPMOStree). The guard is deliberately an any-of, not an all-of:
+// either source alone yields a usable (if partial) report, and the handler
+// itself only ever runs the sources whose capability was probed present.
+//
+// It is also deliberately independent of registerMaintenance's Systemd guard.
+// Reboot posture and the reboot action need systemd; reading which image the
+// host booted does not, so a bootc host without systemd still gets this query
+// while QueryMaintenanceState and ActionMaintenanceReboot stay withheld.
+//
+// The query is read-only in the strongest sense available here: it is served
+// by a HostImageSource, an interface with no mutating method, and no
+// bootc/rpm-ostree action exists in broker's ID vocabulary to pair it with.
+// Like QueryMaintenanceState it is available to any authenticated identity
+// (admin is not required), since it reports facts about the running image
+// rather than privileged content.
+func registerHostImage(queries *broker.QueryRegistry, manager maintenance.HostImageSource, caps capability.Set) error {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil
+	}
+	return queries.Register(broker.QueryHostImageStatus, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.Status(ctx)
 	})
 }
 

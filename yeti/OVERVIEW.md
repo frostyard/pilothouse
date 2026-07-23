@@ -85,7 +85,8 @@ directory. Current modules:
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
-**In progress (#51, host-image status): the host-image parsers and merge.**
+**In progress (#51, host-image status): the parsers, the manager, and the
+broker query.**
 `internal/modules/maintenance/hostimage.go` adds the read-only host-image
 domain types — `Deployment` (bootc's image reference + manifest digest, plus
 rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
@@ -95,18 +96,50 @@ rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
 plus `ParseBootcStatus`, a pure decoder for `bootc status --json`;
 `ParseRPMOStreeStatus`, a pure decoder for `rpm-ostree status --json` into an
 unexported supplement type; and `MergeHostImage`, which combines the two under
-a bootc-authoritative precedence rule. As of this commit nothing calls any of
-them: there is no broker query, no manager, and no view for host-image status
-yet, nothing sets either availability/error pair, and the `maintenance`
-module's behavior is unchanged. Contracts worth knowing before wiring it up:
+a bootc-authoritative precedence rule.
 
-- The file executes nothing. Its imports are limited to
+As of this commit those parsers have exactly one caller:
+`internal/modules/maintenance/hostimage_manager.go`'s `HostImageManager`,
+served over the broker as the new `QueryHostImageStatus`
+(`org.frostyard.pilothouse.maintenance.host_image_status`) registered by
+`registerHostImage` in `cmd/pilothoused/main.go`. There is still no web-side
+consumer and no view for host-image status, and the `maintenance` module's
+web behavior — nav, routes, dashboard, `QueryMaintenanceState`'s
+reboot-required posture — is unchanged. What the daemon side now does:
+
+- `NewHostImageManager(runner, bootcAvailable, rpmOstreeAvailable)` takes the
+  probed `capability.Bootc`/`capability.RPMOStree` facts and runs, at most,
+  `bootc status --json` and `rpm-ostree status --json` — each at most once per
+  `Status` call, only when its flag is true, always through the injected
+  `Runner`, never a shell and never a second subcommand. `Status` merges the
+  two with `MergeHostImage` and returns raw facts only; it computes no
+  reboot-required posture (still `SystemManager.State`'s job) and exposes no
+  mutation.
+- Per-source failure is symmetric and never fatal: an exec failure *or* a
+  parse failure on either source sets that source's `*Available` to false and
+  its `*Error` to the message, leaving the other source's data intact.
+  `Status` returns no error of its own for a source-level failure, so a host
+  where only one tool answers still gets an honest, partial report. A source
+  whose capability is absent is never attempted at all, and reports neither
+  availability nor an error.
+- `registerHostImage` guards the query with
+  `caps.HasAny(capability.Bootc, capability.RPMOStree)` — the first any-of
+  guard in the daemon's registration code — and is deliberately independent of
+  `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
+  host-image reporting while the reboot posture query and reboot action stay
+  withheld. `docs/capabilities.md`'s binding table carries the row (52 IDs,
+  17 queries) and `cmd/pilothoused/capability_contract_test.go` exercises it
+  across bootc-only, rpm-ostree-only, both, and neither fixtures.
+
+Contracts of the parsers themselves, worth knowing before consuming them:
+
+- `hostimage.go` executes nothing. Its imports are limited to
   `encoding/json`/`fmt`/`strings`, enforced mechanically by a test over the
   file's AST, so no bootc invocation — least of all a mutation such as
-  upgrade, switch, rebase, or rollback — can originate here. Obtaining the
-  bytes is a later caller's job: no code in the tree runs bootc for host-image
-  status yet, and when one does it will run only `bootc status --json`, through
-  an injected command runner.
+  upgrade, switch, rebase, or rollback — can originate there. Obtaining the
+  bytes is the manager's job, and `hostimage_manager.go` imports only
+  `context`, so the injected `Runner` is provably the only way a command
+  leaves the package.
 - A structurally malformed payload returns a non-nil error together with a
   zero `HostImageStatus` (`BootcAvailable` false), never partial data. The
   caller decides whether to record that as `HostImageStatus.BootcError` on an

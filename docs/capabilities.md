@@ -5,20 +5,21 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. As of c11, `registerPodman`/`registerDocker`/
-`registerIncus` (and the new `QueryCapabilities` itself), plus
-`registerServices`, `registerLogs`, `registerBackups`,
-`registerStorageActions`, `registerMaintenance`, and `registerSysextActions`,
-are all actually capability-guarded — every row in this table now reflects
-current, landed behavior, not a future guarantee. The final chunk's contract
-test enforces the full table.
+capability-guarded. `registerPodman`/`registerDocker`/`registerIncus` (and
+the new `QueryCapabilities` itself), plus `registerServices`,
+`registerLogs`, `registerBackups`, `registerStorageActions`,
+`registerMaintenance`, `registerHostImage`, and `registerSysextActions`, are
+all actually capability-guarded — every row in this table reflects current,
+landed behavior, not a future guarantee, and
+`cmd/pilothoused/capability_contract_test.go` enforces the full table across
+a fixture matrix of capability sets.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
-constants and 16 `Query*` constants today — 51 IDs total, reproducible with:
+constants and 17 `Query*` constants today — 52 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 35
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 16
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 17
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -26,19 +27,26 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 51 IDs is registered exactly once across the four
+Every one of the 52 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 35/16 above, not IDs
-added on top. This table therefore has exactly 51 rows.
+via `StreamQueryRegistry`) — both are members of the 35/17 above, not IDs
+added on top. This table therefore has exactly 52 rows.
 
-`QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`) landed in
-c6 alongside the engine conversions and is included in both the count above
-and the query table below — this document is updated in the same chunk
-that registers the new ID, per the "every currently registered broker ID"
-invariant stated above. c12's contract test cross-checks its own ID count
-against this document, which is now 51 pre- and post- that chunk (the count
-does not change again for the rest of this phase).
+`QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`) landed
+during phase 1a alongside the engine conversions and is included in both the
+count above and the query table below — this document is updated in the same
+chunk that registers a new ID, per the "every currently registered broker ID"
+invariant stated above. `cmd/pilothoused/capability_contract_test.go`'s
+`capabilityTable` mirrors this document row for row and cross-checks its own
+ID count against it.
+
+`QueryHostImageStatus` (`org.frostyard.pilothouse.maintenance.host_image_status`)
+is the newest ID, added by phase 2 (#51) for read-only host-image reporting,
+and is the reason the totals above read 17/52 rather than the 16/51 phase 1a
+ended with. It is the table's first **any-of** row: `registerHostImage`
+guards it with `caps.HasAny(capability.Bootc, capability.RPMOStree)`, not
+`HasAll`, so either source alone is enough (see exception #4 below).
 
 Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
@@ -84,7 +92,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionStorageUnmount` | storage (remote-mount) | systemd |
 | `ActionStorageDelete` | storage (remote-mount) | systemd |
 
-## Queries (16)
+## Queries (17)
 
 | Broker ID | Module | Capability |
 |---|---|---|
@@ -93,6 +101,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `QueryCapabilities` | capability | none *(unconditional — see below)* |
 | `QueryDockerLogs` | docker | docker |
 | `QueryDockerState` | docker | docker |
+| `QueryHostImageStatus` | maintenance (host image) | bootc OR rpm-ostree *(exception — see below)* |
 | `QueryIncusState` | incus | incus |
 | `QueryJobs` | jobs | none |
 | `QueryLogs` | logs | systemd AND journald *(exception — see below)* |
@@ -111,7 +120,18 @@ Per `.mill/spec.md`: services state/actions → systemd; services journal →
 journald; logs → journald; storage remote-mount actions → systemd; backups
 → systemd; maintenance → systemd; podman/docker/incus → their engine
 capability; system, files, activity, jobs → none. sysext is per-action, not
-module-level:
+module-level.
+
+Maintenance's "→ systemd" default is now a **per-surface** requirement rather
+than a whole-module one, per `.mill/spec.md`'s phase-2 re-grounding: reboot
+posture and the reboot action (`QueryMaintenanceState`,
+`ActionMaintenanceReboot`, guarded by `registerMaintenance`) still require
+systemd, while host-image reporting (`QueryHostImageStatus`, guarded by the
+separate `registerHostImage`) requires a host-image source instead and no
+systemd at all — a bootc host without systemd gets the latter and not the
+former. The rest of that phase's maintenance work (module presence/nav
+gating, the web-side rendering of host-image status) is not yet landed and is
+not described here. The sysext per-action rows are:
 
 - `ActionSysextRefresh` → `sysext`
 - `ActionSysextUpdate` → `updex`
@@ -123,7 +143,7 @@ page through `QueryMaintenanceState` (see the extension-read note below).
 
 ## Exceptions to the module-level defaults
 
-Three rows in this table deviate from the spec's literal module-default
+Four rows in this table deviate from the spec's literal module-default
 prose. Each is grounded in the actual manager code, not just spec wording —
 the module defaults describe steady-state intent; these are the exceptions
 section is precisely where actual code dependencies that exceed that intent
@@ -190,6 +210,41 @@ probed `capability.Set`, requiring `caps.HasAll(capability.Systemd,
 capability.Journald)` before registering `QueryLogs` at all. Documented
 here as the exceptions section's job: recording a real code dependency that
 exceeds the module default's literal wording.
+
+### 4. `QueryHostImageStatus` is `bootc OR rpm-ostree`, the table's only any-of row
+
+Every other row is an AND: the ID registers iff
+`caps.HasAll(required...)`. `QueryHostImageStatus` is the first row whose
+guard is `caps.HasAny(capability.Bootc, capability.RPMOStree)`
+(`registerHostImage` in `cmd/pilothoused/main.go`), because either source
+alone yields a usable report — bootc is authoritative for deployment identity
+and rpm-ostree is supplementary, so a host with only one of them still has
+something honest to say and a host with neither has nothing to report at all.
+Inside the handler, `maintenance.HostImageManager.Status` runs only the
+sources whose capability was actually probed present (`bootc status --json`
+and/or `rpm-ostree status --json`, both read-only, both through an injected
+command runner, never a shell), and a source that fails to run or to parse
+degrades to its own `*Available: false` / `*Error` pair on the response
+rather than failing the query.
+
+This row is also deliberately **independent of maintenance's systemd
+requirement**: `registerHostImage` is a separate function from
+`registerMaintenance` and consults neither `capability.Systemd` nor the
+other's guard, so a bootc host without systemd registers
+`QueryHostImageStatus` while `QueryMaintenanceState` and
+`ActionMaintenanceReboot` stay withheld, and a systemd host with no image
+stack gets the reverse. The response carries raw host-image facts only —
+booted/staged/rollback deployments, image references and digests,
+supplementary rpm-ostree version/checksum detail, soft-reboot eligibility
+when bootc exposes it, and each source's availability/error — and never
+reboot-required posture, which remains `QueryMaintenanceState`'s alone.
+
+`cmd/pilothoused/capability_contract_test.go` mirrors the distinction with a
+`requireAny` column on its table rows and exercises this one across
+bootc-only, rpm-ostree-only, bootc-plus-rpm-ostree, and
+neither-plus-systemd fixtures. No web-side code calls this query yet: as of
+this commit it is a registered, capability-guarded daemon surface with no
+consumer, and the maintenance module's web behavior is unchanged.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
