@@ -51,27 +51,7 @@ func run() error {
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
-	serviceModule := services.New()
-	backupModule := backups.New()
-	maintenanceModule := maintenance.New()
-	storageModule := storage.New()
-	registry, err := platform.NewRegistry(
-		fleet.New(),
-		attention.New(system, serviceModule, maintenanceModule, backupModule, storageModule),
-		activity.New(),
-		system,
-		storageModule,
-		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)),
-		podman.New(),
-		docker.New(),
-		incus.New(),
-		logs.New(),
-		files.New(),
-		serviceModule,
-		maintenanceModule,
-		backupModule,
-	)
+	registry, err := newRegistry(*definitionsRoot, *updex)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
@@ -101,6 +81,36 @@ func run() error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// newRegistry builds the production module registry: every management
+// module instantiated and registered in the same order and configuration
+// run() has always used. It is extracted from run() as a pure refactor (no
+// behavior change) so cmd/pilothouse/capability_contract_test.go can build
+// the real, production-wired registry directly instead of maintaining a
+// second, hand-duplicated module list.
+func newRegistry(definitionsRoot, updex string) (*platform.Registry, error) {
+	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
+	serviceModule := services.New()
+	backupModule := backups.New()
+	maintenanceModule := maintenance.New()
+	storageModule := storage.New()
+	return platform.NewRegistry(
+		fleet.New(),
+		attention.New(system, serviceModule, maintenanceModule, backupModule, storageModule),
+		activity.New(),
+		system,
+		storageModule,
+		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, definitionsRoot, updex)),
+		podman.New(),
+		docker.New(),
+		incus.New(),
+		logs.New(),
+		files.New(),
+		serviceModule,
+		maintenanceModule,
+		backupModule,
+	)
 }
 
 type stringListFlag []string
