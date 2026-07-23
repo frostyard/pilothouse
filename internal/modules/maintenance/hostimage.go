@@ -8,12 +8,14 @@ import (
 
 // bootcKind is the only document kind `bootc status --json` emits, and
 // bootcAPIVersionPrefix is the stable prefix of its apiVersion
-// (`org.containers.bootc/v1` today). Both are used as discriminators so a
+// (`org.containers.bootc/v1` today). Both are required discriminators so a
 // payload that is valid JSON but is not a bootc host status -- an error
 // object from another tool, an empty object, a stray array -- is reported as
-// a parse error instead of decoding into a silently empty result. The
-// apiVersion check matches the prefix only, so a future schema revision
-// (`org.containers.bootc/v2`) still parses as long as the fields this
+// a parse error instead of decoding into a silently empty result. Neither may
+// be omitted: bootc always emits both, so a document missing either one is not
+// bootc host status output and must not be accepted by default. Only the
+// apiVersion's *value* is matched loosely, by prefix, so a future schema
+// revision (`org.containers.bootc/v2`) still parses as long as the fields this
 // package reads keep their meaning.
 const (
 	bootcAPIVersionPrefix = "org.containers.bootc/"
@@ -35,8 +37,13 @@ type Deployment struct {
 // -- it carries no reboot-required posture (that stays State's job) and no
 // lifecycle action of any kind.
 //
-// Booted, Staged, and Rollback are nil when the source does not report that
-// deployment slot. SoftRebootCapable is a three-state value: non-nil true or
+// Booted is always non-nil on a successfully parsed status: a payload that
+// reports no booted deployment is rejected as malformed rather than returned
+// as an empty success. Staged and Rollback are nil when the source does not
+// report that deployment slot, which is the ordinary case on a host with
+// nothing pending and nothing to roll back to.
+//
+// SoftRebootCapable is a three-state value: non-nil true or
 // false when the host's bootc exposes soft-reboot eligibility, and nil when it
 // does not (unknown/not exposed -- an older bootc, never an error).
 //
@@ -57,10 +64,12 @@ type HostImageStatus struct {
 // bootcHost mirrors the subset of `bootc status --json` this package reads.
 // Unknown fields are ignored on purpose: bootc adds keys between releases and
 // none of them should turn a readable status into a parse failure.
+// Status is a pointer so an absent or null `status` object stays
+// distinguishable from one that is present but reports nothing.
 type bootcHost struct {
-	APIVersion string          `json:"apiVersion"`
-	Kind       string          `json:"kind"`
-	Status     bootcHostStatus `json:"status"`
+	APIVersion string           `json:"apiVersion"`
+	Kind       string           `json:"kind"`
+	Status     *bootcHostStatus `json:"status"`
 }
 
 type bootcHostStatus struct {
@@ -92,12 +101,28 @@ type bootcImageReference struct {
 // second bootc subcommand -- and hands them here. No such caller exists yet.
 //
 // On success the returned status has BootcAvailable set to true and one
-// Deployment per slot bootc reported. On a structurally malformed payload --
-// non-JSON, truncated JSON, a JSON value that is not a bootc host document,
-// or a field of the wrong type -- it returns a non-nil error together with a
-// zero HostImageStatus (BootcAvailable false), never a partially populated
-// result. Deciding how to surface that failure (as HostImageStatus.BootcError
-// on an otherwise usable report) belongs to the caller.
+// Deployment per slot bootc reported. On a structurally malformed payload it
+// returns a non-nil error together with a zero HostImageStatus
+// (BootcAvailable false), never a partially populated result. Deciding how to
+// surface that failure (as HostImageStatus.BootcError on an otherwise usable
+// report) belongs to the caller.
+//
+// "Structurally malformed" covers both syntax and substance, because a
+// confident but empty success is exactly as wrong as a wrong value:
+//
+//   - non-JSON, truncated JSON, or a JSON value that is not an object;
+//   - a field of the wrong type;
+//   - a missing or non-bootc discriminator -- both apiVersion and kind are
+//     required, and omitting either is a failure rather than a bypass;
+//   - a document that passes the discriminators but omits the substance the
+//     caller asked for: no `status` object, or a `status` that reports no
+//     booted deployment. bootc always reports what the host is running, so
+//     their absence means the payload is not usable host-image status even
+//     though it claims the right shape.
+//
+// Only the staged and rollback slots are genuinely optional -- a host with
+// nothing staged and nothing to roll back to is an ordinary, healthy host --
+// so their absence yields a nil Deployment, not an error.
 func ParseBootcStatus(data []byte) (HostImageStatus, error) {
 	var host bootcHost
 	if err := json.Unmarshal(data, &host); err != nil {
@@ -106,8 +131,14 @@ func ParseBootcStatus(data []byte) (HostImageStatus, error) {
 	if host.Kind != bootcKind {
 		return HostImageStatus{}, fmt.Errorf("parse bootc status: unexpected kind %q, want %q", host.Kind, bootcKind)
 	}
-	if host.APIVersion != "" && !strings.HasPrefix(host.APIVersion, bootcAPIVersionPrefix) {
+	if !strings.HasPrefix(host.APIVersion, bootcAPIVersionPrefix) {
 		return HostImageStatus{}, fmt.Errorf("parse bootc status: unexpected apiVersion %q, want prefix %q", host.APIVersion, bootcAPIVersionPrefix)
+	}
+	if host.Status == nil {
+		return HostImageStatus{}, fmt.Errorf("parse bootc status: document reports no status object")
+	}
+	if host.Status.Booted == nil {
+		return HostImageStatus{}, fmt.Errorf("parse bootc status: status reports no booted deployment")
 	}
 	return HostImageStatus{
 		BootcAvailable:    true,

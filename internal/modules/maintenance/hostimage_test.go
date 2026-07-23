@@ -174,7 +174,7 @@ func TestParseBootcStatusSoftRebootEligibility(t *testing.T) {
 		},
 		{
 			name:  "booted entry when nothing is staged",
-			input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"softRebootCapable":true}}}`,
+			input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"},"softRebootCapable":true}}}`,
 			want:  boolPtr(true),
 		},
 		{
@@ -189,7 +189,7 @@ func TestParseBootcStatusSoftRebootEligibility(t *testing.T) {
 		},
 		{
 			name:  "staged entry wins over booted entry",
-			input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"softRebootCapable":true},"staged":{"softRebootCapable":false}}}`,
+			input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"},"softRebootCapable":true},"staged":{"softRebootCapable":false}}}`,
 			want:  boolPtr(false),
 		},
 		{
@@ -217,7 +217,7 @@ func TestParseBootcStatusSoftRebootEligibility(t *testing.T) {
 // pointer is a copy, so a consumer mutating it cannot reach back into decoded
 // state shared with anything else.
 func TestParseBootcStatusSoftRebootCapableIsACopy(t *testing.T) {
-	input := []byte(`{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"staged":{"softRebootCapable":true}}}`)
+	input := []byte(`{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}},"staged":{"softRebootCapable":true}}}`)
 	first, err := ParseBootcStatus(input)
 	require.NoError(t, err)
 	require.NotNil(t, first.SoftRebootCapable)
@@ -231,6 +231,13 @@ func TestParseBootcStatusSoftRebootCapableIsACopy(t *testing.T) {
 // TestParseBootcStatusMalformed asserts the error contract: a non-nil error and
 // a zero-value HostImageStatus (BootcAvailable false, every slot nil), never a
 // partially populated result the caller might mistake for real bootc data.
+//
+// The cases below enumerate the full matrix of what ParseBootcStatus requires,
+// rather than only the syntactically broken payloads: for each mandatory
+// element of the document (apiVersion, kind, the status object, and the booted
+// deployment) both "omitted entirely" and "present but wrong/null" must fail.
+// Omission must never be a way around a check -- a required field that is only
+// validated when present is an optional field.
 func TestParseBootcStatusMalformed(t *testing.T) {
 	cases := []struct {
 		input string
@@ -242,11 +249,24 @@ func TestParseBootcStatusMalformed(t *testing.T) {
 		{name: "JSON array", input: `[{"kind":"BootcHost"}]`},
 		{name: "JSON string", input: `"BootcHost"`},
 		{name: "JSON null", input: `null`},
+		{name: "empty JSON object", input: `{}`},
 		{name: "unrelated JSON object", input: `{"some":"json"}`},
 		{name: "wrong kind", input: `{"apiVersion":"org.containers.bootc/v1","kind":"SomethingElse","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "missing kind", input: `{"apiVersion":"org.containers.bootc/v1","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "empty kind", input: `{"apiVersion":"org.containers.bootc/v1","kind":"","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
 		{name: "unexpected apiVersion", input: `{"apiVersion":"org.example.other/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "missing apiVersion", input: `{"kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "missing apiVersion with an empty booted entry", input: `{"kind":"BootcHost","status":{"booted":{}}}`},
+		{name: "empty apiVersion", input: `{"apiVersion":"","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "discriminators only, no status", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost"}`},
+		{name: "null status", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":null}`},
+		{name: "empty status object", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{}}`},
+		{name: "status reporting no booted deployment", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"staged":{"image":{"image":{"image":"img:b"},"imageDigest":"sha256:b"}},"rollbackQueued":false}}`},
+		{name: "null booted deployment", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":null,"staged":null,"rollback":null}}`},
 		{name: "deployment slot of the wrong type", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":"stable"}}`},
-		{name: "eligibility key of the wrong type", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"staged":{"softRebootCapable":"yes"}}}`},
+		{name: "status of the wrong type", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":"booted"}`},
+		{name: "apiVersion of the wrong type", input: `{"apiVersion":42,"kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}}}}`},
+		{name: "eligibility key of the wrong type", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"image":{"image":"img:a"},"imageDigest":"sha256:a"}},"staged":{"softRebootCapable":"yes"}}}`},
 		{name: "digest of the wrong type", input: `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","status":{"booted":{"image":{"imageDigest":42}}}}`},
 	}
 	for _, testCase := range cases {

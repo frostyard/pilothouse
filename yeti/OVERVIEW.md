@@ -106,6 +106,19 @@ unchanged. Contracts worth knowing before wiring it up:
   zero `HostImageStatus` (`BootcAvailable` false), never partial data. The
   caller decides whether to record that as `HostImageStatus.BootcError` on an
   otherwise usable report; `ParseBootcStatus` itself never sets `BootcError`.
+- "Malformed" covers substance, not just syntax, because a confident but empty
+  success would mislead every downstream consumer. Beyond non-JSON, truncated
+  JSON, and wrong-typed fields, the parser rejects a document that omits any
+  element bootc always emits: `apiVersion` and `kind` are both *required*
+  discriminators (an omitted `apiVersion` is a failure, not a bypass — only its
+  value is matched loosely, by prefix, so `org.containers.bootc/v2` still
+  parses), and the `status` object and its `booted` deployment must be present.
+  A payload that satisfies the discriminators but reports nothing — for
+  instance `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost"}` —
+  is an error rather than a successful `HostImageStatus` with every slot nil.
+  Consequently `Booted` is always non-nil on success. Only `staged` and
+  `rollback` are optional: a host with nothing pending and nothing to roll
+  back to is ordinary, so those slots stay nil without error.
 - `SoftRebootCapable` is three-state: non-nil true/false when the host's bootc
   exposes soft-reboot eligibility, nil when it does not. The key is
   `softRebootCapable` on a boot entry, confirmed against bootc's published
