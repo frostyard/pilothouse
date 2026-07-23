@@ -8,9 +8,9 @@ chunk = [
   "make generate",
   "out=$(gofmt -l . | grep -v _templ.go || true); if [ -n \"$out\" ]; then echo \"gofmt needed: $out\"; exit 1; fi",
   "go vet ./... 2>&1 | tail -c 4000; exit ${PIPESTATUS[0]}",
-  # default go vet/test skip //go:build-tagged files; compile them too so a
-  # broken sdjournal-gated file fails here, not only at the deep gate.
-  "go build -tags sdjournal ./... 2>&1 | tail -c 4000; exit ${PIPESTATUS[0]}",
+  # NOTE: sdjournal-tagged files need libsystemd headers absent on native
+  # hosts, so the tagged build lives in the deep gate (make docker-ci runs
+  # make build -tags sdjournal in-container), not here.
   "go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -c 6000; exit ${PIPESTATUS[0]}",
 ]
 # Heavier final gate before the ship decision (mill.sh --no-deep skips these
