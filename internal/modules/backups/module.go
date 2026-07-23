@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -50,8 +51,15 @@ func (*Module) Manifest() platform.Manifest {
 	return platform.Manifest{ID: "backups", Name: "Backups", Description: "Monitor configured systemd backup timers", Icon: "disk", Order: 36, Path: "/backups"}
 }
 
+// RequiredCapabilities makes the whole module — its nav entry, dashboard
+// card, and its route — available only on a host that advertises systemd,
+// since backup timers are systemd timer units.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Systemd}
+}
+
 func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /backups", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /backups", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		state, err := queryState(ctx, host)
@@ -60,7 +68,7 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		_ = host.Render(w, r, platform.Page{Active: "backups", Body: Page(state), Eyebrow: "Backup schedules", Title: "Backups"})
-	})
+	}))
 }
 
 func queryState(ctx context.Context, host platform.Host) (State, error) {

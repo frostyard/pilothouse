@@ -15,15 +15,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fullTestCapabilities matches the default fake Host capability set used
+// across this repo's module tests: every capability present, so existing
+// tests that don't care about gating keep exercising the full-capability
+// path unchanged.
+var fullTestCapabilities = capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+
 type moduleHost struct {
 	page       platform.Page
 	parameters map[string]string
 	query      string
 	state      State
+	// caps overrides Capabilities' return value when capsSet is true.
+	// Leaving both zero (the default for a bare &moduleHost{}) falls back
+	// to fullTestCapabilities, so existing tests that never touch
+	// capability gating keep exercising the full-capability path
+	// unchanged; a gating test sets both explicitly, including to an
+	// intentionally empty capability.Set{}.
+	caps    capability.Set
+	capsSet bool
 }
 
-func (*moduleHost) Capabilities(context.Context) capability.Set {
-	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+func (h *moduleHost) Capabilities(context.Context) capability.Set {
+	if !h.capsSet {
+		return fullTestCapabilities
+	}
+	return h.caps
 }
 func (*moduleHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool {
 	return true
@@ -90,4 +107,45 @@ func TestModuleDashboardAndHealth(t *testing.T) {
 		assert.Equal(t, "/backups", finding.Path)
 		assert.Equal(t, "Backups", finding.Source)
 	}
+}
+
+func TestRequiredCapabilitiesIsSystemdOnly(t *testing.T) {
+	assert.Equal(t, []capability.ID{capability.Systemd}, New().RequiredCapabilities())
+}
+
+// TestModuleAvailabilityGatedOnSystemd exercises platform.Available (the
+// registry's real module-availability predicate, not a reimplementation of
+// it) against this module's RequiredCapabilities, proving the whole module
+// — nav entry and dashboard card — is excluded whenever systemd is absent,
+// regardless of what else is present.
+func TestModuleAvailabilityGatedOnSystemd(t *testing.T) {
+	module := New()
+	assert.True(t, platform.Available(module, capability.New(capability.Systemd)))
+	assert.True(t, platform.Available(module, capability.New(capability.Systemd, capability.Journald)))
+	assert.False(t, platform.Available(module, capability.New(capability.Journald)))
+	assert.False(t, platform.Available(module, capability.Set{}))
+}
+
+// TestBackupsRouteGatesOnSystemdAbsent proves — via a real ServeMux round
+// trip through Mount, not a test-only stand-in — that GET /backups 404s
+// once systemd is absent, even when other capabilities are present.
+func TestBackupsRouteGatesOnSystemdAbsent(t *testing.T) {
+	host := &moduleHost{caps: capability.New(capability.Journald), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/backups", nil))
+	assert.Equal(t, http.StatusNotFound, response.Code)
+}
+
+// TestBackupsRouteServesWhenSystemdPresent proves the gate is additive,
+// not a regression: with systemd present (fullTestCapabilities, the
+// default), GET /backups behaves exactly as it did before this chunk.
+func TestBackupsRouteServesWhenSystemdPresent(t *testing.T) {
+	host := &moduleHost{state: State{Configured: true}}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/backups", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
 }

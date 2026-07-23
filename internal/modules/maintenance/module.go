@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
@@ -61,8 +62,15 @@ func (*Module) Manifest() platform.Manifest {
 	return platform.Manifest{ID: "maintenance", Name: "Maintenance", Description: "Updates, jobs, and reboot posture", Icon: "refresh", Order: 34, Path: "/maintenance"}
 }
 
+// RequiredCapabilities makes the whole module — its nav entry, dashboard
+// card, and both routes below — available only on a host that advertises
+// systemd: the reboot action and auto-update reporting both depend on it.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Systemd}
+}
+
 func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /maintenance", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /maintenance", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		state, err := queryState(ctx, host)
@@ -71,8 +79,8 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			return
 		}
 		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
-	})
-	mux.HandleFunc("POST /maintenance/reboot", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /maintenance/reboot", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) || !host.ConfirmAction(w, r, "Reboot the host", "maintenance/reboot") {
 			return
 		}
@@ -87,7 +95,7 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 			values.Set("notice", "Host reboot requested.")
 		}
 		http.Redirect(w, r, "/maintenance?"+values.Encode(), http.StatusSeeOther)
-	})
+	}))
 }
 
 func queryState(ctx context.Context, host platform.Host) (State, error) {

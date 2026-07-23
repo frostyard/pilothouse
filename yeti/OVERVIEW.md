@@ -345,6 +345,26 @@ rules for adding a new module (routes, actions, queries).
   Systemd-present/-absent and Journald-present/-absent independently via
   real `ServeMux` round trips through `Mount`, rather than calling handler
   logic directly.
+- **Backups and maintenance: whole-module `Systemd` gates.**
+  `internal/modules/backups.Module` and `internal/modules/maintenance.Module`
+  now also implement `RequiredCapabilities() []capability.ID`, each returning
+  `[]capability.ID{capability.Systemd}` — unlike services, neither has a
+  sub-feature with a broader requirement, so there is exactly one
+  `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` wrap per
+  route: backups' single `GET /backups`, and maintenance's `GET /maintenance`
+  and `POST /maintenance/reboot`. With `Systemd` absent, the whole module
+  disappears — nav entry, dashboard card, and every route 404s at request
+  time; with `Systemd` present, both modules behave exactly as before this
+  chunk. Neither module's `views.templ` changed: an absent module 404s
+  before any page renders, so there is no conditional view content to add,
+  unlike services' `journalAvailable` parameter. Maintenance's existing
+  extension-read degrade (`QueryMaintenanceState`'s updex/sysext handling,
+  from #50) is untouched by this chunk; the systemd gate sits on top of it,
+  at the module/route level, not inside the query handler. Both
+  `module_test.go` files gained the same configurable `caps
+  capability.Set`/`capsSet bool` pair on their fake `Host` that services'
+  test uses (defaulting to a full-capability set), so gated/ungated route
+  behavior is exercised via real `ServeMux` round trips through `Mount`.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
