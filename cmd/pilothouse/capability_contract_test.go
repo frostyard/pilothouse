@@ -411,6 +411,159 @@ func assertNoDeadLinks(t *testing.T, handler http.Handler, cookie *http.Cookie, 
 	}
 }
 
+// --- scoped nav/dashboard region assertions -----------------------------
+//
+// The nav (primary navigation, rendered by internal/web's Layout) and the
+// dashboard cards (rendered by internal/web's Dashboard, inside
+// <section id="dashboard">) are two distinct web-side registries per the
+// spec's contract-test requirement. Checking manifest.Name anywhere in the
+// whole page conflates them — the sidebar nav link and a dashboard card
+// heading both happen to contain the module's Name, so a regression that
+// dropped only one of the two would still pass a whole-page Contains check.
+// These helpers scope each assertion to its own region so nav and dashboard
+// are proven independently, and are reused both on GET / and on every other
+// authenticated module page (nav is rendered identically everywhere).
+
+var (
+	navSectionPattern       = regexp.MustCompile(`(?s)<nav\b[^>]*aria-label="Primary navigation"[^>]*>(.*?)</nav>`)
+	dashboardSectionPattern = regexp.MustCompile(`(?s)<section\b[^>]*\bid="dashboard"[^>]*>(.*)</main>`)
+)
+
+// extractRequiredSection returns the first submatch of pattern in body, or
+// fails the test if pattern does not match — a nav/dashboard region that
+// can't be located means the page's markup shape changed underneath this
+// harness, which is itself worth failing loudly on rather than silently
+// asserting against an empty string.
+func extractRequiredSection(t *testing.T, pattern *regexp.Regexp, body, source, label string) string {
+	t.Helper()
+	match := pattern.FindStringSubmatch(body)
+	require.NotNilf(t, match, "%s: could not locate the %s region in rendered HTML", source, label)
+	return match[1]
+}
+
+// assertNavigation scopes to the primary navigation region of body (as
+// rendered on source, e.g. "GET /" or "GET /services") and asserts, for
+// every module in modules, that its nav link (an anchor whose href is its
+// manifest Path) is present when the module is available under caps and
+// absent when it is gated off — proving the navigation registry
+// independently of the dashboard registry.
+func assertNavigation(t *testing.T, source, body string, modules []platform.Module, caps capability.Set) {
+	t.Helper()
+	navSection := extractRequiredSection(t, navSectionPattern, body, source, "primary navigation")
+	for _, module := range modules {
+		manifest := module.Manifest()
+		href := `href="` + manifest.Path + `"`
+		if platform.Available(module, caps) {
+			assert.Containsf(t, navSection, href,
+				"%s: primary navigation is missing a link for available module %q", source, manifest.ID)
+		} else {
+			assert.NotContainsf(t, navSection, href,
+				"%s: primary navigation unexpectedly links to gated-absent module %q", source, manifest.ID)
+		}
+	}
+}
+
+// assertDashboardCards scopes to the <section id="dashboard"> region of
+// dashboardBody and asserts, for every module in modules, that its
+// dashboard card is absent when the module is gated off under caps. When
+// the module is available, it asserts the card is present only if
+// cardModules says that module actually renders one when available — some
+// modules (activity, fleet, files, logs) always return no dashboard cards
+// by design, so their absence from this section is not a regression to
+// flag. cardModules is derived from the real Dashboard() output directly
+// (see dashboardCardModuleIDs), not hand-listed here, so it can't drift
+// from which modules actually render cards.
+//
+// Presence is checked by href="<manifest.Path>" (every card-producing
+// module's Summary/Hero component links back to its own module, e.g.
+// internal/modules/podman/views.templ's `<a class="card-link"
+// href="/podman">`) rather than by manifest.Name: several modules' card
+// headings are a different phrase than their nav Name (podman's Manifest
+// Name is "Containers" but its card heading is "Podman"; sysext's Name is
+// "Extensions" but its card heading is "System extensions"), so Name is not
+// a reliable in-card marker. manifest.Name is checked too, as an
+// alternative match, because internal/web.ModuleErrorCard (rendered when a
+// module's Dashboard() call errors) shows only the module's Name with no
+// href.
+func assertDashboardCards(t *testing.T, dashboardBody string, modules []platform.Module, caps capability.Set, cardModules map[string]bool) {
+	t.Helper()
+	dashboardSection := extractRequiredSection(t, dashboardSectionPattern, dashboardBody, "GET /", "dashboard cards")
+	for _, module := range modules {
+		manifest := module.Manifest()
+		href := `href="` + manifest.Path + `"`
+		present := strings.Contains(dashboardSection, href) || strings.Contains(dashboardSection, manifest.Name)
+		if !platform.Available(module, caps) {
+			assert.Falsef(t, present,
+				"GET /: dashboard unexpectedly renders a card for gated-absent module %q", manifest.ID)
+			continue
+		}
+		if cardModules[manifest.ID] {
+			assert.Truef(t, present,
+				"GET /: dashboard is missing a card for available module %q", manifest.ID)
+		}
+	}
+}
+
+// dashboardProbeHost is a minimal platform.Host used only to call a
+// module's Dashboard(ctx, host) directly, bypassing internal/web.Server's
+// dashboard() HTTP handler entirely. Capabilities always reports every
+// capability present (dashboardCardModuleIDs only wants to know what a
+// module renders when available, not whether it currently is), and Query
+// answers with the same canned zero-value response fakeCapabilityBroker
+// uses. Every other Host method is unused by any module's Dashboard()
+// implementation (which takes only a context and a Host, never an
+// http.ResponseWriter/*http.Request) and returns an inert zero value.
+type dashboardProbeHost struct{}
+
+func (dashboardProbeHost) Capabilities(context.Context) capability.Set { return fullCapabilitySet() }
+func (dashboardProbeHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool {
+	return false
+}
+func (dashboardProbeHost) CSRFToken(*http.Request) string { return "" }
+func (dashboardProbeHost) Execute(context.Context, *http.Request, string, map[string]string) error {
+	return nil
+}
+func (dashboardProbeHost) Identity(*http.Request) auth.Identity { return auth.Identity{} }
+func (dashboardProbeHost) Query(_ context.Context, _ string, _ map[string]string, target any) error {
+	return cannedQueryResponse(target)
+}
+func (dashboardProbeHost) Render(http.ResponseWriter, *http.Request, platform.Page) error { return nil }
+func (dashboardProbeHost) ValidateAction(http.ResponseWriter, *http.Request) bool         { return false }
+func (dashboardProbeHost) ValidateActionToken(http.ResponseWriter, *http.Request, string) bool {
+	return false
+}
+func (dashboardProbeHost) StreamAction(context.Context, *http.Request, string, map[string]string, io.Reader) error {
+	return nil
+}
+func (dashboardProbeHost) StreamQuery(context.Context, string, map[string]string) (broker.StreamResult, error) {
+	return broker.StreamResult{}, nil
+}
+
+// dashboardCardModuleIDs determines, for each module in registry, whether
+// that module renders a dashboard card at all when available — a static
+// property of the module's own Dashboard() implementation
+// (activity/fleet/files/logs always return nil cards by design; the rest
+// always return at least one card, or a platform.ModuleErrorCard carrying
+// the module's Name on error — see internal/web.Server.dashboard), wholly
+// independent of which capability fixture is active or of the server's own
+// dashboard-assembly loop. Calling module.Dashboard() directly here (rather
+// than deriving this from a GET / round trip through that same assembly
+// loop) matters: if the loop itself regressed and silently dropped an
+// available module's card, a derivation sourced from that loop's own output
+// would "learn" the card is expectedly absent and hide the very regression
+// assertDashboardCards exists to catch.
+func dashboardCardModuleIDs(t *testing.T, registry *platform.Registry) map[string]bool {
+	t.Helper()
+	host := dashboardProbeHost{}
+	cardModules := make(map[string]bool, len(registry.Modules()))
+	for _, module := range registry.Modules() {
+		manifest := module.Manifest()
+		cards, err := module.Dashboard(context.Background(), host)
+		cardModules[manifest.ID] = err != nil || len(cards) > 0
+	}
+	return cardModules
+}
+
 // --- sub-routes not covered by any module's Manifest().Path ------------
 //
 // Every module's primary route is checked generically via
@@ -466,6 +619,7 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 
 	modules := registry.Modules()
 	require.NotEmpty(t, modules)
+	cardModules := dashboardCardModuleIDs(t, registry)
 
 	dashboardRequest := httptest.NewRequest(http.MethodGet, "/", nil)
 	dashboardRequest.AddCookie(cookie)
@@ -474,17 +628,15 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 	require.Equal(t, http.StatusOK, dashboardRecorder.Code)
 	dashboardBody := dashboardRecorder.Body.String()
 
+	// Navigation and dashboard cards are two distinct web-side registries;
+	// each is asserted in its own scoped region so a regression in one
+	// can't hide behind the other still containing the module's Name.
+	assertNavigation(t, "/", dashboardBody, modules, caps)
+	assertDashboardCards(t, dashboardBody, modules, caps, cardModules)
+
 	for _, module := range modules {
 		manifest := module.Manifest()
 		available := platform.Available(module, caps)
-
-		if available {
-			assert.Containsf(t, dashboardBody, manifest.Name,
-				"fixture: dashboard is missing a nav/dashboard reference for available module %q", manifest.ID)
-		} else {
-			assert.NotContainsf(t, dashboardBody, manifest.Name,
-				"fixture: dashboard unexpectedly references gated-absent module %q", manifest.ID)
-		}
 
 		routeRequest := httptest.NewRequest(http.MethodGet, manifest.Path, nil)
 		routeRequest.AddCookie(cookie)
@@ -493,7 +645,21 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 		if available {
 			assert.NotEqualf(t, http.StatusNotFound, routeRecorder.Code,
 				"fixture: available module %q primary route %s returned 404", manifest.ID, manifest.Path)
-			assertNoDeadLinks(t, handler, cookie, manifest.Path, routeRecorder.Body.String())
+			routeBody := routeRecorder.Body.String()
+			// Every other authenticated page shares the same Layout nav, so
+			// a gated-absent module's link must stay gone (and every
+			// available module's link must stay present) here too, not
+			// only on GET /. This is scoped to a normal (200) render: a
+			// module whose local unprivileged read depends on a host tool
+			// that isn't installed in this environment (e.g. sysext's page
+			// shells out to updex directly, not through the broker) can
+			// legitimately answer with a non-Layout error body instead —
+			// that's an environment/tooling concern the capability-gating
+			// contract this fixture proves has nothing to do with.
+			if routeRecorder.Code == http.StatusOK {
+				assertNavigation(t, manifest.Path, routeBody, modules, caps)
+			}
+			assertNoDeadLinks(t, handler, cookie, manifest.Path, routeBody)
 		} else {
 			assert.Equalf(t, http.StatusNotFound, routeRecorder.Code,
 				"fixture: gated-absent module %q primary route %s did not return 404", manifest.ID, manifest.Path)
