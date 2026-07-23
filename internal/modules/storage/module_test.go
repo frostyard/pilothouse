@@ -18,6 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fullTestCapabilities matches c1's default: every capability present, so
+// existing tests that don't care about gating keep exercising the
+// full-capability path unchanged.
+var fullTestCapabilities = capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+
 type fakeHost struct {
 	admin           bool
 	confirmCalls    []string
@@ -33,10 +38,20 @@ type fakeHost struct {
 	snapshot        Snapshot
 	validateCalls   int
 	validateResult  bool
+	// caps overrides Capabilities' return value when capsSet is true.
+	// Leaving both zero (the default for a bare &fakeHost{}) falls back to
+	// fullTestCapabilities, so existing tests that never touch capability
+	// gating keep exercising the full-capability path unchanged; tests that
+	// need to exercise gating set both caps and capsSet explicitly.
+	caps    capability.Set
+	capsSet bool
 }
 
-func (*fakeHost) Capabilities(context.Context) capability.Set {
-	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+func (host *fakeHost) Capabilities(context.Context) capability.Set {
+	if !host.capsSet {
+		return fullTestCapabilities
+	}
+	return host.caps
 }
 func (host *fakeHost) ConfirmAction(_ http.ResponseWriter, _ *http.Request, _ string, resource string) bool {
 	host.confirmCalls = append(host.confirmCalls, resource)
@@ -139,6 +154,29 @@ func TestHealthFindingPathHasExactlyOnePageAnchor(t *testing.T) {
 
 func TestManifest(t *testing.T) {
 	assert.Equal(t, platform.Manifest{ID: "storage", Name: "Storage", Path: "/storage", Icon: "disk", Order: 25}, New().Manifest())
+}
+
+// TestModuleDoesNotImplementCapabilityGate proves storage.Module is a
+// deliberate exception to the whole-module gating pattern used by
+// services/backups/maintenance/logs: only its three remote-mount routes are
+// capability-gated (via platform.Gate in Mount), while inventory
+// (nav/dashboard/GET /storage) has no capability requirement per
+// docs/capabilities.md's QueryStorageState exception. If Module ever grew a
+// RequiredCapabilities method, this assertion (and the equivalent
+// c2 available-modules filter behavior below) would start failing.
+func TestModuleDoesNotImplementCapabilityGate(t *testing.T) {
+	_, ok := any(New()).(platform.CapabilityGate)
+	assert.False(t, ok, "storage.Module must not implement platform.CapabilityGate")
+}
+
+// TestModuleStaysAvailableWithoutSystemd exercises c2's real
+// platform.Available (the same predicate internal/web's nav/dashboard
+// filtering uses) against a capability.Set with Systemd absent, proving
+// storage stays in the available-modules filter even on a no-systemd host —
+// equivalent to the acceptance criterion's "storage stays in c2's
+// available-modules filter under a no-systemd fixture" phrasing.
+func TestModuleStaysAvailableWithoutSystemd(t *testing.T) {
+	assert.True(t, platform.Available(New(), capability.Set{}))
 }
 
 func TestStoragePageUsesFixedQueryAndDeadline(t *testing.T) {
@@ -334,4 +372,102 @@ func TestStorageActionDeleteConfirmsAndExecutes(t *testing.T) {
 	assert.Equal(t, []string{"storage/mount/" + id}, host.confirmCalls)
 	assert.Equal(t, broker.ActionStorageDelete, host.executeID)
 	assert.Equal(t, map[string]string{"id": id}, host.executeParams)
+}
+
+// TestStoragePageStaysAvailableWithoutSystemd proves GET /storage — unlike
+// the three remote-mount routes below — is not wrapped in platform.Gate:
+// with Systemd absent it still returns 200 and renders inventory, capacity,
+// and findings, matching docs/capabilities.md's QueryStorageState
+// exception.
+func TestStoragePageStaysAvailableWithoutSystemd(t *testing.T) {
+	host := &fakeHost{
+		caps:     capability.Set{},
+		capsSet:  true,
+		snapshot: Snapshot{Summary: Summary{ActiveMounts: 2, UsableBytes: 10 * 1024 * 1024 * 1024, UsedBytes: 4 * 1024 * 1024 * 1024}, Findings: []Finding{{ResourceID: "disk:abc", Title: "Disk needs attention"}}},
+	}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/storage", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var output strings.Builder
+	require.NoError(t, host.page.Body.Render(context.Background(), &output))
+	html := output.String()
+	assert.Contains(t, html, "2 active mounts")
+	assert.Contains(t, html, "10.0 GiB usable")
+	assert.Contains(t, html, "Disk needs attention")
+}
+
+// TestStorageRemoteMountRoutesRequireSystemd proves the three remote-mount
+// routes GET /storage/mounts/new, POST /storage/mounts, and
+// POST /storage/mounts/{id}/{action} — and only those routes — 404 when the
+// host's capability set lacks Systemd, without ever reaching
+// host.ValidateAction/host.Execute; GET /storage stays reachable on the same
+// mux (proven above), showing the gate is scoped to just these three routes,
+// not the whole module.
+func TestStorageRemoteMountRoutesRequireSystemd(t *testing.T) {
+	host := &fakeHost{admin: true, caps: capability.Set{}, capsSet: true, confirmResult: true, validateResult: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	newForm := httptest.NewRecorder()
+	mux.ServeHTTP(newForm, httptest.NewRequest(http.MethodGet, "/storage/mounts/new", nil))
+	create := httptest.NewRecorder()
+	mux.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/storage/mounts", strings.NewReader("protocol=nfs")))
+	mount := httptest.NewRecorder()
+	mux.ServeHTTP(mount, httptest.NewRequest(http.MethodPost, "/storage/mounts/0123456789abcdef0123456789abcdef/mount", nil))
+	unmount := httptest.NewRecorder()
+	mux.ServeHTTP(unmount, httptest.NewRequest(http.MethodPost, "/storage/mounts/0123456789abcdef0123456789abcdef/unmount", nil))
+	deleteMount := httptest.NewRecorder()
+	mux.ServeHTTP(deleteMount, httptest.NewRequest(http.MethodPost, "/storage/mounts/0123456789abcdef0123456789abcdef/delete", nil))
+
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"GET /storage/mounts/new":           newForm,
+		"POST /storage/mounts":              create,
+		"POST /storage/mounts/{id}/mount":   mount,
+		"POST /storage/mounts/{id}/unmount": unmount,
+		"POST /storage/mounts/{id}/delete":  deleteMount,
+	} {
+		assert.Equal(t, http.StatusNotFound, response.Code, name)
+	}
+	assert.Zero(t, host.validateCalls)
+	assert.Empty(t, host.executeID)
+	assert.Empty(t, host.confirmCalls)
+}
+
+// TestStoragePageThreadsCapabilitiesIntoRemoteMountControls exercises the
+// real GET /storage handler (not a direct ManagedPage call) end to end,
+// proving module.go actually derives remoteMountsAvailable from
+// host.Capabilities(r.Context()).Has(capability.Systemd) and threads it into
+// the rendered page: with Systemd present the Add-remote-mount link and a
+// managed mount's Unmount/Delete controls render; with Systemd absent none
+// of them do, even though the same managed "mounted" mount would otherwise
+// show Unmount and always shows Delete.
+func TestStoragePageThreadsCapabilitiesIntoRemoteMountControls(t *testing.T) {
+	snapshot := Snapshot{Mounts: []Mount{{ID: "remote:0123456789abcdef0123456789abcdef", Managed: true, State: "mounted"}}}
+	for _, test := range []struct {
+		name      string
+		caps      capability.Set
+		available bool
+	}{
+		{"systemd present", capability.New(capability.Systemd), true},
+		{"systemd absent", capability.Set{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &fakeHost{admin: true, caps: test.caps, capsSet: true, snapshot: snapshot}
+			mux := http.NewServeMux()
+			New().Mount(mux, host)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/storage", nil))
+
+			require.Equal(t, http.StatusOK, response.Code)
+			var output strings.Builder
+			require.NoError(t, host.page.Body.Render(context.Background(), &output))
+			html := output.String()
+			assert.Equal(t, test.available, strings.Contains(html, "Add remote mount"))
+			assert.Equal(t, test.available, strings.Contains(html, `>Unmount</button>`))
+			assert.Equal(t, test.available, strings.Contains(html, `>Delete</button>`))
+		})
+	}
 }

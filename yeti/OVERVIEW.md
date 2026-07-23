@@ -419,6 +419,42 @@ rules for adding a new module (routes, actions, queries).
   nav-filtering predicate (wired generically in `internal/web/server.go`
   since c2) is confirmed against this real module's adoption, not just a
   synthetic gated module or a direct `platform.Available` call.
+- **Storage: route-level `Systemd` gate, not a whole-module gate.**
+  `internal/modules/storage.Module` deliberately does *not* implement
+  `platform.CapabilityGate` — its nav entry, dashboard card, and
+  `GET /storage` inventory page stay available regardless of `Systemd`,
+  matching `docs/capabilities.md`'s `QueryStorageState` exception (the
+  daemon-side `registerStorageActions`/`registerBackups` split from #50).
+  Only the three remote-mount routes in `internal/modules/storage/module.go`
+  — `GET /storage/mounts/new`, `POST /storage/mounts`, and
+  `POST /storage/mounts/{id}/{action}` (which covers mount, unmount, *and*
+  delete) — are individually wrapped in `platform.Gate(host,
+  []capability.ID{capability.Systemd}, ...)`. This is the one module in the
+  phase where a capability gate is scoped to a subset of routes rather than
+  the module's whole surface, so the corresponding view had to be audited
+  for every element targeting one of those three routes, not just the ones
+  named in the spec by example: `views.templ`'s `ManagedPage`/
+  `ManagedSnapshotRegion`/`ManagedMountTable` all gained a sibling
+  `remoteMountsAvailable bool` parameter (alongside the existing `admin
+  bool`), and `ManagedMountTable` collapses the *entire* per-mount
+  `<div class="actions">` block — Mount, Unmount, and Delete together — on
+  that one flag, evaluated once before the per-state Mount/Unmount `if`s,
+  rather than hiding each form independently; `ManagedPage` also omits the
+  "Add remote mount" link on the same flag. `module.go`'s `GET /storage`
+  handler derives the flag from
+  `host.Capabilities(r.Context()).Has(capability.Systemd)` and passes it to
+  `ManagedPage` alongside the existing `admin` argument. With `Systemd`
+  absent, storage inventory/capacity/findings keep rendering exactly as
+  before, but no link, form, or button anywhere on the page still points at
+  one of the now-404ing remote-mount routes; with `Systemd` present,
+  rendering is byte-for-byte unchanged from before this chunk.
+  `storage/module_test.go`'s fake `Host` gained the same configurable `caps
+  capability.Set`/`capsSet bool` pair the other gated modules' tests use
+  (defaulting to a full-capability set), and a dedicated test asserts
+  `storage.Module` does *not* satisfy `platform.CapabilityGate` while
+  `platform.Available` still reports it available under a no-`Systemd`
+  fixture — the two assertions together are what "storage stays in c2's
+  available-modules filter" means concretely for a partial-gate module.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

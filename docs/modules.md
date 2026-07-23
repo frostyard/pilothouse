@@ -181,6 +181,44 @@ it implements — not just `Mount()` — and apply the same
 type-assert-and-check wherever one of those calls happens outside the
 module's own package.
 
+### Route-level gating for a partial-gate module
+
+Not every module fits the whole-module shape above. `storage` gates only
+its three remote-mount routes on `capability.Systemd`
+(`GET /storage/mounts/new`, `POST /storage/mounts`, and
+`POST /storage/mounts/{id}/{action}`, which covers mount, unmount, and
+delete) while its inventory (nav entry, dashboard card, `GET /storage`)
+stays available with no capability requirement at all, per
+`docs/capabilities.md`'s `QueryStorageState` exception. `storage.Module`
+deliberately does **not** implement `platform.CapabilityGate` — implementing
+it would make the whole module (including inventory) disappear when
+`Systemd` is absent, which is wrong here. Instead, `Mount` wraps just the
+three routes directly:
+
+```go
+var remoteMountCapabilities = []capability.ID{capability.Systemd}
+
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+    mux.HandleFunc("GET /storage", m.page(host)) // ungated
+    mux.HandleFunc("GET /storage/mounts/new", platform.Gate(host, remoteMountCapabilities, m.newMount(host)))
+    // ...POST /storage/mounts and POST /storage/mounts/{id}/{action} likewise
+}
+```
+
+When a module gates only a subset of its routes like this, audit every
+view element that targets one of the gated routes — not just the ones a
+spec happens to name by example — and collapse them behind one flag as a
+unit. `storage`'s `GET /storage` handler computes
+`host.Capabilities(r.Context()).Has(capability.Systemd)` once and threads
+it into `views.templ`'s `ManagedPage`/`ManagedSnapshotRegion`/
+`ManagedMountTable` as a `remoteMountsAvailable bool` parameter (a sibling
+of the existing `admin bool`): the "Add remote mount" link and the entire
+per-mount `Mount`/`Unmount`/`Delete` actions block are gated on that single
+flag, so a host missing `Systemd` never renders a link, button, or form
+pointing at a route that would 404 — see
+`docs/agents/skills/partial-gate-modules-need-full-view-element-audit.md`
+for the failure mode this avoids.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
