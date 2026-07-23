@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/a-h/templ"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/capability"
@@ -484,6 +485,115 @@ func TestStreamQueryMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
 	assert.True(t, server.capabilities.staleAfterOutage())
 
 	assert.Empty(t, fake.queryCalls, "StreamQuery must never itself trigger a QueryCapabilities call")
+}
+
+// fakeGatedModule is a synthetic platform.Module that also implements
+// platform.CapabilityGate, used to prove the nav/dashboard filtering
+// mechanism added in this chunk without depending on any real module.
+type fakeGatedModule struct {
+	dashboardCalls int
+	required       []capability.ID
+}
+
+func (m *fakeGatedModule) Dashboard(context.Context, platform.Host) ([]platform.DashboardCard, error) {
+	m.dashboardCalls++
+	return []platform.DashboardCard{{Component: textComponent("gated-card-marker"), Order: 1, Span: platform.SpanFull}}, nil
+}
+
+func (m *fakeGatedModule) Manifest() platform.Manifest {
+	return platform.Manifest{ID: "gated", Name: "Gated Module", Order: 50, Path: "/gated"}
+}
+
+func (m *fakeGatedModule) Mount(mux *http.ServeMux, host platform.Host) {
+	mux.HandleFunc("GET /gated", platform.Gate(host, m.required, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "gated-page-marker")
+	}))
+}
+
+func (m *fakeGatedModule) RequiredCapabilities() []capability.ID { return m.required }
+
+func textComponent(text string) templ.Component {
+	return templ.ComponentFunc(func(_ context.Context, w io.Writer) error {
+		_, err := io.WriteString(w, text)
+		return err
+	})
+}
+
+func newGatedTestServer(t *testing.T, module *fakeGatedModule, initialCaps capability.Set) (*Server, *fakeBroker) {
+	t.Helper()
+	registry, err := platform.NewRegistry(module)
+	require.NoError(t, err)
+	fake := &fakeBroker{session: broker.SessionResponse{CSRF: "csrf"}, capabilities: initialCaps}
+	server, err := NewServer(registry, fake, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	server.refreshCapabilities(context.Background(), "token")
+	return server, fake
+}
+
+func getAuthenticated(server *Server) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func TestDashboardOmitsCardAndSkipsDashboardCallForCapabilityGatedAbsentModule(t *testing.T) {
+	module := &fakeGatedModule{required: []capability.ID{capability.Docker}}
+	server, fake := newGatedTestServer(t, module, capability.New(capability.Systemd))
+
+	response := getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), "gated-card-marker")
+	assert.NotContains(t, response.Body.String(), "Module unavailable")
+	assert.Zero(t, module.dashboardCalls)
+
+	fake.capabilities = capability.New(capability.Docker)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "gated-card-marker")
+	assert.Equal(t, 1, module.dashboardCalls)
+}
+
+func TestNavOmitsManifestForCapabilityGatedAbsentModuleAndIncludesItWhenPresent(t *testing.T) {
+	module := &fakeGatedModule{required: []capability.ID{capability.Docker}}
+	server, fake := newGatedTestServer(t, module, capability.New(capability.Systemd))
+
+	response := getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), `href="/gated"`)
+	assert.NotContains(t, response.Body.String(), "Gated Module")
+
+	fake.capabilities = capability.New(capability.Docker)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `href="/gated"`)
+	assert.Contains(t, response.Body.String(), "Gated Module")
+}
+
+func TestGatedModuleRouteMountedAlways404sUntilCapabilityPresent(t *testing.T) {
+	module := &fakeGatedModule{required: []capability.ID{capability.Docker}}
+	server, fake := newGatedTestServer(t, module, capability.New(capability.Systemd))
+
+	request := httptest.NewRequest(http.MethodGet, "/gated", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusNotFound, response.Code)
+
+	fake.capabilities = capability.New(capability.Docker)
+	server.refreshCapabilities(context.Background(), "token")
+
+	request = httptest.NewRequest(http.MethodGet, "/gated", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "gated-page-marker")
 }
 
 type countingReader struct {

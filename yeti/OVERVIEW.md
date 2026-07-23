@@ -250,12 +250,10 @@ rules for adding a new module (routes, actions, queries).
   the per-action registration guards above are what withhold each action. See
   `docs/capabilities.md`'s sysext rows and module-level-defaults section for
   the full per-action table.
-- **Web-side capability fetch/cache (independent of module gating).**
-  `internal/web.Server` now keeps its own opportunistically-refreshed view
-  of the broker's advertised `capability.Set`, separate from `pilothoused`'s
-  own probe/advertise cycle above and from any per-module gating (which is a
-  daemon-side, registration-time concern only as of this chunk — no module
-  handler reads this cache yet). `internal/web/capabilities.go`'s
+- **Web-side capability fetch/cache.** `internal/web.Server` keeps its own
+  opportunistically-refreshed view of the broker's advertised
+  `capability.Set`, separate from `pilothoused`'s own probe/advertise cycle
+  above. `internal/web/capabilities.go`'s
   `capabilityCache` (a field on `Server`, zero-value valid) holds the last
   fetched `Set` plus a `down` flag; `Server.Capabilities(ctx
   context.Context)` (added to the widened `platform.Host` interface so both
@@ -279,6 +277,41 @@ rules for adding a new module (routes, actions, queries).
   and arbitrary domain errors never mark the cache down or trigger a
   refetch. `capability.Set` gained `UnmarshalJSON` (mirroring the existing
   `MarshalJSON`) to decode this query's `{"capabilities": [...]}` response.
+- **Whole-module web-side capability gating (mechanism only).**
+  `internal/platform/capability.go` adds two primitives every later
+  capability-gated module will use, on top of the web-side capability
+  fetch/cache above: `CapabilityGate` is an interface
+  (`RequiredCapabilities() []capability.ID`) a `Module` optionally
+  implements to declare that its whole surface (nav entry, dashboard cards,
+  routes) needs some set of host capabilities present (`Set.HasAll`
+  semantics); a `Module` that does not implement it has no requirement and
+  is always available — the default for `system`/`files`/`activity`/`fleet`
+  and storage's own inventory reads. `Gate(host Host, ids []capability.ID,
+  next http.HandlerFunc) http.HandlerFunc` wraps a `Mount`-registered
+  handler so the route itself stays mounted on the shared mux, but 404s at
+  request time when `host.Capabilities(ctx)` doesn't `HasAll(ids...)` —
+  this is what "routes stay mounted, capability absence 404s instead of
+  changing the mux" means concretely for a module's `Mount`. `internal/web/server.go`
+  wires the interface (not `Gate`, which individual modules call from their
+  own `Mount`) into the two web-side registries the spec calls out: an
+  unexported `moduleAvailable(module platform.Module, caps capability.Set)
+  bool` type-asserts `platform.CapabilityGate` and defaults to available
+  when a module doesn't implement it; `Render` now builds the shell's
+  `Modules` nav list from a new `s.availableManifests(ctx)` (filters
+  `s.registry.Modules()` through `moduleAvailable` before mapping to
+  `Manifest`, replacing the previous unfiltered `s.registry.Manifests()`
+  call) and the `dashboard` handler's per-module loop skips a
+  capability-gated-absent module entirely — no `Dashboard()` call, no card,
+  no error-card placeholder, since an unavailable surface is not rendered
+  at all, not shown degraded. `Mount()` at server construction
+  (`internal/web/server.go`, around where the registry's modules are
+  wired to the mux) stays unfiltered: every module's routes remain mounted
+  regardless of capability, per the "routes stay mounted" requirement above;
+  only the nav list and the dashboard loop are filtered by
+  `moduleAvailable`. No production module implements `CapabilityGate` yet as
+  of this chunk — the mechanism is proven with a synthetic fake module in
+  `internal/platform/capability_test.go` and `internal/web/server_test.go`,
+  and every real module's nav/dashboard/route behavior is unchanged.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

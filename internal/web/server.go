@@ -193,10 +193,40 @@ func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Pa
 		Flash:     r.URL.Query().Get("notice"),
 		FlashKind: r.URL.Query().Get("kind"),
 		Identity:  s.Identity(r),
-		Modules:   s.registry.Manifests(),
+		Modules:   s.availableManifests(r.Context()),
 		Path:      r.URL.Path,
 		Title:     page.Title,
 	}, page.Body).Render(r.Context(), w)
+}
+
+// availableManifests returns the Manifest of every registered module whose
+// capability requirement (if any) is satisfied by the currently cached
+// capability.Set. A module with no capability requirement (it does not
+// implement platform.CapabilityGate) is always included, matching the
+// spec's default for system/files/activity/fleet/storage-inventory.
+func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
+	caps := s.Capabilities(ctx)
+	modules := s.registry.Modules()
+	manifests := make([]platform.Manifest, 0, len(modules))
+	for _, module := range modules {
+		if !moduleAvailable(module, caps) {
+			continue
+		}
+		manifests = append(manifests, module.Manifest())
+	}
+	return manifests
+}
+
+// moduleAvailable reports whether module is available given caps: a module
+// implementing platform.CapabilityGate is available only when caps has every
+// one of its RequiredCapabilities; a module that does not implement
+// CapabilityGate has no capability requirement and is always available.
+func moduleAvailable(module platform.Module, caps capability.Set) bool {
+	gate, ok := module.(platform.CapabilityGate)
+	if !ok {
+		return true
+	}
+	return caps.HasAll(gate.RequiredCapabilities()...)
 }
 
 func (s *Server) ValidateAction(w http.ResponseWriter, r *http.Request) bool {
@@ -272,8 +302,12 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
+	caps := s.Capabilities(ctx)
 	cards := make([]platform.DashboardCard, 0)
 	for _, module := range s.registry.Modules() {
+		if !moduleAvailable(module, caps) {
+			continue
+		}
 		moduleCards, err := module.Dashboard(ctx, s)
 		if err != nil {
 			s.logger.Warn("dashboard module unavailable", "error", err, "module", module.Manifest().ID)

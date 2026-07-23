@@ -121,6 +121,47 @@ doesn't actually need `Journald`, instead of losing the whole module.
 `registerLogs` needs both `Systemd` and `Journald` uniformly, so its single
 registration is guarded by one `caps.HasAll(...)` check.
 
+## Whole-module web-side capability gating
+
+The guard above is daemon-side and per-registration. A separate,
+web-side mechanism lets a whole `platform.Module` declare that its entire
+surface — nav entry, dashboard cards, and routes — depends on host
+capabilities the web process itself can check per request, via the
+`capability.Set` cache described in `yeti/OVERVIEW.md`'s "Web-side
+capability fetch/cache". Implement `platform.CapabilityGate` on your
+`Module`:
+
+```go
+func (m *Module) RequiredCapabilities() []capability.ID {
+    return []capability.ID{capability.Docker}
+}
+```
+
+A module that does not implement `CapabilityGate` has no requirement and is
+always available — this is the default for `system`, `files`, `activity`,
+`fleet`, and storage's own inventory reads. `internal/web.Server` filters
+`CapabilityGate` modules out of both the shell's navigation list and the
+dashboard's per-module loop when a required capability is absent; skipped
+dashboard modules are omitted entirely (no `Dashboard()` call, no card, no
+error placeholder), since an unavailable surface is not rendered, not shown
+degraded.
+
+Routes stay mounted on the shared mux regardless — never register a route
+conditionally at startup based on capability. Instead, wrap the handler
+passed to `mux.HandleFunc` in `Mount` with `platform.Gate`:
+
+```go
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+    mux.HandleFunc("GET /docker", platform.Gate(host, m.RequiredCapabilities(), m.page(host)))
+}
+```
+
+`Gate` 404s the request when `host.Capabilities(ctx)` doesn't have every
+required capability, and otherwise delegates to the wrapped handler
+unchanged — including the zero-capabilities case, which always delegates.
+This keeps a capability-gated module indistinguishable from a route that
+simply doesn't exist, both in navigation/dashboard and at the URL itself.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
