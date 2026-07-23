@@ -180,6 +180,65 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.QueryFilesList:        nil,
 }
 
+// moduleRequiredCapabilities is the independent, hand-maintained oracle for
+// which whole-module capability gate each web module carries, transcribed
+// from docs/capabilities.md's "Module-level defaults applied" section — NOT
+// derived by calling platform.Available (the production gating predicate
+// this harness exists to verify). Per docs/agents/skills/dont-use-the-gate-
+// under-test-as-the-test-oracle.md, computing the expected availability by
+// calling that same predicate would be tautological: a regression that made
+// an "unaffected" module (e.g. system, files, activity) accidentally pick up
+// a Systemd gate — or drop one it should keep — would shift both the
+// expected and the actual side together, so the degraded fixture would keep
+// passing while the "every other module is unaffected" acceptance criterion
+// was silently violated. By stating the expected gate here by hand and
+// asserting the real route/nav/dashboard behavior against it, that class of
+// regression fails the test.
+//
+// Whole-module gates only. storage is deliberately mapped to `nil` (always
+// available) because it is a partial-gate module: its inventory page is
+// always present, and its remote-mount sub-routes are gated separately via
+// contractSubRoutes and the explicit storage assertions in
+// runCapabilityContractFixture. A nil/empty value means the module has no
+// whole-module capability requirement. A module ID missing from this map
+// fails the test (see expectModuleAvailable), so adding a module to the
+// registry forces a deliberate decision here rather than silently defaulting
+// to "always available".
+var moduleRequiredCapabilities = map[string][]capability.ID{
+	"activity":    nil,
+	"attention":   nil,
+	"fleet":       nil,
+	"system":      nil,
+	"storage":     nil, // partial-gate: inventory always present; remote-mount routes gated (see contractSubRoutes)
+	"sysext":      nil,
+	"files":       nil,
+	"services":    {capability.Systemd},
+	"backups":     {capability.Systemd},
+	"maintenance": {capability.Systemd},
+	"logs":        {capability.Systemd, capability.Journald},
+	"podman":      {capability.Podman},
+	"docker":      {capability.Docker},
+	"incus":       {capability.Incus},
+}
+
+// expectModuleAvailable is the independent oracle for whether the module with
+// the given manifest ID should be available (nav link present, primary route
+// non-404, dashboard card allowed) under caps. It consults
+// moduleRequiredCapabilities — the hand-maintained, spec-derived table — and
+// never calls platform.Available, so the real production predicate's actual
+// behavior can be asserted against this independent expectation. An unknown
+// module ID fails the test loudly: docs/capabilities.md's module table is
+// meant to cover every registered module, so an unlisted one most likely
+// means a module was added to the registry without recording its gate here.
+func expectModuleAvailable(t *testing.T, manifestID string, caps capability.Set) bool {
+	t.Helper()
+	required, known := moduleRequiredCapabilities[manifestID]
+	if !known {
+		t.Fatalf("module %q is not present in moduleRequiredCapabilities; record its spec-derived capability gate (see docs/capabilities.md's Module-level defaults)", manifestID)
+	}
+	return caps.HasAll(required...)
+}
+
 // fakeCapabilityBroker implements web.BrokerClient. Session always succeeds
 // for any token; Login always succeeds and returns contractIdentity; Query
 // answers broker.QueryCapabilities with the configured capability.Set and
@@ -257,19 +316,31 @@ func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[stri
 	}
 }
 
-// cannedStorageSnapshot returns a storage.Snapshot carrying one managed,
-// mounted remote mount (ID "remote:"+sampleDefinitionID, matching the
-// definition ID contractSubRoutes exercises against the mount/delete
-// sub-routes). Per docs/agents/skills/canned-fixtures-need-populated-data-
-// for-what-they-assert.md, an empty Snapshot can never render
-// ManagedMountTable's per-mount Unmount/Delete forms under any fixture, so
-// an assertion that those forms are absent under a gated fixture would be
-// vacuously true — it would pass identically whether the gating logic
-// correctly hid the forms or whether the forms were deleted outright. A
-// populated managed mount makes the "forms present when available, absent
-// when gated" assertion actually exercise storage's per-mount conditional
-// rendering (internal/modules/storage/views.templ's ManagedMountTable),
-// not just the top-level "Add remote mount" link.
+// cannedStorageSnapshot returns a storage.Snapshot carrying two managed
+// remote mounts, deliberately in different states so that every one of
+// ManagedMountTable's per-mount remote-mount forms is actually rendered
+// under the full-capability fixture:
+//
+//   - a *mounted* managed mount (ID "remote:"+sampleDefinitionID) renders
+//     the Unmount and Delete forms (the Mount form is suppressed while a
+//     mount is already mounted, per views.templ's state guard);
+//   - an *unmounted* managed mount (ID "remote:"+sampleUnmountedDefinitionID)
+//     renders the Mount and Delete forms (the Unmount form is suppressed
+//     while a mount is not mounted).
+//
+// Per docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
+// assert.md, an empty Snapshot can never render ManagedMountTable's
+// per-mount forms under any fixture, so an assertion that those forms are
+// absent under a gated fixture would be vacuously true — it would pass
+// identically whether the gating logic correctly hid the forms or whether
+// the forms were deleted outright. Crucially, a *single* mounted mount is
+// also not enough: it never renders the per-row Mount form
+// (internal/modules/storage/views.templ only emits `/storage/mounts/{id}/
+// mount` when the mount's State is neither "mounted" nor "needs-attention"),
+// so a regression that left that Mount form visible when systemd is absent
+// would slip through. Carrying an unmounted mount as well means the
+// no-systemd fixture's "no remote-mount controls / no dead links" assertion
+// exercises the Mount form too, not only Unmount/Delete.
 func cannedStorageSnapshot() storage.Snapshot {
 	return storage.Snapshot{
 		Mounts: []storage.Mount{
@@ -280,6 +351,14 @@ func cannedStorageSnapshot() storage.Snapshot {
 				Health:  storage.HealthHealthy,
 				Source:  "nfs.example.com:/export/contract",
 				Target:  "/mnt/contract",
+			},
+			{
+				ID:      "remote:" + sampleUnmountedDefinitionID,
+				Managed: true,
+				State:   "unmounted",
+				Health:  storage.HealthHealthy,
+				Source:  "nfs.example.com:/export/contract-idle",
+				Target:  "/mnt/contract-idle",
 			},
 		},
 	}
@@ -490,7 +569,7 @@ func assertNavigation(t *testing.T, source, body string, modules []platform.Modu
 	for _, module := range modules {
 		manifest := module.Manifest()
 		href := `href="` + manifest.Path + `"`
-		if platform.Available(module, caps) {
+		if expectModuleAvailable(t, manifest.ID, caps) {
 			assert.Containsf(t, navSection, href,
 				"%s: primary navigation is missing a link for available module %q", source, manifest.ID)
 		} else {
@@ -529,7 +608,7 @@ func assertDashboardCards(t *testing.T, dashboardBody string, modules []platform
 		manifest := module.Manifest()
 		href := `href="` + manifest.Path + `"`
 		present := strings.Contains(dashboardSection, href) || strings.Contains(dashboardSection, manifest.Name)
-		if !platform.Available(module, caps) {
+		if !expectModuleAvailable(t, manifest.ID, caps) {
 			assert.Falsef(t, present,
 				"GET /: dashboard unexpectedly renders a card for gated-absent module %q", manifest.ID)
 			continue
@@ -603,8 +682,9 @@ func dashboardCardModuleIDs(t *testing.T, registry *platform.Registry) map[strin
 
 // --- sub-routes not covered by any module's Manifest().Path ------------
 //
-// Every module's primary route is checked generically via
-// platform.Available(module, caps) against manifest.Path. Several modules
+// Every module's primary route is checked generically against manifest.Path,
+// with the expected availability taken from the independent
+// expectModuleAvailable oracle (never platform.Available). Several modules
 // also mount secondary routes gated at a finer grain (route-level, or with
 // a stricter capability requirement than the module's own
 // RequiredCapabilities — the services journal tab and the whole logs
@@ -613,8 +693,9 @@ func dashboardCardModuleIDs(t *testing.T, registry *platform.Registry) map[strin
 // them explicitly, per docs/agents/skills/gate-every-call-path-not-just-
 // routes-and-nav.md and partial-gate-modules-need-full-view-element-audit.md.
 var sampleUnit = "sample.service"
-var sampleDefinitionID = strings.Repeat("0123456789abcdef", 2) // 32 hex chars
-var sampleContainerID = strings.Repeat("a1b2c3d4e5f60789", 4)  // 64 hex chars
+var sampleDefinitionID = strings.Repeat("0123456789abcdef", 2)          // 32 hex chars (a mounted managed mount)
+var sampleUnmountedDefinitionID = strings.Repeat("fedcba9876543210", 2) // 32 hex chars (an unmounted managed mount)
+var sampleContainerID = strings.Repeat("a1b2c3d4e5f60789", 4)           // 64 hex chars
 
 var contractSubRoutes = []struct {
 	method       string
@@ -673,7 +754,7 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 
 	for _, module := range modules {
 		manifest := module.Manifest()
-		available := platform.Available(module, caps)
+		available := expectModuleAvailable(t, manifest.ID, caps)
 
 		routeRequest := httptest.NewRequest(http.MethodGet, manifest.Path, nil)
 		routeRequest.AddCookie(cookie)
@@ -714,11 +795,17 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 	// systemd. This is checked explicitly, not just inferred from the
 	// dead-link crawl, because the acceptance criteria call it out by name.
 	// cannedStorageSnapshot() (returned by the fake broker for every
-	// fixture) carries one managed, mounted remote mount so the per-mount
-	// Unmount/Delete forms actually render when available — proving they
-	// are hidden when gated, not just vacuously absent from an empty
+	// fixture) carries a mounted managed mount AND an unmounted managed
+	// mount so every one of ManagedMountTable's per-mount remote-mount forms
+	// — Mount (only on the unmounted row), Unmount (only on the mounted
+	// row), and Delete (on both) — actually renders when available, proving
+	// each is hidden when gated rather than vacuously absent from an empty
 	// mount table (docs/agents/skills/canned-fixtures-need-populated-data-
-	// for-what-they-assert.md).
+	// for-what-they-assert.md). Covering the Mount form specifically matters:
+	// a lone mounted mount never renders it, so a regression that left the
+	// per-row Mount form visible when systemd is absent would otherwise slip
+	// through (docs/agents/skills/partial-gate-modules-need-full-view-
+	// element-audit.md).
 	storageRequest := httptest.NewRequest(http.MethodGet, "/storage", nil)
 	storageRequest.AddCookie(cookie)
 	storageRecorder := httptest.NewRecorder()
@@ -726,22 +813,32 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 	require.Equal(t, http.StatusOK, storageRecorder.Code,
 		"fixture: storage inventory (GET /storage) must stay available regardless of capabilities")
 	storageBody := storageRecorder.Body.String()
+	mountFormAction := `action="/storage/mounts/` + sampleUnmountedDefinitionID + `/mount"`
 	unmountFormAction := `action="/storage/mounts/` + sampleDefinitionID + `/unmount"`
-	deleteFormAction := `action="/storage/mounts/` + sampleDefinitionID + `/delete"`
+	deleteMountedFormAction := `action="/storage/mounts/` + sampleDefinitionID + `/delete"`
+	deleteUnmountedFormAction := `action="/storage/mounts/` + sampleUnmountedDefinitionID + `/delete"`
 	if caps.Has(capability.Systemd) {
 		assert.Contains(t, storageBody, "Add remote mount",
 			"fixture: storage page should render the remote-mount control when systemd is present")
+		assert.Contains(t, storageBody, mountFormAction,
+			"fixture: storage page should render the per-mount Mount form (for the unmounted mount) when systemd is present")
 		assert.Contains(t, storageBody, unmountFormAction,
-			"fixture: storage page should render the per-mount Unmount form when systemd is present")
-		assert.Contains(t, storageBody, deleteFormAction,
-			"fixture: storage page should render the per-mount Delete form when systemd is present")
+			"fixture: storage page should render the per-mount Unmount form (for the mounted mount) when systemd is present")
+		assert.Contains(t, storageBody, deleteMountedFormAction,
+			"fixture: storage page should render the per-mount Delete form for the mounted mount when systemd is present")
+		assert.Contains(t, storageBody, deleteUnmountedFormAction,
+			"fixture: storage page should render the per-mount Delete form for the unmounted mount when systemd is present")
 	} else {
 		assert.NotContains(t, storageBody, "Add remote mount",
 			"fixture: storage page rendered a remote-mount control despite systemd being absent")
+		assert.NotContains(t, storageBody, mountFormAction,
+			"fixture: storage page rendered a per-mount Mount form despite systemd being absent")
 		assert.NotContains(t, storageBody, unmountFormAction,
 			"fixture: storage page rendered a per-mount Unmount form despite systemd being absent")
-		assert.NotContains(t, storageBody, deleteFormAction,
-			"fixture: storage page rendered a per-mount Delete form despite systemd being absent")
+		assert.NotContains(t, storageBody, deleteMountedFormAction,
+			"fixture: storage page rendered a per-mount Delete form (mounted) despite systemd being absent")
+		assert.NotContains(t, storageBody, deleteUnmountedFormAction,
+			"fixture: storage page rendered a per-mount Delete form (unmounted) despite systemd being absent")
 	}
 	assertNoDeadLinks(t, handler, cookie, "/storage", storageBody)
 
