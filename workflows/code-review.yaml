@@ -1,0 +1,137 @@
+# Parallel code review of a git diff range.
+#
+#   conductor run workflows/code-review.yaml                         # last commit
+#   conductor run workflows/code-review.yaml -i range=main...HEAD    # branch diff
+#
+# A script step captures the diff deterministically, two reviewers run in
+# parallel (security + correctness), and a synthesizer merges their findings.
+workflow:
+  name: code-review
+  description: Two-lens parallel review of a diff, merged into one report
+  entry_point: get_diff
+  limits:
+    max_iterations: 20
+    timeout_seconds: 1800
+  runtime:
+    provider: claude-agent-sdk
+    default_model: sonnet
+
+  input:
+    range:
+      type: string
+      required: false
+      default: "HEAD~1..HEAD"
+      description: Git diff range to review
+
+agents:
+  - name: get_diff
+    type: script
+    description: Capture the diff for the requested range
+    command: bash
+    args:
+      - "-c"
+      - "git diff {{ workflow.input.range }} -- ':!*_templ.go' ':!site/' | head -c 60000"
+    timeout: 60
+    routes:
+      - to: no_changes
+        when: "{{ get_diff.output.stdout | trim == '' }}"
+      - to: reviewers
+        when: "exit_code == 0"
+      - to: bad_range
+
+  - name: no_changes
+    type: terminate
+    status: success
+    reason: "Diff for '{{ workflow.input.range }}' is empty — nothing to review"
+
+  - name: bad_range
+    type: terminate
+    status: failed
+    reason: "git diff failed: {{ get_diff.output.stderr }}"
+
+  - name: security_review
+    description: Security-focused reviewer
+    prompt: |
+      You are reviewing a change to pilothouse, a web admin console for Snosi
+      systems. Its core security rule: the unprivileged web process must never
+      touch root APIs directly — all privileged access goes through the
+      pilothoused broker over a Unix socket. Conventions are in AGENTS.md.
+
+      Review this diff strictly for SECURITY issues: privilege boundary
+      violations, injection (shell/path/HTML), authn/authz gaps, unsafe input
+      handling, secrets. Read surrounding source files for context as needed.
+      Do NOT modify any files. Do NOT report style issues.
+
+      ```diff
+      {{ get_diff.output.stdout }}
+      ```
+
+      Report only findings you are confident in. If there are none, say so.
+    output:
+      findings:
+        type: array
+        description: "Each: {file, line, severity, description}"
+      summary:
+        type: string
+
+  - name: correctness_review
+    description: Correctness-focused reviewer
+    prompt: |
+      You are reviewing a change to pilothouse, a Go + templ + HTMX web admin
+      console. Conventions are in AGENTS.md (templ files must be regenerated
+      with make generate; never hand-edit *_templ.go).
+
+      Review this diff strictly for CORRECTNESS bugs: logic errors, nil/error
+      handling, races, resource leaks, broken templ/HTMX wiring, missed doc or
+      generated-file updates. Read surrounding source files for context as
+      needed. Do NOT modify any files. Do NOT report style issues.
+
+      ```diff
+      {{ get_diff.output.stdout }}
+      ```
+
+      Report only findings you are confident in. If there are none, say so.
+    output:
+      findings:
+        type: array
+        description: "Each: {file, line, severity, description}"
+      summary:
+        type: string
+
+  - name: synthesize
+    model: sonnet
+    description: Merge both reviews into one report
+    prompt: |
+      Merge these two code reviews of the same diff into a single report.
+      Deduplicate overlapping findings, order by severity, and drop anything
+      speculative. Finish with a verdict: approve, approve-with-nits, or
+      request-changes.
+
+      Security review:
+      {{ reviewers.outputs.security_review | tojson }}
+
+      Correctness review:
+      {{ reviewers.outputs.correctness_review | tojson }}
+    output:
+      report:
+        type: string
+        description: Final markdown review report
+      verdict:
+        type: string
+        description: approve | approve-with-nits | request-changes
+    routes:
+      - to: $end
+
+parallel:
+  - name: reviewers
+    description: Run both review lenses concurrently
+    agents:
+      - security_review
+      - correctness_review
+    failure_mode: continue_on_error
+    routes:
+      - to: synthesize
+
+output:
+  verdict: "{{ synthesize.output.verdict if synthesize is defined else 'skipped' }}"
+  report: "{{ synthesize.output.report if synthesize is defined else '' }}"

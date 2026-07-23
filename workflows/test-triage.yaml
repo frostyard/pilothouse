@@ -1,0 +1,95 @@
+# Test triage: run the native quality gates; only invoke an LLM if something fails.
+#
+#   conductor run workflows/test-triage.yaml
+#
+# Green path is fully deterministic (zero LLM calls). On a failure, a
+# claude-agent-sdk agent with repo access diagnoses the root cause.
+workflow:
+  name: test-triage
+  description: Run gofmt/vet/tests and diagnose any failure with an agent
+  entry_point: format_check
+  limits:
+    max_iterations: 20
+    timeout_seconds: 1200
+  runtime:
+    provider: claude-agent-sdk
+    default_model: sonnet
+
+agents:
+  - name: format_check
+    type: script
+    description: Fail if any file needs gofmt
+    command: bash
+    args:
+      - "-c"
+      - 'out=$(gofmt -l . | grep -v _templ.go || true); if [ -n "$out" ]; then echo "$out"; exit 1; fi'
+    timeout: 120
+    routes:
+      - to: vet
+        when: "exit_code == 0"
+      - to: diagnose
+
+  - name: vet
+    type: script
+    description: go vet the whole module
+    command: bash
+    args:
+      - "-c"
+      - "go vet ./... 2>&1 | tail -n 60"
+    timeout: 300
+    routes:
+      - to: run_tests
+        when: "exit_code == 0"
+      - to: diagnose
+
+  - name: run_tests
+    type: script
+    description: Run the full unit test suite
+    command: bash
+    args:
+      - "-c"
+      - "set -o pipefail; go test ./... 2>&1 | grep -v '^ok ' | tail -n 80"
+    timeout: 600
+    routes:
+      - to: all_green
+        when: "exit_code == 0"
+      - to: diagnose
+
+  - name: all_green
+    type: terminate
+    status: success
+    reason: "gofmt, go vet, and go test all passed"
+
+  - name: diagnose
+    description: Diagnose the failing gate with repo access
+    prompt: |
+      You are working in the pilothouse repository (a Go web admin console;
+      conventions are in AGENTS.md). A CI-style gate just failed. Diagnose it.
+
+      Format check output (empty means it passed):
+      {{ format_check.output.stdout }}
+
+      Vet output (if it ran):
+      {% if vet is defined %}{{ vet.output.stdout }}{% endif %}
+
+      Test output (if it ran):
+      {% if run_tests is defined %}{{ run_tests.output.stdout }}{% endif %}
+
+      Read the relevant source files to find the root cause. Do NOT modify any
+      files. Report the root cause and a concrete suggested fix.
+    output:
+      root_cause:
+        type: string
+        description: One-paragraph root cause analysis
+      suspect_files:
+        type: array
+        description: Repo-relative paths most likely needing a change
+      suggested_fix:
+        type: string
+        description: Concrete fix suggestion
+    routes:
+      - to: $end
+
+output:
+  root_cause: "{{ diagnose.output.root_cause if diagnose is defined else '' }}"
+  suggested_fix: "{{ diagnose.output.suggested_fix if diagnose is defined else '' }}"

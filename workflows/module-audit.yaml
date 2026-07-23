@@ -1,0 +1,105 @@
+# Audit every module under internal/modules/ with a dynamic for_each fan-out.
+#
+#   conductor run workflows/module-audit.yaml
+#   conductor run workflows/module-audit.yaml -i filter=podman   # single module
+#
+# A script step lists modules as JSON, a cheap haiku agent audits each one
+# concurrently, and an aggregator merges everything into a scorecard.
+workflow:
+  name: module-audit
+  description: Per-module health audit (tests, docs, conventions) with fan-out
+  entry_point: list_modules
+  limits:
+    max_iterations: 40
+    timeout_seconds: 1800
+  runtime:
+    provider: claude-agent-sdk
+    default_model: haiku
+
+  input:
+    filter:
+      type: string
+      required: false
+      default: ""
+      description: Only audit modules whose name contains this substring
+
+agents:
+  - name: list_modules
+    type: script
+    description: Emit the module list as JSON
+    command: bash
+    args:
+      - "-c"
+      - |
+        ls -1 internal/modules/ | { f='{{ workflow.input.filter }}'; if [ -n "$f" ]; then grep -F "$f" || true; else cat; fi; } \
+          | python3 -c 'import json,sys; print(json.dumps({"modules": sys.stdin.read().split()}))'
+    timeout: 30
+    routes:
+      - to: nothing_matched
+        when: "{{ list_modules.output.modules | length == 0 }}"
+      - to: audits
+
+  - name: nothing_matched
+    type: terminate
+    status: failed
+    reason: "No modules matched filter '{{ workflow.input.filter }}'"
+
+  - name: summarize
+    model: sonnet
+    description: Merge per-module audits into a scorecard
+    prompt: |
+      You audited the modules of pilothouse (internal/modules/*). Merge the
+      per-module results below into a single markdown scorecard: a table with
+      columns Module | Tests | Registered | Notes, followed by a short
+      prioritized list of the 3 most useful improvements across all modules.
+
+      Per-module results:
+      {% for r in audits.outputs %}
+      - {{ r | tojson }}
+      {% endfor %}
+      {% if audits.errors %}
+      Failed audits: {{ audits.errors | tojson }}
+      {% endif %}
+    output:
+      scorecard:
+        type: string
+    routes:
+      - to: $end
+
+for_each:
+  - name: audits
+    type: for_each
+    description: Audit each module concurrently
+    source: "list_modules.output.modules"
+    as: module
+    max_concurrent: 4
+    failure_mode: continue_on_error
+    agent:
+      name: module_auditor
+      model: haiku
+      prompt: |
+        You are in the pilothouse repo. Audit the module directory
+        internal/modules/{{ module }} quickly. Do NOT modify any files.
+        Check only:
+        1. Does it have *_test.go files, and roughly how many test functions?
+        2. Is the module registered (look for its name in cmd/pilothouse or a
+           registry under internal/platform)?
+        3. Any obvious convention gap vs AGENTS.md (e.g. hand-edited
+           *_templ.go, missing doc comment on the module type)?
+        Be brief; skim, don't deep-read.
+      output:
+        module:
+          type: string
+        has_tests:
+          type: boolean
+        test_functions:
+          type: number
+        registered:
+          type: boolean
+        notes:
+          type: string
+    routes:
+      - to: summarize
+
+output:
+  scorecard: "{{ summarize.output.scorecard if summarize is defined else '' }}"
