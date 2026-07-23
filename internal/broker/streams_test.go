@@ -270,3 +270,28 @@ func TestStreamRegistryPublicErrors(t *testing.T) {
 	assert.Equal(t, 413, StatusCode(err))
 	assert.Equal(t, 503, StatusCode(errors.New("unavailable")))
 }
+
+func TestStreamQueryRegistryRegistered(t *testing.T) {
+	registry := NewStreamQueryRegistry()
+	assert.False(t, registry.Registered("test.download"))
+	require.NoError(t, registry.Register(StreamQueryDefinition{
+		ID: "test.download", Limit: 4,
+		Handler: func(context.Context, auth.Identity, map[string]string) (StreamResult, error) {
+			return StreamResult{}, nil
+		},
+	}))
+	assert.True(t, registry.Registered("test.download"))
+	assert.False(t, registry.Registered("test.other"))
+}
+
+func TestStreamActionRegistryRegistered(t *testing.T) {
+	registry := NewStreamActionRegistry()
+	assert.False(t, registry.Registered("test.upload"))
+	require.NoError(t, registry.Register(StreamActionDefinition{
+		ID: "test.upload", Limit: 4,
+		Resource: func(map[string]string) (string, error) { return "test.upload", nil },
+		Handler:  func(context.Context, auth.Identity, map[string]string, io.Reader) error { return nil },
+	}))
+	assert.True(t, registry.Registered("test.upload"))
+	assert.False(t, registry.Registered("test.other"))
+}

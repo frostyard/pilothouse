@@ -274,6 +274,15 @@ func (r *ActionRegistry) RegisterDefinition(definition ActionDefinition) error {
 	return nil
 }
 
+// Registered reports whether id is currently registered. It manages its own
+// locking internally; callers must not hold any registry lock around it.
+func (r *ActionRegistry) Registered(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.actions[id]
+	return ok
+}
+
 func validateParameters(expected []string, parameters map[string]string) error {
 	if len(parameters) != len(expected) {
 		return fmt.Errorf("expected parameters %v", expected)
@@ -344,4 +353,13 @@ func (r *QueryRegistry) Register(id string, admin bool, handler QueryHandler) er
 	}
 	r.queries[id] = registeredQuery{admin: admin, handler: handler}
 	return nil
+}
+
+// Registered reports whether id is currently registered. It manages its own
+// locking internally; callers must not hold any registry lock around it.
+func (r *QueryRegistry) Registered(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.queries[id]
+	return ok
 }

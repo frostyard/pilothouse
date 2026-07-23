@@ -109,6 +109,15 @@ func (r *StreamQueryRegistry) Register(definition StreamQueryDefinition) error {
 	return nil
 }
 
+// Registered reports whether id is currently registered. It manages its own
+// locking internally; callers must not hold any registry lock around it.
+func (r *StreamQueryRegistry) Registered(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.queries[id]
+	return ok
+}
+
 func (r *StreamQueryRegistry) Execute(ctx context.Context, identity auth.Identity, id string, parameters map[string]string) (StreamResult, error) {
 	r.mu.RLock()
 	definition, ok := r.queries[id]
@@ -157,6 +166,15 @@ func (r *StreamActionRegistry) Register(definition StreamActionDefinition) error
 	}
 	r.actions[definition.ID] = definition
 	return nil
+}
+
+// Registered reports whether id is currently registered. It manages its own
+// locking internally; callers must not hold any registry lock around it.
+func (r *StreamActionRegistry) Registered(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.actions[id]
+	return ok
 }
 
 func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identity, id string, parameters map[string]string, body io.Reader) error {
