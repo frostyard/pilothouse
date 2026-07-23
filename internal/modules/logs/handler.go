@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
 func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /logs", platform.Gate(host, []capability.ID{capability.Systemd, capability.Journald}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.Identity(r).Admin {
 			_ = host.Render(w, r, platform.Page{
 				Active: "logs", Body: AccessDenied(), Eyebrow: "system journal", Title: "Logs",
@@ -40,5 +41,5 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 		_ = host.Render(w, r, platform.Page{
 			Active: "logs", Body: Page(state, unavailable), Eyebrow: "system journal", Title: "Logs",
 		})
-	})
+	}))
 }

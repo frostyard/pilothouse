@@ -386,6 +386,39 @@ rules for adding a new module (routes, actions, queries).
   `internal/modules/attention/module_test.go` proves it with a
   Health-call-counting fake provider, at both the absent- and
   present-capability ends.
+- **Logs: whole-module `Systemd AND Journald` gate.**
+  `internal/modules/logs.Module` now implements
+  `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Systemd, capability.Journald}` — matching
+  `docs/capabilities.md`'s `QueryLogs` exception (the manager resolves units
+  via the systemd D-Bus client before reading journal entries, so the
+  module needs both, not journald alone). Its single route,
+  `GET /logs`, is wrapped with `platform.Gate(host,
+  []capability.ID{capability.Systemd, capability.Journald}, ...)` in
+  `internal/modules/logs/handler.go`; with either capability absent the
+  whole module disappears — nav entry and the route 404 at request time —
+  and with both present it behaves exactly as before this chunk. Unlike
+  services, logs has no sub-feature with a narrower requirement, so there
+  is exactly one `Gate` wrap. `logs.Module.Dashboard` already returns
+  `(nil, nil)` unconditionally and logs is not a `platform.HealthProvider`
+  (see the module table above), so no dashboard or `attention` aggregator
+  change was needed here, unlike backups/maintenance. `module_test.go`
+  gained the same configurable `caps capability.Set`/`capsSet bool` pair
+  on its fake `Host` that services/backups/maintenance use (defaulting to
+  a full-capability set), so gated/ungated route behavior — including the
+  systemd-only and journald-only partial cases — is exercised via real
+  `ServeMux` round trips through `Mount`. `platform.Available` is also
+  exercised directly against the module's `RequiredCapabilities` as a
+  unit-level check, but the nav claim itself is proven end-to-end:
+  `TestLogsNavEntryFollowsCapabilityGateEndToEnd` builds a real
+  `internal/web.Server` (via `platform.NewRegistry(New())`, the same
+  constructor path `cmd/pilothouse` uses) backed by a fake broker, drives an
+  actual `POST /login` then `GET /` through `server.Handler()`, and asserts
+  the rendered dashboard HTML omits `href="/logs"`/`Logs` when either
+  capability is missing and includes them when both are present — so the
+  nav-filtering predicate (wired generically in `internal/web/server.go`
+  since c2) is confirmed against this real module's adoption, not just a
+  synthetic gated module or a direct `platform.Available` call.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

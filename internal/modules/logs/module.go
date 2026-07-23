@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/a-h/templ"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -23,6 +24,14 @@ func (*Module) Manifest() platform.Manifest {
 		ID: "logs", Name: "Logs", Description: "Inspect the systemd journal",
 		Icon: "activity", Order: 37, Path: "/logs",
 	}
+}
+
+// RequiredCapabilities makes the whole module — its nav entry and its single
+// route — available only when the host advertises both Systemd and
+// Journald: QueryLogs resolves units via the systemd D-Bus client before
+// reading journal entries, per docs/capabilities.md's QueryLogs exception.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Systemd, capability.Journald}
 }
 
 func normalizeHTTPFilters(filters Filters) Filters {
