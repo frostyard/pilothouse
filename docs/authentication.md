@@ -15,8 +15,9 @@ pilothoused             User=root, no TCP listener
   ├── NSS identity and group resolution
   ├── query and action authorization
   ├── narrow Podman, Docker, and local Incus inventory/lifecycle operations
-  ├── storage inventory (lsblk/findmnt plus optional SMART/RAID/LVM/ZFS/
-  │   Btrfs backends) and managed NFS/SMB remote-mount lifecycle
+  ├── storage inventory (lsblk/findmnt plus optional SMART/NVMe, MD RAID,
+  │   LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends) and
+  │   managed NFS/SMB remote-mount lifecycle
   ├── bounded journal search and file browsing/upload/download within
   │   explicitly configured roots
   └── updex/systemd-sysext execution
@@ -45,7 +46,7 @@ the broker. Privileged actions require membership in the broker's
 `--admin-group`, which defaults to `sudo`. An optional `--login-group`
 restricts login entirely.
 
-The web process submits fixed query or action IDs and structured parameters. Before each operation, the broker resolves the account again so group removal takes effect without waiting for the session to expire. The registries are the only paths to privileged code; neither can execute caller-supplied commands. Action definitions reject missing and unexpected parameters, derive a canonical resource key, serialize conflicting operations, and require exact confirmation for destructive actions. Podman and Docker operations accept only full hexadecimal container IDs discovered from their system inventories. Incus operations accept only projects and validated instance names rediscovered from the local daemon before each mutation; the broker uses the fixed `/var/lib/incus/unix.socket` path and never loads configured remotes. Storage remote-mount actions (create/mount/unmount/delete for NFS and SMB) are administrator-only and modify only definitions Pilothouse itself created; unmanaged mounts are never touched. Files reads (list/download) and uploads are administrator-only and are bounded to explicitly configured root IDs with a 256 MiB transfer limit; there is no generic filesystem proxy.
+The web process submits fixed query or action IDs and structured parameters. Before each operation, the broker resolves the account again so group removal takes effect without waiting for the session to expire. The registries are the only paths to privileged code; neither can execute caller-supplied commands. Action definitions reject missing and unexpected parameters, derive a canonical resource key, serialize conflicting operations, and require exact confirmation for destructive actions. Podman and Docker operations accept only full hexadecimal container IDs discovered from their system inventories. Incus operations accept only projects and validated instance names rediscovered from the local daemon before each mutation; the broker uses the fixed `/var/lib/incus/unix.socket` path and never loads configured remotes. Storage remote-mount actions (create/mount/unmount/delete for NFS and SMB) are administrator-only and modify only definitions Pilothouse itself created; unmanaged mounts are never touched. The two SMB ownership-mapped create actions additionally require paired canonical numeric `uid`/`gid` values, which the broker renders only as fixed deterministic CIFS `uid=`/`gid=` mount options — it never resolves names or accepts free-form options. Files reads (list/download) and uploads are administrator-only and are bounded to explicitly configured root IDs with a 256 MiB transfer limit; there is no generic filesystem proxy.
 
 Privileged action attempts are recorded by the broker in a root-owned bbolt database under `/var/lib/pilothouse`. The intent record is committed before the mutation begins, so an unavailable audit store prevents the action. Completion records contain the actor, fixed action ID, canonical resource, timing, outcome, and a stable error category; credentials, raw parameters, and backend error text are not retained. Interrupted records are marked unknown when the broker restarts. Only administrators can query the bounded activity history.
 
