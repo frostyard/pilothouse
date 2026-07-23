@@ -36,3 +36,19 @@ func Gate(host Host, ids []capability.ID, next http.HandlerFunc) http.HandlerFun
 		next(w, r)
 	}
 }
+
+// Available reports whether module is available given caps: a Module
+// implementing CapabilityGate is available only when caps has every one of
+// its RequiredCapabilities (HasAll semantics); a Module that does not
+// implement CapabilityGate has no capability requirement and is always
+// available. This is the same test Gate applies to a single request,
+// applied instead to a whole registry's module list so navigation and
+// dashboard rendering can filter out modules the host currently lacks the
+// capabilities for.
+func Available(module Module, caps capability.Set) bool {
+	gate, ok := module.(CapabilityGate)
+	if !ok {
+		return true
+	}
+	return caps.HasAll(gate.RequiredCapabilities()...)
+}

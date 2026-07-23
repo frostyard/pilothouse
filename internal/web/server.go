@@ -220,13 +220,11 @@ func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
 // moduleAvailable reports whether module is available given caps: a module
 // implementing platform.CapabilityGate is available only when caps has every
 // one of its RequiredCapabilities; a module that does not implement
-// CapabilityGate has no capability requirement and is always available.
+// CapabilityGate has no capability requirement and is always available. It
+// delegates to platform.Available so the gating decision has exactly one
+// implementation, shared with internal/platform's own tests.
 func moduleAvailable(module platform.Module, caps capability.Set) bool {
-	gate, ok := module.(platform.CapabilityGate)
-	if !ok {
-		return true
-	}
-	return caps.HasAll(gate.RequiredCapabilities()...)
+	return platform.Available(module, caps)
 }
 
 func (s *Server) ValidateAction(w http.ResponseWriter, r *http.Request) bool {

@@ -102,14 +102,19 @@ func TestGateWithZeroRequiredCapabilitiesIsAlwaysAvailable(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code)
 }
 
-// availableModuleIDs filters modules exactly the way a registry consumer is
-// expected to: a module implementing CapabilityGate is included only when
-// caps has every one of its RequiredCapabilities; a module that does not
-// implement CapabilityGate has no requirement and is always included.
-func availableModuleIDs(modules []Module, caps capability.Set) []string {
-	ids := make([]string, 0, len(modules))
-	for _, module := range modules {
-		if gate, ok := module.(CapabilityGate); ok && !caps.HasAll(gate.RequiredCapabilities()...) {
+// availableModuleIDs filters registry's modules exactly the way a real
+// consumer (internal/web's nav and dashboard filtering) is expected to: it
+// reads caps from host.Capabilities — the same production Host method a
+// live server calls on every request — and applies each module against the
+// production Available predicate. Nothing here reimplements the gating
+// decision; both the capability source and the gating logic are the actual
+// production code under test.
+func availableModuleIDs(t *testing.T, registry *Registry, host Host) []string {
+	t.Helper()
+	caps := host.Capabilities(context.Background())
+	ids := make([]string, 0, len(registry.Modules()))
+	for _, module := range registry.Modules() {
+		if !Available(module, caps) {
 			continue
 		}
 		ids = append(ids, module.Manifest().ID)
@@ -129,8 +134,8 @@ func TestCapabilityGateModuleExcludedFromRegistryAvailableSetUntilCapabilityPres
 
 	// Docker absent: the CapabilityGate module is excluded; the plain
 	// module is always included.
-	assert.Equal(t, []string{"always"}, availableModuleIDs(registry.Modules(), capability.New(capability.Systemd)))
+	assert.Equal(t, []string{"always"}, availableModuleIDs(t, registry, fakeHost{caps: capability.New(capability.Systemd)}))
 
 	// Docker present: both are included.
-	assert.Equal(t, []string{"always", "gated"}, availableModuleIDs(registry.Modules(), capability.New(capability.Docker)))
+	assert.Equal(t, []string{"always", "gated"}, availableModuleIDs(t, registry, fakeHost{caps: capability.New(capability.Docker)}))
 }

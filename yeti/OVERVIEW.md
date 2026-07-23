@@ -278,7 +278,7 @@ rules for adding a new module (routes, actions, queries).
   refetch. `capability.Set` gained `UnmarshalJSON` (mirroring the existing
   `MarshalJSON`) to decode this query's `{"capabilities": [...]}` response.
 - **Whole-module web-side capability gating (mechanism only).**
-  `internal/platform/capability.go` adds two primitives every later
+  `internal/platform/capability.go` adds the primitives every later
   capability-gated module will use, on top of the web-side capability
   fetch/cache above: `CapabilityGate` is an interface
   (`RequiredCapabilities() []capability.ID`) a `Module` optionally
@@ -291,27 +291,36 @@ rules for adding a new module (routes, actions, queries).
   handler so the route itself stays mounted on the shared mux, but 404s at
   request time when `host.Capabilities(ctx)` doesn't `HasAll(ids...)` —
   this is what "routes stay mounted, capability absence 404s instead of
-  changing the mux" means concretely for a module's `Mount`. `internal/web/server.go`
+  changing the mux" means concretely for a module's `Mount`. A second,
+  exported function, `Available(module Module, caps capability.Set) bool`,
+  applies the same `CapabilityGate`-or-default-available test to a whole
+  module rather than a single request — it type-asserts `CapabilityGate`
+  and defaults to available when a module doesn't implement it, exactly
+  mirroring the check `Gate` makes per-request. `internal/web/server.go`
   wires the interface (not `Gate`, which individual modules call from their
   own `Mount`) into the two web-side registries the spec calls out: an
   unexported `moduleAvailable(module platform.Module, caps capability.Set)
-  bool` type-asserts `platform.CapabilityGate` and defaults to available
-  when a module doesn't implement it; `Render` now builds the shell's
-  `Modules` nav list from a new `s.availableManifests(ctx)` (filters
-  `s.registry.Modules()` through `moduleAvailable` before mapping to
-  `Manifest`, replacing the previous unfiltered `s.registry.Manifests()`
-  call) and the `dashboard` handler's per-module loop skips a
-  capability-gated-absent module entirely — no `Dashboard()` call, no card,
-  no error-card placeholder, since an unavailable surface is not rendered
-  at all, not shown degraded. `Mount()` at server construction
-  (`internal/web/server.go`, around where the registry's modules are
-  wired to the mux) stays unfiltered: every module's routes remain mounted
-  regardless of capability, per the "routes stay mounted" requirement above;
-  only the nav list and the dashboard loop are filtered by
-  `moduleAvailable`. No production module implements `CapabilityGate` yet as
-  of this chunk — the mechanism is proven with a synthetic fake module in
-  `internal/platform/capability_test.go` and `internal/web/server_test.go`,
-  and every real module's nav/dashboard/route behavior is unchanged.
+  bool` delegates straight to `platform.Available` — so the gating decision
+  has exactly one implementation, shared with `internal/platform`'s own
+  tests — and `Render` now builds the shell's `Modules` nav list from a new
+  `s.availableManifests(ctx)` (filters `s.registry.Modules()` through
+  `moduleAvailable` before mapping to `Manifest`, replacing the previous
+  unfiltered `s.registry.Manifests()` call) and the `dashboard` handler's
+  per-module loop skips a capability-gated-absent module entirely — no
+  `Dashboard()` call, no card, no error-card placeholder, since an
+  unavailable surface is not rendered at all, not shown degraded. `Mount()`
+  at server construction (`internal/web/server.go`, around where the
+  registry's modules are wired to the mux) stays unfiltered: every module's
+  routes remain mounted regardless of capability, per the "routes stay
+  mounted" requirement above; only the nav list and the dashboard loop are
+  filtered by `moduleAvailable`. No production module implements
+  `CapabilityGate` yet as of this chunk — the mechanism is proven with a
+  synthetic fake module in `internal/platform/capability_test.go` (which
+  exercises `Available` through a fake `Host`'s real `Capabilities()`
+  method, not a capability.Set passed in directly, so the test covers the
+  same `Host`-integration boundary the production code depends on) and
+  `internal/web/server_test.go`, and every real module's
+  nav/dashboard/route behavior is unchanged.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
