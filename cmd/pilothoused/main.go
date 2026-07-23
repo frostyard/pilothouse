@@ -25,6 +25,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
@@ -93,6 +94,10 @@ func run() error {
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
 	streamQueries := broker.NewStreamQueryRegistry()
+	caps := capability.Probe(context.Background(), capability.Config{PodmanSocket: *podmanSocket, Updex: *updex})
+	if err := registerCapabilities(queries, caps); err != nil {
+		return err
+	}
 	filesManager, err := files.NewSystemManager(filesRoots.Specs())
 	if err != nil {
 		return err
@@ -155,19 +160,25 @@ func run() error {
 	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
 	defer podmanClient.Close()
-	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient)); err != nil {
+	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient), caps); err != nil {
 		return err
 	}
 	dockerClient, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
-		return fmt.Errorf("create Docker client: %w", err)
-	}
-	defer func() { _ = dockerClient.Close() }()
-	if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient)); err != nil {
-		return err
+		// Construction failure (e.g. a malformed DOCKER_HOST) is treated the
+		// same as an unreachable engine: the docker capability was already
+		// probed above (capability.Probe never fails fatally), so this is
+		// never a reason to abort daemon startup -- just leave docker
+		// unregistered.
+		logger.Warn("docker client unavailable; docker capability disabled", "error", err)
+	} else {
+		defer func() { _ = dockerClient.Close() }()
+		if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient), caps); err != nil {
+			return err
+		}
 	}
 	incusClient := incus.NewLocalClient()
-	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient)); err != nil {
+	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient), caps); err != nil {
 		return err
 	}
 	sessions := broker.NewSessionStore(15*time.Minute, 8*time.Hour)
@@ -296,6 +307,19 @@ func (values *stringListFlag) addCommaSeparated(input string) {
 			*values = append(*values, value)
 		}
 	}
+}
+
+// registerCapabilities registers QueryCapabilities unconditionally: capability
+// discovery itself requires no capability, so unlike every registerX
+// function below it is never guarded by caps.Has(...) -- it is what reports
+// caps in the first place. It is non-admin (any authenticated identity may
+// discover which capabilities the daemon advertises) and returns exactly
+// the probed Set, whose MarshalJSON already produces the sorted,
+// present-only {"capabilities": [...]} shape the query contract requires.
+func registerCapabilities(queries *broker.QueryRegistry, caps capability.Set) error {
+	return queries.Register(broker.QueryCapabilities, false, func(context.Context, auth.Identity, map[string]string) (any, error) {
+		return caps, nil
+	})
 }
 
 func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
@@ -714,7 +738,16 @@ func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegis
 	})
 }
 
-func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager) error {
+// registerPodman registers every Podman query and action iff the podman
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. This lets a host with an unreachable or absent Podman
+// socket start the daemon normally, with the Podman surface simply absent
+// from every registry (and from QueryCapabilities) rather than aborting
+// startup.
+func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Podman) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryPodmanLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.Logs(ctx, parameters["id"])
 	}); err != nil {
@@ -734,7 +767,13 @@ func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	})
 }
 
-func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager docker.Manager) error {
+// registerDocker registers every Docker query and action iff the docker
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. See registerPodman for the rationale.
+func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager docker.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Docker) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryDockerLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.Logs(ctx, parameters["id"])
 	}); err != nil {
@@ -754,7 +793,13 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	})
 }
 
-func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager) error {
+// registerIncus registers every Incus query and action iff the incus
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. See registerPodman for the rationale.
+func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Incus) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryIncusState, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.State(ctx, parameters["project"])
 	}); err != nil {

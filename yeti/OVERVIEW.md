@@ -114,6 +114,31 @@ rules for adding a new module (routes, actions, queries).
   target as a root-owned, non-group/world-writable regular file while executing
   the original entry-point path. Broken or unsafe present candidates fail
   startup; absent optional tools degrade only their backend to unsupported.
+- **Capability probing and advertisement.** `pilothoused` probes host
+  capabilities once at startup (`internal/capability.Probe`, called early
+  in `cmd/pilothoused/main.go`'s `run()`, before any module manager is
+  constructed) — systemd, journald, `updex`, `systemd-sysext`, bootc,
+  rpm-ostree, the `rpm-ostreed-automatic`/`bootc-fetch-apply-updates`
+  automatic-update unit-file pairs, and the Podman/Docker/Incus engine
+  sockets — and never fails fatally: every probe narrows to "absent" on
+  any error instead of erroring, so a host missing any combination of this
+  optional tooling still starts the daemon. The probed `capability.Set` is
+  advertised over the fixed, authenticated, non-admin
+  `org.frostyard.pilothouse.capabilities.list` query
+  (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
+  present capabilities only, sorted, canonical IDs — and restart re-probes
+  from scratch (nothing is cached). The same `capability.Set` gates
+  privileged registration: see `docs/capabilities.md` for the binding
+  table mapping every broker ID to its required capability, and
+  `docs/modules.md`'s "Capability-guarded registration" section for the
+  convention new modules follow. `registerPodman`/`registerDocker`/
+  `registerIncus` are the first conversions — each takes `caps
+  capability.Set` and registers nothing for its engine when the
+  corresponding capability is absent (an unreachable or misconfigured
+  engine, including a Docker client that fails to construct, is logged as
+  a warning, never a fatal `run()` error). Remaining modules
+  (services/logs/backups/storage/maintenance/sysext) stay unconditionally
+  registered until their own conversion.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

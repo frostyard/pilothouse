@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,11 +15,15 @@ import (
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
+	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/files"
+	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
+	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/stretchr/testify/assert"
@@ -701,4 +706,129 @@ func TestRegisterFilesBoundsAndAuditsUploadDestination(t *testing.T) {
 	records, err := store.List(context.Background(), audit.Filter{Action: broker.ActionFilesUpload, Limit: 2})
 	require.NoError(t, err)
 	assert.Equal(t, "files/logs/root.txt", records[0].Resource)
+}
+
+func TestRegisterCapabilitiesIsUnconditionalNonAdminAndReturnsProbedSet(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	caps := capability.New(capability.Systemd, capability.Docker, capability.Journald)
+	require.NoError(t, registerCapabilities(queries, caps))
+	assert.True(t, queries.Registered(broker.QueryCapabilities))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryCapabilities, nil)
+	require.NoError(t, err)
+	assert.Equal(t, caps, result)
+
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"capabilities":["docker","journald","systemd"]}`, string(encoded))
+}
+
+func TestRegisterCapabilitiesOmitsAbsentCapabilitiesAndNeverErrorsOnEmptySet(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerCapabilities(queries, capability.New()))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryCapabilities, nil)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"capabilities":[]}`, string(encoded))
+}
+
+type fakePodmanManager struct{}
+
+func (fakePodmanManager) Logs(context.Context, string) (podman.Logs, error) {
+	return podman.Logs{}, nil
+}
+func (fakePodmanManager) Remove(context.Context, string) error        { return nil }
+func (fakePodmanManager) RemoveImage(context.Context, string) error   { return nil }
+func (fakePodmanManager) Restart(context.Context, string) error       { return nil }
+func (fakePodmanManager) Start(context.Context, string) error         { return nil }
+func (fakePodmanManager) State(context.Context) (podman.State, error) { return podman.State{}, nil }
+func (fakePodmanManager) Stop(context.Context, string) error          { return nil }
+
+func TestRegisterPodmanNoOpsWithoutPodmanCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryPodmanState))
+	assert.False(t, queries.Registered(broker.QueryPodmanLogs))
+	for _, id := range []string{broker.ActionPodmanRemove, broker.ActionPodmanRemoveImage, broker.ActionPodmanRestart, broker.ActionPodmanStart, broker.ActionPodmanStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterPodmanRegistersEverythingWithPodmanCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, capability.New(capability.Podman)))
+
+	assert.True(t, queries.Registered(broker.QueryPodmanState))
+	assert.True(t, queries.Registered(broker.QueryPodmanLogs))
+	for _, id := range []string{broker.ActionPodmanRemove, broker.ActionPodmanRemoveImage, broker.ActionPodmanRestart, broker.ActionPodmanStart, broker.ActionPodmanStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+type fakeDockerManager struct{}
+
+func (fakeDockerManager) Logs(context.Context, string) (docker.Logs, error) {
+	return docker.Logs{}, nil
+}
+func (fakeDockerManager) Remove(context.Context, string) error        { return nil }
+func (fakeDockerManager) RemoveImage(context.Context, string) error   { return nil }
+func (fakeDockerManager) Restart(context.Context, string) error       { return nil }
+func (fakeDockerManager) Start(context.Context, string) error         { return nil }
+func (fakeDockerManager) State(context.Context) (docker.State, error) { return docker.State{}, nil }
+func (fakeDockerManager) Stop(context.Context, string) error          { return nil }
+
+func TestRegisterDockerNoOpsWithoutDockerCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryDockerState))
+	assert.False(t, queries.Registered(broker.QueryDockerLogs))
+	for _, id := range []string{broker.ActionDockerRemove, broker.ActionDockerRemoveImage, broker.ActionDockerRestart, broker.ActionDockerStart, broker.ActionDockerStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterDockerRegistersEverythingWithDockerCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, capability.New(capability.Docker)))
+
+	assert.True(t, queries.Registered(broker.QueryDockerState))
+	assert.True(t, queries.Registered(broker.QueryDockerLogs))
+	for _, id := range []string{broker.ActionDockerRemove, broker.ActionDockerRemoveImage, broker.ActionDockerRestart, broker.ActionDockerStart, broker.ActionDockerStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+type fakeIncusManager struct{}
+
+func (fakeIncusManager) Remove(context.Context, string, string) error      { return nil }
+func (fakeIncusManager) RemoveImage(context.Context, string, string) error { return nil }
+func (fakeIncusManager) Restart(context.Context, string, string) error     { return nil }
+func (fakeIncusManager) Start(context.Context, string, string) error       { return nil }
+func (fakeIncusManager) State(context.Context, string) (incus.State, error) {
+	return incus.State{}, nil
+}
+func (fakeIncusManager) Stop(context.Context, string, string) error { return nil }
+
+func TestRegisterIncusNoOpsWithoutIncusCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryIncusState))
+	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterIncusRegistersEverythingWithIncusCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Incus)))
+
+	assert.True(t, queries.Registered(broker.QueryIncusState))
+	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
+		assert.True(t, actions.Registered(id))
+	}
 }

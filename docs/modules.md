@@ -89,6 +89,25 @@ err := host.Execute(r.Context(), r, "org.frostyard.pilothouse.network.configure"
 
 The corresponding broker action is registered once in `cmd/pilothoused`. The action registry rechecks the user's current system groups before dispatch.
 
+## Capability-guarded registration
+
+`pilothoused` probes host capabilities once at startup
+(`internal/capability.Probe`, called from `cmd/pilothoused/main.go`'s
+`run()`) and exposes the result over the authenticated, non-admin
+`org.frostyard.pilothouse.capabilities.list` query
+(`broker.QueryCapabilities`). Every privileged registration in
+`cmd/pilothoused` that depends on optional host tooling (a container engine
+socket, systemd, journald, `updex`, `systemd-sysext`, bootc, rpm-ostree)
+must be guarded by the probed `capability.Set` per `docs/capabilities.md`'s
+binding table: a `registerX` function checks `caps.Has(...)`/`caps.HasAll(...)`
+and registers nothing for that module when its capability is absent, rather
+than letting a missing or unreachable dependency fail daemon startup. See
+`registerPodman`/`registerDocker`/`registerIncus` in
+`cmd/pilothoused/main.go` for the pattern: each takes the probed
+`capability.Set` as its last parameter and no-ops immediately when its
+engine capability isn't present. New modules that depend on optional host
+tooling should follow the same shape from the start.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
