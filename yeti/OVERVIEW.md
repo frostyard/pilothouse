@@ -144,14 +144,17 @@ rules for adding a new module (routes, actions, queries).
   reachable at probe time but wedges before this second, real dial.
   `buildSystemdManagers` constructs the remote-mount
   controller and the backups/services/logs managers only when that client
-  is non-nil, leaving each nil otherwise; `registerStorageActions` and
-  `registerBackups` still no-op purely on a nil manager as a stopgap (their
-  own `capability.Set`-based conversion lands in a later chunk).
-  `registerServices` and `registerLogs` have been converted to the full
-  `capability.Set`-based guard (see below); their nil-manager check is
-  retained alongside it as a defensive backstop, since manager and caps
-  agree in the real `run()` wiring but a directly-injected fake manager in
-  tests must still respect the capability guard on its own.
+  is non-nil, leaving each nil otherwise. `registerStorageActions` (the
+  eight remote-mount lifecycle actions) and `registerBackups`
+  (`QueryBackupsState`) have both been converted to the full
+  `capability.Set`-based guard, alongside `registerServices` and
+  `registerLogs` (see below): each requires only `Systemd` uniformly (every
+  remote-mount action generates or controls systemd units; backups monitors
+  systemd timers), so the guard sits once at the top of the function rather
+  than per call. Each function's nil-manager check is retained alongside the
+  capability check as a defensive backstop, since manager and caps agree in
+  the real `run()` wiring but a directly-injected fake manager in tests must
+  still respect the capability guard on its own.
   `QueryStorageState` is registered separately against the
   plain, non-systemd `storageManager` built earlier in `run()`, so storage
   inventory reads never depend on systemd at all — not even via a
@@ -189,10 +192,17 @@ rules for adding a new module (routes, actions, queries).
   with systemd but no journald still gets full service management with
   only the journal query withheld; `registerLogs` guards its single
   `QueryLogs` registration on that same `caps.HasAll(capability.Systemd,
-  capability.Journald)`. Storage (remote-mount actions) and backups
-  registration remain nil-guarded only, not yet `capability.Set`-guarded;
-  maintenance and sysext stay unconditionally registered until their own
-  conversion.
+  capability.Journald)`. `registerStorageActions` and `registerBackups` are
+  the next conversions: both guard their whole function on
+  `caps.Has(capability.Systemd)` alone (every remote-mount action generates
+  or controls systemd units, and backups monitors systemd timers, so
+  neither has a services-style mixed per-call requirement); their
+  nil-manager check is retained alongside the capability check as a
+  defensive backstop for directly-injected test fakes. `QueryStorageState`
+  itself, registered separately against the plain, non-systemd
+  `storageManager`, remains unconditional per `docs/capabilities.md`'s
+  documented exception. Maintenance and sysext stay unconditionally
+  registered until their own conversion.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

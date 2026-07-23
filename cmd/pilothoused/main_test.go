@@ -173,7 +173,7 @@ func TestRegisterMaintenanceAndBackups(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	maintenanceManager := &fakeMaintenanceManager{}
 	require.NoError(t, registerMaintenance(actions, queries, maintenanceManager))
-	require.NoError(t, registerBackups(queries, fakeBackupsManager{}))
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New(capability.Systemd)))
 	state, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryMaintenanceState, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "Snosi", state.(maintenance.State).OSVersion)
@@ -235,7 +235,7 @@ func TestStorageQueryAndActionsShareManagedRemoteComposition(t *testing.T) {
 	manager := &fakeRemoteManager{snapshot: storage.Snapshot{Mounts: []storage.Mount{{ID: "remote:" + id, Managed: true, State: "needs-attention"}}, Findings: []storage.Finding{{ResourceID: "remote:" + id, Severity: storage.HealthWarning, Title: "Managed remote mount needs attention"}}}}
 	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
 	require.NoError(t, registerStorage(queries, manager))
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestRegisterStorageCreateActionsUseTrustedIDsAndGlobalLock(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, test.parameters, "")
 			assert.Error(t, err)
@@ -306,7 +306,7 @@ func TestRegisterStorageOwnedSMBCreateActionsRejectInvalidOwnership(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 			err := actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, test.parameters, "")
 			require.Error(t, err)
@@ -323,7 +323,7 @@ func TestRegisterStorageOwnedSMBCreateActionsRejectInvalidOwnership(t *testing.T
 
 	manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 	actions := broker.NewActionRegistry(store)
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBGuestOwned, base, ""))
 	assert.Regexp(t, `^storage/mount/[a-f0-9]{32}$`, store.last().Resource)
 }
@@ -343,7 +343,7 @@ func TestRegisterStorageLifecycleActionsValidateIDAndConfirmation(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 			parameters := map[string]string{"id": id}
 
 			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, parameters, "")
@@ -367,7 +367,7 @@ func TestRegisterStorageLifecycleActionsValidateIDAndConfirmation(t *testing.T) 
 
 func TestRegisterStorageActionsRejectUnexpectedParameters(t *testing.T) {
 	actions := broker.NewActionRegistry()
-	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}))
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New(capability.Systemd)))
 	err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageMount, map[string]string{"id": "0123456789abcdef0123456789abcdef", "target": "/secret"}, "")
 	assert.Error(t, err)
 	assert.NotContains(t, err.Error(), "/secret")
@@ -377,7 +377,7 @@ func TestRegisterStorageCredentialActionAuditsOnlyOpaqueID(t *testing.T) {
 	const secret = "never-record-this-secret"
 	manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 	actions := broker.NewActionRegistry(store)
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBCredentials, map[string]string{
 		"server": "nas.example", "share": "media", "username": "mount-user", "password": secret,
@@ -394,7 +394,7 @@ func TestRegisterStorageCreateActionUsesGlobalLock(t *testing.T) {
 	release := make(chan struct{})
 	manager := &blockingRemoteManager{started: started, release: release}
 	actions := broker.NewActionRegistry()
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 	parameters := map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "false"}
 	first := make(chan error, 1)
 	go func() {
@@ -428,7 +428,7 @@ func TestRegisterStorageLifecycleActionsSerializeSameIDAndAllowDifferentIDs(t *t
 		t.Run(test.name, func(t *testing.T) {
 			manager := &blockingLifecycleRemoteManager{entered: make(chan string, 3), release: make(chan struct{})}
 			actions := broker.NewActionRegistry()
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 			confirmation := ""
 			if test.confirmation {
 				confirmation = "storage/mount/0123456789abcdef0123456789abcdef"
@@ -899,14 +899,15 @@ func TestBuildSystemdManagersSkipsConstructionWithoutClient(t *testing.T) {
 }
 
 // TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd is the
-// fixture-style test proving, at the construction level rather than by a
-// later registration guard, that QueryStorageState is registered and
-// backed by a working manager even when the Systemd capability is absent:
-// it builds managers exactly the way run() does (buildSystemdManagers with
-// a nil client), registers every dependent handler the same way run() does,
-// and asserts the daemon (a) never errors, (b) still answers
+// fixture-style test proving, at the construction level (c7) as well as the
+// registration-level capability guard (c9's registerBackups and
+// registerStorageActions conversions), that QueryStorageState is registered
+// and backed by a working manager even when the Systemd capability is
+// absent: it builds managers exactly the way run() does (buildSystemdManagers
+// with a nil client), registers every dependent handler the same way run()
+// does, and asserts the daemon (a) never errors, (b) still answers
 // QueryStorageState with real data, and (c) leaves every systemd-dependent
-// handler unregistered rather than backed by a nil manager.
+// handler -- including all eight storage remote-mount actions -- unregistered.
 func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 	root := t.TempDir()
 	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
@@ -936,8 +937,8 @@ func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 
 	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
 	require.NoError(t, registerStorage(queries, storageManager))
-	require.NoError(t, registerStorageActions(actions, managers.remoteManager))
-	require.NoError(t, registerBackups(queries, managers.backupManager))
+	require.NoError(t, registerStorageActions(actions, managers.remoteManager, capability.New()))
+	require.NoError(t, registerBackups(queries, managers.backupManager, capability.New()))
 	require.NoError(t, registerServices(actions, queries, managers.servicesManager, capability.New()))
 	require.NoError(t, registerLogs(queries, managers.logsManager, capability.New()))
 
@@ -952,7 +953,7 @@ func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 	assert.False(t, queries.Registered(broker.QueryServicesState))
 	assert.False(t, queries.Registered(broker.QueryServicesJournal))
 	assert.False(t, queries.Registered(broker.QueryLogs))
-	for _, id := range []string{broker.ActionStorageCreateNFS, broker.ActionStorageMount, broker.ActionStorageUnmount, broker.ActionStorageDelete} {
+	for _, id := range allStorageRemoteMountActions {
 		assert.False(t, actions.Registered(id))
 	}
 	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesStart, broker.ActionServicesStop} {
@@ -962,7 +963,25 @@ func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 
 func TestRegisterBackupsNoOpsWithNilManager(t *testing.T) {
 	queries := broker.NewQueryRegistry()
-	require.NoError(t, registerBackups(queries, nil))
+	// Systemd present: proves the nil-manager guard applies independent of
+	// caps, since the real run() wiring would never see a nil manager and a
+	// present Systemd capability together.
+	require.NoError(t, registerBackups(queries, nil, capability.New(capability.Systemd)))
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterBackupsRegistersWithSystemd(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New(capability.Systemd)))
+	assert.True(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterBackupsNoOpsWithoutSystemdCapability(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	// A non-nil fake manager proves registerBackups' own caps guard
+	// independently withholds registration, since backups.Manager monitors
+	// systemd timers and requires Systemd uniformly.
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New()))
 	assert.False(t, queries.Registered(broker.QueryBackupsState))
 }
 
@@ -1049,8 +1068,44 @@ func TestRegisterLogsRegistersWithSystemdAndJournald(t *testing.T) {
 
 func TestRegisterStorageActionsNoOpsWithNilManager(t *testing.T) {
 	actions := broker.NewActionRegistry()
-	require.NoError(t, registerStorageActions(actions, nil))
-	for _, id := range []string{broker.ActionStorageCreateNFS, broker.ActionStorageMount, broker.ActionStorageUnmount, broker.ActionStorageDelete} {
+	// Systemd present: proves the nil-manager guard applies independent of
+	// caps, since the real run() wiring would never see a nil manager and a
+	// present Systemd capability together.
+	require.NoError(t, registerStorageActions(actions, nil, capability.New(capability.Systemd)))
+	for _, id := range allStorageRemoteMountActions {
 		assert.False(t, actions.Registered(id))
 	}
+}
+
+func TestRegisterStorageActionsRegistersWithSystemd(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New(capability.Systemd)))
+	for _, id := range allStorageRemoteMountActions {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterStorageActionsNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	// A non-nil fake manager proves registerStorageActions' own caps guard
+	// independently withholds registration, since every remote-mount action
+	// generates or controls systemd units and requires Systemd uniformly.
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New()))
+	for _, id := range allStorageRemoteMountActions {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+// allStorageRemoteMountActions is every fixed broker action ID for storage
+// remote-mount lifecycle, so capability-guard tests can assert on all eight
+// rather than a partial sample.
+var allStorageRemoteMountActions = []string{
+	broker.ActionStorageCreateNFS,
+	broker.ActionStorageCreateSMBGuest,
+	broker.ActionStorageCreateSMBCredentials,
+	broker.ActionStorageCreateSMBGuestOwned,
+	broker.ActionStorageCreateSMBCredentialsOwned,
+	broker.ActionStorageMount,
+	broker.ActionStorageUnmount,
+	broker.ActionStorageDelete,
 }

@@ -141,10 +141,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := registerStorageActions(actions, managers.remoteManager); err != nil {
+	if err := registerStorageActions(actions, managers.remoteManager, caps); err != nil {
 		return err
 	}
-	if err := registerBackups(queries, managers.backupManager); err != nil {
+	if err := registerBackups(queries, managers.backupManager, caps); err != nil {
 		return err
 	}
 	if err := registerServices(actions, queries, managers.servicesManager, caps); err != nil {
@@ -395,14 +395,17 @@ func registerCapabilities(queries *broker.QueryRegistry, caps capability.Set) er
 	})
 }
 
-// registerBackups registers QueryBackupsState iff manager is non-nil.
-// manager is nil exactly when construction skipped it -- systemd absent or
-// unreachable per buildSystemdManagers -- in which case this is a no-op
-// stopgap (superseded by a full capability.Set-based guard in a later
-// chunk) rather than a handler that would panic dereferencing a nil
-// manager at request time.
-func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
-	if manager == nil {
+// registerBackups registers QueryBackupsState iff manager is non-nil and caps
+// has Systemd. backups.Manager monitors systemd timers, so it requires
+// Systemd uniformly -- there is no partial-capability case to guard
+// per-call, unlike registerServices/registerLogs. manager is nil exactly
+// when buildSystemdManagers skipped construction (systemd absent or
+// unreachable), which per c7 already implies the Systemd capability was
+// absent, so the manager check and the caps check agree in the real run()
+// wiring; both are kept so a fake, non-nil manager passed directly in tests
+// still respects the capability guard.
+func registerBackups(queries *broker.QueryRegistry, manager backups.Manager, caps capability.Set) error {
+	if manager == nil || !caps.Has(capability.Systemd) {
 		return nil
 	}
 	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
@@ -422,14 +425,21 @@ func registerStorage(queries *broker.QueryRegistry, manager storage.Manager) err
 const storageActionTimeout = 2 * time.Minute
 
 // registerStorageActions registers the remote-mount lifecycle actions iff
-// manager is non-nil. manager is nil exactly when buildSystemdManagers
-// skipped constructing the remote-mount controller (systemd absent or
-// unreachable), in which case this is a no-op rather than a handler that
-// would panic dereferencing a nil manager at request time. QueryStorageState
-// itself (registered separately via registerStorage against the plain,
-// non-systemd storageManager) is unaffected.
-func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager) error {
-	if manager == nil {
+// manager is non-nil and caps has Systemd. Every one of these actions
+// generates and controls systemd units (mount/automount, or their
+// enable/disable/start/stop lifecycle), so they require Systemd uniformly
+// -- there is no partial-capability case to guard per-call. manager is nil
+// exactly when buildSystemdManagers skipped constructing the remote-mount
+// controller (systemd absent or unreachable), which per c7 already implies
+// the Systemd capability was absent, so the manager check and the caps
+// check agree in the real run() wiring; both are kept so a fake, non-nil
+// manager passed directly in tests still respects the capability guard.
+// QueryStorageState itself (registered separately via registerStorage
+// against the plain, non-systemd storageManager) is unaffected -- storage
+// inventory reads never depend on systemd, per docs/capabilities.md's
+// documented exception.
+func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager, caps capability.Set) error {
+	if manager == nil || !caps.Has(capability.Systemd) {
 		return nil
 	}
 	for _, action := range []struct {
