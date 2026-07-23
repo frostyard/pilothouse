@@ -136,7 +136,13 @@ rules for adding a new module (routes, actions, queries).
   opens that connection at most once, only when the probed `Systemd`
   capability is present; a connection failure is logged as a warning and
   degrades to a nil client exactly like an absent capability — never a
-  fatal `run()` error. `buildSystemdManagers` constructs the remote-mount
+  fatal `run()` error. `run()` calls `connectSystemd` with a context bounded
+  by `systemdConnectTimeout` (mirroring `capability.Probe`'s own
+  `dbusProbeTimeout`), not `context.Background()`: reusing an unbounded
+  context here would reintroduce the exact unbounded-startup-hang risk the
+  probe's own timeout exists to rule out, for the case where the bus was
+  reachable at probe time but wedges before this second, real dial.
+  `buildSystemdManagers` constructs the remote-mount
   controller and the backups/services/logs managers only when that client
   is non-nil, leaving each nil otherwise; `registerStorageActions`/
   `registerBackups`/`registerServices`/`registerLogs` no-op on a nil

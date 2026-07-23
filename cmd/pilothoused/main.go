@@ -129,7 +129,9 @@ func run() error {
 	if err := backups.ValidateConfiguration(backupTimers, *backupMaxAge); err != nil {
 		return err
 	}
-	systemdClient := connectSystemd(context.Background(), caps, func(ctx context.Context) (*dbus.Conn, error) {
+	systemdConnectCtx, systemdConnectCancel := context.WithTimeout(context.Background(), systemdConnectTimeout)
+	defer systemdConnectCancel()
+	systemdClient := connectSystemd(systemdConnectCtx, caps, func(ctx context.Context) (*dbus.Conn, error) {
 		return dbus.NewSystemConnectionContext(ctx)
 	}, logger)
 	if systemdClient != nil {
@@ -291,14 +293,25 @@ func newStorageManager(resolve storage.ToolResolver, root string) (*storage.Syst
 	return storage.NewSystemManagerWithEnrichers([]storage.Adapter{storage.NewBlockAdapter(tools.LSBLK), storage.NewMountAdapter(tools.Findmnt)}, []storage.Enricher{smart, mdraid, lvm, deviceMapper, multipath, zfs, btrfs}), nil
 }
 
+// systemdConnectTimeout bounds the second, "real" system D-Bus dial that
+// connectSystemd performs after capability.Probe has already reported
+// Systemd present. It intentionally mirrors capability.Probe's own
+// dbusProbeTimeout: the probe's bounded context only proves the bus was
+// reachable at probe time, so reusing context.Background() here would
+// reintroduce an unbounded-hang risk if the bus wedges between the probe
+// and this call -- exactly the failure mode the probe's timeout exists to
+// rule out.
+const systemdConnectTimeout = 5 * time.Second
+
 // connectSystemd opens the system D-Bus connection used by every
 // systemd-backed manager, but only when the probed Systemd capability is
 // present, and it never turns a connection failure into a fatal error: a
 // missing capability skips calling connect at all, and a failed connect
-// attempt is logged as a warning and degrades exactly like an absent
-// capability (nil is returned either way). This is what lets run() start on
-// a host without systemd instead of aborting before it ever registers
-// QueryCapabilities.
+// attempt (including one that times out per the caller-supplied, bounded
+// ctx -- see systemdConnectTimeout) is logged as a warning and degrades
+// exactly like an absent capability (nil is returned either way). This is
+// what lets run() start on a host without systemd instead of aborting
+// before it ever registers QueryCapabilities.
 func connectSystemd(ctx context.Context, caps capability.Set, connect func(context.Context) (*dbus.Conn, error), logger *slog.Logger) *dbus.Conn {
 	if !caps.Has(capability.Systemd) {
 		return nil

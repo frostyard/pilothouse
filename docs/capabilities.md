@@ -135,41 +135,52 @@ are silent on the inventory read. `internal/modules/storage/manager.go`'s
 `NewSystemManager`/`NewSystemManagerWithEnrichers` (lines 50, 54) take only
 `Adapter`/`Enricher` values — lsblk, findmnt, SMART, mdraid, LVM,
 device-mapper, multipath, ZFS, Btrfs — and never open a D-Bus connection or
-otherwise depend on systemd. `registerStorage` (main.go:307) is fed by this
-plain `storage.Manager`, while `registerStorageActions` (main.go:318, the
+otherwise depend on systemd. `registerStorage` is fed by this plain
+`storage.Manager` (`storageManager` in `run()`, built by `newStorageManager`
+before any systemd dialing happens), while `registerStorageActions` (the
 systemd-unit-creating remote-mount lifecycle) is fed by a separate
-`storage.RemoteManager`. So `QueryStorageState` is unconditional/`none`
-today, and — per the plan — c7 makes this a real *construction-level* fact
-(the inventory manager is built without any systemd dependency), not merely
-a registration-level guard bolted onto a manager whose construction could
-still depend on systemd.
+`storage.RemoteManager` that only exists inside `buildSystemdManagers` when
+a systemd client was actually obtained. So `QueryStorageState` is
+unconditional/`none` as a real *construction-level* fact, not merely a
+registration-level guard bolted onto a manager whose construction could
+still depend on systemd: `storageManager`'s construction has no systemd
+dependency at all, and `registerStorage(queries, storageManager)` runs
+whether or not `connectSystemd` ever returns a non-nil client.
 
 ### 2. `QueryServicesJournal` is `systemd AND journald`, not `journald` alone
 
 The spec's module-default prose says "services journal → journald."
-`internal/modules/services/manager.go`'s `Journal()` (line 114) calls
-`m.resolveUnit(ctx, name)` (line 118; `resolveUnit` defined at line 279)
-before reading journal entries. `resolveUnit` uses the systemd D-Bus client
-(`m.client`, populated via `dbus.NewSystemConnectionContext` in
-`NewSystemManager`, lines 100–106) to validate/resolve the unit. The query
-cannot function — and the backing `services.SystemManager` cannot even be
-*constructed* (`NewSystemManager` fails outright if the D-Bus connection
-fails) — without systemd, regardless of journald availability. This is
-recorded as a refinement of the spec's stated module default, not a
-deviation from it: the module-level default describes the feature's intent
-("read the journal"), and the exception records the actual code dependency
-that intent doesn't mention.
+`internal/modules/services/manager.go`'s `Journal()` calls
+`m.resolveUnit(ctx, name)` before reading journal entries, which uses the
+systemd D-Bus client (`m.client`) to validate/resolve the unit — so the
+query cannot function without systemd, regardless of journald availability.
+As of this chunk, `services.NewSystemManager` no longer opens that D-Bus
+connection itself: it accepts a pre-opened `systemdClient` from its caller
+(`cmd/pilothoused/main.go`'s `buildSystemdManagers`), which only calls it at
+all when `connectSystemd` already obtained a live connection. A connection
+failure is therefore no longer a construction-time error from this
+package's constructor; it surfaces upstream as `connectSystemd` returning
+`nil` (logged as a warning, never fatal), and `services.NewSystemManager`
+simply never gets called in that case, leaving `QueryServicesJournal`
+unregistered (`registerServices` no-ops on a nil manager). This is recorded
+as a refinement of the spec's stated module default, not a deviation from
+it: the module-level default describes the feature's intent ("read the
+journal"), and the exception records the actual code dependency that intent
+doesn't mention.
 
 ### 3. `QueryLogs` (the whole logs module) is `systemd AND journald`, not `journald` alone
 
-Same shape as above. `internal/modules/logs/manager.go`'s `Logs()` (line
-159) calls `m.client.ListUnitsContext(ctx)` (line 163) and
-`m.client.ListUnitFilesContext(ctx)` (line 167) — both systemd D-Bus calls —
-to build the returned unit allowlist before any journal entries are
-filtered. `NewSystemManager` (line 147) itself calls
-`dbus.NewSystemConnectionContext` and returns an error if that connection
-fails, so the manager cannot be constructed at all without systemd. The
-query's true requirement is `systemd AND journald`, documented here as the
+Same shape as above. `internal/modules/logs/manager.go`'s `Logs()` calls
+`m.client.ListUnitsContext(ctx)` and `m.client.ListUnitFilesContext(ctx)` —
+both systemd D-Bus calls — to build the returned unit allowlist before any
+journal entries are filtered, so the query's true requirement is `systemd
+AND journald`. As of this chunk, `logs.NewSystemManager` likewise no longer
+dials D-Bus itself; it accepts a pre-opened `systemdClient`, opened once by
+`cmd/pilothoused/main.go`'s `connectSystemd` and passed through
+`buildSystemdManagers`. An absent or unreachable systemd bus means
+`connectSystemd` returns `nil`, `buildSystemdManagers` never calls
+`logs.NewSystemManager`, and `registerLogs` no-ops on the resulting nil
+manager — startup is never aborted by this path. Documented here as the
 exceptions section's job: recording a real code dependency that exceeds the
 module default's literal wording.
 
