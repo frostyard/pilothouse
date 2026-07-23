@@ -172,7 +172,7 @@ func TestServiceStopRequiresResourceConfirmation(t *testing.T) {
 func TestRegisterMaintenanceAndBackups(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	maintenanceManager := &fakeMaintenanceManager{}
-	require.NoError(t, registerMaintenance(actions, queries, maintenanceManager))
+	require.NoError(t, registerMaintenance(actions, queries, maintenanceManager, capability.New(capability.Systemd, capability.Updex, capability.Sysext)))
 	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New(capability.Systemd)))
 	state, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryMaintenanceState, nil)
 	require.NoError(t, err)
@@ -183,6 +183,17 @@ func TestRegisterMaintenanceAndBackups(t *testing.T) {
 	err = actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot")
 	require.NoError(t, err)
 	assert.True(t, maintenanceManager.rebooted)
+}
+
+func TestRegisterMaintenanceNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	// A non-nil fake manager proves registerMaintenance's own caps guard
+	// independently withholds registration -- maintenance.NewSystemManager
+	// has no D-Bus dependency, so unlike backups/services/logs there is no
+	// nil-manager construction signal to rely on instead.
+	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, capability.New(capability.Updex, capability.Sysext)))
+	assert.False(t, queries.Registered(broker.QueryMaintenanceState))
+	assert.False(t, actions.Registered(broker.ActionMaintenanceReboot))
 }
 
 func TestRegisterJobsRequiresAdministrator(t *testing.T) {

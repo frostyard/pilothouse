@@ -5,14 +5,13 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. As of c9, `registerPodman`/`registerDocker`/
+capability-guarded. As of c10, `registerPodman`/`registerDocker`/
 `registerIncus` (and the new `QueryCapabilities` itself), plus
-`registerServices`, `registerLogs`, `registerBackups`, and
-`registerStorageActions`, are actually capability-guarded; every other row
-below still reflects a *future* guarantee that its own conversion chunk
-(c10-c11) has not landed yet. Later chunks in this phase convert the
-remaining registrations to match this table module by module; the final
-chunk's contract test enforces it.
+`registerServices`, `registerLogs`, `registerBackups`,
+`registerStorageActions`, and `registerMaintenance`, are actually
+capability-guarded; every other row below (sysext) still reflects a
+*future* guarantee that its own conversion chunk (c11) has not landed yet.
+The final chunk's contract test enforces the full table.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
 constants and 16 `Query*` constants today — 51 IDs total, reproducible with:
@@ -196,15 +195,47 @@ exceeds the module default's literal wording.
 
 `.mill/spec.md` says sysext reads are "updex OR sysext" — there is no
 standalone sysext read query; that describes the extension-read subpath
-inside `QueryMaintenanceState` (`main.go:546`), which the spec notes already
-performs daemon-side extension reads today (maintenance's update source
-invokes updex). The *registration* of `QueryMaintenanceState` is guarded on
-`systemd` (the module-level default for maintenance, matching the row
-above); separately, once guarded, its extension-read subpath must degrade
-gracefully when updex/sysext capabilities are absent — extension-derived
-fields are omitted, never errors. This degrade behavior is c10's scope; this
-table only fixes `QueryMaintenanceState`'s registration-level capability at
-`systemd`.
+inside `QueryMaintenanceState`, which the spec notes already performs
+daemon-side extension reads today (maintenance's update source invokes
+updex). The *registration* of `QueryMaintenanceState` (and
+`ActionMaintenanceReboot`) is guarded on `systemd` (the module-level default
+for maintenance, matching the rows above) by `registerMaintenance`, which
+takes the probed `capability.Set` and no-ops entirely when `systemd` is
+absent, exactly like `registerBackups`/`registerStorageActions`.
+`maintenance.NewSystemManager` has no D-Bus dependency of its own (it
+depends only on the sysext manager, job store, and command runner), so
+unlike backups/services/logs there is no construction-level non-fatal-
+startup fix needed here — the manager is always constructed, and this
+registration guard is the only thing withholding it.
+
+Separately, as of c10, `maintenance.SystemManager`'s `extensionState` method
+degrades its extension-read subpath gracefully based on the probed
+`updex`/`sysext` capabilities threaded into `NewSystemManager`'s new
+`updexAvailable`/`sysextAvailable` parameters, rather than erroring:
+`sysext.SystemManager.Check()` (which produces `Updates`) only ever invokes
+`updex`, while `List()` (which produces `Features`, driving "disabled but
+merged, reboot required" reasons) invokes `updex` to enumerate feature
+definitions and additionally `systemd-sysext` to attach installed/merged
+status.
+
+- updex and sysext both present: unchanged pre-chunk behavior — `Updates`
+  and `Features`/merged-derived reboot reasons both populate.
+- updex present, sysext absent: `Check()` still runs (`Updates` populates,
+  since `Check` never touches `systemd-sysext`); `List()` is skipped
+  entirely (merged-but-disabled reboot reasons omitted, no attempt, no
+  error), since installed/merged status is meaningless without
+  `systemd-sysext`.
+- updex absent (sysext present or absent): neither `Check()` nor `List()`
+  runs — both require `updex` to enumerate feature definitions in the first
+  place — so `Updates` and feature-derived reboot reasons are both omitted.
+  Recorded as an honest limitation of today's `sysext.SystemManager`
+  (enumeration is updex-only by construction), not a phase-1a shortfall.
+
+In no combination does `State()` return an error because of missing
+updex/sysext, and non-extension fields (`Jobs`, `OSVersion`, reboot-marker-
+derived reasons) are unaffected in every combination.
+`internal/modules/maintenance/manager_test.go` has one dedicated test case
+per combination.
 
 ## `jobs` query
 

@@ -58,7 +58,7 @@ func TestStateCombinesUpdatesAndRebootSignals(t *testing.T) {
 	manager := NewSystemManager(
 		fakeUpdates{updates: []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}}, features: []sysext.Feature{{Name: "docker", Merged: true}}},
 		fakeJobs{records: []jobs.Job{{Action: "update", Status: jobs.StatusSucceeded, RebootRequired: true, FinishedAt: &finished}}},
-		&fakeRunner{}, root,
+		&fakeRunner{}, root, true, true,
 	)
 	manager.now = func() time.Time { return now }
 
@@ -76,7 +76,7 @@ func TestOldUpdateJobDoesNotRequireReboot(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
 	now := time.Now().UTC()
 	finished := now.Add(-time.Hour)
-	manager := NewSystemManager(fakeUpdates{}, fakeJobs{records: []jobs.Job{{Status: jobs.StatusSucceeded, RebootRequired: true, FinishedAt: &finished}}}, &fakeRunner{}, root)
+	manager := NewSystemManager(fakeUpdates{}, fakeJobs{records: []jobs.Job{{Status: jobs.StatusSucceeded, RebootRequired: true, FinishedAt: &finished}}}, &fakeRunner{}, root, true, true)
 	manager.now = func() time.Time { return now }
 	state, err := manager.State(context.Background())
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestEnabledMergedExtensionDoesNotRequireReboot(t *testing.T) {
 		fakeUpdates{features: []sysext.Feature{{Name: "docker", Enabled: true, Merged: true}}},
 		fakeJobs{},
 		&fakeRunner{},
-		root,
+		root, true, true,
 	)
 
 	state, err := manager.State(context.Background())
@@ -103,7 +103,7 @@ func TestEnabledMergedExtensionDoesNotRequireReboot(t *testing.T) {
 
 func TestRebootUsesFixedSystemctlArguments(t *testing.T) {
 	runner := &fakeRunner{}
-	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, runner, t.TempDir())
+	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, runner, t.TempDir(), true, true)
 	require.NoError(t, manager.Reboot(context.Background()))
 	assert.Equal(t, "systemctl", runner.name)
 	assert.Equal(t, []string{"reboot", "--no-wall", "--no-block"}, runner.args)
@@ -120,7 +120,7 @@ func TestStateSliceFieldsSerializeAsArrays(t *testing.T) {
 
 	// fakeUpdates{} returns a nil updates slice from Check(); no reboot marker
 	// and no jobs means RebootReasons and Jobs are empty too.
-	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, &fakeRunner{}, root)
+	manager := NewSystemManager(fakeUpdates{}, fakeJobs{}, &fakeRunner{}, root, true, true)
 	state, err := manager.State(context.Background())
 	require.NoError(t, err)
 
@@ -134,4 +134,111 @@ func TestStateSliceFieldsSerializeAsArrays(t *testing.T) {
 	assert.Contains(t, out, `"reboot_reasons":[]`)
 	assert.False(t, strings.Contains(out, `"updates":null`), "updates must not be null")
 	assert.False(t, strings.Contains(out, `"reboot_reasons":null`), "reboot_reasons must not be null")
+}
+
+// callCountingUpdates tracks how many times Check/List are invoked, so the
+// updex/sysext presence combination tests below can assert that
+// extensionState skips Check()/List() entirely when updex is absent, rather
+// than merely asserting on the returned data.
+type callCountingUpdates struct {
+	checkCalls int
+	features   []sysext.Feature
+	listCalls  int
+	updates    []sysext.AvailableUpdate
+}
+
+func (u *callCountingUpdates) Check(context.Context) ([]sysext.AvailableUpdate, error) {
+	u.checkCalls++
+	return u.updates, nil
+}
+
+func (u *callCountingUpdates) List(context.Context) ([]sysext.Feature, error) {
+	u.listCalls++
+	return u.features, nil
+}
+
+func newExtensionRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "proc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
+	return root
+}
+
+// The four tests below cover the degrade table from the chunk spec, grounded
+// in what sysext.SystemManager's Check()/List() actually depend on: Check()
+// only ever invokes updex, while List() invokes updex to enumerate feature
+// definitions and additionally systemd-sysext to attach installed/merged
+// status. In no combination does State() return an error.
+
+func TestStateWithUpdexAndSysextBothPresentPopulatesUpdatesAndFeatureReasons(t *testing.T) {
+	root := newExtensionRoot(t)
+	source := &callCountingUpdates{
+		updates:  []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}},
+		features: []sysext.Feature{{Name: "docker", Merged: true}},
+	}
+	manager := NewSystemManager(source, fakeJobs{}, &fakeRunner{}, root, true, true)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, source.checkCalls)
+	assert.Equal(t, 1, source.listCalls)
+	assert.Len(t, state.Updates, 1)
+	assert.Contains(t, state.RebootReasons, "docker is disabled but remains active until reboot.")
+	assert.True(t, state.RebootRequired)
+}
+
+func TestStateWithUpdexPresentSysextAbsentSkipsFeatureDerivedReasons(t *testing.T) {
+	root := newExtensionRoot(t)
+	source := &callCountingUpdates{
+		updates:  []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}},
+		features: []sysext.Feature{{Name: "docker", Merged: true}},
+	}
+	manager := NewSystemManager(source, fakeJobs{}, &fakeRunner{}, root, true, false)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, source.checkCalls, "Check never touches systemd-sysext, so it still runs")
+	assert.Equal(t, 0, source.listCalls, "List's installed/merged status is meaningless without systemd-sysext")
+	assert.Len(t, state.Updates, 1)
+	assert.Empty(t, state.RebootReasons)
+	assert.False(t, state.RebootRequired)
+}
+
+func TestStateWithUpdexAbsentSysextPresentOmitsUpdatesAndFeatureReasons(t *testing.T) {
+	root := newExtensionRoot(t)
+	source := &callCountingUpdates{
+		updates:  []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}},
+		features: []sysext.Feature{{Name: "docker", Merged: true}},
+	}
+	manager := NewSystemManager(source, fakeJobs{}, &fakeRunner{}, root, false, true)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, source.checkCalls, "neither Check nor List can enumerate feature definitions without updex")
+	assert.Equal(t, 0, source.listCalls)
+	assert.Empty(t, state.Updates)
+	assert.Empty(t, state.RebootReasons)
+	assert.False(t, state.RebootRequired)
+}
+
+func TestStateWithUpdexAndSysextBothAbsentOmitsUpdatesAndFeatureReasons(t *testing.T) {
+	root := newExtensionRoot(t)
+	source := &callCountingUpdates{
+		updates:  []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}},
+		features: []sysext.Feature{{Name: "docker", Merged: true}},
+	}
+	manager := NewSystemManager(source, fakeJobs{}, &fakeRunner{}, root, false, false)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, source.checkCalls, "identical observable output to the updex-absent/sysext-present case")
+	assert.Equal(t, 0, source.listCalls)
+	assert.Empty(t, state.Updates)
+	assert.Empty(t, state.RebootReasons)
+	assert.False(t, state.RebootRequired)
 }

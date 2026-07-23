@@ -169,7 +169,8 @@ rules for adding a new module (routes, actions, queries).
   capability, and never let its absence fail `run()`. Maintenance and
   sysext manager construction (which use `sysext.ExecRunner`, not systemd
   D-Bus) are unaffected by this chunk and remain unconditionally
-  registered until their own conversion. The probed `capability.Set` is
+  registered until their own conversion (see the maintenance update below).
+  The probed `capability.Set` is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
   (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
@@ -201,8 +202,38 @@ rules for adding a new module (routes, actions, queries).
   defensive backstop for directly-injected test fakes. `QueryStorageState`
   itself, registered separately against the plain, non-systemd
   `storageManager`, remains unconditional per `docs/capabilities.md`'s
-  documented exception. Maintenance and sysext stay unconditionally
-  registered until their own conversion.
+  documented exception. Sysext stays unconditionally registered until its
+  own conversion.
+- **Maintenance: guarded registration plus a real handler-level degrade.**
+  `registerMaintenance` (`cmd/pilothoused/main.go`) is the next conversion:
+  it takes the probed `capability.Set` and no-ops both
+  `QueryMaintenanceState` and `ActionMaintenanceReboot` when `systemd` is
+  absent, exactly like `registerBackups`/`registerStorageActions`.
+  `maintenance.NewSystemManager` has no D-Bus dependency of its own (it
+  depends only on the sysext manager, job store, and command runner), so
+  unlike backups/services/logs there is no construction-level non-fatal-
+  startup fix to make here; the manager is always constructed regardless of
+  systemd, and the registration guard above is the only thing withholding
+  it. Separately — and this is the real behavioral change in this chunk —
+  `maintenance.SystemManager.State`'s extension-read subpath
+  (`extensionState`, which calls `UpdateSource.Check` for `Updates` and
+  `UpdateSource.List` for `Features`/merged-status-derived reboot reasons)
+  degrades gracefully instead of erroring when `updex`/`systemd-sysext` are
+  unavailable, driven by two new `updexAvailable`/`sysextAvailable`
+  parameters on `NewSystemManager` fed from `cmd/pilothoused/main.go`'s
+  probed `caps.Has(capability.Updex)`/`caps.Has(capability.Sysext)`: with
+  both present, behavior is byte-for-byte unchanged; with updex present but
+  sysext absent, `Check()` still runs (`Updates` populates) but `List()` is
+  skipped entirely (merged-but-disabled reboot reasons omitted); with updex
+  absent (sysext present or absent), neither call runs and both `Updates`
+  and feature-derived reboot reasons are omitted — a documented limitation
+  of today's `sysext.SystemManager`, whose enumeration is updex-only by
+  construction, not a phase 1a gap. `State` never returns an error because
+  of missing updex/sysext in any combination; `Jobs`, `OSVersion`, and
+  reboot-marker-derived reasons are computed exactly as before regardless.
+  See `docs/capabilities.md`'s extension-read note for the full table and
+  `internal/modules/maintenance/manager_test.go` for one dedicated test case
+  per combination.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

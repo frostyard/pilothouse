@@ -157,8 +157,8 @@ func run() error {
 	if err := registerSysextActions(actions, sysextManager); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/")
-	if err := registerMaintenance(actions, queries, maintenanceManager); err != nil {
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext))
+	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
@@ -681,7 +681,21 @@ func filesPublicError(err error) error {
 	return broker.NewPublicError(503, "files service unavailable", "unavailable", err)
 }
 
-func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager) error {
+// registerMaintenance registers QueryMaintenanceState and
+// ActionMaintenanceReboot iff caps has Systemd -- both require Systemd
+// uniformly, so the guard sits once at the top rather than per call.
+// maintenance.NewSystemManager has no D-Bus dependency (it depends only on
+// the sysext manager, job store, and command runner), so unlike
+// backups/services/logs/storage there is no nil-manager backstop here: the
+// manager is always non-nil regardless of systemd's presence, and this
+// guard is the only thing withholding registration. Extension-derived
+// fields (Updates, Feature/merged-derived reboot reasons) degrade inside
+// SystemManager.State itself based on the probed updex/sysext capabilities
+// passed into NewSystemManager, independent of this systemd guard.
+func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Systemd) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryMaintenanceState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	}); err != nil {
