@@ -605,6 +605,194 @@ func TestGatedModuleRouteMountedAlways404sUntilCapabilityPresent(t *testing.T) {
 	assert.Contains(t, response.Body.String(), "gated-page-marker")
 }
 
+// fakeGatedAnyModule is a synthetic platform.Module that implements
+// platform.CapabilityGateAny (not CapabilityGate), used to prove the any-of
+// nav/dashboard/route filtering mechanism added in this chunk through a
+// real registry and real HTTP round trip, mirroring fakeGatedModule above.
+type fakeGatedAnyModule struct {
+	dashboardCalls int
+	requiredAny    []capability.ID
+}
+
+func (m *fakeGatedAnyModule) Dashboard(context.Context, platform.Host) ([]platform.DashboardCard, error) {
+	m.dashboardCalls++
+	return []platform.DashboardCard{{Component: textComponent("gated-any-card-marker"), Order: 1, Span: platform.SpanFull}}, nil
+}
+
+func (m *fakeGatedAnyModule) Manifest() platform.Manifest {
+	return platform.Manifest{ID: "gated-any", Name: "Gated Any Module", Order: 51, Path: "/gated-any"}
+}
+
+func (m *fakeGatedAnyModule) Mount(mux *http.ServeMux, host platform.Host) {
+	mux.HandleFunc("GET /gated-any", platform.GateAny(host, m.requiredAny, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "gated-any-page-marker")
+	}))
+}
+
+func (m *fakeGatedAnyModule) RequiredAnyCapabilities() []capability.ID { return m.requiredAny }
+
+// fakePlainModule is a synthetic platform.Module implementing neither
+// platform.CapabilityGate nor platform.CapabilityGateAny: it has no
+// capability requirement at all and must always be available, the third
+// case moduleAvailable's AND-of-two-defaults composition must handle
+// correctly alongside CapabilityGate-only and CapabilityGateAny-only.
+type fakePlainModule struct {
+	dashboardCalls int
+}
+
+func (m *fakePlainModule) Dashboard(context.Context, platform.Host) ([]platform.DashboardCard, error) {
+	m.dashboardCalls++
+	return []platform.DashboardCard{{Component: textComponent("plain-card-marker"), Order: 1, Span: platform.SpanFull}}, nil
+}
+
+func (m *fakePlainModule) Manifest() platform.Manifest {
+	return platform.Manifest{ID: "plain", Name: "Plain Module", Order: 1, Path: "/plain"}
+}
+
+func (m *fakePlainModule) Mount(mux *http.ServeMux, host platform.Host) {
+	mux.HandleFunc("GET /plain", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "plain-page-marker")
+	})
+}
+
+func newGatedAnyTestServer(t *testing.T, module *fakeGatedAnyModule, initialCaps capability.Set) (*Server, *fakeBroker) {
+	t.Helper()
+	registry, err := platform.NewRegistry(module)
+	require.NoError(t, err)
+	fake := &fakeBroker{session: broker.SessionResponse{CSRF: "csrf"}, capabilities: initialCaps}
+	server, err := NewServer(registry, fake, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	server.refreshCapabilities(context.Background(), "token")
+	return server, fake
+}
+
+func TestDashboardOmitsCardAndSkipsDashboardCallForCapabilityGateAnyAbsentModule(t *testing.T) {
+	module := &fakeGatedAnyModule{requiredAny: []capability.ID{capability.Docker, capability.Podman}}
+	server, fake := newGatedAnyTestServer(t, module, capability.New(capability.Systemd))
+
+	response := getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), "gated-any-card-marker")
+	assert.NotContains(t, response.Body.String(), "Module unavailable")
+	assert.Zero(t, module.dashboardCalls)
+
+	// One of the required set (Podman) present, not Docker: any-of must be
+	// satisfied.
+	fake.capabilities = capability.New(capability.Podman)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "gated-any-card-marker")
+	assert.Equal(t, 1, module.dashboardCalls)
+}
+
+func TestNavOmitsManifestForCapabilityGateAnyAbsentModuleAndIncludesItWhenPresent(t *testing.T) {
+	module := &fakeGatedAnyModule{requiredAny: []capability.ID{capability.Docker, capability.Podman}}
+	server, fake := newGatedAnyTestServer(t, module, capability.New(capability.Systemd))
+
+	response := getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), `href="/gated-any"`)
+	assert.NotContains(t, response.Body.String(), "Gated Any Module")
+
+	fake.capabilities = capability.New(capability.Podman)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `href="/gated-any"`)
+	assert.Contains(t, response.Body.String(), "Gated Any Module")
+}
+
+func TestGatedAnyModuleRouteMountedAlways404sUntilOneOfRequiredCapabilitiesPresent(t *testing.T) {
+	module := &fakeGatedAnyModule{requiredAny: []capability.ID{capability.Docker, capability.Podman}}
+	server, fake := newGatedAnyTestServer(t, module, capability.New(capability.Systemd))
+
+	request := httptest.NewRequest(http.MethodGet, "/gated-any", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusNotFound, response.Code)
+
+	fake.capabilities = capability.New(capability.Podman)
+	server.refreshCapabilities(context.Background(), "token")
+
+	request = httptest.NewRequest(http.MethodGet, "/gated-any", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "token"})
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "gated-any-page-marker")
+}
+
+// TestModuleAvailabilityCoversCapabilityGateCapabilityGateAnyAndNeither
+// registers one module of each of the three shapes moduleAvailable's
+// AND-of-two-defaults composition must handle (CapabilityGate only,
+// CapabilityGateAny only, and neither interface) into one real registry and
+// proves, through a real *web.Server and authenticated HTTP round trips,
+// that each is correctly included or excluded from both the nav
+// (availableManifests) and the dashboard card list as capabilities change.
+func TestModuleAvailabilityCoversCapabilityGateCapabilityGateAnyAndNeither(t *testing.T) {
+	gateOnly := &fakeGatedModule{required: []capability.ID{capability.Docker}}
+	gateAnyOnly := &fakeGatedAnyModule{requiredAny: []capability.ID{capability.Podman, capability.Incus}}
+	neither := &fakePlainModule{}
+
+	registry, err := platform.NewRegistry(gateOnly, gateAnyOnly, neither)
+	require.NoError(t, err)
+	fake := &fakeBroker{session: broker.SessionResponse{CSRF: "csrf"}, capabilities: capability.New(capability.Systemd)}
+	server, err := NewServer(registry, fake, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	server.refreshCapabilities(context.Background(), "token")
+
+	// Neither Docker (gateOnly's requirement) nor Podman/Incus (gateAnyOnly's
+	// any-of set) is present: only the module implementing neither interface
+	// is available.
+	response := getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), "gated-card-marker")
+	assert.NotContains(t, response.Body.String(), "gated-any-card-marker")
+	assert.Contains(t, response.Body.String(), "plain-card-marker")
+	assert.NotContains(t, response.Body.String(), `href="/gated"`)
+	assert.NotContains(t, response.Body.String(), `href="/gated-any"`)
+	assert.Contains(t, response.Body.String(), `href="/plain"`)
+	assert.Zero(t, gateOnly.dashboardCalls)
+	assert.Zero(t, gateAnyOnly.dashboardCalls)
+	assert.Equal(t, 1, neither.dashboardCalls)
+
+	// Docker present: the CapabilityGate-only module becomes available; the
+	// CapabilityGateAny-only module still isn't (Docker isn't in its any-of
+	// set); the plain module remains available.
+	fake.capabilities = capability.New(capability.Docker)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "gated-card-marker")
+	assert.NotContains(t, response.Body.String(), "gated-any-card-marker")
+	assert.Contains(t, response.Body.String(), "plain-card-marker")
+	assert.Contains(t, response.Body.String(), `href="/gated"`)
+	assert.NotContains(t, response.Body.String(), `href="/gated-any"`)
+	assert.Equal(t, 1, gateOnly.dashboardCalls)
+	assert.Zero(t, gateAnyOnly.dashboardCalls)
+
+	// Podman present instead: the CapabilityGateAny-only module becomes
+	// available (any-of satisfied); the CapabilityGate-only module (still
+	// missing Docker) is not.
+	fake.capabilities = capability.New(capability.Podman)
+	server.refreshCapabilities(context.Background(), "token")
+
+	response = getAuthenticated(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.NotContains(t, response.Body.String(), "gated-card-marker")
+	assert.Contains(t, response.Body.String(), "gated-any-card-marker")
+	assert.Contains(t, response.Body.String(), "plain-card-marker")
+	assert.NotContains(t, response.Body.String(), `href="/gated"`)
+	assert.Contains(t, response.Body.String(), `href="/gated-any"`)
+	assert.Equal(t, 1, gateOnly.dashboardCalls)
+	assert.Equal(t, 1, gateAnyOnly.dashboardCalls)
+}
+
 type countingReader struct {
 	io.Reader
 	reads int

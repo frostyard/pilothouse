@@ -235,6 +235,59 @@ pointing at a route that would 404 — see
 `docs/agents/skills/partial-gate-modules-need-full-view-element-audit.md`
 for the failure mode this avoids.
 
+### Any-of whole-module gating (`CapabilityGateAny`)
+
+`CapabilityGate`/`Available` above always require *every* listed capability
+(`capability.Set.HasAll` semantics). Some modules will instead need *any
+one* of several capabilities — e.g. a module whose surface works given
+either of two alternative container engines. For that shape,
+`internal/capability`'s `Set` gained a sibling predicate,
+`HasAny(ids ...ID) bool`, that reports true iff at least one given id is
+present; unlike `HasAll`'s zero-ids case (vacuously true), `HasAny()` with
+zero ids is always false, since "any of nothing" has no capability to
+satisfy — a nil/zero-value `Set`'s `HasAny` is nil-safe like `Has`/`HasAll`.
+
+`internal/platform` mirrors the whole `CapabilityGate`/`Gate`/`Available`
+trio with an any-of sibling set, deliberately kept as separate types rather
+than adding an any-of flag to `CapabilityGate` — no module needs both AND
+and OR semantics on its whole-module gate at once, and separate interfaces
+avoid ambiguity about which test applies to a given module:
+
+```go
+type CapabilityGateAny interface {
+    RequiredAnyCapabilities() []capability.ID
+}
+```
+
+`platform.GateAny(host, ids, next)` is `Gate`'s any-of counterpart: it 404s
+the request unless `host.Capabilities(ctx).HasAny(ids...)`, and otherwise
+delegates to `next` unchanged. `platform.AvailableAny(module, caps)` is
+`Available`'s any-of counterpart: it returns true when `module` implements
+`CapabilityGateAny` and `caps.HasAny` on its `RequiredAnyCapabilities` is
+true, and returns true (available) when `module` does not implement
+`CapabilityGateAny` at all — the same default-available convention
+`Available` uses for `CapabilityGate`.
+
+`internal/web/server.go`'s `moduleAvailable(module, caps)` — the single
+choke point `availableManifests` (nav) and the dashboard card loop both
+call — composes the two: `platform.Available(module, caps) &&
+platform.AvailableAny(module, caps)`. Because each half defaults to `true`
+for a module that doesn't implement its respective interface, this
+AND-of-two-defaults composition is exactly correct for all three shapes a
+module can be in (`CapabilityGate` only, `CapabilityGateAny` only, or
+neither) with no type-switching in `server.go` itself, and needs no further
+change if a module later switches from one interface to the other.
+
+Reach for `CapabilityGateAny` instead of `CapabilityGate` when a module's
+whole surface should appear as soon as *any one* of a set of alternative
+capabilities is present, rather than requiring all of them together. No
+production module implements `CapabilityGateAny` yet — the mechanism above
+(`HasAny`, `GateAny`, `AvailableAny`, and the `moduleAvailable` composition)
+is proven with synthetic fake modules in `internal/capability/capability_test.go`,
+`internal/platform/capability_test.go`, and `internal/web/server_test.go`
+only, the same way `CapabilityGate` itself was proven before its first real
+adopter.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.

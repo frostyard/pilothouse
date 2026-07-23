@@ -256,8 +256,8 @@ rules for adding a new module (routes, actions, queries).
   wires the interface (not `Gate`, which individual modules call from their
   own `Mount`) into the two web-side registries the spec calls out: an
   unexported `moduleAvailable(module platform.Module, caps capability.Set)
-  bool` delegates straight to `platform.Available` — so the gating decision
-  has exactly one implementation, shared with `internal/platform`'s own
+  bool` delegates to `platform.Available` — so the gating decision has
+  exactly one implementation, shared with `internal/platform`'s own
   tests — and `Render` now builds the shell's `Modules` nav list from a new
   `s.availableManifests(ctx)` (filters `s.registry.Modules()` through
   `moduleAvailable` before mapping to `Manifest`, replacing the previous
@@ -278,6 +278,32 @@ rules for adding a new module (routes, actions, queries).
   `internal/web/server_test.go`, and every real module's
   nav/dashboard/route behavior was unchanged. `services` is the first real
   module to adopt it — see the next bullet.
+- **`HasAny`/`CapabilityGateAny`/`GateAny`/`AvailableAny`: an any-of sibling
+  (mechanism only).** `internal/capability.Set` gained `HasAny(ids ...ID)
+  bool`, reporting true iff at least one given id is present; unlike
+  `HasAll`'s zero-ids case (vacuously true), `HasAny()` with zero ids is
+  always false ("any of nothing" has no capability to satisfy), and a
+  nil/zero-value `Set`'s `HasAny` is nil-safe like `Has`/`HasAll`.
+  `internal/platform` mirrors `CapabilityGate`/`Gate`/`Available` with a
+  parallel any-of trio — `CapabilityGateAny` (`RequiredAnyCapabilities()
+  []capability.ID`), `GateAny(host, ids, next)`, and `AvailableAny(module,
+  caps)` — kept as separate types rather than folding an any-of flag into
+  `CapabilityGate`, since no module needs both AND and OR semantics on its
+  whole-module gate at once. `moduleAvailable` now composes both:
+  `platform.Available(module, caps) && platform.AvailableAny(module,
+  caps)`. Because `Available` defaults to `true` for a module that doesn't
+  implement `CapabilityGate` and `AvailableAny` defaults to `true` for a
+  module that doesn't implement `CapabilityGateAny`, this
+  AND-of-two-defaults composition is correct for all three shapes a module
+  can be in (`CapabilityGate` only, `CapabilityGateAny` only, or neither)
+  with no type-switching in `server.go` itself. No production module
+  implements `CapabilityGateAny` yet — the mechanism was proven the same
+  way `CapabilityGate` was before its first real adopter: a synthetic fake
+  module in `internal/platform/capability_test.go` (exercising `AvailableAny`
+  through a fake `Host`'s real `Capabilities()`) and a synthetic fake module
+  registered into a real `*web.Server` in `internal/web/server_test.go`
+  proving nav/dashboard/route behavior through a real registry and HTTP
+  round trip.
 - **Services module: the first real `CapabilityGate` adopter.**
   `internal/modules/services.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -535,8 +561,14 @@ optional tooling never shows a dead link or a button that always fails.
   capability.Set`, added to the `platform.Host` interface in #54 and satisfied
   by `web.Server` from the cache above. Because it takes a `context.Context`
   rather than an `*http.Request`, it is callable from both HTTP handlers and
-  `Module.Dashboard(ctx, host)`. Modules implementing `CapabilityGate`
-  (whole-module gate):
+  `Module.Dashboard(ctx, host)`. `internal/platform` also has an any-of
+  sibling set — `CapabilityGateAny` (`RequiredAnyCapabilities()
+  []capability.ID`), `GateAny`, and `AvailableAny`, using `Set.HasAny`
+  semantics instead of `HasAll` — and `moduleAvailable` composes both:
+  `platform.Available(module, caps) && platform.AvailableAny(module,
+  caps)`. No production module implements `CapabilityGateAny` yet; see the
+  mechanism-only bullet above for detail. Modules implementing
+  `CapabilityGate` (whole-module gate):
   - `services` → `Systemd` (plus a `Systemd AND Journald` `Gate` on just
     `GET /services/{unit}/logs`)
   - `logs` → `Systemd AND Journald`

@@ -31,8 +31,9 @@ const (
 )
 
 // Set holds the capabilities present on a host. The zero value is a valid,
-// empty Set: Has and HasAll on a nil or zero-value Set return false without
-// panicking, and MarshalJSON on a zero-value Set encodes an empty list.
+// empty Set: Has, HasAll, and HasAny on a nil or zero-value Set return false
+// without panicking, and MarshalJSON on a zero-value Set encodes an empty
+// list.
 type Set struct {
 	ids map[ID]struct{}
 }
@@ -63,6 +64,20 @@ func (s Set) HasAll(ids ...ID) bool {
 		}
 	}
 	return true
+}
+
+// HasAny reports whether at least one given id is present in the set. Unlike
+// HasAll (whose zero-ids case is vacuously true), HasAny with zero ids
+// returns false: "any of nothing" has no capability to satisfy. A nil or
+// zero-value Set never panics and always returns false, the same as Has and
+// HasAll.
+func (s Set) HasAny(ids ...ID) bool {
+	for _, id := range ids {
+		if s.Has(id) {
+			return true
+		}
+	}
+	return false
 }
 
 // List returns the present capability IDs, sorted. It never returns a nil
