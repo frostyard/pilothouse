@@ -455,6 +455,35 @@ rules for adding a new module (routes, actions, queries).
   `platform.Available` still reports it available under a no-`Systemd`
   fixture — the two assertions together are what "storage stays in c2's
   available-modules filter" means concretely for a partial-gate module.
+- **Podman and docker: whole-module engine-capability gates.**
+  `internal/modules/podman.Module` and `internal/modules/docker.Module` now
+  implement `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Podman}` and `[]capability.ID{capability.Docker}`
+  respectively — matching `docs/capabilities.md`'s one-capability-per-engine
+  mapping and #50's daemon-side `registerPodman`/`registerDocker` gating.
+  Each module has the same four-route shape (state page, container logs,
+  container action, image action), and every one is wrapped in
+  `platform.Gate(host, []capability.ID{capability.Podman|Docker}, ...)` in
+  the module's own `Mount`: `GET /podman`/`GET /docker`,
+  `GET /{podman,docker}/containers/{id}/logs`,
+  `POST /{podman,docker}/containers/{id}/{action}`, and
+  `POST /{podman,docker}/images/{id}/{action}`. Neither module has a
+  sub-feature with a broader or narrower requirement (unlike services'
+  journal split), so there is exactly one `Gate` wrap per route, all sharing
+  the module's single capability. With the engine capability absent, the
+  whole module disappears — nav entry, dashboard card, and all four routes
+  404 at request time — while the sibling engine and the rest of the app are
+  unaffected; with the capability present, both modules behave exactly as
+  before this chunk. Neither module's `views.templ` changed: an absent
+  module 404s before any page renders, so there is no conditional view
+  content to add, the same as backups/maintenance/logs. Neither module is a
+  `platform.HealthProvider` (see the module table above), so no `attention`
+  aggregator change was needed here either. Both `module_test.go` files
+  gained the same configurable `caps capability.Set`/`capsSet bool` pair on
+  their fake `Host` that the other gated modules' tests use (defaulting to a
+  full-capability set), so gated/ungated route behavior — and that gating
+  one engine leaves the other engine's routes and the rest of the mux
+  unaffected — is exercised via real `ServeMux` round trips through `Mount`.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

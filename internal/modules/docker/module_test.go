@@ -14,16 +14,32 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// fullCapabilities matches c1's default: every capability present, so
+// existing tests that don't care about gating keep exercising the
+// full-capability path unchanged.
+var fullCapabilities = capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+
 type moduleHost struct {
 	action          string
 	parameters      map[string]string
 	query           string
 	queryParameters map[string]string
 	page            platform.Page
+	// caps overrides Capabilities' return value when capsSet is true.
+	// Leaving both zero (the default for a bare &moduleHost{}) falls back
+	// to fullCapabilities, so existing tests that never touch capability
+	// gating keep exercising the full-capability path unchanged; tests
+	// that need to exercise gating set both caps and capsSet explicitly,
+	// including to an intentionally empty capability.Set{}.
+	caps    capability.Set
+	capsSet bool
 }
 
-func (*moduleHost) Capabilities(context.Context) capability.Set {
-	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+func (h *moduleHost) Capabilities(context.Context) capability.Set {
+	if !h.capsSet {
+		return fullCapabilities
+	}
+	return h.caps
 }
 
 func (*moduleHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool {
@@ -84,4 +100,76 @@ func TestLogsRouteQueriesBroker(t *testing.T) {
 	response = httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/docker/containers/invalid/logs", nil))
 	assert.Equal(t, http.StatusNotFound, response.Code)
+}
+
+func TestRequiredCapabilitiesIsDockerOnly(t *testing.T) {
+	assert.Equal(t, []capability.ID{capability.Docker}, New().RequiredCapabilities())
+}
+
+// TestModuleAvailabilityGatedOnDocker exercises platform.Available (c2's
+// real production gating predicate, not a reimplementation of it) against
+// this module's RequiredCapabilities, proving the whole module — nav entry
+// and dashboard card, per c2's mechanism — is excluded whenever docker is
+// absent, regardless of what else is present.
+func TestModuleAvailabilityGatedOnDocker(t *testing.T) {
+	module := New()
+	assert.True(t, platform.Available(module, capability.New(capability.Docker)))
+	assert.True(t, platform.Available(module, capability.New(capability.Docker, capability.Podman)))
+	assert.False(t, platform.Available(module, capability.New(capability.Podman)))
+	assert.False(t, platform.Available(module, capability.Set{}))
+}
+
+// TestRoutesGateOnDockerAbsent proves — via a real ServeMux round trip
+// through Mount, not a test-only stand-in — that every route this module
+// registers 404s once docker is absent, even when the other engine
+// (podman) is present.
+func TestRoutesGateOnDockerAbsent(t *testing.T) {
+	host := &moduleHost{caps: capability.New(capability.Podman), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/docker", nil),
+		httptest.NewRequest(http.MethodGet, "/docker/containers/"+runningID+"/logs", nil),
+		httptest.NewRequest(http.MethodPost, "/docker/containers/"+runningID+"/restart", nil),
+		httptest.NewRequest(http.MethodPost, "/docker/images/image/remove", nil),
+	} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusNotFound, response.Code, "%s %s", request.Method, request.URL.Path)
+	}
+}
+
+// TestPodmanRoutesUnaffectedWhenDockerAbsent proves gating docker does not
+// disturb the sibling podman module or the rest of the app: with only
+// docker missing, other routes (mounted on the same mux) keep working.
+func TestPodmanRoutesUnaffectedWhenDockerAbsent(t *testing.T) {
+	host := &moduleHost{caps: capability.New(capability.Podman), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	mux.HandleFunc("GET /unrelated", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/unrelated", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+}
+
+// TestRoutesWorkWhenDockerPresent proves behavior is unchanged from before
+// this chunk when docker is present: routes still succeed and dispatch as
+// before, exercised through the real ServeMux.
+func TestRoutesWorkWhenDockerPresent(t *testing.T) {
+	host := &moduleHost{caps: capability.New(capability.Docker), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/docker/containers/"+runningID+"/logs", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryDockerLogs, host.query)
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/docker/containers/"+runningID+"/restart", nil))
+	assert.Equal(t, broker.ActionDockerRestart, host.action)
 }
