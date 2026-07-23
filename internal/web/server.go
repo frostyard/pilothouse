@@ -280,11 +280,15 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		defer cancel()
 		session, err := s.broker.Session(ctx, cookie.Value)
 		if err != nil {
-			s.clearSessionCookie(w, r)
 			if errors.Is(err, broker.ErrUnauthorized) {
+				s.clearSessionCookie(w, r)
 				s.redirectToLogin(w, r)
 				return
 			}
+			// Transient broker outage: keep the session cookie so the
+			// capability set is refetched once the broker recovers (the
+			// staleAfterOutage path below), rather than logging the user
+			// out and losing that recovery signal.
 			s.capabilities.noteResult(err)
 			http.Error(w, "privileged broker unavailable", http.StatusServiceUnavailable)
 			return

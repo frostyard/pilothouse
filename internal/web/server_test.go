@@ -363,6 +363,15 @@ func TestAuthenticateRefetchesCapabilitiesAfterOutageRecovery(t *testing.T) {
 	assert.True(t, server.capabilities.staleAfterOutage())
 	assert.Equal(t, initialCaps.List(), server.Capabilities(context.Background()).List())
 	assert.Empty(t, fake.queryCalls)
+	// A transient outage must NOT clear the session cookie: clearing it logs
+	// the user out, so the recovery refetch below could never fire with the
+	// same session. Only a genuine ErrUnauthorized clears the cookie.
+	for _, c := range response.Result().Cookies() {
+		if c.Name == sessionCookie {
+			assert.Falsef(t, c.MaxAge < 0 || c.Value == "",
+				"transient outage cleared the session cookie")
+		}
+	}
 
 	// The next successful Session() triggers exactly one refetch and clears
 	// the down flag.
