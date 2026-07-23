@@ -681,6 +681,16 @@ func filesPublicError(err error) error {
 	return broker.NewPublicError(503, "files service unavailable", "unavailable", err)
 }
 
+// maintenanceLockResource is the serialization key ActionMaintenanceReboot
+// holds for the duration of a reboot attempt. It is deliberately distinct
+// from the "sysext/global" key every sysext lifecycle action shares: reboot
+// once reused that key, but the coupling was accidental rather than
+// intentional, and the only thing the reboot action needs is that two
+// concurrent reboots cannot overlap. Owning its own resource keeps that
+// guarantee while letting an in-flight extension refresh/update and a reboot
+// proceed independently.
+const maintenanceLockResource = "maintenance/global"
+
 // registerMaintenance registers QueryMaintenanceState and
 // ActionMaintenanceReboot iff caps has Systemd -- both require Systemd
 // uniformly, so the guard sits once at the top rather than per call.
@@ -704,7 +714,7 @@ func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRe
 	return actions.RegisterDefinition(broker.ActionDefinition{
 		ID: broker.ActionMaintenanceReboot, Admin: true, ConfirmationRequired: true, NonBlocking: true,
 		Resource:     func(map[string]string) (string, error) { return "maintenance/reboot", nil },
-		LockResource: func(map[string]string) (string, error) { return "sysext/global", nil },
+		LockResource: func(map[string]string) (string, error) { return maintenanceLockResource, nil },
 		Handler:      func(ctx context.Context, _ auth.Identity, _ map[string]string) error { return manager.Reboot(ctx) },
 	})
 }

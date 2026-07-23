@@ -109,6 +109,22 @@ rules for adding a new module (routes, actions, queries).
   unavailable, the action does not run. Long-running mutations (extension
   update/refresh) run as durable background jobs so a browser disconnect
   doesn't cancel in-flight work.
+- **Per-resource action serialization, keyed per subsystem.** Every action
+  definition resolves a lock key — `LockResource` when set, otherwise the
+  audited `Resource` — and `internal/broker`'s action registry holds it for
+  the action's duration, so conflicting operations on one resource cannot
+  overlap. The keys are deliberately per subsystem: the sysext lifecycle
+  actions (enable/disable/refresh/update) share `sysext/global`; storage
+  remote-mount lifecycle actions key on their opaque
+  `storage/mount/<id>` with creation on `storage/mounts`; and
+  `ActionMaintenanceReboot` holds `maintenance/global`
+  (`maintenanceLockResource` in `cmd/pilothoused/main.go`). Reboot formerly
+  reused sysext's key, which was reuse rather than an intentional coupling —
+  it now serializes only against another reboot, and an in-flight extension
+  refresh/update no longer refuses a reboot (nor the reverse). Confirmation,
+  admin authorization, and the audited `maintenance/reboot` resource are
+  unchanged. `cmd/pilothoused/main_test.go` proves both halves through real
+  `broker.ActionRegistry.Execute` calls.
 - **Streams for large/blocking data.** File upload/download use fixed
   `stream-actions`/`stream-queries` registrations with explicit size caps
   (256 MiB) rather than the generic action/query path.
