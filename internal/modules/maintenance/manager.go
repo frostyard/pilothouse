@@ -52,22 +52,29 @@ type Manager interface {
 }
 
 type SystemManager struct {
-	cacheFeatures []sysext.Feature
-	cacheUpdates  []sysext.AvailableUpdate
-	cacheAt       time.Time
-	jobs          JobSource
-	mu            sync.Mutex
-	now           func() time.Time
-	root          string
-	runner        Runner
-	updates       UpdateSource
+	cacheFeatures   []sysext.Feature
+	cacheUpdates    []sysext.AvailableUpdate
+	cacheAt         time.Time
+	jobs            JobSource
+	mu              sync.Mutex
+	now             func() time.Time
+	root            string
+	runner          Runner
+	sysextAvailable bool
+	updates         UpdateSource
+	updexAvailable  bool
 }
 
-func NewSystemManager(updates UpdateSource, jobSource JobSource, runner Runner, root string) *SystemManager {
+// NewSystemManager constructs a maintenance manager. updexAvailable and
+// sysextAvailable report whether the updex executable and systemd-sysext are
+// present on this host (as probed by internal/capability): they gate
+// extensionState's degrade behavior below, independent of the systemd
+// capability that gates registerMaintenance's registration entirely.
+func NewSystemManager(updates UpdateSource, jobSource JobSource, runner Runner, root string, updexAvailable, sysextAvailable bool) *SystemManager {
 	if root == "" {
 		root = "/"
 	}
-	return &SystemManager{jobs: jobSource, now: time.Now, root: root, runner: runner, updates: updates}
+	return &SystemManager{jobs: jobSource, now: time.Now, root: root, runner: runner, sysextAvailable: sysextAvailable, updates: updates, updexAvailable: updexAvailable}
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
@@ -115,9 +122,29 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
+// extensionState reads updex/sysext-derived data, degrading gracefully when
+// either dependency is absent rather than returning an error:
+//
+//   - updex and sysext both present: unchanged behavior -- Check() populates
+//     Updates and List() populates Features (which drives merged-but-disabled
+//     reboot reasons in State).
+//   - updex present, sysext absent: Check() still runs (it never touches
+//     systemd-sysext) so Updates still populates; List()'s installed/merged
+//     status is meaningless without systemd-sysext, so it is skipped entirely
+//     and Features is omitted.
+//   - updex absent (sysext present or absent): neither Check() nor List() can
+//     enumerate feature definitions without updex, so both are skipped and
+//     Updates/Features are both omitted. This is a known limitation of
+//     today's sysext.SystemManager (enumeration is updex-only), not an error.
+//
+// In no combination does extensionState return an error because of a missing
+// updex/sysext capability.
 func (m *SystemManager) extensionState(ctx context.Context) ([]sysext.AvailableUpdate, []sysext.Feature, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.updexAvailable {
+		return nil, nil, nil
+	}
 	if !m.cacheAt.IsZero() && m.now().Sub(m.cacheAt) < time.Minute {
 		return slices.Clone(m.cacheUpdates), slices.Clone(m.cacheFeatures), nil
 	}
@@ -125,9 +152,12 @@ func (m *SystemManager) extensionState(ctx context.Context) ([]sysext.AvailableU
 	if err != nil {
 		return nil, nil, fmt.Errorf("check extension updates: %w", err)
 	}
-	features, err := m.updates.List(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("inspect extension state: %w", err)
+	var features []sysext.Feature
+	if m.sysextAvailable {
+		features, err = m.updates.List(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("inspect extension state: %w", err)
+		}
 	}
 	m.cacheUpdates = slices.Clone(available)
 	m.cacheFeatures = slices.Clone(features)

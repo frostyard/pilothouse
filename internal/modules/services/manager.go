@@ -97,12 +97,15 @@ const (
 
 var errJournalUnavailable = errors.New("recent service diagnostics are unavailable")
 
-func NewSystemManager(journal JournalReader) (*SystemManager, error) {
-	client, err := dbus.NewSystemConnectionContext(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("connect to systemd: %w", err)
+// NewSystemManager builds a services manager from a pre-opened systemd
+// D-Bus client. The caller (cmd/pilothoused) is responsible for opening
+// that connection -- this package no longer dials systemd itself, so
+// construction can never fail because systemd is absent or unreachable.
+func NewSystemManager(client systemdClient, journal JournalReader) (*SystemManager, error) {
+	if client == nil {
+		return nil, errors.New("systemd client is required")
 	}
-	return &SystemManager{client: client, journal: journal}, nil
+	return newSystemManagerWithJournal(client, journal), nil
 }
 
 func newSystemManager(client systemdClient) *SystemManager { return &SystemManager{client: client} }

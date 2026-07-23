@@ -31,6 +31,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts
 - Responsive desktop and mobile layouts
+- Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus), advertised over an authenticated broker query; the daemon already keeps starting when Podman, Docker, or Incus is absent or unreachable, registering only the engines actually present instead of failing to start (broader graceful degradation across the rest of the probed capabilities lands in later releases)
 
 Pilothouse-managed SMB mounts can optionally map file ownership to a local
 numeric UID/GID. Both IDs are required together; leaving both fields blank

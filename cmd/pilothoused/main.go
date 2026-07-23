@@ -25,6 +25,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/auth/pam"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
 	"github.com/frostyard/pilothouse/internal/modules/docker"
@@ -93,6 +94,10 @@ func run() error {
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
 	streamQueries := broker.NewStreamQueryRegistry()
+	caps := capability.Probe(context.Background(), capability.Config{PodmanSocket: *podmanSocket, Updex: *updex})
+	if err := registerCapabilities(queries, caps); err != nil {
+		return err
+	}
 	filesManager, err := files.NewSystemManager(filesRoots.Specs())
 	if err != nil {
 		return err
@@ -111,63 +116,72 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve storage tools: %w", err)
 	}
-	unitClient, err := dbus.NewSystemConnectionContext(context.Background())
-	if err != nil {
-		return fmt.Errorf("connect storage systemd controller: %w", err)
-	}
-	defer unitClient.Close()
-	remoteManager := storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: unitClient})
-	if err := registerStorage(queries, remoteManager); err != nil {
+	// QueryStorageState is registered against the plain storageManager, which
+	// has no systemd dependency, so storage inventory reads work regardless
+	// of whether systemd is present -- see buildSystemdManagers below for the
+	// remote-mount controller, which does depend on systemd.
+	if err := registerStorage(queries, storageManager); err != nil {
 		return err
 	}
-	if err := registerStorageActions(actions, remoteManager); err != nil {
+	// Flag misconfiguration (bad timer name, non-positive max age) is a real
+	// startup error and fails run() regardless of systemd's presence; only
+	// the D-Bus reachability failure mode below is non-fatal.
+	if err := backups.ValidateConfiguration(backupTimers, *backupMaxAge); err != nil {
 		return err
 	}
-	backupManager, err := backups.NewSystemManager(backupTimers, *backupMaxAge)
-	if err != nil {
-		return err
+	systemdConnectCtx, systemdConnectCancel := context.WithTimeout(context.Background(), systemdConnectTimeout)
+	defer systemdConnectCancel()
+	systemdClient := connectSystemd(systemdConnectCtx, caps, func(ctx context.Context) (*dbus.Conn, error) {
+		return dbus.NewSystemConnectionContext(ctx)
+	}, logger)
+	if systemdClient != nil {
+		defer systemdClient.Close()
 	}
-	defer backupManager.Close()
-	if err := registerBackups(queries, backupManager); err != nil {
-		return err
-	}
-	servicesManager, err := services.NewSystemManager(servicejournal.New())
-	if err != nil {
-		return err
-	}
-	if err := registerServices(actions, queries, servicesManager); err != nil {
-		return err
-	}
-	logsManager, err := logs.NewSystemManager(logjournal.New())
+	managers, err := buildSystemdManagers(systemdClient, storageManager, backupTimers, *backupMaxAge, servicejournal.New(), logjournal.New())
 	if err != nil {
 		return err
 	}
-	if err := registerLogs(queries, logsManager); err != nil {
+	if err := registerStorageActions(actions, managers.remoteManager, caps); err != nil {
+		return err
+	}
+	if err := registerBackups(queries, managers.backupManager, caps); err != nil {
+		return err
+	}
+	if err := registerServices(actions, queries, managers.servicesManager, caps); err != nil {
+		return err
+	}
+	if err := registerLogs(queries, managers.logsManager, caps); err != nil {
 		return err
 	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
-	if err := registerSysextActions(actions, sysextManager); err != nil {
+	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/")
-	if err := registerMaintenance(actions, queries, maintenanceManager); err != nil {
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext))
+	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
 	podmanClient := podman.NewAPIClient(*podmanSocket)
 	defer podmanClient.Close()
-	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient)); err != nil {
+	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient), caps); err != nil {
 		return err
 	}
 	dockerClient, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
-		return fmt.Errorf("create Docker client: %w", err)
-	}
-	defer func() { _ = dockerClient.Close() }()
-	if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient)); err != nil {
-		return err
+		// Construction failure (e.g. a malformed DOCKER_HOST) is treated the
+		// same as an unreachable engine: the docker capability was already
+		// probed above (capability.Probe never fails fatally), so this is
+		// never a reason to abort daemon startup -- just leave docker
+		// unregistered.
+		logger.Warn("docker client unavailable; docker capability disabled", "error", err)
+	} else {
+		defer func() { _ = dockerClient.Close() }()
+		if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient), caps); err != nil {
+			return err
+		}
 	}
 	incusClient := incus.NewLocalClient()
-	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient)); err != nil {
+	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient), caps); err != nil {
 		return err
 	}
 	sessions := broker.NewSessionStore(15*time.Minute, 8*time.Hour)
@@ -279,6 +293,76 @@ func newStorageManager(resolve storage.ToolResolver, root string) (*storage.Syst
 	return storage.NewSystemManagerWithEnrichers([]storage.Adapter{storage.NewBlockAdapter(tools.LSBLK), storage.NewMountAdapter(tools.Findmnt)}, []storage.Enricher{smart, mdraid, lvm, deviceMapper, multipath, zfs, btrfs}), nil
 }
 
+// systemdConnectTimeout bounds the second, "real" system D-Bus dial that
+// connectSystemd performs after capability.Probe has already reported
+// Systemd present. It intentionally mirrors capability.Probe's own
+// dbusProbeTimeout: the probe's bounded context only proves the bus was
+// reachable at probe time, so reusing context.Background() here would
+// reintroduce an unbounded-hang risk if the bus wedges between the probe
+// and this call -- exactly the failure mode the probe's timeout exists to
+// rule out.
+const systemdConnectTimeout = 5 * time.Second
+
+// connectSystemd opens the system D-Bus connection used by every
+// systemd-backed manager, but only when the probed Systemd capability is
+// present, and it never turns a connection failure into a fatal error: a
+// missing capability skips calling connect at all, and a failed connect
+// attempt (including one that times out per the caller-supplied, bounded
+// ctx -- see systemdConnectTimeout) is logged as a warning and degrades
+// exactly like an absent capability (nil is returned either way). This is
+// what lets run() start on a host without systemd instead of aborting
+// before it ever registers QueryCapabilities.
+func connectSystemd(ctx context.Context, caps capability.Set, connect func(context.Context) (*dbus.Conn, error), logger *slog.Logger) *dbus.Conn {
+	if !caps.Has(capability.Systemd) {
+		return nil
+	}
+	client, err := connect(ctx)
+	if err != nil {
+		logger.Warn("systemd connection unavailable; systemd-backed managers disabled", "error", err)
+		return nil
+	}
+	return client
+}
+
+// systemdManagers holds every daemon manager that depends on a live systemd
+// D-Bus connection. buildSystemdManagers leaves every field nil when client
+// is nil (systemd absent, or present but unreachable per connectSystemd),
+// and registerStorageActions/registerBackups/registerServices/registerLogs
+// each no-op on a nil manager -- so the daemon never fails to start over a
+// missing systemd connection, only over a genuine flag misconfiguration
+// (checked separately, before this function runs, via
+// backups.ValidateConfiguration).
+type systemdManagers struct {
+	remoteManager   storage.RemoteManager
+	backupManager   backups.Manager
+	servicesManager services.Manager
+	logsManager     logs.Manager
+}
+
+func buildSystemdManagers(client *dbus.Conn, storageManager storage.Manager, backupTimers []string, backupMaxAge time.Duration, servicesJournal services.JournalReader, logsJournal logs.JournalReader) (systemdManagers, error) {
+	if client == nil {
+		return systemdManagers{}, nil
+	}
+	backupManager, err := backups.NewSystemManager(client, backupTimers, backupMaxAge)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	servicesManager, err := services.NewSystemManager(client, servicesJournal)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	logsManager, err := logs.NewSystemManager(client, logsJournal)
+	if err != nil {
+		return systemdManagers{}, err
+	}
+	return systemdManagers{
+		remoteManager:   storage.NewSystemRemoteManager(storageManager, storage.NewArtifactStore(), storageUnitController{client: client}),
+		backupManager:   backupManager,
+		servicesManager: servicesManager,
+		logsManager:     logsManager,
+	}, nil
+}
+
 type stringListFlag []string
 
 func (values *stringListFlag) String() string { return fmt.Sprint([]string(*values)) }
@@ -298,7 +382,32 @@ func (values *stringListFlag) addCommaSeparated(input string) {
 	}
 }
 
-func registerBackups(queries *broker.QueryRegistry, manager backups.Manager) error {
+// registerCapabilities registers QueryCapabilities unconditionally: capability
+// discovery itself requires no capability, so unlike every registerX
+// function below it is never guarded by caps.Has(...) -- it is what reports
+// caps in the first place. It is non-admin (any authenticated identity may
+// discover which capabilities the daemon advertises) and returns exactly
+// the probed Set, whose MarshalJSON already produces the sorted,
+// present-only {"capabilities": [...]} shape the query contract requires.
+func registerCapabilities(queries *broker.QueryRegistry, caps capability.Set) error {
+	return queries.Register(broker.QueryCapabilities, false, func(context.Context, auth.Identity, map[string]string) (any, error) {
+		return caps, nil
+	})
+}
+
+// registerBackups registers QueryBackupsState iff manager is non-nil and caps
+// has Systemd. backups.Manager monitors systemd timers, so it requires
+// Systemd uniformly -- there is no partial-capability case to guard
+// per-call, unlike registerServices/registerLogs. manager is nil exactly
+// when buildSystemdManagers skipped construction (systemd absent or
+// unreachable), which per c7 already implies the Systemd capability was
+// absent, so the manager check and the caps check agree in the real run()
+// wiring; both are kept so a fake, non-nil manager passed directly in tests
+// still respects the capability guard.
+func registerBackups(queries *broker.QueryRegistry, manager backups.Manager, caps capability.Set) error {
+	if manager == nil || !caps.Has(capability.Systemd) {
+		return nil
+	}
 	return queries.Register(broker.QueryBackupsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	})
@@ -315,7 +424,24 @@ func registerStorage(queries *broker.QueryRegistry, manager storage.Manager) err
 
 const storageActionTimeout = 2 * time.Minute
 
-func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager) error {
+// registerStorageActions registers the remote-mount lifecycle actions iff
+// manager is non-nil and caps has Systemd. Every one of these actions
+// generates and controls systemd units (mount/automount, or their
+// enable/disable/start/stop lifecycle), so they require Systemd uniformly
+// -- there is no partial-capability case to guard per-call. manager is nil
+// exactly when buildSystemdManagers skipped constructing the remote-mount
+// controller (systemd absent or unreachable), which per c7 already implies
+// the Systemd capability was absent, so the manager check and the caps
+// check agree in the real run() wiring; both are kept so a fake, non-nil
+// manager passed directly in tests still respects the capability guard.
+// QueryStorageState itself (registered separately via registerStorage
+// against the plain, non-systemd storageManager) is unaffected -- storage
+// inventory reads never depend on systemd, per docs/capabilities.md's
+// documented exception.
+func registerStorageActions(actions *broker.ActionRegistry, manager storage.RemoteManager, caps capability.Set) error {
+	if manager == nil || !caps.Has(capability.Systemd) {
+		return nil
+	}
 	for _, action := range []struct {
 		id         string
 		parameters []string
@@ -461,7 +587,20 @@ func waitForStorageUnitJob(ctx context.Context, unit string, operation func(cont
 	}
 }
 
-func registerLogs(queries *broker.QueryRegistry, manager logs.Manager) error {
+// registerLogs registers QueryLogs iff manager is non-nil and caps has both
+// Systemd and Journald. logs.Manager.Logs() calls
+// ListUnitsContext/ListUnitFilesContext on the systemd D-Bus client before
+// filtering journal entries, so it genuinely requires both capabilities
+// uniformly, not journald alone (docs/capabilities.md's exception #3).
+// manager is nil exactly when construction skipped it -- systemd absent or
+// unreachable per buildSystemdManagers, which per c7 already implies the
+// Systemd capability was absent -- so the manager check and the caps check
+// agree in the real run() wiring; both are kept so a fake, non-nil manager
+// passed directly in tests still respects the capability guard.
+func registerLogs(queries *broker.QueryRegistry, manager logs.Manager, caps capability.Set) error {
+	if manager == nil || !caps.HasAll(capability.Systemd, capability.Journald) {
+		return nil
+	}
 	return queries.Register(broker.QueryLogs, true, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		filters, err := logs.ParseBrokerFilters(parameters)
 		if err != nil {
@@ -542,7 +681,21 @@ func filesPublicError(err error) error {
 	return broker.NewPublicError(503, "files service unavailable", "unavailable", err)
 }
 
-func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager) error {
+// registerMaintenance registers QueryMaintenanceState and
+// ActionMaintenanceReboot iff caps has Systemd -- both require Systemd
+// uniformly, so the guard sits once at the top rather than per call.
+// maintenance.NewSystemManager has no D-Bus dependency (it depends only on
+// the sysext manager, job store, and command runner), so unlike
+// backups/services/logs/storage there is no nil-manager backstop here: the
+// manager is always non-nil regardless of systemd's presence, and this
+// guard is the only thing withholding registration. Extension-derived
+// fields (Updates, Feature/merged-derived reboot reasons) degrade inside
+// SystemManager.State itself based on the probed updex/sysext capabilities
+// passed into NewSystemManager, independent of this systemd guard.
+func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Systemd) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryMaintenanceState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.State(ctx)
 	}); err != nil {
@@ -661,16 +814,32 @@ func registerNamedActions(registry *broker.ActionRegistry, parameter string, reg
 	return nil
 }
 
-func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager) error {
-	if err := registerNamedActions(registry, "name", []actionRegistration{
-		{id: broker.ActionSysextDisable, resource: "sysext/feature", global: true, confirmation: true, handler: func(ctx context.Context, name string) error {
-			return manager.Disable(ctx, name)
-		}},
-		{id: broker.ActionSysextEnable, resource: "sysext/feature", global: true, handler: func(ctx context.Context, name string) error {
-			return manager.Enable(ctx, name)
-		}},
-	}); err != nil {
-		return err
+// registerSysextActions registers the four sysext lifecycle actions guarded
+// per-action against caps, per docs/capabilities.md: unlike every other
+// registerX function in this file (which has a uniform per-call
+// requirement), sysext's four actions split across three distinct
+// requirements, so each is guarded individually rather than gating the whole
+// function behind one check. ActionSysextDisable and ActionSysextEnable
+// share the same "updex AND sysext" requirement and are registered together
+// via registerNamedActions, so that pair is guarded as a single group.
+// ActionSysextRefresh needs only sysext (it merges/refreshes installed
+// systemd-sysext images) and ActionSysextUpdate needs only updex (it invokes
+// updex directly); those two already live in a separate local loop, so the
+// per-entry required capability is checked there without touching the
+// shared registerNamedActions/registerProjectActions helpers used by every
+// other module.
+func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager, caps capability.Set) error {
+	if caps.HasAll(capability.Updex, capability.Sysext) {
+		if err := registerNamedActions(registry, "name", []actionRegistration{
+			{id: broker.ActionSysextDisable, resource: "sysext/feature", global: true, confirmation: true, handler: func(ctx context.Context, name string) error {
+				return manager.Disable(ctx, name)
+			}},
+			{id: broker.ActionSysextEnable, resource: "sysext/feature", global: true, handler: func(ctx context.Context, name string) error {
+				return manager.Enable(ctx, name)
+			}},
+		}); err != nil {
+			return err
+		}
 	}
 	for _, action := range []struct {
 		background   bool
@@ -678,14 +847,18 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 		handler      broker.ActionHandler
 		id           string
 		reboot       bool
+		required     capability.ID
 	}{
-		{id: broker.ActionSysextRefresh, background: true, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextRefresh, background: true, confirmation: true, required: capability.Sysext, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Refresh(ctx)
 		}},
-		{id: broker.ActionSysextUpdate, background: true, confirmation: true, reboot: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextUpdate, background: true, confirmation: true, reboot: true, required: capability.Updex, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Update(ctx)
 		}},
 	} {
+		if !caps.Has(action.required) {
+			continue
+		}
 		if err := registry.RegisterDefinition(broker.ActionDefinition{ID: action.id, Admin: true, Background: action.background, ConfirmationRequired: action.confirmation, RebootRequired: action.reboot, Timeout: 20 * time.Minute, Resource: func(map[string]string) (string, error) { return "sysext/global", nil }, Handler: action.handler}); err != nil {
 			return err
 		}
@@ -693,28 +866,58 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 	return nil
 }
 
-func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager) error {
-	if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
-		return manager.Journal(ctx, parameters["unit"])
-	}); err != nil {
-		return err
+// registerServices registers Services queries/actions guarded by the
+// capabilities their manager call paths actually depend on, per
+// docs/capabilities.md: QueryServicesState and every services lifecycle
+// action require only Systemd, while QueryServicesJournal additionally
+// requires Journald because resolveUnit() needs the systemd client to
+// validate/resolve the unit before journal entries are read (exception #2).
+// Each group is guarded individually rather than the whole function behind
+// one check, so a host with systemd but no journald still gets full service
+// management with only the journal query withheld. manager is nil exactly
+// when construction skipped it -- systemd absent or unreachable per
+// buildSystemdManagers, which per c7 already implies Systemd was absent --
+// so the manager check and the caps check agree in the real run() wiring;
+// both are kept so a fake, non-nil manager passed directly in tests still
+// respects the capability guard.
+func registerServices(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager services.Manager, caps capability.Set) error {
+	if manager != nil && caps.Has(capability.Systemd) {
+		if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+			return manager.State(ctx)
+		}); err != nil {
+			return err
+		}
+		if err := registerNamedActions(actions, "unit", []actionRegistration{
+			{id: broker.ActionServicesDisable, resource: "services/unit", confirmation: true, handler: manager.Disable},
+			{id: broker.ActionServicesEnable, resource: "services/unit", handler: manager.Enable},
+			{id: broker.ActionServicesResetFailed, resource: "services/unit", handler: manager.ResetFailed},
+			{id: broker.ActionServicesRestart, resource: "services/unit", handler: manager.Restart},
+			{id: broker.ActionServicesStart, resource: "services/unit", handler: manager.Start},
+			{id: broker.ActionServicesStop, resource: "services/unit", confirmation: true, handler: manager.Stop},
+		}); err != nil {
+			return err
+		}
 	}
-	if err := queries.Register(broker.QueryServicesState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
-		return manager.State(ctx)
-	}); err != nil {
-		return err
+	if manager != nil && caps.HasAll(capability.Systemd, capability.Journald) {
+		if err := queries.Register(broker.QueryServicesJournal, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+			return manager.Journal(ctx, parameters["unit"])
+		}); err != nil {
+			return err
+		}
 	}
-	return registerNamedActions(actions, "unit", []actionRegistration{
-		{id: broker.ActionServicesDisable, resource: "services/unit", confirmation: true, handler: manager.Disable},
-		{id: broker.ActionServicesEnable, resource: "services/unit", handler: manager.Enable},
-		{id: broker.ActionServicesResetFailed, resource: "services/unit", handler: manager.ResetFailed},
-		{id: broker.ActionServicesRestart, resource: "services/unit", handler: manager.Restart},
-		{id: broker.ActionServicesStart, resource: "services/unit", handler: manager.Start},
-		{id: broker.ActionServicesStop, resource: "services/unit", confirmation: true, handler: manager.Stop},
-	})
+	return nil
 }
 
-func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager) error {
+// registerPodman registers every Podman query and action iff the podman
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. This lets a host with an unreachable or absent Podman
+// socket start the daemon normally, with the Podman surface simply absent
+// from every registry (and from QueryCapabilities) rather than aborting
+// startup.
+func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager podman.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Podman) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryPodmanLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.Logs(ctx, parameters["id"])
 	}); err != nil {
@@ -734,7 +937,13 @@ func registerPodman(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	})
 }
 
-func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager docker.Manager) error {
+// registerDocker registers every Docker query and action iff the docker
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. See registerPodman for the rationale.
+func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager docker.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Docker) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryDockerLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.Logs(ctx, parameters["id"])
 	}); err != nil {
@@ -754,7 +963,13 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 	})
 }
 
-func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager) error {
+// registerIncus registers every Incus query and action iff the incus
+// capability was probed present in caps; otherwise it registers nothing and
+// returns nil. See registerPodman for the rationale.
+func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager incus.Manager, caps capability.Set) error {
+	if !caps.Has(capability.Incus) {
+		return nil
+	}
 	if err := queries.Register(broker.QueryIncusState, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
 		return manager.State(ctx, parameters["project"])
 	}); err != nil {

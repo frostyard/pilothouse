@@ -3,7 +3,6 @@ package logs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -144,12 +143,15 @@ func validUnitName(name string) bool {
 	return unitNamePattern.MatchString(name) && !strings.Contains(name, "..") && !strings.Contains(name, "/") && !strings.Contains(lowerName, "\\x2f") && !strings.Contains(lowerName, "\\x00")
 }
 
-func NewSystemManager(reader JournalReader) (*SystemManager, error) {
-	client, err := dbus.NewSystemConnectionContext(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("connect to systemd: %w", err)
+// NewSystemManager builds a logs manager from a pre-opened systemd D-Bus
+// client. The caller (cmd/pilothoused) is responsible for opening that
+// connection -- this package no longer dials systemd itself, so
+// construction can never fail because systemd is absent or unreachable.
+func NewSystemManager(client systemdClient, reader JournalReader) (*SystemManager, error) {
+	if client == nil {
+		return nil, errors.New("systemd client is required")
 	}
-	return &SystemManager{client: client, journal: reader}, nil
+	return newSystemManager(client, reader), nil
 }
 
 func newSystemManager(client systemdClient, reader JournalReader) *SystemManager {

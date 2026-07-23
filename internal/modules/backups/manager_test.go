@@ -156,6 +156,31 @@ func TestSystemManagerReportsUnconfiguredState(t *testing.T) {
 	assert.Empty(t, client.calls)
 }
 
+func TestNewSystemManagerAcceptsPreOpenedClientAndRejectsNil(t *testing.T) {
+	client := &fakeSystemdClient{}
+	manager, err := NewSystemManager(client, []string{"backup.timer"}, time.Hour)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	_, err = NewSystemManager(nil, []string{"backup.timer"}, time.Hour)
+	assert.Error(t, err)
+}
+
+func TestNewSystemManagerRejectsBadConfigurationWithoutRequiringDBus(t *testing.T) {
+	client := &fakeSystemdClient{}
+	_, err := NewSystemManager(client, []string{"backup.service"}, time.Hour)
+	assert.Error(t, err)
+	_, err = NewSystemManager(client, []string{"backup.timer"}, 0)
+	assert.Error(t, err)
+}
+
+func TestValidateConfigurationChecksNamesAndMaxAgeIndependentlyOfSystemd(t *testing.T) {
+	assert.NoError(t, ValidateConfiguration([]string{"backup.timer"}, time.Hour))
+	assert.Error(t, ValidateConfiguration([]string{"backup.service"}, time.Hour))
+	assert.Error(t, ValidateConfiguration([]string{"backup.timer"}, 0))
+	assert.Error(t, ValidateConfiguration([]string{"backup.timer", "backup.timer"}, time.Hour))
+}
+
 func healthyClient(now time.Time, timer, service string) *fakeSystemdClient {
 	return &fakeSystemdClient{
 		properties: map[string]map[string]any{

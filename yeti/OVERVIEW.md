@@ -114,6 +114,142 @@ rules for adding a new module (routes, actions, queries).
   target as a root-owned, non-group/world-writable regular file while executing
   the original entry-point path. Broken or unsafe present candidates fail
   startup; absent optional tools degrade only their backend to unsupported.
+- **Capability probing and advertisement.** `pilothoused` probes host
+  capabilities once at startup (`internal/capability.Probe`, called early
+  in `cmd/pilothoused/main.go`'s `run()`, before any module manager is
+  constructed) — systemd, journald, `updex`, `systemd-sysext`, bootc,
+  rpm-ostree, the `rpm-ostreed-automatic`/`bootc-fetch-apply-updates`
+  automatic-update unit-file pairs, and the Podman/Docker/Incus engine
+  sockets — and probing itself never fails fatally: every probe narrows to
+  "absent" on any error instead of erroring. As of this chunk that
+  guarantee is fully wired through to daemon startup for the engine
+  capabilities (Podman/Docker/Incus) and for systemd: a host with any of
+  these absent or unreachable still starts the daemon.
+- **Capability-gated, non-fatal construction of systemd-backed managers.**
+  Storage's remote-mount unit controller and the backups/services/logs
+  managers all need a live system D-Bus connection, and their exported
+  constructors (`backups.NewSystemManager`, `services.NewSystemManager`,
+  `logs.NewSystemManager`) no longer open that connection themselves — each
+  accepts a pre-opened client (an unexported `systemdClient` interface per
+  package, structurally satisfied by `*dbus.Conn`) from its caller.
+  `cmd/pilothoused/main.go`'s `connectSystemd(ctx, caps, connect, logger)`
+  opens that connection at most once, only when the probed `Systemd`
+  capability is present; a connection failure is logged as a warning and
+  degrades to a nil client exactly like an absent capability — never a
+  fatal `run()` error. `run()` calls `connectSystemd` with a context bounded
+  by `systemdConnectTimeout` (mirroring `capability.Probe`'s own
+  `dbusProbeTimeout`), not `context.Background()`: reusing an unbounded
+  context here would reintroduce the exact unbounded-startup-hang risk the
+  probe's own timeout exists to rule out, for the case where the bus was
+  reachable at probe time but wedges before this second, real dial.
+  `buildSystemdManagers` constructs the remote-mount
+  controller and the backups/services/logs managers only when that client
+  is non-nil, leaving each nil otherwise. `registerStorageActions` (the
+  eight remote-mount lifecycle actions) and `registerBackups`
+  (`QueryBackupsState`) have both been converted to the full
+  `capability.Set`-based guard, alongside `registerServices` and
+  `registerLogs` (see below): each requires only `Systemd` uniformly (every
+  remote-mount action generates or controls systemd units; backups monitors
+  systemd timers), so the guard sits once at the top of the function rather
+  than per call. Each function's nil-manager check is retained alongside the
+  capability check as a defensive backstop, since manager and caps agree in
+  the real `run()` wiring but a directly-injected fake manager in tests must
+  still respect the capability guard on its own.
+  `QueryStorageState` is registered separately against the
+  plain, non-systemd `storageManager` built earlier in `run()`, so storage
+  inventory reads never depend on systemd at all — not even via a
+  registration-level guard, unlike the remote-mount actions. Independent of
+  systemd's presence, `backups.ValidateConfiguration` (timer name pattern,
+  positive max age) still runs unconditionally in `run()` before any of
+  this and fails startup fatally on genuine flag misconfiguration; only the
+  D-Bus reachability failure mode is non-fatal. Later modules that
+  construct a privileged manager from an optional host resource should
+  follow this same shape: accept a pre-opened/pre-resolved dependency from
+  the caller, gate opening that dependency on the relevant probed
+  capability, and never let its absence fail `run()`. Maintenance and
+  sysext manager construction (which use `sysext.ExecRunner`, not systemd
+  D-Bus) are unaffected by this chunk and remain unconditionally
+  registered until their own conversion (see the maintenance update below).
+  The probed `capability.Set` is
+  advertised over the fixed, authenticated, non-admin
+  `org.frostyard.pilothouse.capabilities.list` query
+  (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
+  present capabilities only, sorted, canonical IDs — and restart re-probes
+  from scratch (nothing is cached). The same `capability.Set` gates
+  privileged registration: see `docs/capabilities.md` for the binding
+  table mapping every broker ID to its required capability, and
+  `docs/modules.md`'s "Capability-guarded registration" section for the
+  convention new modules follow. `registerPodman`/`registerDocker`/
+  `registerIncus` are the first full conversions — each takes `caps
+  capability.Set` and registers nothing for its engine when the
+  corresponding capability is absent (an unreachable or misconfigured
+  engine, including a Docker client that fails to construct, is logged as
+  a warning, never a fatal `run()` error). `registerServices` and
+  `registerLogs` are the next conversions: `registerServices` guards
+  `QueryServicesState` and every services lifecycle action on
+  `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
+  `caps.HasAll(capability.Systemd, capability.Journald)` — guarded
+  individually per `docs/capabilities.md`'s corrected mapping, so a host
+  with systemd but no journald still gets full service management with
+  only the journal query withheld; `registerLogs` guards its single
+  `QueryLogs` registration on that same `caps.HasAll(capability.Systemd,
+  capability.Journald)`. `registerStorageActions` and `registerBackups` are
+  the next conversions: both guard their whole function on
+  `caps.Has(capability.Systemd)` alone (every remote-mount action generates
+  or controls systemd units, and backups monitors systemd timers, so
+  neither has a services-style mixed per-call requirement); their
+  nil-manager check is retained alongside the capability check as a
+  defensive backstop for directly-injected test fakes. `QueryStorageState`
+  itself, registered separately against the plain, non-systemd
+  `storageManager`, remains unconditional per `docs/capabilities.md`'s
+  documented exception.
+- **Maintenance: guarded registration plus a real handler-level degrade.**
+  `registerMaintenance` (`cmd/pilothoused/main.go`) is the next conversion:
+  it takes the probed `capability.Set` and no-ops both
+  `QueryMaintenanceState` and `ActionMaintenanceReboot` when `systemd` is
+  absent, exactly like `registerBackups`/`registerStorageActions`.
+  `maintenance.NewSystemManager` has no D-Bus dependency of its own (it
+  depends only on the sysext manager, job store, and command runner), so
+  unlike backups/services/logs there is no construction-level non-fatal-
+  startup fix to make here; the manager is always constructed regardless of
+  systemd, and the registration guard above is the only thing withholding
+  it. Separately — and this is the real behavioral change in this chunk —
+  `maintenance.SystemManager.State`'s extension-read subpath
+  (`extensionState`, which calls `UpdateSource.Check` for `Updates` and
+  `UpdateSource.List` for `Features`/merged-status-derived reboot reasons)
+  degrades gracefully instead of erroring when `updex`/`systemd-sysext` are
+  unavailable, driven by two new `updexAvailable`/`sysextAvailable`
+  parameters on `NewSystemManager` fed from `cmd/pilothoused/main.go`'s
+  probed `caps.Has(capability.Updex)`/`caps.Has(capability.Sysext)`: with
+  both present, behavior is byte-for-byte unchanged; with updex present but
+  sysext absent, `Check()` still runs (`Updates` populates) but `List()` is
+  skipped entirely (merged-but-disabled reboot reasons omitted); with updex
+  absent (sysext present or absent), neither call runs and both `Updates`
+  and feature-derived reboot reasons are omitted — a documented limitation
+  of today's `sysext.SystemManager`, whose enumeration is updex-only by
+  construction, not a phase 1a gap. `State` never returns an error because
+  of missing updex/sysext in any combination; `Jobs`, `OSVersion`, and
+  reboot-marker-derived reasons are computed exactly as before regardless.
+  See `docs/capabilities.md`'s extension-read note for the full table and
+  `internal/modules/maintenance/manager_test.go` for one dedicated test case
+  per combination.
+- **Sysext: the one module guarded per-action, not per-function.**
+  `registerSysextActions` (`cmd/pilothoused/main.go`) is the final capability
+  conversion in this phase, and the only one where the four registrations
+  don't share a single requirement: `ActionSysextDisable`/`ActionSysextEnable`
+  (registered together via the shared `registerNamedActions` helper) require
+  `updex AND sysext` together, so that pair is guarded as one group;
+  `ActionSysextRefresh` requires `sysext` alone and `ActionSysextUpdate`
+  requires `updex` alone — those two already lived in a separate local loop,
+  so each entry there now carries its own required capability, checked
+  in-loop, without changing `registerNamedActions`/`registerProjectActions`
+  (every other caller has a uniform per-call requirement). `sysext.NewSystemManager`
+  has no systemd D-Bus dependency (exec/`CommandRunner`-based only), so — like
+  maintenance — there is no construction-level non-fatal-startup fix needed;
+  `sysextManager` is constructed unconditionally regardless of capability, and
+  the per-action registration guards above are what withhold each action. See
+  `docs/capabilities.md`'s sysext rows and module-level-defaults section for
+  the full per-action table.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,16 +15,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/frostyard/pilothouse/internal/audit"
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/backups"
+	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/files"
+	"github.com/frostyard/pilothouse/internal/modules/incus"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
+	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
+	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -123,6 +133,18 @@ func (*fakeMaintenanceManager) State(context.Context) (maintenance.State, error)
 	return maintenance.State{OSVersion: "Snosi"}, nil
 }
 
+// fakeSysextManager satisfies sysext.Manager so registerSysextActions'
+// per-action capability guards can be tested without exercising a real
+// updex/systemd-sysext dependency.
+type fakeSysextManager struct{}
+
+func (fakeSysextManager) Check(context.Context) ([]sysext.AvailableUpdate, error) { return nil, nil }
+func (fakeSysextManager) Disable(context.Context, string) error                   { return nil }
+func (fakeSysextManager) Enable(context.Context, string) error                    { return nil }
+func (fakeSysextManager) List(context.Context) ([]sysext.Feature, error)          { return nil, nil }
+func (fakeSysextManager) Refresh(context.Context) error                           { return nil }
+func (fakeSysextManager) Update(context.Context) error                            { return nil }
+
 func (*fakeServicesManager) Disable(context.Context, string) error     { return nil }
 func (*fakeServicesManager) Enable(context.Context, string) error      { return nil }
 func (*fakeServicesManager) ResetFailed(context.Context, string) error { return nil }
@@ -153,7 +175,7 @@ func TestRegisterActivityRequiresAdministratorAndBoundsFilters(t *testing.T) {
 
 func TestServiceStopRequiresResourceConfirmation(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
-	require.NoError(t, registerServices(actions, queries, &fakeServicesManager{}))
+	require.NoError(t, registerServices(actions, queries, &fakeServicesManager{}, capability.New(capability.Systemd, capability.Journald)))
 	parameters := map[string]string{"unit": "backup.timer"}
 	err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionServicesStop, parameters, "")
 	assert.ErrorIs(t, err, broker.ErrConfirmationRequired)
@@ -163,8 +185,8 @@ func TestServiceStopRequiresResourceConfirmation(t *testing.T) {
 func TestRegisterMaintenanceAndBackups(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	maintenanceManager := &fakeMaintenanceManager{}
-	require.NoError(t, registerMaintenance(actions, queries, maintenanceManager))
-	require.NoError(t, registerBackups(queries, fakeBackupsManager{}))
+	require.NoError(t, registerMaintenance(actions, queries, maintenanceManager, capability.New(capability.Systemd, capability.Updex, capability.Sysext)))
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New(capability.Systemd)))
 	state, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryMaintenanceState, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "Snosi", state.(maintenance.State).OSVersion)
@@ -174,6 +196,17 @@ func TestRegisterMaintenanceAndBackups(t *testing.T) {
 	err = actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot")
 	require.NoError(t, err)
 	assert.True(t, maintenanceManager.rebooted)
+}
+
+func TestRegisterMaintenanceNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	// A non-nil fake manager proves registerMaintenance's own caps guard
+	// independently withholds registration -- maintenance.NewSystemManager
+	// has no D-Bus dependency, so unlike backups/services/logs there is no
+	// nil-manager construction signal to rely on instead.
+	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, capability.New(capability.Updex, capability.Sysext)))
+	assert.False(t, queries.Registered(broker.QueryMaintenanceState))
+	assert.False(t, actions.Registered(broker.ActionMaintenanceReboot))
 }
 
 func TestRegisterJobsRequiresAdministrator(t *testing.T) {
@@ -197,7 +230,7 @@ func (m *fakeServicesManager) Journal(_ context.Context, unit string) (services.
 func TestRegisterServicesJournalAllowsReadOnlyIdentity(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	manager := &fakeServicesManager{}
-	require.NoError(t, registerServices(actions, queries, manager))
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd, capability.Journald)))
 	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryServicesJournal, map[string]string{"unit": "backup.timer"})
 	require.NoError(t, err)
 	assert.Equal(t, "backup.timer", manager.journalUnit)
@@ -226,7 +259,7 @@ func TestStorageQueryAndActionsShareManagedRemoteComposition(t *testing.T) {
 	manager := &fakeRemoteManager{snapshot: storage.Snapshot{Mounts: []storage.Mount{{ID: "remote:" + id, Managed: true, State: "needs-attention"}}, Findings: []storage.Finding{{ResourceID: "remote:" + id, Severity: storage.HealthWarning, Title: "Managed remote mount needs attention"}}}}
 	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
 	require.NoError(t, registerStorage(queries, manager))
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
 	require.NoError(t, err)
@@ -255,7 +288,7 @@ func TestRegisterStorageCreateActionsUseTrustedIDsAndGlobalLock(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, test.parameters, "")
 			assert.Error(t, err)
@@ -297,7 +330,7 @@ func TestRegisterStorageOwnedSMBCreateActionsRejectInvalidOwnership(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 			err := actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, test.parameters, "")
 			require.Error(t, err)
@@ -314,7 +347,7 @@ func TestRegisterStorageOwnedSMBCreateActionsRejectInvalidOwnership(t *testing.T
 
 	manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 	actions := broker.NewActionRegistry(store)
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBGuestOwned, base, ""))
 	assert.Regexp(t, `^storage/mount/[a-f0-9]{32}$`, store.last().Resource)
 }
@@ -334,7 +367,7 @@ func TestRegisterStorageLifecycleActionsValidateIDAndConfirmation(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 			actions := broker.NewActionRegistry(store)
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 			parameters := map[string]string{"id": id}
 
 			err := actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, test.action, parameters, "")
@@ -358,7 +391,7 @@ func TestRegisterStorageLifecycleActionsValidateIDAndConfirmation(t *testing.T) 
 
 func TestRegisterStorageActionsRejectUnexpectedParameters(t *testing.T) {
 	actions := broker.NewActionRegistry()
-	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}))
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New(capability.Systemd)))
 	err := actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageMount, map[string]string{"id": "0123456789abcdef0123456789abcdef", "target": "/secret"}, "")
 	assert.Error(t, err)
 	assert.NotContains(t, err.Error(), "/secret")
@@ -368,7 +401,7 @@ func TestRegisterStorageCredentialActionAuditsOnlyOpaqueID(t *testing.T) {
 	const secret = "never-record-this-secret"
 	manager, store := &fakeRemoteManager{}, &recordingAuditStore{}
 	actions := broker.NewActionRegistry(store)
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 
 	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionStorageCreateSMBCredentials, map[string]string{
 		"server": "nas.example", "share": "media", "username": "mount-user", "password": secret,
@@ -385,7 +418,7 @@ func TestRegisterStorageCreateActionUsesGlobalLock(t *testing.T) {
 	release := make(chan struct{})
 	manager := &blockingRemoteManager{started: started, release: release}
 	actions := broker.NewActionRegistry()
-	require.NoError(t, registerStorageActions(actions, manager))
+	require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 	parameters := map[string]string{"host": "nas.example", "export": "/media", "target": "/mnt/media", "version": "4.2", "read_only": "false"}
 	first := make(chan error, 1)
 	go func() {
@@ -419,7 +452,7 @@ func TestRegisterStorageLifecycleActionsSerializeSameIDAndAllowDifferentIDs(t *t
 		t.Run(test.name, func(t *testing.T) {
 			manager := &blockingLifecycleRemoteManager{entered: make(chan string, 3), release: make(chan struct{})}
 			actions := broker.NewActionRegistry()
-			require.NoError(t, registerStorageActions(actions, manager))
+			require.NoError(t, registerStorageActions(actions, manager, capability.New(capability.Systemd)))
 			confirmation := ""
 			if test.confirmation {
 				confirmation = "storage/mount/0123456789abcdef0123456789abcdef"
@@ -546,7 +579,7 @@ func backendAvailability(backends []storage.BackendStatus, name string) storage.
 func TestRegisterLogsRequiresAdministratorAndValidatesParameters(t *testing.T) {
 	queries := broker.NewQueryRegistry()
 	manager := &fakeLogsManager{}
-	require.NoError(t, registerLogs(queries, manager))
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd, capability.Journald)))
 	parameters := map[string]string{
 		"query": "panic", "priority": "warning", "unit": "sshd.service", "window": "6h",
 	}
@@ -701,4 +734,453 @@ func TestRegisterFilesBoundsAndAuditsUploadDestination(t *testing.T) {
 	records, err := store.List(context.Background(), audit.Filter{Action: broker.ActionFilesUpload, Limit: 2})
 	require.NoError(t, err)
 	assert.Equal(t, "files/logs/root.txt", records[0].Resource)
+}
+
+func TestRegisterCapabilitiesIsUnconditionalNonAdminAndReturnsProbedSet(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	caps := capability.New(capability.Systemd, capability.Docker, capability.Journald)
+	require.NoError(t, registerCapabilities(queries, caps))
+	assert.True(t, queries.Registered(broker.QueryCapabilities))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryCapabilities, nil)
+	require.NoError(t, err)
+	assert.Equal(t, caps, result)
+
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"capabilities":["docker","journald","systemd"]}`, string(encoded))
+}
+
+func TestRegisterCapabilitiesOmitsAbsentCapabilitiesAndNeverErrorsOnEmptySet(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerCapabilities(queries, capability.New()))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "reader"}, broker.QueryCapabilities, nil)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"capabilities":[]}`, string(encoded))
+}
+
+type fakePodmanManager struct{}
+
+func (fakePodmanManager) Logs(context.Context, string) (podman.Logs, error) {
+	return podman.Logs{}, nil
+}
+func (fakePodmanManager) Remove(context.Context, string) error        { return nil }
+func (fakePodmanManager) RemoveImage(context.Context, string) error   { return nil }
+func (fakePodmanManager) Restart(context.Context, string) error       { return nil }
+func (fakePodmanManager) Start(context.Context, string) error         { return nil }
+func (fakePodmanManager) State(context.Context) (podman.State, error) { return podman.State{}, nil }
+func (fakePodmanManager) Stop(context.Context, string) error          { return nil }
+
+func TestRegisterPodmanNoOpsWithoutPodmanCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryPodmanState))
+	assert.False(t, queries.Registered(broker.QueryPodmanLogs))
+	for _, id := range []string{broker.ActionPodmanRemove, broker.ActionPodmanRemoveImage, broker.ActionPodmanRestart, broker.ActionPodmanStart, broker.ActionPodmanStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterPodmanRegistersEverythingWithPodmanCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, capability.New(capability.Podman)))
+
+	assert.True(t, queries.Registered(broker.QueryPodmanState))
+	assert.True(t, queries.Registered(broker.QueryPodmanLogs))
+	for _, id := range []string{broker.ActionPodmanRemove, broker.ActionPodmanRemoveImage, broker.ActionPodmanRestart, broker.ActionPodmanStart, broker.ActionPodmanStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+type fakeDockerManager struct{}
+
+func (fakeDockerManager) Logs(context.Context, string) (docker.Logs, error) {
+	return docker.Logs{}, nil
+}
+func (fakeDockerManager) Remove(context.Context, string) error        { return nil }
+func (fakeDockerManager) RemoveImage(context.Context, string) error   { return nil }
+func (fakeDockerManager) Restart(context.Context, string) error       { return nil }
+func (fakeDockerManager) Start(context.Context, string) error         { return nil }
+func (fakeDockerManager) State(context.Context) (docker.State, error) { return docker.State{}, nil }
+func (fakeDockerManager) Stop(context.Context, string) error          { return nil }
+
+func TestRegisterDockerNoOpsWithoutDockerCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryDockerState))
+	assert.False(t, queries.Registered(broker.QueryDockerLogs))
+	for _, id := range []string{broker.ActionDockerRemove, broker.ActionDockerRemoveImage, broker.ActionDockerRestart, broker.ActionDockerStart, broker.ActionDockerStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterDockerRegistersEverythingWithDockerCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, capability.New(capability.Docker)))
+
+	assert.True(t, queries.Registered(broker.QueryDockerState))
+	assert.True(t, queries.Registered(broker.QueryDockerLogs))
+	for _, id := range []string{broker.ActionDockerRemove, broker.ActionDockerRemoveImage, broker.ActionDockerRestart, broker.ActionDockerStart, broker.ActionDockerStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+type fakeIncusManager struct{}
+
+func (fakeIncusManager) Remove(context.Context, string, string) error      { return nil }
+func (fakeIncusManager) RemoveImage(context.Context, string, string) error { return nil }
+func (fakeIncusManager) Restart(context.Context, string, string) error     { return nil }
+func (fakeIncusManager) Start(context.Context, string, string) error       { return nil }
+func (fakeIncusManager) State(context.Context, string) (incus.State, error) {
+	return incus.State{}, nil
+}
+func (fakeIncusManager) Stop(context.Context, string, string) error { return nil }
+
+func TestRegisterIncusNoOpsWithoutIncusCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Systemd)))
+
+	assert.False(t, queries.Registered(broker.QueryIncusState))
+	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterIncusRegistersEverythingWithIncusCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Incus)))
+
+	assert.True(t, queries.Registered(broker.QueryIncusState))
+	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestConnectSystemdNeverCallsConnectWithoutSystemdCapability(t *testing.T) {
+	called := false
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	client := connectSystemd(context.Background(), capability.New(capability.Docker, capability.Journald), func(context.Context) (*dbus.Conn, error) {
+		called = true
+		return &dbus.Conn{}, nil
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.False(t, called, "connect must never be invoked when the Systemd capability is absent")
+}
+
+func TestConnectSystemdReturnsNilAndWarnsWhenConnectFails(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+
+	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+		return nil, errors.New("dial unix /run/systemd/private: connect: no such file or directory")
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.Contains(t, logged.String(), "systemd connection unavailable")
+	assert.Contains(t, logged.String(), "level=WARN")
+}
+
+func TestConnectSystemdReturnsConnectionWhenCapabilityPresentAndConnectSucceeds(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	want := &dbus.Conn{}
+
+	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+		return want, nil
+	}, logger)
+
+	assert.Same(t, want, client)
+}
+
+func TestBuildSystemdManagersSkipsConstructionWithoutClient(t *testing.T) {
+	root := t.TempDir()
+	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
+	findmnt := writeStorageTool(t, root, `{"filesystems":[]}`)
+	storageManager, err := newStorageManager(func(candidates []string) (string, bool, error) {
+		switch candidates[0] {
+		case "/usr/bin/lsblk":
+			return lsblk, true, nil
+		case "/usr/bin/findmnt":
+			return findmnt, true, nil
+		default:
+			return "", false, nil
+		}
+	}, root)
+	require.NoError(t, err)
+
+	managers, err := buildSystemdManagers(nil, storageManager, []string{"backup.timer"}, time.Hour, nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, managers.remoteManager, "remote-mount unit controller must not be constructed without a systemd client")
+	assert.Nil(t, managers.backupManager, "backups.SystemManager must not be constructed without a systemd client")
+	assert.Nil(t, managers.servicesManager, "services.SystemManager must not be constructed without a systemd client")
+	assert.Nil(t, managers.logsManager, "logs.SystemManager must not be constructed without a systemd client")
+}
+
+// TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd is the
+// fixture-style test proving, at the construction level (c7) as well as the
+// registration-level capability guard (c9's registerBackups and
+// registerStorageActions conversions), that QueryStorageState is registered
+// and backed by a working manager even when the Systemd capability is
+// absent: it builds managers exactly the way run() does (buildSystemdManagers
+// with a nil client), registers every dependent handler the same way run()
+// does, and asserts the daemon (a) never errors, (b) still answers
+// QueryStorageState with real data, and (c) leaves every systemd-dependent
+// handler -- including all eight storage remote-mount actions -- unregistered.
+func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
+	root := t.TempDir()
+	lsblk := writeStorageTool(t, root, `{"blockdevices":[]}`)
+	findmnt := writeStorageTool(t, root, `{"filesystems":[]}`)
+	storageManager, err := newStorageManager(func(candidates []string) (string, bool, error) {
+		switch candidates[0] {
+		case "/usr/bin/lsblk":
+			return lsblk, true, nil
+		case "/usr/bin/findmnt":
+			return findmnt, true, nil
+		default:
+			return "", false, nil
+		}
+	}, root)
+	require.NoError(t, err)
+
+	// No Systemd capability: connectSystemd (already proven above to never
+	// invoke connect in this case) yields a nil client.
+	client := connectSystemd(context.Background(), capability.New(), func(context.Context) (*dbus.Conn, error) {
+		t.Fatal("connect must never be invoked when the Systemd capability is absent")
+		return nil, nil
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.Nil(t, client)
+
+	managers, err := buildSystemdManagers(client, storageManager, []string{"backup.timer"}, time.Hour, nil, nil)
+	require.NoError(t, err, "construction must never fail fatally because systemd is absent")
+
+	queries, actions := broker.NewQueryRegistry(), broker.NewActionRegistry()
+	require.NoError(t, registerStorage(queries, storageManager))
+	require.NoError(t, registerStorageActions(actions, managers.remoteManager, capability.New()))
+	require.NoError(t, registerBackups(queries, managers.backupManager, capability.New()))
+	require.NoError(t, registerServices(actions, queries, managers.servicesManager, capability.New()))
+	require.NoError(t, registerLogs(queries, managers.logsManager, capability.New()))
+
+	require.True(t, queries.Registered(broker.QueryStorageState))
+	result, err := queries.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.QueryStorageState, nil)
+	require.NoError(t, err)
+	snapshot, ok := result.(storage.Snapshot)
+	require.True(t, ok)
+	assert.NotEmpty(t, snapshot.Backends, "storage inventory must run its real enrichers, not a stub, independent of systemd")
+
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+	for _, id := range allStorageRemoteMountActions {
+		assert.False(t, actions.Registered(id))
+	}
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterBackupsNoOpsWithNilManager(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	// Systemd present: proves the nil-manager guard applies independent of
+	// caps, since the real run() wiring would never see a nil manager and a
+	// present Systemd capability together.
+	require.NoError(t, registerBackups(queries, nil, capability.New(capability.Systemd)))
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterBackupsRegistersWithSystemd(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New(capability.Systemd)))
+	assert.True(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterBackupsNoOpsWithoutSystemdCapability(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	// A non-nil fake manager proves registerBackups' own caps guard
+	// independently withholds registration, since backups.Manager monitors
+	// systemd timers and requires Systemd uniformly.
+	require.NoError(t, registerBackups(queries, fakeBackupsManager{}, capability.New()))
+	assert.False(t, queries.Registered(broker.QueryBackupsState))
+}
+
+func TestRegisterServicesNoOpsWithNilManager(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	require.NoError(t, registerServices(actions, queries, nil, capability.New(capability.Systemd, capability.Journald)))
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterLogsNoOpsWithNilManager(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	require.NoError(t, registerLogs(queries, nil, capability.New(capability.Systemd, capability.Journald)))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterServicesRegistersStateAndActionsWithSystemdOnly(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd)))
+
+	assert.True(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal), "journal query requires journald in addition to systemd")
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterServicesNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	// journald present, systemd absent: per c7, a real nil-manager fixture
+	// would already imply this, but registerServices' own caps guard must
+	// independently withhold every registration even given a non-nil fake
+	// manager, since QueryServicesJournal additionally requires systemd
+	// (docs/capabilities.md exception #2) and service management itself
+	// requires systemd.
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Journald)))
+
+	assert.False(t, queries.Registered(broker.QueryServicesState))
+	assert.False(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterServicesRegistersJournalWithSystemdAndJournald(t *testing.T) {
+	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+	manager := &fakeServicesManager{}
+	require.NoError(t, registerServices(actions, queries, manager, capability.New(capability.Systemd, capability.Journald)))
+
+	assert.True(t, queries.Registered(broker.QueryServicesState))
+	assert.True(t, queries.Registered(broker.QueryServicesJournal))
+	for _, id := range []string{broker.ActionServicesDisable, broker.ActionServicesEnable, broker.ActionServicesResetFailed, broker.ActionServicesRestart, broker.ActionServicesStart, broker.ActionServicesStop} {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterLogsNoOpsWithSystemdOnlyNoJournald(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := &fakeLogsManager{}
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd)))
+	assert.False(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterLogsNoOpsWithoutSystemdRegardlessOfJournald(t *testing.T) {
+	for _, caps := range []capability.Set{capability.New(), capability.New(capability.Journald)} {
+		queries := broker.NewQueryRegistry()
+		manager := &fakeLogsManager{}
+		require.NoError(t, registerLogs(queries, manager, caps))
+		assert.False(t, queries.Registered(broker.QueryLogs))
+	}
+}
+
+func TestRegisterLogsRegistersWithSystemdAndJournald(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := &fakeLogsManager{}
+	require.NoError(t, registerLogs(queries, manager, capability.New(capability.Systemd, capability.Journald)))
+	assert.True(t, queries.Registered(broker.QueryLogs))
+}
+
+func TestRegisterStorageActionsNoOpsWithNilManager(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	// Systemd present: proves the nil-manager guard applies independent of
+	// caps, since the real run() wiring would never see a nil manager and a
+	// present Systemd capability together.
+	require.NoError(t, registerStorageActions(actions, nil, capability.New(capability.Systemd)))
+	for _, id := range allStorageRemoteMountActions {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterStorageActionsRegistersWithSystemd(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New(capability.Systemd)))
+	for _, id := range allStorageRemoteMountActions {
+		assert.True(t, actions.Registered(id))
+	}
+}
+
+func TestRegisterStorageActionsNoOpsWithoutSystemdCapability(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	// A non-nil fake manager proves registerStorageActions' own caps guard
+	// independently withholds registration, since every remote-mount action
+	// generates or controls systemd units and requires Systemd uniformly.
+	require.NoError(t, registerStorageActions(actions, &fakeRemoteManager{}, capability.New()))
+	for _, id := range allStorageRemoteMountActions {
+		assert.False(t, actions.Registered(id))
+	}
+}
+
+// allStorageRemoteMountActions is every fixed broker action ID for storage
+// remote-mount lifecycle, so capability-guard tests can assert on all eight
+// rather than a partial sample.
+var allStorageRemoteMountActions = []string{
+	broker.ActionStorageCreateNFS,
+	broker.ActionStorageCreateSMBGuest,
+	broker.ActionStorageCreateSMBCredentials,
+	broker.ActionStorageCreateSMBGuestOwned,
+	broker.ActionStorageCreateSMBCredentialsOwned,
+	broker.ActionStorageMount,
+	broker.ActionStorageUnmount,
+	broker.ActionStorageDelete,
+}
+
+// assertSysextRegistered checks that exactly the sysext action IDs in want
+// are registered, and every other sysext action ID (from allSysextActions)
+// is not -- so each per-action-combination test proves both what should and
+// what should not be present, per docs/capabilities.md's sysext table.
+func assertSysextRegistered(t *testing.T, actions *broker.ActionRegistry, want ...string) {
+	t.Helper()
+	wantSet := make(map[string]bool, len(want))
+	for _, id := range want {
+		wantSet[id] = true
+	}
+	for _, id := range allSysextActions {
+		if wantSet[id] {
+			assert.True(t, actions.Registered(id), "expected %s to be registered", id)
+		} else {
+			assert.False(t, actions.Registered(id), "expected %s not to be registered", id)
+		}
+	}
+}
+
+// allSysextActions is every fixed broker action ID for sysext lifecycle.
+var allSysextActions = []string{
+	broker.ActionSysextDisable,
+	broker.ActionSysextEnable,
+	broker.ActionSysextRefresh,
+	broker.ActionSysextUpdate,
+}
+
+func TestRegisterSysextActionsWithUpdexOnly(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Updex)))
+	assertSysextRegistered(t, actions, broker.ActionSysextUpdate)
+}
+
+func TestRegisterSysextActionsWithSysextOnly(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Sysext)))
+	assertSysextRegistered(t, actions, broker.ActionSysextRefresh)
+}
+
+func TestRegisterSysextActionsWithBothCapabilities(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Updex, capability.Sysext)))
+	assertSysextRegistered(t, actions, broker.ActionSysextDisable, broker.ActionSysextEnable, broker.ActionSysextRefresh, broker.ActionSysextUpdate)
+}
+
+func TestRegisterSysextActionsWithNeitherCapability(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New()))
+	assertSysextRegistered(t, actions)
 }

@@ -86,6 +86,15 @@ func TestSystemManagerListsAllUnitsAndPassesFixedLimits(t *testing.T) {
 	assert.Equal(t, JournalLimits{EntryLimit: 200, ScanLimit: 10_000, MaxBytes: 256 * 1024}, reader.limits)
 }
 
+func TestNewSystemManagerAcceptsPreOpenedClientAndRejectsNil(t *testing.T) {
+	manager, err := NewSystemManager(&fakeSystemdClient{}, &fakeJournalReader{})
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	_, err = NewSystemManager(nil, &fakeJournalReader{})
+	assert.Error(t, err)
+}
+
 func TestSystemManagerFailsClosedForInvalidFiltersAndDependencies(t *testing.T) {
 	t.Run("invalid filters do not invoke the reader", func(t *testing.T) {
 		reader := &fakeJournalReader{}
