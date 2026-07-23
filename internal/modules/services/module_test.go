@@ -17,15 +17,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fullTestCapabilities matches c1's default: every capability present, so
+// existing tests that don't care about gating keep exercising the
+// full-capability path unchanged.
+var fullTestCapabilities = capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+
 type testHost struct {
 	action     string
 	parameters map[string]string
 	query      string
 	page       platform.Page
+	// caps overrides Capabilities' return value when capsSet is true.
+	// Leaving both zero (the default for a bare &testHost{}) falls back to
+	// fullTestCapabilities, so existing tests that never touch capability
+	// gating keep exercising the full-capability path unchanged; tests
+	// that need to exercise gating set both caps and capsSet explicitly,
+	// including to an intentionally empty capability.Set{}.
+	caps    capability.Set
+	capsSet bool
+	// state overrides the State returned to a *State Query, so gating
+	// tests can populate units and inspect the rendered page.
+	state State
 }
 
-func (*testHost) Capabilities(context.Context) capability.Set {
-	return capability.New(capability.Systemd, capability.Journald, capability.Updex, capability.Sysext, capability.Bootc, capability.RPMOStree, capability.AutoupdateRPMOStree, capability.AutoupdateBootc, capability.Podman, capability.Docker, capability.Incus)
+func (h *testHost) Capabilities(context.Context) capability.Set {
+	if !h.capsSet {
+		return fullTestCapabilities
+	}
+	return h.caps
 }
 
 func (*testHost) ConfirmAction(http.ResponseWriter, *http.Request, string, string) bool { return true }
@@ -40,6 +59,9 @@ func (h *testHost) Query(_ context.Context, query string, parameters map[string]
 	h.query, h.parameters = query, parameters
 	if journal, ok := result.(*Journal); ok {
 		*journal = Journal{Unit: parameters["unit"], Description: "Backup"}
+	}
+	if state, ok := result.(*State); ok {
+		*state = h.state
 	}
 	return nil
 }
@@ -159,4 +181,100 @@ func TestFilterOptionsIncludeStandardAndObservedStates(t *testing.T) {
 
 	normalized := normalizeFilters(Filters{Status: "invented", Type: "scope", UnitFileState: "masked"}, options)
 	assert.Equal(t, Filters{}, normalized)
+}
+
+func TestRequiredCapabilitiesIsSystemdOnly(t *testing.T) {
+	assert.Equal(t, []capability.ID{capability.Systemd}, New().RequiredCapabilities())
+}
+
+// TestModuleAvailabilityGatedOnSystemd exercises platform.Available (c2's
+// real production gating predicate, not a reimplementation of it) against
+// this module's RequiredCapabilities, proving the whole module — nav entry
+// and dashboard card, per c2's mechanism — is excluded whenever systemd is
+// absent, regardless of what else is present.
+func TestModuleAvailabilityGatedOnSystemd(t *testing.T) {
+	module := New()
+	assert.True(t, platform.Available(module, capability.New(capability.Systemd)))
+	assert.True(t, platform.Available(module, capability.New(capability.Systemd, capability.Journald)))
+	assert.False(t, platform.Available(module, capability.New(capability.Journald)))
+	assert.False(t, platform.Available(module, capability.Set{}))
+}
+
+// TestRoutesGateOnSystemdAbsent proves — via a real ServeMux round trip
+// through Mount, not a test-only stand-in — that every route this module
+// registers 404s once systemd is absent, even when other capabilities
+// (journald here) are present.
+func TestRoutesGateOnSystemdAbsent(t *testing.T) {
+	host := &testHost{caps: capability.New(capability.Journald), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/services", nil),
+		httptest.NewRequest(http.MethodGet, "/services/backup.timer/logs", nil),
+		httptest.NewRequest(http.MethodPost, "/services/backup.timer/restart", nil),
+	} {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusNotFound, response.Code, "%s %s", request.Method, request.URL.Path)
+	}
+}
+
+// TestLogsRouteGatesOnJournaldWhileServicesAndActionsStillWork proves the
+// journal sub-gate is additive: with systemd present but journald absent,
+// GET /services/{unit}/logs 404s but GET /services and the unit-action
+// POST route keep working exactly as when fully capable.
+func TestLogsRouteGatesOnJournaldWhileServicesAndActionsStillWork(t *testing.T) {
+	host := &testHost{caps: capability.New(capability.Systemd), capsSet: true}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/services", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/services/backup.timer/logs", nil))
+	assert.Equal(t, http.StatusNotFound, response.Code)
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/services/backup.timer/restart", nil))
+	assert.Equal(t, broker.ActionServicesRestart, host.action)
+	assert.Equal(t, map[string]string{"unit": "backup.timer"}, host.parameters)
+	assert.Equal(t, http.StatusSeeOther, response.Code)
+}
+
+// TestServicesPageLogsLinkFollowsJournaldCapability drives the real GET
+// /services handler end-to-end and inspects the rendered page body,
+// proving module.go actually threads host.Capabilities' journald bit into
+// Page's journalAvailable argument rather than hardcoding it.
+func TestServicesPageLogsLinkFollowsJournaldCapability(t *testing.T) {
+	unit := Unit{Name: "backup.timer", ActiveState: "active"}
+	for _, test := range []struct {
+		name     string
+		caps     capability.Set
+		wantLogs bool
+	}{
+		{name: "journald present", caps: capability.New(capability.Systemd, capability.Journald), wantLogs: true},
+		{name: "journald absent", caps: capability.New(capability.Systemd), wantLogs: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &testHost{caps: test.caps, capsSet: true, state: State{Units: []Unit{unit}}}
+			mux := http.NewServeMux()
+			New().Mount(mux, host)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/services", nil))
+			require.Equal(t, http.StatusOK, response.Code)
+
+			var output strings.Builder
+			require.NoError(t, host.page.Body.Render(context.Background(), &output))
+			html := output.String()
+			if test.wantLogs {
+				assert.Contains(t, html, "/services/backup.timer/logs")
+			} else {
+				assert.NotContains(t, html, "/services/backup.timer/logs")
+				assert.NotContains(t, html, ">Logs<")
+			}
+		})
+	}
 }
