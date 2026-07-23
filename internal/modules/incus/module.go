@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -44,8 +45,15 @@ func (m *Module) Manifest() platform.Manifest {
 	}
 }
 
+// RequiredCapabilities makes the whole module — its nav entry, dashboard
+// card, and every route mounted below — available only on a host that
+// advertises incus.
+func (*Module) RequiredCapabilities() []capability.ID {
+	return []capability.ID{capability.Incus}
+}
+
 func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /incus", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /incus", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		state, err := queryState(ctx, host, r.URL.Query().Get("project"))
@@ -62,8 +70,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			Active: "incus", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin),
 			Eyebrow: "Local system instances", Title: "Incus",
 		})
-	})
-	mux.HandleFunc("POST /incus/instances/{name}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /incus/instances/{name}/{action}", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
@@ -82,8 +90,8 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		}
 		err := host.Execute(ctx, r, actionID, map[string]string{"name": name, "project": project})
 		m.redirect(w, r, project, fmt.Sprintf("Instance %sd", r.PathValue("action")), err)
-	})
-	mux.HandleFunc("POST /incus/images/{fingerprint}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("POST /incus/images/{fingerprint}/{action}", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
 		}
@@ -102,7 +110,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			"fingerprint": fingerprint, "project": project,
 		})
 		m.redirect(w, r, project, "Image removed", err)
-	})
+	}))
 }
 
 func queryState(ctx context.Context, host platform.Host, project string) (State, error) {

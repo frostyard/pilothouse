@@ -484,6 +484,31 @@ rules for adding a new module (routes, actions, queries).
   full-capability set), so gated/ungated route behavior — and that gating
   one engine leaves the other engine's routes and the rest of the mux
   unaffected — is exercised via real `ServeMux` round trips through `Mount`.
+- **Incus: whole-module engine-capability gate.**
+  `internal/modules/incus.Module` now implements
+  `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Incus}` — the same one-capability-per-engine
+  mapping podman and docker use, matching `docs/capabilities.md` and #50's
+  daemon-side `registerIncus` gating. Unlike podman/docker, incus has no
+  separate logs route (its state page nests project/instance detail inline),
+  so it has exactly three routes, all wrapped in
+  `platform.Gate(host, []capability.ID{capability.Incus}, ...)` in the
+  module's own `Mount`: `GET /incus`,
+  `POST /incus/instances/{name}/{action}`, and
+  `POST /incus/images/{fingerprint}/{action}`. With incus absent, the whole
+  module disappears — nav entry, dashboard card, and all three routes 404 at
+  request time — while podman, docker, and the rest of the app are
+  unaffected; with incus present, the module behaves exactly as before this
+  chunk. `views.templ` is unchanged: an absent module 404s before any page
+  renders, so there is no conditional view content to add, the same as
+  podman/docker/backups/maintenance/logs. Incus is not a
+  `platform.HealthProvider` either, so no `attention` aggregator change was
+  needed. `module_test.go` gained the same configurable
+  `caps capability.Set`/`capsSet bool` pair on its fake `Host` that the other
+  gated modules' tests use (defaulting to a full-capability set), so
+  gated/ungated route behavior — and that gating incus leaves the rest of
+  the mux unaffected — is exercised via real `ServeMux` round trips through
+  `Mount`.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
