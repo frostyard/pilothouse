@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/platform"
 )
 
@@ -35,9 +36,34 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 	})
 }
 
+// findings collects Health results from every registered provider, skipping
+// any provider whose module is unavailable on this host. A provider that
+// implements platform.CapabilityGate is treated the same way its module's
+// own routes (platform.Gate) and nav/dashboard entry (platform.Available)
+// are: when host's current capability.Set doesn't satisfy the provider's
+// RequiredCapabilities, its Health method is never called and it
+// contributes nothing — not even an "unavailable" placeholder — since an
+// absent module is not the same as one whose status collection failed.
 func (m *Module) findings(ctx context.Context, host platform.Host) []platform.Finding {
 	findings := make([]platform.Finding, 0)
+	var caps capability.Set
+	capsLoaded := false
 	for _, provider := range m.providers {
+		if gate, ok := provider.(platform.CapabilityGate); ok {
+			if !capsLoaded {
+				caps = host.Capabilities(ctx)
+				capsLoaded = true
+			}
+			if !caps.HasAll(gate.RequiredCapabilities()...) {
+				// The provider's module is absent on this host (the same
+				// capability check platform.Gate applies to its routes and
+				// platform.Available applies to its nav/dashboard entry).
+				// Skip it entirely: no Health call, and no "unavailable"
+				// finding either, since an absent module is not the same
+				// as one whose status collection failed.
+				continue
+			}
+		}
 		providerCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		provided, err := provider.Health(providerCtx, host)
 		cancel()

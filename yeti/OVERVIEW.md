@@ -365,6 +365,27 @@ rules for adding a new module (routes, actions, queries).
   capability.Set`/`capsSet bool` pair on their fake `Host` that services'
   test uses (defaulting to a full-capability set), so gated/ungated route
   behavior is exercised via real `ServeMux` round trips through `Mount`.
+  `platform.Gate`/`Available` only guard requests that arrive through a
+  module's own `Mount`-registered routes or the web-side nav/dashboard
+  loops, though — they do nothing for other in-process code that holds a
+  `platform.HealthProvider` reference and calls `Health` directly.
+  `internal/modules/attention.Module.findings` is exactly that: it iterates
+  every registered provider (including `backupModule` and
+  `maintenanceModule`, passed into `attention.New(...)` in
+  `cmd/pilothouse/main.go`) and previously called `provider.Health(ctx,
+  host)` unconditionally, so a `Systemd`-absent host still reached
+  `QueryBackupsState`/`QueryMaintenanceState` through `/attention` and
+  rendered a degraded "status is unavailable" finding instead of the
+  provider being absent entirely. `findings` now type-asserts each
+  provider to `platform.CapabilityGate` and, when the host's cached
+  `capability.Set` doesn't `HasAll` its `RequiredCapabilities`, skips it
+  outright — no `Health` call and no "unavailable" finding, since an absent
+  module is not the same as one whose status collection failed. This is
+  the same `CapabilityGate` type-assert-and-check `Gate`/`Available`
+  already apply, generalized to this aggregator's direct method calls;
+  `internal/modules/attention/module_test.go` proves it with a
+  Health-call-counting fake provider, at both the absent- and
+  present-capability ends.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

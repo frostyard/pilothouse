@@ -162,6 +162,25 @@ unchanged — including the zero-capabilities case, which always delegates.
 This keeps a capability-gated module indistinguishable from a route that
 simply doesn't exist, both in navigation/dashboard and at the URL itself.
 
+`Gate`/`Available`/the dashboard loop only cover requests that arrive
+through a module's own `Mount`-registered routes, or the web-side
+nav/dashboard registries in `internal/web/server.go` — they do nothing for
+other in-process code that holds a reference to the module (or one of its
+narrower interfaces) and calls it directly. `internal/modules/attention`
+is exactly that: it holds a `[]platform.HealthProvider` and calls
+`provider.Health(ctx, host)` on each one to build the aggregated
+"Attention" view. If your module implements `CapabilityGate` and is also
+passed to `attention.New(...)` in `cmd/pilothouse/main.go`, its `Health`
+must not be reachable when the required capability is absent either —
+`attention.Module.findings` handles this by type-asserting each provider
+to `platform.CapabilityGate` and skipping both the `Health` call and any
+"unavailable" finding when `host.Capabilities(ctx)` doesn't satisfy its
+`RequiredCapabilities`. When adding a new capability-gated module, grep
+for every caller of its exported methods and every cross-module interface
+it implements — not just `Mount()` — and apply the same
+type-assert-and-check wherever one of those calls happens outside the
+module's own package.
+
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
