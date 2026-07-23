@@ -185,13 +185,16 @@ other in-process code that holds a reference to the module (or one of its
 narrower interfaces) and calls it directly. `internal/modules/attention`
 is exactly that: it holds a `[]platform.HealthProvider` and calls
 `provider.Health(ctx, host)` on each one to build the aggregated
-"Attention" view. If your module implements `CapabilityGate` and is also
-passed to `attention.New(...)` in `cmd/pilothouse/main.go`, its `Health`
-must not be reachable when the required capability is absent either —
-`attention.Module.findings` handles this by type-asserting each provider
-to `platform.CapabilityGate` and skipping both the `Health` call and any
-"unavailable" finding when `host.Capabilities(ctx)` doesn't satisfy its
-`RequiredCapabilities`. When adding a new capability-gated module, grep
+"Attention" view. If your module implements `CapabilityGate` or
+`CapabilityGateAny` (below) and is also passed to `attention.New(...)` in
+`cmd/pilothouse/main.go`, its `Health` must not be reachable when the
+required capabilities are absent either — `attention.Module.findings`
+handles this by type-asserting each provider to *both* gate interfaces and
+skipping both the `Health` call and any "unavailable" finding when
+`host.Capabilities(ctx)` doesn't satisfy its `RequiredCapabilities`
+(`HasAll`) or its `RequiredAnyCapabilities` (`HasAny`). The two checks are
+an AND of two defaults, matching `moduleAvailable`; a provider implementing
+neither interface is always collected. When adding a new capability-gated module, grep
 for every caller of its exported methods and every cross-module interface
 it implements — not just `Mount()` — and apply the same
 type-assert-and-check wherever one of those calls happens outside the
@@ -284,9 +287,14 @@ capabilities is present, rather than requiring all of them together. No
 production module implements `CapabilityGateAny` yet — the mechanism above
 (`HasAny`, `GateAny`, `AvailableAny`, and the `moduleAvailable` composition)
 is proven with synthetic fake modules in `internal/capability/capability_test.go`,
-`internal/platform/capability_test.go`, and `internal/web/server_test.go`
-only, the same way `CapabilityGate` itself was proven before its first real
-adopter.
+`internal/platform/capability_test.go`, `internal/web/server_test.go`, and
+`internal/modules/attention/module_test.go` only, the same way
+`CapabilityGate` itself was proven before its first real adopter.
+
+Because `CapabilityGateAny` is a whole-module gate, it carries the same
+every-call-path obligation as `CapabilityGate`: the `attention` aggregator
+described above already honors it, and any future direct caller of a gated
+module's methods must apply both tests too.
 
 ## Privileged reads
 

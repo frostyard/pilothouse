@@ -256,9 +256,13 @@ rules for adding a new module (routes, actions, queries).
   wires the interface (not `Gate`, which individual modules call from their
   own `Mount`) into the two web-side registries the spec calls out: an
   unexported `moduleAvailable(module platform.Module, caps capability.Set)
-  bool` delegates to `platform.Available` — so the gating decision has
-  exactly one implementation, shared with `internal/platform`'s own
-  tests — and `Render` now builds the shell's `Modules` nav list from a new
+  bool` delegates the gating decision to `internal/platform` rather than
+  reimplementing it — in this chunk that was `platform.Available` alone; the
+  next bullet's any-of work changed the body to
+  `platform.Available(module, caps) && platform.AvailableAny(module, caps)`,
+  and it remains the single choke point both web-side registries call, with
+  each half implemented once in `internal/platform` and shared with that
+  package's own tests — and `Render` now builds the shell's `Modules` nav list from a new
   `s.availableManifests(ctx)` (filters `s.registry.Modules()` through
   `moduleAvailable` before mapping to `Manifest`, replacing the previous
   unfiltered `s.registry.Manifests()` call) and the `dashboard` handler's
@@ -296,7 +300,14 @@ rules for adding a new module (routes, actions, queries).
   module that doesn't implement `CapabilityGateAny`, this
   AND-of-two-defaults composition is correct for all three shapes a module
   can be in (`CapabilityGate` only, `CapabilityGateAny` only, or neither)
-  with no type-switching in `server.go` itself. No production module
+  with no type-switching in `server.go` itself. The one other place that
+  gates a module's surface outside `Mount`/nav/dashboard —
+  `internal/modules/attention.Module.findings`, which calls
+  `HealthProvider.Health` directly — was updated in the same chunk to
+  type-assert `CapabilityGateAny` alongside `CapabilityGate` and skip a
+  provider when either gate is unsatisfied, so a future `CapabilityGateAny`
+  module can't be hidden from nav/dashboard and 404 on its routes while
+  `/attention` still calls its `Health`. No production module
   implements `CapabilityGateAny` yet — the mechanism was proven the same
   way `CapabilityGate` was before its first real adopter: a synthetic fake
   module in `internal/platform/capability_test.go` (exercising `AvailableAny`
@@ -367,7 +378,10 @@ rules for adding a new module (routes, actions, queries).
   already apply, generalized to this aggregator's direct method calls;
   `internal/modules/attention/module_test.go` proves it with a
   Health-call-counting fake provider, at both the absent- and
-  present-capability ends.
+  present-capability ends. (The any-of bullet below later extended the same
+  skip to `platform.CapabilityGateAny`/`HasAny`; see "Attention's
+  per-provider capability skip" in the current-state section for the
+  composed behavior.)
 - **Logs: whole-module `Systemd AND Journald` gate.**
   `internal/modules/logs.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -591,11 +605,20 @@ optional tooling never shows a dead link or a button that always fails.
   (`internal/modules/attention/module.go`). The attention aggregator holds
   `[]platform.HealthProvider` and calls `Health` directly — outside any
   `Mount` route or the nav/dashboard filter — so its `findings` type-asserts
-  each provider to `platform.CapabilityGate` and, when `host.Capabilities(ctx)`
-  doesn't `HasAll` its `RequiredCapabilities`, skips it outright: no `Health`
-  call and no "unavailable" finding, since an absent module is not a failed
-  one. On a no-systemd host, `services`/`maintenance`/`backups` contribute
-  nothing to `/attention` rather than a degraded placeholder.
+  each provider to *both* whole-module gate interfaces and skips it outright
+  when either is unsatisfied: `platform.CapabilityGate` when
+  `host.Capabilities(ctx)` doesn't `HasAll` its `RequiredCapabilities`, and
+  `platform.CapabilityGateAny` when it doesn't `HasAny` its
+  `RequiredAnyCapabilities`. Skipping means no `Health` call and no
+  "unavailable" finding, since an absent module is not a failed one. The two
+  checks are an AND of two defaults — a provider implementing neither
+  interface is always collected — mirroring `moduleAvailable`'s composition,
+  so this call path stays gate-complete for a module of any of the three
+  shapes. (`platform.Available`/`AvailableAny` take a `platform.Module`,
+  which a `HealthProvider` need not be, so `findings` applies the same two
+  tests to the provider value rather than calling them directly.) On a
+  no-systemd host, `services`/`maintenance`/`backups` contribute nothing to
+  `/attention` rather than a degraded placeholder.
 - **Routes stay mounted; absence 404s at request time.** No route is ever
   conditionally registered at startup based on capability — every module's
   `Mount` runs unconditionally and mounts all its routes on the shared mux.
