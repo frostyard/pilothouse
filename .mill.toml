@@ -1,0 +1,34 @@
+# Repository configuration for the mill (workflows/mill.yaml).
+# Everything repo-specific lives here; the workflow and state machine are
+# generic. See workflows/README.md.
+
+[gates]
+# Deterministic quality gates run after every chunk (in order, bash -c each).
+chunk = [
+  "make generate",
+  "out=$(gofmt -l . | grep -v _templ.go || true); if [ -n \"$out\" ]; then echo \"gofmt needed: $out\"; exit 1; fi",
+  "go vet ./... 2>&1 | tail -c 4000; exit ${PIPESTATUS[0]}",
+  "go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -c 6000; exit ${PIPESTATUS[0]}",
+]
+# Heavier final gate before the ship decision (mill.sh --no-deep skips these
+# and re-runs the chunk gates instead).
+deep = ["make docker-test"]
+
+[context]
+# Docs every agent must read before planning/implementing/reviewing.
+docs = ["AGENTS.md", "yeti/OVERVIEW.md", "docs/modules.md"]
+# Durable lessons harvested from previous runs; read by all agents.
+skills_dir = "docs/agents/skills"
+
+[review]
+# Injected into the security reviewer's brief.
+security_invariants = """
+The unprivileged web process must never touch root APIs directly — all
+privileged access goes through the pilothoused broker over a Unix socket.
+No change may give the web process a path around the broker, register a
+broker handler without a capability guard, or expose an unaudited action.
+"""
+
+[harvest]
+# The only paths the harvest step may modify; everything else is reverted.
+allowlist = ["docs/agents/skills/", "AGENTS.md"]

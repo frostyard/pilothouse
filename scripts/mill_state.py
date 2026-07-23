@@ -20,17 +20,38 @@ import pathlib
 import re
 import subprocess
 import sys
+import tomllib
 
 MILL = pathlib.Path(".mill")
 PROGRESS = MILL / "progress.json"
+CONFIG = pathlib.Path(".mill.toml")
 
 MAX_PLAN_ROUNDS = 3
 MAX_GATE_ATTEMPTS = 3
 MAX_REVIEW_ROUNDS = 2
 GATE_LOG_TAIL = 4000
 
-# Paths the harvest step may touch; everything else it changes is reverted.
-HARVEST_ALLOWED = ("docs/agents/", "AGENTS.md")
+
+def load_config():
+    """Read and validate the repo's .mill.toml; every repo-specific value
+    lives there. Raises with a friendly message on any problem."""
+    if not CONFIG.is_file():
+        raise RuntimeError(
+            ".mill.toml not found — this repo is not set up for the mill")
+    cfg = tomllib.loads(CONFIG.read_text())
+    def need(section, key, typ):
+        val = cfg.get(section, {}).get(key)
+        if not isinstance(val, typ) or not val:
+            raise RuntimeError(f".mill.toml missing/invalid [{section}] {key}")
+        return val
+    return {
+        "gates_chunk": need("gates", "chunk", list),
+        "gates_deep": need("gates", "deep", list),
+        "context_docs": need("context", "docs", list),
+        "skills_dir": need("context", "skills_dir", str),
+        "security_invariants": need("review", "security_invariants", str),
+        "harvest_allowlist": need("harvest", "allowlist", list),
+    }
 
 
 def journal(event, **fields):
@@ -76,8 +97,14 @@ def staged_hash():
 
 def cmd_init(source):
     """source: an issue number or a path to a spec file."""
+    try:
+        cfg = load_config()
+    except RuntimeError as e:
+        out(ok=False, error=str(e))
     MILL.mkdir(exist_ok=True)
     (MILL / ".gitignore").write_text("*\n")  # .mill never enters version control
+    # Resolved config for agents to read (prompts reference .mill/config.json).
+    (MILL / "config.json").write_text(json.dumps(cfg, indent=2))
     if re.fullmatch(r"\d+", source):
         p = sh("gh", "issue", "view", source, "--json", "title,body", timeout=60)
         if p.returncode != 0:
@@ -105,25 +132,17 @@ def cmd_init(source):
 
 
 def run_gates(deep=False):
-    """Run the deterministic quality gates; return (ok, log_tail)."""
-    if deep:
-        gates = [["make", "docker-test"]]
-    else:
-        gates = [
-            ["make", "generate"],
-            ["bash", "-c",
-             "out=$(gofmt -l . | grep -v _templ.go || true); "
-             'if [ -n "$out" ]; then echo "gofmt needed: $out"; exit 1; fi'],
-            ["bash", "-c", "go vet ./... 2>&1 | tail -c 4000; exit ${PIPESTATUS[0]}"],
-            ["bash", "-c",
-             "go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -c 6000; "
-             "exit ${PIPESTATUS[0]}"],
-        ]
-    for gate in gates:
-        p = sh(*gate, timeout=1800 if deep else 900)
+    """Run the repo-configured quality gates; return (ok, log_tail).
+
+    Gate commands come from .mill.toml and are repo-committed, so they carry
+    the same trust as the Makefile they invoke.
+    """
+    cfg = load_config()
+    for cmd in cfg["gates_deep"] if deep else cfg["gates_chunk"]:
+        p = sh("bash", "-c", cmd, timeout=3600 if deep else 900)
         if p.returncode != 0:
             log = (p.stdout + "\n" + p.stderr)[-GATE_LOG_TAIL:]
-            return False, f"$ {' '.join(gate[:2])}\n{log}"
+            return False, f"$ {cmd[:120]}\n{log}"
     return True, ""
 
 
@@ -271,10 +290,11 @@ def cmd_final_gate(sec_json, comp_json):
 
 def cmd_harvest_gate():
     """Enforce the harvest path allowlist, then commit any surviving lessons."""
+    allowed = load_config()["harvest_allowlist"]
     reverted = []
     for line in tree_dirty_outside_mill():
         path = line[3:].split(" -> ")[-1].strip().strip('"')
-        if not any(path == a or path.startswith(a) for a in HARVEST_ALLOWED):
+        if not any(path == a or path.startswith(a) for a in allowed):
             reverted.append(path)
             sh("git", "checkout", "--", path)
             sh("git", "clean", "-fd", "--", path)

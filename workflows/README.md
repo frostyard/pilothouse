@@ -75,6 +75,12 @@ scripts/mill.sh spec.md --auto      # unattended (auto-approves gates)
 scripts/mill.sh 35 --no-pr --no-deep --fresh   # local-only, native gates, restart
 ```
 
+**Repo-specific pieces live in `.mill.toml` at the repo root** — gate
+commands, context docs, security invariants, harvest allowlist. The workflow
+and state machine are fully generic: point them at any repo with a valid
+`.mill.toml` and they run unchanged. `ingest` resolves the config to
+`.mill/config.json`, which every agent prompt references at runtime.
+
 Design rules baked in:
 - **All control flow is deterministic.** Loop counters, gate results, and
   every git operation live in `scripts/mill_state.py`; LLM steps never decide
