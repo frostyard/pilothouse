@@ -154,7 +154,7 @@ func run() error {
 		return err
 	}
 	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
-	if err := registerSysextActions(actions, sysextManager); err != nil {
+	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
 	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext))
@@ -814,16 +814,32 @@ func registerNamedActions(registry *broker.ActionRegistry, parameter string, reg
 	return nil
 }
 
-func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager) error {
-	if err := registerNamedActions(registry, "name", []actionRegistration{
-		{id: broker.ActionSysextDisable, resource: "sysext/feature", global: true, confirmation: true, handler: func(ctx context.Context, name string) error {
-			return manager.Disable(ctx, name)
-		}},
-		{id: broker.ActionSysextEnable, resource: "sysext/feature", global: true, handler: func(ctx context.Context, name string) error {
-			return manager.Enable(ctx, name)
-		}},
-	}); err != nil {
-		return err
+// registerSysextActions registers the four sysext lifecycle actions guarded
+// per-action against caps, per docs/capabilities.md: unlike every other
+// registerX function in this file (which has a uniform per-call
+// requirement), sysext's four actions split across three distinct
+// requirements, so each is guarded individually rather than gating the whole
+// function behind one check. ActionSysextDisable and ActionSysextEnable
+// share the same "updex AND sysext" requirement and are registered together
+// via registerNamedActions, so that pair is guarded as a single group.
+// ActionSysextRefresh needs only sysext (it merges/refreshes installed
+// systemd-sysext images) and ActionSysextUpdate needs only updex (it invokes
+// updex directly); those two already live in a separate local loop, so the
+// per-entry required capability is checked there without touching the
+// shared registerNamedActions/registerProjectActions helpers used by every
+// other module.
+func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manager, caps capability.Set) error {
+	if caps.HasAll(capability.Updex, capability.Sysext) {
+		if err := registerNamedActions(registry, "name", []actionRegistration{
+			{id: broker.ActionSysextDisable, resource: "sysext/feature", global: true, confirmation: true, handler: func(ctx context.Context, name string) error {
+				return manager.Disable(ctx, name)
+			}},
+			{id: broker.ActionSysextEnable, resource: "sysext/feature", global: true, handler: func(ctx context.Context, name string) error {
+				return manager.Enable(ctx, name)
+			}},
+		}); err != nil {
+			return err
+		}
 	}
 	for _, action := range []struct {
 		background   bool
@@ -831,14 +847,18 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 		handler      broker.ActionHandler
 		id           string
 		reboot       bool
+		required     capability.ID
 	}{
-		{id: broker.ActionSysextRefresh, background: true, confirmation: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextRefresh, background: true, confirmation: true, required: capability.Sysext, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Refresh(ctx)
 		}},
-		{id: broker.ActionSysextUpdate, background: true, confirmation: true, reboot: true, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
+		{id: broker.ActionSysextUpdate, background: true, confirmation: true, reboot: true, required: capability.Updex, handler: func(ctx context.Context, _ auth.Identity, _ map[string]string) error {
 			return manager.Update(ctx)
 		}},
 	} {
+		if !caps.Has(action.required) {
+			continue
+		}
 		if err := registry.RegisterDefinition(broker.ActionDefinition{ID: action.id, Admin: true, Background: action.background, ConfirmationRequired: action.confirmation, RebootRequired: action.reboot, Timeout: 20 * time.Minute, Resource: func(map[string]string) (string, error) { return "sysext/global", nil }, Handler: action.handler}); err != nil {
 			return err
 		}

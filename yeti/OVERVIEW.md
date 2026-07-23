@@ -202,8 +202,7 @@ rules for adding a new module (routes, actions, queries).
   defensive backstop for directly-injected test fakes. `QueryStorageState`
   itself, registered separately against the plain, non-systemd
   `storageManager`, remains unconditional per `docs/capabilities.md`'s
-  documented exception. Sysext stays unconditionally registered until its
-  own conversion.
+  documented exception.
 - **Maintenance: guarded registration plus a real handler-level degrade.**
   `registerMaintenance` (`cmd/pilothoused/main.go`) is the next conversion:
   it takes the probed `capability.Set` and no-ops both
@@ -234,6 +233,23 @@ rules for adding a new module (routes, actions, queries).
   See `docs/capabilities.md`'s extension-read note for the full table and
   `internal/modules/maintenance/manager_test.go` for one dedicated test case
   per combination.
+- **Sysext: the one module guarded per-action, not per-function.**
+  `registerSysextActions` (`cmd/pilothoused/main.go`) is the final capability
+  conversion in this phase, and the only one where the four registrations
+  don't share a single requirement: `ActionSysextDisable`/`ActionSysextEnable`
+  (registered together via the shared `registerNamedActions` helper) require
+  `updex AND sysext` together, so that pair is guarded as one group;
+  `ActionSysextRefresh` requires `sysext` alone and `ActionSysextUpdate`
+  requires `updex` alone — those two already lived in a separate local loop,
+  so each entry there now carries its own required capability, checked
+  in-loop, without changing `registerNamedActions`/`registerProjectActions`
+  (every other caller has a uniform per-call requirement). `sysext.NewSystemManager`
+  has no systemd D-Bus dependency (exec/`CommandRunner`-based only), so — like
+  maintenance — there is no construction-level non-fatal-startup fix needed;
+  `sysextManager` is constructed unconditionally regardless of capability, and
+  the per-action registration guards above are what withhold each action. See
+  `docs/capabilities.md`'s sysext rows and module-level-defaults section for
+  the full per-action table.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions

@@ -5,13 +5,13 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. As of c10, `registerPodman`/`registerDocker`/
+capability-guarded. As of c11, `registerPodman`/`registerDocker`/
 `registerIncus` (and the new `QueryCapabilities` itself), plus
 `registerServices`, `registerLogs`, `registerBackups`,
-`registerStorageActions`, and `registerMaintenance`, are actually
-capability-guarded; every other row below (sysext) still reflects a
-*future* guarantee that its own conversion chunk (c11) has not landed yet.
-The final chunk's contract test enforces the full table.
+`registerStorageActions`, `registerMaintenance`, and `registerSysextActions`,
+are all actually capability-guarded — every row in this table now reflects
+current, landed behavior, not a future guarantee. The final chunk's contract
+test enforces the full table.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
 constants and 16 `Query*` constants today — 51 IDs total, reproducible with:

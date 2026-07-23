@@ -30,6 +30,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
+	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,6 +132,18 @@ func (m *fakeMaintenanceManager) Reboot(context.Context) error { m.rebooted = tr
 func (*fakeMaintenanceManager) State(context.Context) (maintenance.State, error) {
 	return maintenance.State{OSVersion: "Snosi"}, nil
 }
+
+// fakeSysextManager satisfies sysext.Manager so registerSysextActions'
+// per-action capability guards can be tested without exercising a real
+// updex/systemd-sysext dependency.
+type fakeSysextManager struct{}
+
+func (fakeSysextManager) Check(context.Context) ([]sysext.AvailableUpdate, error) { return nil, nil }
+func (fakeSysextManager) Disable(context.Context, string) error                   { return nil }
+func (fakeSysextManager) Enable(context.Context, string) error                    { return nil }
+func (fakeSysextManager) List(context.Context) ([]sysext.Feature, error)          { return nil, nil }
+func (fakeSysextManager) Refresh(context.Context) error                           { return nil }
+func (fakeSysextManager) Update(context.Context) error                            { return nil }
 
 func (*fakeServicesManager) Disable(context.Context, string) error     { return nil }
 func (*fakeServicesManager) Enable(context.Context, string) error      { return nil }
@@ -1119,4 +1132,55 @@ var allStorageRemoteMountActions = []string{
 	broker.ActionStorageMount,
 	broker.ActionStorageUnmount,
 	broker.ActionStorageDelete,
+}
+
+// assertSysextRegistered checks that exactly the sysext action IDs in want
+// are registered, and every other sysext action ID (from allSysextActions)
+// is not -- so each per-action-combination test proves both what should and
+// what should not be present, per docs/capabilities.md's sysext table.
+func assertSysextRegistered(t *testing.T, actions *broker.ActionRegistry, want ...string) {
+	t.Helper()
+	wantSet := make(map[string]bool, len(want))
+	for _, id := range want {
+		wantSet[id] = true
+	}
+	for _, id := range allSysextActions {
+		if wantSet[id] {
+			assert.True(t, actions.Registered(id), "expected %s to be registered", id)
+		} else {
+			assert.False(t, actions.Registered(id), "expected %s not to be registered", id)
+		}
+	}
+}
+
+// allSysextActions is every fixed broker action ID for sysext lifecycle.
+var allSysextActions = []string{
+	broker.ActionSysextDisable,
+	broker.ActionSysextEnable,
+	broker.ActionSysextRefresh,
+	broker.ActionSysextUpdate,
+}
+
+func TestRegisterSysextActionsWithUpdexOnly(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Updex)))
+	assertSysextRegistered(t, actions, broker.ActionSysextUpdate)
+}
+
+func TestRegisterSysextActionsWithSysextOnly(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Sysext)))
+	assertSysextRegistered(t, actions, broker.ActionSysextRefresh)
+}
+
+func TestRegisterSysextActionsWithBothCapabilities(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New(capability.Updex, capability.Sysext)))
+	assertSysextRegistered(t, actions, broker.ActionSysextDisable, broker.ActionSysextEnable, broker.ActionSysextRefresh, broker.ActionSysextUpdate)
+}
+
+func TestRegisterSysextActionsWithNeitherCapability(t *testing.T) {
+	actions := broker.NewActionRegistry()
+	require.NoError(t, registerSysextActions(actions, fakeSysextManager{}, capability.New()))
+	assertSysextRegistered(t, actions)
 }
