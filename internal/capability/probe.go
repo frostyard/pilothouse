@@ -18,6 +18,33 @@ type Config struct {
 	Updex string
 }
 
+// probeFn is a single capability probe bound to the run's Config: given the
+// run context, it returns the Set of capabilities it found present, never
+// erroring. Every real probe in this package (ProbeSystemd, ProbeJournald,
+// ProbeUpdex, ProbeSysext, ProbeBootc, ProbeRPMOStree, ProbePodman,
+// ProbeDocker, ProbeIncus) is adapted to this shape by probes below.
+type probeFn func(ctx context.Context, config Config) Set
+
+// probes is the ordered list of every probe Probe composes. It is a
+// package variable -- rather than a literal directly inside Probe -- solely
+// so a test can temporarily substitute a fake table (standing in for the
+// real, host-dependent probes) and then call the real, exported Probe
+// itself. That proves Probe's actual composition/wiring under
+// partial-success and all-fail fixtures, deterministically, rather than
+// only proving a same-shaped merge helper behaves correctly on fixture
+// Sets it never obtained by calling any real probe.
+var probes = []probeFn{
+	func(ctx context.Context, config Config) Set { return ProbeSystemd(ctx) },
+	func(ctx context.Context, config Config) Set { return ProbeJournald() },
+	func(ctx context.Context, config Config) Set { return ProbeUpdex(ctx, ExecRunner{}, config.Updex) },
+	func(ctx context.Context, config Config) Set { return ProbeSysext(ctx, ExecRunner{}) },
+	func(ctx context.Context, config Config) Set { return ProbeBootc(ctx, ExecRunner{}) },
+	func(ctx context.Context, config Config) Set { return ProbeRPMOStree(ctx, ExecRunner{}) },
+	func(ctx context.Context, config Config) Set { return ProbePodman(ctx, config.PodmanSocket) },
+	func(ctx context.Context, config Config) Set { return ProbeDocker(ctx) },
+	func(ctx context.Context, config Config) Set { return ProbeIncus(ctx) },
+}
+
 // Probe runs every probe in this package -- systemd (plus, sharing its
 // connection, the automatic-update pairs), journald, updex, systemd-sysext,
 // bootc, rpm-ostree, and the three container engines -- and returns their
@@ -30,17 +57,11 @@ type Config struct {
 // startup; nothing here is cached, so every restart re-probes from
 // scratch.
 func Probe(ctx context.Context, config Config) Set {
-	return unionSets(
-		ProbeSystemd(ctx),
-		ProbeJournald(),
-		ProbeUpdex(ctx, ExecRunner{}, config.Updex),
-		ProbeSysext(ctx, ExecRunner{}),
-		ProbeBootc(ctx, ExecRunner{}),
-		ProbeRPMOStree(ctx, ExecRunner{}),
-		ProbePodman(ctx, config.PodmanSocket),
-		ProbeDocker(ctx),
-		ProbeIncus(ctx),
-	)
+	sets := make([]Set, 0, len(probes))
+	for _, p := range probes {
+		sets = append(sets, p(ctx, config))
+	}
+	return unionSets(sets...)
 }
 
 // unionSets combines any number of Sets into one, present iff present in at
