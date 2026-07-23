@@ -30,9 +30,12 @@ agents:
     command: bash
     args:
       - "-c"
+      # filter arrives as $1 (argv, never shell-parsed) — injection-safe; env vars are not templated in v0.1.25
       - |
-        ls -1 internal/modules/ | { f='{{ workflow.input.filter }}'; if [ -n "$f" ]; then grep -F "$f" || true; else cat; fi; } \
+        ls -1 internal/modules/ | { if [ -n "$1" ]; then grep -F -- "$1" || true; else cat; fi; } \
           | python3 -c 'import json,sys; print(json.dumps({"modules": sys.stdin.read().split()}))'
+      - "list_modules"
+      - "{{ workflow.input.filter }}"
     timeout: 30
     routes:
       - to: nothing_matched

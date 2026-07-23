@@ -63,6 +63,17 @@ conductor run workflows/module-audit.yaml -i filter=podman   # subset
 
 ## Schema gotchas (v0.1.25)
 
+- Script-step `env:` values are **not** Jinja-templated (inputs arrive as the
+  literal `{{ ... }}` string). `args` are templated — pass untrusted inputs as
+  extra argv entries after the `bash -c` script (`"$1"`), never interpolated
+  into the shell source (shell injection) and never via `env`.
+- Per-agent `provider:`/`model:` overrides work — e.g. one reviewer on
+  `provider: copilot` with `model: gpt-5.5` while the rest of the workflow
+  runs on `claude-agent-sdk` (cross-model adversarial review).
+- In `bash -c` pipelines, remember the exit code is the last command's: use
+  `set -o pipefail` on gates or failures get swallowed, and wrap `grep` in
+  `{ grep ... || true; }` so no-match doesn't turn pipefail into a false red.
+
 - `input:` declarations nest under `workflow:`, not at top level.
 - Inline `for_each` agents require a `name:`.
 - Outputs of a `parallel` group are read as

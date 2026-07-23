@@ -35,7 +35,7 @@ agents:
     command: bash
     args:
       - "-c"
-      - "go vet ./... 2>&1 | tail -n 60"
+      - "set -o pipefail; go vet ./... 2>&1 | tail -n 60"
     timeout: 300
     routes:
       - to: run_tests
@@ -48,7 +48,8 @@ agents:
     command: bash
     args:
       - "-c"
-      - "set -o pipefail; go test ./... 2>&1 | grep -v '^ok ' | tail -n 80"
+      # grep is wrapped so a fully-'ok' run can't turn pipefail into a false red
+      - "set -o pipefail; go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -n 80"
     timeout: 600
     routes:
       - to: all_green
