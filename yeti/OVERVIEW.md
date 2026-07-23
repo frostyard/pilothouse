@@ -106,9 +106,12 @@ which in turn has exactly two consumers, both wired to the *same* instance in
 `registerHostImage`), and `maintenance.SystemManager`, which takes it as a
 `HostImageSource` and reads it while computing `QueryMaintenanceState`'s
 posture. There is still no web-side consumer and no view for host-image
-status, and the `maintenance` module's nav, routes, and dashboard are
-unchanged; `QueryMaintenanceState`'s response is the one thing that changed
-shape (see the `State` bullet below). What the daemon side now does:
+status; `QueryMaintenanceState`'s response is the one thing that changed
+shape (see the `State` bullet below). The `maintenance` module's own
+nav/route/dashboard gating was reworked separately, to
+`HasAny(Systemd, Bootc, RPMOStree)` — see the "Maintenance: whole-module
+`HasAny(Systemd, Bootc, RPMOStree)` gate" bullet in the web-side gating
+narrative below. What the daemon side now does:
 
 - `NewHostImageManager(runner, bootcAvailable, rpmOstreeAvailable)` takes the
   probed `capability.Bootc`/`capability.RPMOStree` facts and runs, at most,
@@ -474,14 +477,15 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   type-assert `CapabilityGateAny` alongside `CapabilityGate` and skip a
   provider when either gate is unsatisfied, so a future `CapabilityGateAny`
   module can't be hidden from nav/dashboard and 404 on its routes while
-  `/attention` still calls its `Health`. No production module
-  implements `CapabilityGateAny` yet — the mechanism was proven the same
+  `/attention` still calls its `Health`. No production module implemented
+  `CapabilityGateAny` in this chunk — the mechanism was proven the same
   way `CapabilityGate` was before its first real adopter: a synthetic fake
   module in `internal/platform/capability_test.go` (exercising `AvailableAny`
   through a fake `Host`'s real `Capabilities()`) and a synthetic fake module
   registered into a real `*web.Server` in `internal/web/server_test.go`
   proving nav/dashboard/route behavior through a real registry and HTTP
-  round trip.
+  round trip. `maintenance` is the first real adopter — see the Maintenance
+  bullet below.
 - **Services module: the first real `CapabilityGate` adopter.**
   `internal/modules/services.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -505,36 +509,31 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   Systemd-present/-absent and Journald-present/-absent independently via
   real `ServeMux` round trips through `Mount`, rather than calling handler
   logic directly.
-- **Backups and maintenance: whole-module `Systemd` gates.**
-  `internal/modules/backups.Module` and `internal/modules/maintenance.Module`
-  now also implement `RequiredCapabilities() []capability.ID`, each returning
-  `[]capability.ID{capability.Systemd}` — unlike services, neither has a
+- **Backups: whole-module `Systemd` gate.**
+  `internal/modules/backups.Module` now also implements
+  `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Systemd}` — unlike services, it has no
   sub-feature with a broader requirement, so there is exactly one
-  `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` wrap per
-  route: backups' single `GET /backups`, and maintenance's `GET /maintenance`
-  and `POST /maintenance/reboot`. With `Systemd` absent, the whole module
-  disappears — nav entry, dashboard card, and every route 404s at request
-  time; with `Systemd` present, both modules behave exactly as before this
-  chunk. Neither module's `views.templ` changed: an absent module 404s
-  before any page renders, so there is no conditional view content to add,
-  unlike services' `journalAvailable` parameter. Maintenance's existing
-  extension-read degrade (`QueryMaintenanceState`'s updex/sysext handling,
-  from #50) is untouched by this chunk; the systemd gate sits on top of it,
-  at the module/route level, not inside the query handler. Both
-  `module_test.go` files gained the same configurable `caps
-  capability.Set`/`capsSet bool` pair on their fake `Host` that services'
-  test uses (defaulting to a full-capability set), so gated/ungated route
-  behavior is exercised via real `ServeMux` round trips through `Mount`.
+  `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` wrap, on
+  its single `GET /backups` route. With `Systemd` absent, the whole module
+  disappears — nav entry, dashboard card, and the route 404s at request
+  time; with `Systemd` present, the module behaves exactly as before this
+  chunk. Its `views.templ` did not change: an absent module 404s before any
+  page renders, so there is no conditional view content to add, unlike
+  services' `journalAvailable` parameter. `module_test.go` gained the same
+  configurable `caps capability.Set`/`capsSet bool` pair on its fake `Host`
+  that services' test uses (defaulting to a full-capability set), so
+  gated/ungated route behavior is exercised via real `ServeMux` round trips
+  through `Mount`.
   `platform.Gate`/`Available` only guard requests that arrive through a
   module's own `Mount`-registered routes or the web-side nav/dashboard
   loops, though — they do nothing for other in-process code that holds a
   `platform.HealthProvider` reference and calls `Health` directly.
   `internal/modules/attention.Module.findings` is exactly that: it iterates
-  every registered provider (including `backupModule` and
-  `maintenanceModule`, passed into `attention.New(...)` in
-  `cmd/pilothouse/main.go`) and previously called `provider.Health(ctx,
-  host)` unconditionally, so a `Systemd`-absent host still reached
-  `QueryBackupsState`/`QueryMaintenanceState` through `/attention` and
+  every registered provider (including `backupModule`, passed into
+  `attention.New(...)` in `cmd/pilothouse/main.go`) and previously called
+  `provider.Health(ctx, host)` unconditionally, so a `Systemd`-absent host
+  still reached `QueryBackupsState` through `/attention` and
   rendered a degraded "status is unavailable" finding instead of the
   provider being absent entirely. `findings` now type-asserts each
   provider to `platform.CapabilityGate` and, when the host's cached
@@ -545,10 +544,56 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   already apply, generalized to this aggregator's direct method calls;
   `internal/modules/attention/module_test.go` proves it with a
   Health-call-counting fake provider, at both the absent- and
-  present-capability ends. (The any-of bullet below later extended the same
+  present-capability ends. (The any-of bullet above later extended the same
   skip to `platform.CapabilityGateAny`/`HasAny`; see "Attention's
   per-provider capability skip" in the current-state section for the
   composed behavior.)
+- **Maintenance: whole-module `HasAny(Systemd, Bootc, RPMOStree)` gate
+  (reworked by #51).** `internal/modules/maintenance.Module` adopted #54's
+  whole-module `Systemd` `CapabilityGate` alongside backups; #51 replaced
+  it. `module.go` now implements `platform.CapabilityGateAny`
+  (`RequiredAnyCapabilities()` returning `[]capability.ID{capability.Systemd,
+  capability.Bootc, capability.RPMOStree}`), **not**
+  `platform.CapabilityGate`, because the module reports on two independent
+  sources: systemd-gated reboot posture, update availability, and jobs
+  (`QueryMaintenanceState`), and separately gated host-image status
+  (`QueryHostImageStatus`, `Bootc OR RPMOStree`). `GET /maintenance` is
+  wrapped in `platform.GateAny(host, {Systemd, Bootc, RPMOStree}, ...)`;
+  `POST /maintenance/reboot` remains wrapped in a separate, plain
+  `platform.Gate(host, {Systemd}, ...)`, unchanged, since rebooting is a
+  systemd operation and `ActionMaintenanceReboot` is registered only under
+  `Systemd`. So: with none of the three capabilities present the whole
+  module disappears (no nav entry, no dashboard card, `GET /maintenance`
+  404s); with any one of them present the nav entry, dashboard card, and
+  `GET /maintenance` are available, while `POST /maintenance/reboot` remains
+  available only when `Systemd` specifically is present, regardless of
+  bootc/rpm-ostree. Each broker call the module makes is independently
+  capability-gated so no newly-possible capability combination turns an
+  available module into an error: `queryState` calls
+  `QueryMaintenanceState` only when the host advertises `Systemd` and
+  substitutes the zero `State` otherwise, so `Page`, `Summary`, and `Health`
+  degrade to "nothing to report" on a bootc-only host rather than the
+  handler 503ing (or the dashboard card/`attention` finding erroring) on a
+  query the daemon never registered there; the page handler also records
+  `HasAny(Bootc, RPMOStree)` as the flag the host-image section will attempt
+  or skip its fetch on. As of this commit maintenance's `views.templ` still
+  has **no** conditional capability-based content, and no web-side code
+  calls `QueryHostImageStatus`. It needs none yet for the dead-control
+  audit a whole-module-present/route-gated combination normally demands:
+  the only view element targeting the systemd-only reboot route is the admin
+  "Reboot host" form nested inside `if state.RebootRequired`, and the zero
+  `State` substituted when `Systemd` is absent leaves that condition false,
+  so the form cannot render on a host where the route 404s
+  (`TestPageRendersNoRebootControlWithoutSystemd` pins both ends of that).
+  Because the module's whole-module gate is
+  now an any-of gate, `attention.Module.findings` reaches it through the
+  `platform.CapabilityGateAny`/`AvailableAny` (`HasAny`) type-assert rather
+  than the `platform.CapabilityGate` (`HasAll`) one, so maintenance is
+  skipped there — no `Health` call, no "unavailable" placeholder — only when
+  a host has none of the three. Maintenance's existing extension-read
+  degrade (`QueryMaintenanceState`'s updex/sysext handling, from #50) is
+  untouched by either chunk: the capability gating sits on top of it, at the
+  module/route level, not inside the query handler.
 - **Logs: whole-module `Systemd AND Journald` gate.**
   `internal/modules/logs.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -747,17 +792,22 @@ optional tooling never shows a dead link or a button that always fails.
   []capability.ID`), `GateAny`, and `AvailableAny`, using `Set.HasAny`
   semantics instead of `HasAll` — and `moduleAvailable` composes both:
   `platform.Available(module, caps) && platform.AvailableAny(module,
-  caps)`. No production module implements `CapabilityGateAny` yet; see the
-  mechanism-only bullet above for detail. Modules implementing
-  `CapabilityGate` (whole-module gate):
+  caps)`. Modules implementing `CapabilityGate` (whole-module gate):
   - `services` → `Systemd` (plus a `Systemd AND Journald` `Gate` on just
     `GET /services/{unit}/logs`)
   - `logs` → `Systemd AND Journald`
   - `backups` → `Systemd`
-  - `maintenance` → `Systemd`
   - `podman` → `Podman`
   - `docker` → `Docker`
   - `incus` → `Incus`
+
+  Modules implementing `CapabilityGateAny` (whole-module any-of gate, added
+  by #51):
+  - `maintenance` → `HasAny(Systemd, Bootc, RPMOStree)`
+
+  `POST /maintenance/reboot` is additionally, separately gated by a plain
+  `Systemd`-only `platform.Gate` outside the whole-module mechanism, so it
+  404s on a bootc-only host whose maintenance module is otherwise present.
 
   Modules with partial or no gating: `storage` deliberately does *not*
   implement `CapabilityGate` — its inventory (nav, dashboard card,
@@ -784,8 +834,14 @@ optional tooling never shows a dead link or a button that always fails.
   shapes. (`platform.Available`/`AvailableAny` take a `platform.Module`,
   which a `HealthProvider` need not be, so `findings` applies the same two
   tests to the provider value rather than calling them directly.) On a
-  no-systemd host, `services`/`maintenance`/`backups` contribute nothing to
-  `/attention` rather than a degraded placeholder.
+  no-systemd host, `services`/`backups` contribute nothing to `/attention`
+  rather than a degraded placeholder, via the plain
+  `CapabilityGate`/`HasAll` check. `maintenance` is skipped on a different
+  condition: it implements `CapabilityGateAny`, so it contributes nothing
+  only when *none* of `Systemd`/`Bootc`/`RPMOStree` is present (the
+  `CapabilityGateAny`/`AvailableAny` `HasAny` check added by #51) — a
+  bootc-only host still collects its `Health`, which reports what it can
+  without the systemd-gated query.
 - **Routes stay mounted; absence 404s at request time.** No route is ever
   conditionally registered at startup based on capability — every module's
   `Mount` runs unconditionally and mounts all its routes on the shared mux.

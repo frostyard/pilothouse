@@ -283,13 +283,28 @@ change if a module later switches from one interface to the other.
 
 Reach for `CapabilityGateAny` instead of `CapabilityGate` when a module's
 whole surface should appear as soon as *any one* of a set of alternative
-capabilities is present, rather than requiring all of them together. No
-production module implements `CapabilityGateAny` yet — the mechanism above
-(`HasAny`, `GateAny`, `AvailableAny`, and the `moduleAvailable` composition)
-is proven with synthetic fake modules in `internal/capability/capability_test.go`,
+capabilities is present, rather than requiring all of them together.
+`maintenance` is the first and, so far, only production adopter: it returns
+`{Systemd, Bootc, RPMOStree}` from `RequiredAnyCapabilities` (and no longer
+implements `CapabilityGate`), so a bootc-only host with no systemd keeps the
+module's nav entry, dashboard card, and `GET /maintenance` — which is wrapped
+in `platform.GateAny` accordingly. Its `POST /maintenance/reboot` is a
+separate matter: rebooting is a systemd operation, so that one route keeps a
+plain `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` outside
+the whole-module mechanism, and each broker call the module makes is gated on
+its own capability inside the handler (`QueryMaintenanceState` is skipped, not
+failed, when `Systemd` is absent) so no capability combination can turn an
+available module into a 503. Keeping a narrower route gate inside an
+available module also carries the partial-gate obligation: audit every view
+element that targets the narrower route. Maintenance's only one is the
+"Reboot host" form, which renders solely when `state.RebootRequired` is
+true — impossible under the zero `State` a systemd-less host gets — so no
+control ever points at the reboot route on a host that 404s it. The
+mechanism itself (`HasAny`, `GateAny`,
+`AvailableAny`, and the `moduleAvailable` composition) also remains proven
+with synthetic fake modules in `internal/capability/capability_test.go`,
 `internal/platform/capability_test.go`, `internal/web/server_test.go`, and
-`internal/modules/attention/module_test.go` only, the same way
-`CapabilityGate` itself was proven before its first real adopter.
+`internal/modules/attention/module_test.go`, independent of that adopter.
 
 Because `CapabilityGateAny` is a whole-module gate, it carries the same
 every-call-path obligation as `CapabilityGate`: the `attention` aggregator

@@ -54,6 +54,12 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 // platform.Module, which a platform.HealthProvider need not be (it has no
 // Dashboard/Mount), so the same two tests are applied to the provider value
 // here rather than being called directly.
+//
+// Both branches have real providers today: services and backups gate on
+// RequiredCapabilities (HasAll), and maintenance — whose module is present
+// whenever any of Systemd, Bootc, or RPMOStree is — gates on
+// RequiredAnyCapabilities (HasAny), so it is skipped here only when a host
+// has none of those three.
 func (m *Module) findings(ctx context.Context, host platform.Host) []platform.Finding {
 	findings := make([]platform.Finding, 0)
 	var caps capability.Set

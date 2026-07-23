@@ -129,9 +129,13 @@ posture and the reboot action (`QueryMaintenanceState`,
 systemd, while host-image reporting (`QueryHostImageStatus`, guarded by the
 separate `registerHostImage`) requires a host-image source instead and no
 systemd at all — a bootc host without systemd gets the latter and not the
-former. The rest of that phase's maintenance work (module presence/nav
-gating, the web-side rendering of host-image status) is not yet landed and is
-not described here. The sysext per-action rows are:
+former. The web module's presence follows suit: `maintenance.Module`
+implements `platform.CapabilityGateAny` with
+`HasAny(Systemd, Bootc, RPMOStree)`, so the nav entry, dashboard card, and
+`GET /maintenance` survive on a bootc-only host while `POST
+/maintenance/reboot` stays behind its own `Systemd`-only gate (see
+`docs/modules.md`). The web-side rendering of host-image status is not yet
+landed and is not described here. The sysext per-action rows are:
 
 - `ActionSysextRefresh` → `sysext`
 - `ActionSysextUpdate` → `updex`
@@ -244,8 +248,10 @@ reboot-required posture, which remains `QueryMaintenanceState`'s alone.
 bootc-only, rpm-ostree-only, bootc-plus-rpm-ostree, and
 neither-plus-systemd fixtures. No web-side code calls this query yet: as of
 this commit it is a registered, capability-guarded daemon surface with no
-web consumer, and the maintenance module's nav, routes, and dashboard are
-unchanged.
+web consumer. (The maintenance module's nav, routes, and dashboard have
+since moved to a `HasAny(Systemd, Bootc, RPMOStree)` whole-module gate, but
+that gate reads no host-image data — it only records whether a host-image
+source exists.)
 
 It does have one in-process consumer, and only one: `cmd/pilothoused` passes
 the same `maintenance.HostImageManager` instance it registers this query

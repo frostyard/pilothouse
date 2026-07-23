@@ -74,15 +74,23 @@ func fullCapabilitySet() capability.Set {
 // storage remote-mount actions, backups, and maintenance all keep
 // working), but the journal-dependent surfaces (the services journal tab
 // and the whole logs module) require Systemd AND Journald and go absent.
+//
+// (maintenance keeps working here for two independent reasons — it needs
+// only any one of systemd/bootc/rpm-ostree, and all three are present.)
 func noJournaldCapabilitySet() capability.Set {
 	return withoutCapabilities(fullCapabilitySet(), capability.Journald)
 }
 
 // noSystemdCapabilitySet matches a host with every capability present
-// except systemd: services, the storage remote-mount routes, backups,
-// maintenance, and logs (which also needs systemd) all go absent, while
-// storage's own inventory (QueryStorageState has no capability requirement
-// per docs/capabilities.md) stays available.
+// except systemd: services, the storage remote-mount routes, backups, and
+// logs (which also needs systemd) all go absent, while storage's own
+// inventory (QueryStorageState has no capability requirement per
+// docs/capabilities.md) stays available. maintenance stays available too:
+// its whole-module gate is HasAny(Systemd, Bootc, RPMOStree) and this
+// fixture still has bootc and rpm-ostree, so its nav entry, dashboard card,
+// and GET /maintenance remain while only its POST /maintenance/reboot
+// sub-route goes absent — and its systemd-gated QueryMaintenanceState is
+// never called, which the fake broker's requireAvailable guard enforces.
 func noSystemdCapabilitySet() capability.Set {
 	return withoutCapabilities(fullCapabilitySet(), capability.Systemd)
 }
@@ -205,38 +213,66 @@ var capabilityRequirements = map[string][]capability.ID{
 // registry forces a deliberate decision here rather than silently defaulting
 // to "always available".
 var moduleRequiredCapabilities = map[string][]capability.ID{
-	"activity":    nil,
-	"attention":   nil,
-	"fleet":       nil,
-	"system":      nil,
-	"storage":     nil, // partial-gate: inventory always present; remote-mount routes gated (see contractSubRoutes)
-	"sysext":      nil,
-	"files":       nil,
-	"services":    {capability.Systemd},
-	"backups":     {capability.Systemd},
-	"maintenance": {capability.Systemd},
-	"logs":        {capability.Systemd, capability.Journald},
-	"podman":      {capability.Podman},
-	"docker":      {capability.Docker},
-	"incus":       {capability.Incus},
+	"activity":  nil,
+	"attention": nil,
+	"fleet":     nil,
+	"system":    nil,
+	"storage":   nil, // partial-gate: inventory always present; remote-mount routes gated (see contractSubRoutes)
+	"sysext":    nil,
+	"files":     nil,
+	"services":  {capability.Systemd},
+	"backups":   {capability.Systemd},
+	"logs":      {capability.Systemd, capability.Journald},
+	"podman":    {capability.Podman},
+	"docker":    {capability.Docker},
+	"incus":     {capability.Incus},
+}
+
+// moduleRequiredAnyCapabilities is the any-of counterpart of
+// moduleRequiredCapabilities, for modules whose whole-module gate is
+// platform.CapabilityGateAny (HasAny semantics) rather than
+// platform.CapabilityGate (HasAll). It is likewise transcribed by hand from
+// docs/capabilities.md and docs/modules.md, never derived from
+// platform.AvailableAny. maintenance is the only entry: per #51 it reports
+// on two independently gated sources — systemd-gated reboot posture, update
+// availability, and jobs (QueryMaintenanceState), and bootc-or-rpm-ostree-
+// gated host-image status (QueryHostImageStatus) — so the module is present
+// whenever any one of the three is, and only its POST /maintenance/reboot
+// sub-route stays systemd-only (see contractSubRoutes).
+//
+// A module ID must appear in exactly one of the two maps; appearing in both
+// fails the test, as does appearing in neither.
+var moduleRequiredAnyCapabilities = map[string][]capability.ID{
+	"maintenance": {capability.Systemd, capability.Bootc, capability.RPMOStree},
 }
 
 // expectModuleAvailable is the independent oracle for whether the module with
 // the given manifest ID should be available (nav link present, primary route
 // non-404, dashboard card allowed) under caps. It consults
-// moduleRequiredCapabilities — the hand-maintained, spec-derived table — and
-// never calls platform.Available, so the real production predicate's actual
-// behavior can be asserted against this independent expectation. An unknown
-// module ID fails the test loudly: docs/capabilities.md's module table is
-// meant to cover every registered module, so an unlisted one most likely
-// means a module was added to the registry without recording its gate here.
+// moduleRequiredCapabilities and moduleRequiredAnyCapabilities — the
+// hand-maintained, spec-derived tables — and never calls
+// platform.Available/platform.AvailableAny, so the real production
+// predicates' actual behavior can be asserted against this independent
+// expectation. An unknown module ID fails the test loudly:
+// docs/capabilities.md's module table is meant to cover every registered
+// module, so an unlisted one most likely means a module was added to the
+// registry without recording its gate here.
 func expectModuleAvailable(t *testing.T, manifestID string, caps capability.Set) bool {
 	t.Helper()
 	required, known := moduleRequiredCapabilities[manifestID]
-	if !known {
-		t.Fatalf("module %q is not present in moduleRequiredCapabilities; record its spec-derived capability gate (see docs/capabilities.md's Module-level defaults)", manifestID)
+	requiredAny, knownAny := moduleRequiredAnyCapabilities[manifestID]
+	switch {
+	case known && knownAny:
+		t.Fatalf("module %q appears in both moduleRequiredCapabilities and moduleRequiredAnyCapabilities; a module declares at most one whole-module gate", manifestID)
+		return false
+	case knownAny:
+		return caps.HasAny(requiredAny...)
+	case known:
+		return caps.HasAll(required...)
+	default:
+		t.Fatalf("module %q is not present in moduleRequiredCapabilities or moduleRequiredAnyCapabilities; record its spec-derived capability gate (see docs/capabilities.md's Module-level defaults)", manifestID)
+		return false
 	}
-	return caps.HasAll(required...)
 }
 
 // fakeCapabilityBroker implements web.BrokerClient. Session always succeeds
@@ -879,8 +915,9 @@ func TestCapabilityContractFullCapabilityFixture(t *testing.T) {
 // TestCapabilityContractDegradedFixtures exercises the three degraded
 // fixtures named in the mill plan for issue #54, chunk c11: no-journald
 // (services keeps working, journal/logs go absent), no-systemd (services,
-// storage's remote-mount routes, backups, maintenance, and logs all go
-// absent, storage inventory stays), and no-engines (podman/docker/incus
+// storage's remote-mount routes, backups, and logs all go absent, storage
+// inventory and — since #51 — maintenance itself stay, with only
+// maintenance's reboot sub-route gated off), and no-engines (podman/docker/incus
 // all go absent together). Each subtest reuses the exact same
 // runCapabilityContractFixture assertions the full-capability fixture
 // above uses, driven purely by the fixture's capability.Set.
