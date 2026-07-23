@@ -52,6 +52,61 @@ conductor run workflows/module-audit.yaml
 conductor run workflows/module-audit.yaml -i filter=podman   # subset
 ```
 
+### mill.yaml — spec → PR harness
+The big one: takes a complete specification (a GitHub issue or a local
+markdown file) and puts it through the mill:
+
+```
+ingest → baseline gate → plan (claude) → adversarial plan review (gpt) ⟲
+→ human gate → [ implement (claude) → deterministic gate ⟲ fix
+                 → adversarial chunk review (gpt) → commit ] per chunk
+→ security review (claude) ∥ spec-compliance matrix (gpt)
+→ harvest (self-improvement) → deep gate (make docker-test)
+→ human ship gate → push + PR
+```
+
+**Always launch via the driver**, which isolates the run in a git worktree
+(`.worktrees/mill-<id>`, branch `mill/<id>`) — the claude-agent-sdk provider
+ignores `working_dir`, so process cwd is the isolation boundary:
+
+```bash
+scripts/mill.sh 35                  # run issue #35, interactive gates
+scripts/mill.sh spec.md --auto      # unattended (auto-approves gates)
+scripts/mill.sh 35 --no-pr --no-deep --fresh   # local-only, native gates, restart
+```
+
+Design rules baked in:
+- **All control flow is deterministic.** Loop counters, gate results, and
+  every git operation live in `scripts/mill_state.py`; LLM steps never decide
+  when a loop ends and never run git. Bounded retries everywhere: 3 plan
+  rounds, 3 gate-fix attempts per chunk, 2 review rounds per chunk — then the
+  run terminates `failed` with a resumable checkpoint instead of thrashing.
+- **Cross-model adversarial review.** Claude implements; GPT (via Copilot)
+  reviews the plan, each chunk, and final spec compliance — prompted to
+  reject, with an explicit requirement-by-requirement compliance matrix at
+  the end.
+- **Reviewers are provably read-only.** After every review step a script
+  compares the staged-diff hash and working tree against a pre-review
+  snapshot; any modification is reverted and the run aborts.
+- **Humans gate the irreversible moments**: plan approval (before tokens are
+  spent) and ship (before anything leaves the machine). `--auto` skips both;
+  `--no-pr` guarantees nothing is pushed regardless.
+- **Self-improvement (harvest).** Every gate failure, reviewer objection,
+  and revision round is journaled to `.mill/journal.jsonl`. After final
+  reviews pass, a harvest agent distills at most 3 durable, generalizable
+  lessons into `docs/agents/skills/*.md` — committed inside the same PR so a
+  human reviews the learned lessons alongside the code. A deterministic gate
+  reverts anything harvest touches outside its allowlist. The planner and
+  implementer read `docs/agents/skills/` at the start of every future run,
+  closing the loop.
+- **Plan deadlock escalates instead of dead-ending.** If the plan reviewer
+  rejects 3 times, that usually means the spec is ambiguous — a human gate
+  offers "proceed with latest plan" or "abort and clarify the spec"
+  (abort is the default in `--auto` runs).
+- Run state lives in `.mill/` inside the worktree (spec, plan, progress,
+  objections, final report, journal) — self-gitignored, and the whole run is
+  re-entrant via `conductor resume` plus the on-disk cursor.
+
 ## Useful flags
 
 - `--web` — live DAG dashboard in the browser

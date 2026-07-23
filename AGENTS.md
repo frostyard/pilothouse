@@ -48,3 +48,11 @@ before performing tasks. Write content in this directory to be
 maximally useful to an AI agent understanding the codebase — detailed
 architecture, patterns, and decision rationale rather than user-facing
 guides.
+
+## Learned agent skills
+
+**docs/agents/skills/** Read every file in `docs/agents/skills/` before
+planning, implementing, or reviewing changes. Each file is a durable lesson
+distilled from a previous automated run (see `workflows/mill.yaml`); they are
+binding guidance, not suggestions. New skills are added by the mill's harvest
+step and reviewed like any other change in the PR that carries them.
