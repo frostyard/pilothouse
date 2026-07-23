@@ -62,6 +62,7 @@ target, so agents and CI can never disagree about what "passing" means.
 
 **docs/agents/skills/** Read every file in `docs/agents/skills/` before
 planning, implementing, or reviewing changes. Each file is a durable lesson
-distilled from a previous automated run (see `workflows/mill.yaml`); they are
-binding guidance, not suggestions. New skills are added by the mill's harvest
-step and reviewed like any other change in the PR that carries them.
+distilled from a previous automated run of [the mill](https://github.com/frostyard/mill)
+(the spec→PR harness, configured here via `.mill.toml`); they are binding
+guidance, not suggestions. New skills are added by the mill's harvest step
+and reviewed like any other change in the PR that carries them.

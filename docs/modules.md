@@ -68,6 +68,10 @@ Register one constructor in `cmd/pilothouse/main.go`; navigation and dashboard p
 ## Rules for actions
 
 - Use POST for mutations and call `host.ValidateAction` before doing work.
+  The one exception is a fixed multipart stream upload (Files), which must
+  read the CSRF token from a parsed multipart part before the body is fully
+  buffered and validates it with `host.ValidateActionToken` instead — see
+  `internal/modules/files/handler.go`.
 - Submit a fixed action ID with `host.Execute`; never execute a privileged command in a web module.
 - Submit privileged reads through a fixed `host.Query`; never grant the web process access to a root-equivalent API socket.
 - Register the privileged implementation in `cmd/pilothoused`, marking whether it requires an administrator.
@@ -77,6 +81,9 @@ Register one constructor in `cmd/pilothouse/main.go`; navigation and dashboard p
 - Run long privileged mutations through the broker's durable background-action definition; never launch detached goroutines from a web module.
 - Test web handlers with a fake host and broker actions with fake domain managers.
 - Return an `HX-Redirect` for HTMX requests and a 303 redirect for normal forms.
+  The exceptions are handlers that end the session or system state outright
+  (`POST /logout` in `internal/web/server.go`, `POST /maintenance/reboot` in
+  `internal/modules/maintenance/module.go`), which always return a plain 303.
 
 Example web action:
 

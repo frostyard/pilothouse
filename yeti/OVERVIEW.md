@@ -34,6 +34,7 @@ internal/
 docs/                 authoritative subsystem docs (kept here, not duplicated into yeti/):
   authentication.md    login, session, authorization, audit, PAM policy, deployment rules
   modules.md           how to add a new module: contract, file layout, action/query rules
+  capabilities.md      binding table mapping every broker ID to its required host capability
 
 packaging/            systemd units, PAM policy, sysusers declaration
 .docker/              development container image (Go + PAM + systemd headers) for docker-* make targets
@@ -48,12 +49,15 @@ packaging/            systemd units, PAM policy, sysusers declaration
   directly (e.g. `system` collects `/proc`, `/sys`, `/etc/os-release`
   telemetry) — this is allowed because it requires no elevated access.
 - **`pilothoused`** (`cmd/pilothoused/main.go`): refuses to start unless
-  `euid == 0`. Opens root-owned bbolt databases for audit and jobs, builds
+  `euid == 0`. Probes optional host capabilities (`internal/capability`) up
+  front, then opens root-owned bbolt databases for audit and jobs, builds
   `broker.QueryRegistry` / `broker.ActionRegistry` / stream registries, and
   registers every privileged implementation (services, Podman, Docker, Incus,
-  sysext, files, logs, backups, storage/remote-mounts, maintenance). Serves HTTP
-  only over a Unix socket with `0660 root:<socket-group>` permissions — never a
-  TCP listener.
+  sysext, files, logs, backups, storage/remote-mounts, maintenance) — each
+  registration guarded by the probed capability set so an absent optional
+  dependency degrades only that registration instead of aborting startup.
+  Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
+  permissions — never a TCP listener.
 
 ### Modules (`internal/modules/<name>`)
 
@@ -114,63 +118,15 @@ rules for adding a new module (routes, actions, queries).
   target as a root-owned, non-group/world-writable regular file while executing
   the original entry-point path. Broken or unsafe present candidates fail
   startup; absent optional tools degrade only their backend to unsupported.
-- **Capability probing and advertisement.** `pilothoused` probes host
-  capabilities once at startup (`internal/capability.Probe`, called early
-  in `cmd/pilothoused/main.go`'s `run()`, before any module manager is
-  constructed) — systemd, journald, `updex`, `systemd-sysext`, bootc,
-  rpm-ostree, the `rpm-ostreed-automatic`/`bootc-fetch-apply-updates`
-  automatic-update unit-file pairs, and the Podman/Docker/Incus engine
-  sockets — and probing itself never fails fatally: every probe narrows to
-  "absent" on any error instead of erroring. As of this chunk that
-  guarantee is fully wired through to daemon startup for the engine
-  capabilities (Podman/Docker/Incus) and for systemd: a host with any of
-  these absent or unreachable still starts the daemon.
-- **Capability-gated, non-fatal construction of systemd-backed managers.**
-  Storage's remote-mount unit controller and the backups/services/logs
-  managers all need a live system D-Bus connection, and their exported
-  constructors (`backups.NewSystemManager`, `services.NewSystemManager`,
-  `logs.NewSystemManager`) no longer open that connection themselves — each
-  accepts a pre-opened client (an unexported `systemdClient` interface per
-  package, structurally satisfied by `*dbus.Conn`) from its caller.
-  `cmd/pilothoused/main.go`'s `connectSystemd(ctx, caps, connect, logger)`
-  opens that connection at most once, only when the probed `Systemd`
-  capability is present; a connection failure is logged as a warning and
-  degrades to a nil client exactly like an absent capability — never a
-  fatal `run()` error. `run()` calls `connectSystemd` with a context bounded
-  by `systemdConnectTimeout` (mirroring `capability.Probe`'s own
-  `dbusProbeTimeout`), not `context.Background()`: reusing an unbounded
-  context here would reintroduce the exact unbounded-startup-hang risk the
-  probe's own timeout exists to rule out, for the case where the bus was
-  reachable at probe time but wedges before this second, real dial.
-  `buildSystemdManagers` constructs the remote-mount
-  controller and the backups/services/logs managers only when that client
-  is non-nil, leaving each nil otherwise. `registerStorageActions` (the
-  eight remote-mount lifecycle actions) and `registerBackups`
-  (`QueryBackupsState`) have both been converted to the full
-  `capability.Set`-based guard, alongside `registerServices` and
-  `registerLogs` (see below): each requires only `Systemd` uniformly (every
-  remote-mount action generates or controls systemd units; backups monitors
-  systemd timers), so the guard sits once at the top of the function rather
-  than per call. Each function's nil-manager check is retained alongside the
-  capability check as a defensive backstop, since manager and caps agree in
-  the real `run()` wiring but a directly-injected fake manager in tests must
-  still respect the capability guard on its own.
-  `QueryStorageState` is registered separately against the
-  plain, non-systemd `storageManager` built earlier in `run()`, so storage
-  inventory reads never depend on systemd at all — not even via a
-  registration-level guard, unlike the remote-mount actions. Independent of
-  systemd's presence, `backups.ValidateConfiguration` (timer name pattern,
-  positive max age) still runs unconditionally in `run()` before any of
-  this and fails startup fatally on genuine flag misconfiguration; only the
-  D-Bus reachability failure mode is non-fatal. Later modules that
-  construct a privileged manager from an optional host resource should
-  follow this same shape: accept a pre-opened/pre-resolved dependency from
-  the caller, gate opening that dependency on the relevant probed
-  capability, and never let its absence fail `run()`. Maintenance and
-  sysext manager construction (which use `sysext.ExecRunner`, not systemd
-  D-Bus) are unaffected by this chunk and remain unconditionally
-  registered until their own conversion (see the maintenance update below).
-  The probed `capability.Set` is
+- **Capability probing at startup.** `pilothoused` probes optional host
+  capabilities once, early in `cmd/pilothoused/main.go`'s `run()`, before any
+  module manager is constructed (`internal/capability.Probe`): systemd,
+  journald, `updex`, `systemd-sysext`, bootc, rpm-ostree, the
+  `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
+  unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
+  individual probe narrows to "absent" on any error rather than failing —
+  probing itself is never fatal. The resulting `capability.Set` is not
+  cached or re-probed later; a daemon restart re-probes from scratch. It is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
   (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
@@ -509,6 +465,84 @@ rules for adding a new module (routes, actions, queries).
   gated/ungated route behavior — and that gating incus leaves the rest of
   the mux unaffected — is exercised via real `ServeMux` round trips through
   `Mount`.
+||||||| 702e635
+  (`broker.QueryCapabilities`), returning `{"capabilities": [...]}` —
+  present capabilities only, sorted, canonical IDs — and restart re-probes
+  from scratch (nothing is cached). The same `capability.Set` gates
+  privileged registration: see `docs/capabilities.md` for the binding
+  table mapping every broker ID to its required capability, and
+  `docs/modules.md`'s "Capability-guarded registration" section for the
+  convention new modules follow. `registerPodman`/`registerDocker`/
+  `registerIncus` are the first full conversions — each takes `caps
+  capability.Set` and registers nothing for its engine when the
+  corresponding capability is absent (an unreachable or misconfigured
+  engine, including a Docker client that fails to construct, is logged as
+  a warning, never a fatal `run()` error). `registerServices` and
+  `registerLogs` are the next conversions: `registerServices` guards
+  `QueryServicesState` and every services lifecycle action on
+  `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
+  `caps.HasAll(capability.Systemd, capability.Journald)` — guarded
+  individually per `docs/capabilities.md`'s corrected mapping, so a host
+  with systemd but no journald still gets full service management with
+  only the journal query withheld; `registerLogs` guards its single
+  `QueryLogs` registration on that same `caps.HasAll(capability.Systemd,
+  capability.Journald)`. `registerStorageActions` and `registerBackups` are
+  the next conversions: both guard their whole function on
+  `caps.Has(capability.Systemd)` alone (every remote-mount action generates
+  or controls systemd units, and backups monitors systemd timers, so
+  neither has a services-style mixed per-call requirement); their
+  nil-manager check is retained alongside the capability check as a
+  defensive backstop for directly-injected test fakes. `QueryStorageState`
+  itself, registered separately against the plain, non-systemd
+  `storageManager`, remains unconditional per `docs/capabilities.md`'s
+  documented exception.
+- **Maintenance: guarded registration plus a real handler-level degrade.**
+  `registerMaintenance` (`cmd/pilothoused/main.go`) is the next conversion:
+  it takes the probed `capability.Set` and no-ops both
+  `QueryMaintenanceState` and `ActionMaintenanceReboot` when `systemd` is
+  absent, exactly like `registerBackups`/`registerStorageActions`.
+  `maintenance.NewSystemManager` has no D-Bus dependency of its own (it
+  depends only on the sysext manager, job store, and command runner), so
+  unlike backups/services/logs there is no construction-level non-fatal-
+  startup fix to make here; the manager is always constructed regardless of
+  systemd, and the registration guard above is the only thing withholding
+  it. Separately — and this is the real behavioral change in this chunk —
+  `maintenance.SystemManager.State`'s extension-read subpath
+  (`extensionState`, which calls `UpdateSource.Check` for `Updates` and
+  `UpdateSource.List` for `Features`/merged-status-derived reboot reasons)
+  degrades gracefully instead of erroring when `updex`/`systemd-sysext` are
+  unavailable, driven by two new `updexAvailable`/`sysextAvailable`
+  parameters on `NewSystemManager` fed from `cmd/pilothoused/main.go`'s
+  probed `caps.Has(capability.Updex)`/`caps.Has(capability.Sysext)`: with
+  both present, behavior is byte-for-byte unchanged; with updex present but
+  sysext absent, `Check()` still runs (`Updates` populates) but `List()` is
+  skipped entirely (merged-but-disabled reboot reasons omitted); with updex
+  absent (sysext present or absent), neither call runs and both `Updates`
+  and feature-derived reboot reasons are omitted — a documented limitation
+  of today's `sysext.SystemManager`, whose enumeration is updex-only by
+  construction, not a phase 1a gap. `State` never returns an error because
+  of missing updex/sysext in any combination; `Jobs`, `OSVersion`, and
+  reboot-marker-derived reasons are computed exactly as before regardless.
+  See `docs/capabilities.md`'s extension-read note for the full table and
+  `internal/modules/maintenance/manager_test.go` for one dedicated test case
+  per combination.
+- **Sysext: the one module guarded per-action, not per-function.**
+  `registerSysextActions` (`cmd/pilothoused/main.go`) is the final capability
+  conversion in this phase, and the only one where the four registrations
+  don't share a single requirement: `ActionSysextDisable`/`ActionSysextEnable`
+  (registered together via the shared `registerNamedActions` helper) require
+  `updex AND sysext` together, so that pair is guarded as one group;
+  `ActionSysextRefresh` requires `sysext` alone and `ActionSysextUpdate`
+  requires `updex` alone — those two already lived in a separate local loop,
+  so each entry there now carries its own required capability, checked
+  in-loop, without changing `registerNamedActions`/`registerProjectActions`
+  (every other caller has a uniform per-call requirement). `sysext.NewSystemManager`
+  has no systemd D-Bus dependency (exec/`CommandRunner`-based only), so — like
+  maintenance — there is no construction-level non-fatal-startup fix needed;
+  `sysextManager` is constructed unconditionally regardless of capability, and
+  the per-action registration guards above are what withhold each action. See
+  `docs/capabilities.md`'s sysext rows and module-level-defaults section for
+  the full per-action table.
 - **Storage SMB ownership mapping.** The fixed administrator-only
   `org.frostyard.pilothouse.storage.create-smb-guest-owned` and
   `org.frostyard.pilothouse.storage.create-smb-credentials-owned` actions
@@ -519,7 +553,8 @@ rules for adding a new module (routes, actions, queries).
   The web process cannot resolve names or provide free-form mount options, and
   no generic command, filesystem, or socket capability is introduced.
 
-See `docs/authentication.md` for the full login/session/authorization/audit
+See `docs/capabilities.md` for the full broker-ID-to-capability table and
+`docs/authentication.md` for the full login/session/authorization/audit
 model and deployment rules (cookie flags, allowed origins, PAM policy).
 
 ### Web-side capability gating (end state, #54)
@@ -632,10 +667,16 @@ optional tooling never shows a dead link or a button that always fails.
   `platform.Page{Active, Body, Eyebrow, Title}` and calls `host.Render`,
   which wraps the module body in the shared `Layout`.
 - HTMX is used for auto-refresh (dashboard every 15s targeting `#dashboard`,
-  log views every 5s) and for redirect handling: handlers return
-  `HX-Redirect` for HTMX requests and a plain `303` for normal form posts.
-  Mutating forms are otherwise plain POSTs (often with `hx-boost="false"`) —
-  **pages must remain usable without JavaScript.**
+  storage snapshot every 30s targeting `#storage-snapshot`, container/journal
+  log views every 5s) and, for most module mutation handlers, for redirect
+  handling: handlers return `HX-Redirect` for HTMX requests and a plain `303`
+  for normal form posts. Two handlers intentionally skip that branch and
+  always return a plain `303` regardless of request type — `POST
+  /maintenance/reboot` (`internal/modules/maintenance/module.go`) and `POST
+  /logout` (`internal/web/server.go`) — since both end the current session or
+  system state, so a full-page redirect is correct either way. Mutating forms
+  are otherwise plain POSTs (often with `hx-boost="false"`) — **pages must
+  remain usable without JavaScript.**
 - Run `make generate` (or `make docker-generate`) after editing any
   `*.templ` file. Never hand-edit the generated `*_templ.go` files.
 - **Composition rule:** put component calls like `@web.Icon("chevron")` on
@@ -736,10 +777,36 @@ hoc container or pass Git credentials into the image — see
 `docs/superpowers/plans/2026-07-21-bump-workflow.md` for the design
 rationale.
 
+## Agent workflow tooling
+
+- `.mill.toml` configures the [frostyard/mill](https://github.com/frostyard/mill)
+  spec→PR harness for this repo: `[gates].chunk` (`make generate`, `gofmt`,
+  `go vet`, `go test`) runs after every chunk, `[gates].deep` (`make
+  docker-ci`) runs before the ship decision, and `[context].docs` lists
+  `AGENTS.md`, `yeti/OVERVIEW.md`, and `docs/modules.md` as required reading
+  for every mill agent. The mill engine itself lives in the separate
+  `frostyard/mill` repo; this repo carries only config, learned skills, and
+  cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
+  `.github/copilot-instructions.md`, all pointing back to `AGENTS.md`).
+- `docs/agents/skills/` holds durable lessons harvested from previous mill
+  runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
+  `AGENTS.md` requires reading every file there before planning,
+  implementing, or reviewing changes — treat them as binding guidance.
+- `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
+  multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
+  (gate chain, only escalates to an LLM on failure), `code-review.yaml`
+  (parallel security/correctness reviewers plus a synthesizer), and
+  `module-audit.yaml` (fans out one audit agent per `internal/modules/*`
+  directory). See `workflows/README.md` for setup and schema gotchas.
+
 ## Further Reading
 
 - `docs/authentication.md` — login flow, session/CSRF model, authorization,
   audit trail, PAM policy, deployment rules.
 - `docs/modules.md` — module contract, recommended file layout, and the
   concrete rules for adding actions/queries (fixed IDs only, validation,
-  timeouts, no shell invocation, HTMX redirect conventions).
+  timeouts, no shell invocation, HTMX redirect conventions, capability-guarded
+  registration).
+- `docs/capabilities.md` — binding table mapping every broker `Query*`/
+  `Action*` ID to its required capability (or capabilities), plus documented
+  exceptions to the module-level defaults.
