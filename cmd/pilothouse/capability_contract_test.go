@@ -17,6 +17,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/capability"
+	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/frostyard/pilothouse/internal/web"
 	"github.com/stretchr/testify/assert"
@@ -238,14 +239,50 @@ func (b *fakeCapabilityBroker) Logout(context.Context, string) error { return ni
 
 func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[string]string, target any) error {
 	b.requireAvailable(id)
-	if id == broker.QueryCapabilities {
+	switch id {
+	case broker.QueryCapabilities:
 		encoded, err := json.Marshal(b.capabilities)
 		if err != nil {
 			return err
 		}
 		return json.Unmarshal(encoded, target)
+	case broker.QueryStorageState:
+		encoded, err := json.Marshal(cannedStorageSnapshot())
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(encoded, target)
+	default:
+		return cannedQueryResponse(target)
 	}
-	return cannedQueryResponse(target)
+}
+
+// cannedStorageSnapshot returns a storage.Snapshot carrying one managed,
+// mounted remote mount (ID "remote:"+sampleDefinitionID, matching the
+// definition ID contractSubRoutes exercises against the mount/delete
+// sub-routes). Per docs/agents/skills/canned-fixtures-need-populated-data-
+// for-what-they-assert.md, an empty Snapshot can never render
+// ManagedMountTable's per-mount Unmount/Delete forms under any fixture, so
+// an assertion that those forms are absent under a gated fixture would be
+// vacuously true — it would pass identically whether the gating logic
+// correctly hid the forms or whether the forms were deleted outright. A
+// populated managed mount makes the "forms present when available, absent
+// when gated" assertion actually exercise storage's per-mount conditional
+// rendering (internal/modules/storage/views.templ's ManagedMountTable),
+// not just the top-level "Add remote mount" link.
+func cannedStorageSnapshot() storage.Snapshot {
+	return storage.Snapshot{
+		Mounts: []storage.Mount{
+			{
+				ID:      "remote:" + sampleDefinitionID,
+				Managed: true,
+				State:   "mounted",
+				Health:  storage.HealthHealthy,
+				Source:  "nfs.example.com:/export/contract",
+				Target:  "/mnt/contract",
+			},
+		},
+	}
 }
 
 func (b *fakeCapabilityBroker) Session(context.Context, string) (broker.SessionResponse, error) {
@@ -676,19 +713,37 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) {
 	// forms per storage.Module.Mount's remoteMountCapabilities) require
 	// systemd. This is checked explicitly, not just inferred from the
 	// dead-link crawl, because the acceptance criteria call it out by name.
+	// cannedStorageSnapshot() (returned by the fake broker for every
+	// fixture) carries one managed, mounted remote mount so the per-mount
+	// Unmount/Delete forms actually render when available — proving they
+	// are hidden when gated, not just vacuously absent from an empty
+	// mount table (docs/agents/skills/canned-fixtures-need-populated-data-
+	// for-what-they-assert.md).
 	storageRequest := httptest.NewRequest(http.MethodGet, "/storage", nil)
 	storageRequest.AddCookie(cookie)
 	storageRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(storageRecorder, storageRequest)
 	require.Equal(t, http.StatusOK, storageRecorder.Code,
 		"fixture: storage inventory (GET /storage) must stay available regardless of capabilities")
+	storageBody := storageRecorder.Body.String()
+	unmountFormAction := `action="/storage/mounts/` + sampleDefinitionID + `/unmount"`
+	deleteFormAction := `action="/storage/mounts/` + sampleDefinitionID + `/delete"`
 	if caps.Has(capability.Systemd) {
-		assert.Contains(t, storageRecorder.Body.String(), "Add remote mount",
+		assert.Contains(t, storageBody, "Add remote mount",
 			"fixture: storage page should render the remote-mount control when systemd is present")
+		assert.Contains(t, storageBody, unmountFormAction,
+			"fixture: storage page should render the per-mount Unmount form when systemd is present")
+		assert.Contains(t, storageBody, deleteFormAction,
+			"fixture: storage page should render the per-mount Delete form when systemd is present")
 	} else {
-		assert.NotContains(t, storageRecorder.Body.String(), "Add remote mount",
+		assert.NotContains(t, storageBody, "Add remote mount",
 			"fixture: storage page rendered a remote-mount control despite systemd being absent")
+		assert.NotContains(t, storageBody, unmountFormAction,
+			"fixture: storage page rendered a per-mount Unmount form despite systemd being absent")
+		assert.NotContains(t, storageBody, deleteFormAction,
+			"fixture: storage page rendered a per-mount Delete form despite systemd being absent")
 	}
+	assertNoDeadLinks(t, handler, cookie, "/storage", storageBody)
 
 	for _, route := range contractSubRoutes {
 		expectAvailable := caps.HasAll(route.requirements...)
