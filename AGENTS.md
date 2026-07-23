@@ -49,6 +49,15 @@ maximally useful to an AI agent understanding the codebase — detailed
 architecture, patterns, and decision rationale rather than user-facing
 guides.
 
+## One command mirrors CI
+
+**make ci / make docker-ci** runs every gate CI runs — tidy check, vet,
+format check, lint, govulncheck, tests, race, build — in CI's order. Run it
+before pushing; if it is green locally, CI will be green. `docker-ci` is
+the containerized equivalent for hosts without Go/PAM/systemd headers or
+golangci-lint. Automated harnesses (the mill's deep gate) use this same
+target, so agents and CI can never disagree about what "passing" means.
+
 ## Learned agent skills
 
 **docs/agents/skills/** Read every file in `docs/agents/skills/` before

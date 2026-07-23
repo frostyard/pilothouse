@@ -39,6 +39,10 @@ accepted.
 
 ## Develop
 
+Before pushing, run `make ci` (or `make docker-ci` on hosts without the
+native toolchain) — it runs every gate CI runs, in the same order. Local
+green means CI green.
+
 Go 1.26 or newer is required.
 
 ```bash

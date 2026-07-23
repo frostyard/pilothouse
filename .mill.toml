@@ -12,7 +12,7 @@ chunk = [
 ]
 # Heavier final gate before the ship decision (mill.sh --no-deep skips these
 # and re-runs the chunk gates instead).
-deep = ["make docker-test", "make docker-lint"]
+deep = ["make docker-ci"]
 
 [context]
 # Docs every agent must read before planning/implementing/reviewing.

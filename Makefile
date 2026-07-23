@@ -91,6 +91,20 @@ docker-fmt: docker-image ## Format Go source files in Docker
 docker-lint: docker-image ## Run golangci-lint in Docker
 	$(DOCKER_RUN) golangci-lint run
 
+ci: generate ## Run every gate CI runs (lint, vuln, tidy, vet, fmt, test, race, build)
+	@echo "==> go mod tidy check" && go mod tidy -diff
+	@echo "==> go vet" && go vet ./...
+	@echo "==> format check" && $(MAKE) format-check
+	@echo "==> lint" && $(MAKE) lint
+	@echo "==> govulncheck" && { command -v govulncheck >/dev/null 2>&1 && govulncheck ./... || go run golang.org/x/vuln/cmd/govulncheck@latest ./...; }
+	@echo "==> tests" && $(MAKE) test
+	@echo "==> race" && $(MAKE) race
+	@echo "==> build" && $(MAKE) build
+	@echo "all CI gates passed"
+
+docker-ci: docker-image ## Run every CI gate inside the development image
+	$(DOCKER_RUN) make ci
+
 bump-preflight: ## Verify that main is clean and synchronized
 	@DOCKER="$(DOCKER)" ./scripts/bump.sh preflight
 
