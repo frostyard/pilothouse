@@ -403,11 +403,17 @@ func TestExecuteMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
 	assert.ErrorIs(t, err, broker.ErrUnauthorized)
 	assert.False(t, server.capabilities.staleAfterOutage())
 
+	fake.actionErr = errors.New("some domain error")
+	err = server.Execute(ctx, request, "action", nil)
+	assert.Error(t, err)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
 	fake.actionErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
 	err = server.Execute(ctx, request, "action", nil)
 	assert.Error(t, err)
 	assert.True(t, server.capabilities.staleAfterOutage())
-	assert.Empty(t, fake.queryCalls)
+
+	assert.Empty(t, fake.queryCalls, "Execute must never itself trigger a QueryCapabilities call")
 }
 
 func TestQueryMarksCapabilitiesDownOnlyOnUnavailableAndNeverRefetchesItself(t *testing.T) {
@@ -416,8 +422,13 @@ func TestQueryMarksCapabilitiesDownOnlyOnUnavailableAndNeverRefetchesItself(t *t
 	ctx := context.WithValue(context.Background(), sessionContextKey{}, requestSession{token: "token"})
 	var target any
 
-	fake.queryErr = errors.New("some domain error")
+	fake.queryErr = broker.ErrUnauthorized
 	err := server.Query(ctx, "some.query", nil, &target)
+	assert.ErrorIs(t, err, broker.ErrUnauthorized)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
+	fake.queryErr = errors.New("some domain error")
+	err = server.Query(ctx, "some.query", nil, &target)
 	assert.Error(t, err)
 	assert.False(t, server.capabilities.staleAfterOutage())
 
@@ -426,7 +437,7 @@ func TestQueryMarksCapabilitiesDownOnlyOnUnavailableAndNeverRefetchesItself(t *t
 	assert.Error(t, err)
 	assert.True(t, server.capabilities.staleAfterOutage())
 
-	assert.Equal(t, []string{"some.query", "some.query"}, fake.queryCalls)
+	assert.Equal(t, []string{"some.query", "some.query", "some.query"}, fake.queryCalls, "Query must never itself trigger a QueryCapabilities call")
 }
 
 func TestStreamActionMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
@@ -439,10 +450,17 @@ func TestStreamActionMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
 	assert.ErrorIs(t, err, broker.ErrUnauthorized)
 	assert.False(t, server.capabilities.staleAfterOutage())
 
+	fake.streamActionErr = errors.New("some domain error")
+	err = server.StreamAction(context.Background(), request, "id", nil, strings.NewReader(""))
+	assert.Error(t, err)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
 	fake.streamActionErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
 	err = server.StreamAction(context.Background(), request, "id", nil, strings.NewReader(""))
 	assert.Error(t, err)
 	assert.True(t, server.capabilities.staleAfterOutage())
+
+	assert.Empty(t, fake.queryCalls, "StreamAction must never itself trigger a QueryCapabilities call")
 }
 
 func TestStreamQueryMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
@@ -455,10 +473,17 @@ func TestStreamQueryMarksCapabilitiesDownOnlyOnUnavailable(t *testing.T) {
 	assert.ErrorIs(t, err, broker.ErrUnauthorized)
 	assert.False(t, server.capabilities.staleAfterOutage())
 
+	fake.streamQueryErr = errors.New("some domain error")
+	_, err = server.StreamQuery(ctx, "id", nil)
+	assert.Error(t, err)
+	assert.False(t, server.capabilities.staleAfterOutage())
+
 	fake.streamQueryErr = fmt.Errorf("dial unix: %w", broker.ErrUnavailable)
 	_, err = server.StreamQuery(ctx, "id", nil)
 	assert.Error(t, err)
 	assert.True(t, server.capabilities.staleAfterOutage())
+
+	assert.Empty(t, fake.queryCalls, "StreamQuery must never itself trigger a QueryCapabilities call")
 }
 
 type countingReader struct {
