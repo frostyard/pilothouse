@@ -60,7 +60,7 @@ func TestStateCombinesEveryRebootSignal(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	finished := now.Add(-10 * time.Minute)
 	manager := NewSystemManager(
-		fakeExtensions{extensions: []sysext.Extension{{Name: "docker", Merged: true}}},
+		fakeExtensions{extensions: []sysext.Extension{{Name: "docker", Managed: true, Merged: true}}},
 		fakeJobs{records: []jobs.Job{{Action: "update", Status: jobs.StatusSucceeded, RebootRequired: true, FinishedAt: &finished}}},
 		nil, &fakeRunner{}, root, true, true, false,
 	)
@@ -91,7 +91,7 @@ func TestEnabledMergedExtensionDoesNotRequireReboot(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "proc"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
 	manager := NewSystemManager(
-		fakeExtensions{extensions: []sysext.Extension{{Name: "docker", Enabled: true, Merged: true}}},
+		fakeExtensions{extensions: []sysext.Extension{{Name: "docker", Enabled: true, Managed: true, Merged: true}}},
 		fakeJobs{},
 		nil,
 		&fakeRunner{},
@@ -330,6 +330,92 @@ func TestStateWithExtensionSourceMethodErrorStillSucceeds(t *testing.T) {
 	assert.NotContains(t, state.RebootReasons, "docker is disabled but remains active until reboot.")
 	assert.Equal(t, []string{"The operating system requested a reboot."}, state.RebootReasons)
 	assert.True(t, state.RebootRequired)
+}
+
+// TestStateSkipsExtensionReasonsWhenUpdexDidNotAnswer is the partial-degrade
+// case, and the one that distinguishes a real implementation from a plausible
+// one: systemd-sysext answers fully (so docker really is Merged) while updex
+// does not (so Enabled is the Go zero value, not a fact). "Disabled" and
+// "unknown" are the identical false on the wire here, and only
+// UpdexAvailable/UpdexError separate them.
+//
+// Both ways updex can fail to answer are covered, because they produce
+// different states: absent leaves UpdexError empty, while attempted-and-failed
+// populates it. In neither may maintenance claim docker is disabled -- doing so
+// is precisely the extension failure leaking into Maintenance that spec
+// resolution 3 forbids. RebootRequired must still be computed from the
+// non-extension reasons, so State stays useful rather than merely non-erroring.
+func TestStateSkipsExtensionReasonsWhenUpdexDidNotAnswer(t *testing.T) {
+	// One merged, updex-managed extension whose Enabled field nothing populated.
+	// Under a healthy aggregate this exact extension does produce the reason
+	// (see TestStateDerivesRebootReasonFromMergedButDisabledExtension), which is
+	// what makes its absence below attributable to the guard and not to the
+	// fixture being inert.
+	extensions := []sysext.Extension{{Installed: true, Managed: true, Merged: true, Name: "docker"}}
+
+	for _, fixture := range []struct {
+		name  string
+		state sysext.ExtensionsState
+	}{
+		{
+			name:  "updex absent",
+			state: sysext.ExtensionsState{Extensions: extensions, SysextAvailable: true},
+		},
+		{
+			name: "updex attempted and failed",
+			state: sysext.ExtensionsState{
+				Extensions:      extensions,
+				SysextAvailable: true,
+				UpdexError:      "run updex features list: exit status 1",
+			},
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			source := &callCountingExtensions{state: fixture.state}
+			manager := NewSystemManager(source, fakeJobs{}, nil, &fakeRunner{}, newRebootMarkerRoot(t), true, true, false)
+
+			state, err := manager.State(context.Background())
+
+			require.NoError(t, err, "a half-answered aggregate must never fail State")
+			assert.NotContains(t, state.RebootReasons, "docker is disabled but remains active until reboot.",
+				"Enabled is unknown, not false, when updex did not answer")
+			assert.Equal(t, []string{"The operating system requested a reboot."}, state.RebootReasons,
+				"only the non-extension reasons may survive an unanswered updex")
+			assert.True(t, state.RebootRequired, "RebootRequired still follows the non-extension reasons")
+		})
+	}
+}
+
+// TestStateSkipsMergedExtensionUpdexDoesNotManage covers the same
+// unknown-versus-false distinction one level down, per extension rather than
+// per source. Both sources answered here, so the aggregate is entirely healthy
+// -- but it is a *union*, and this extension was installed and merged straight
+// through systemd-sysext with no updex definition behind it. Its Enabled is
+// false because updex has nothing to say about it, not because anyone disabled
+// it.
+//
+// This is also the behavior-parity case for the chunk: the List()-based code
+// this replaced iterated updex's feature list alone, so an unmanaged extension
+// could never reach the merged-but-disabled check. Reporting one now would be a
+// new false reboot reason introduced by the switch to the union aggregate.
+func TestStateSkipsMergedExtensionUpdexDoesNotManage(t *testing.T) {
+	source := &callCountingExtensions{state: sysext.ExtensionsState{
+		Extensions: []sysext.Extension{
+			{Installed: true, Merged: true, Name: "vendor-blob"},
+			{Enabled: true, Installed: true, Managed: true, Merged: true, Name: "docker"},
+		},
+		SysextAvailable: true,
+		UpdexAvailable:  true,
+	}}
+	manager := NewSystemManager(source, fakeJobs{}, nil, &fakeRunner{}, newExtensionRoot(t), true, true, false)
+
+	state, err := manager.State(context.Background())
+
+	require.NoError(t, err)
+	assert.NotContains(t, state.RebootReasons, "vendor-blob is disabled but remains active until reboot.",
+		"an extension updex does not manage has no known enabled-state")
+	assert.Empty(t, state.RebootReasons)
+	assert.False(t, state.RebootRequired)
 }
 
 // TestStateWithNoExtensionSourceInjectedStillSucceeds pins the nil-source

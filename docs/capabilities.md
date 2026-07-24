@@ -454,12 +454,33 @@ combination, including one that drives the real `*sysext.SystemManager` with
 a failing command runner.
 
 **What maintenance derives, and what it no longer owns.** From the returned
-`Extensions` slice, maintenance takes exactly one fact: an entry that is
-`Merged && !Enabled` becomes the reboot reason "<name> is disabled but
-remains active until reboot." Nothing else. `maintenance.State` no longer
-carries an `Updates` field, the Maintenance page no longer renders an
-"Available updates" table or an update count, the dashboard Summary card no
-longer carries an "Updates" mini-row, and `Module.Health` no longer emits the
+`Extensions` slice, maintenance takes exactly one fact: a merged extension
+that is known to be disabled becomes the reboot reason "<name> is disabled
+but remains active until reboot." Nothing else.
+
+"Known to be disabled" is narrower than `Merged && !Enabled`, and
+deliberately so, because the aggregate's fields are populated by two
+independently-failing sources. `Enabled` comes only from updex and `Merged`
+only from systemd-sysext, so a source that was never attempted or that failed
+leaves its own fields at Go's zero value — and `Enabled: false` because updex
+answered is indistinguishable on the wire from `Enabled: false` because updex
+never ran. `mergedButDisabledReasons` therefore reads `Enabled` only when
+`UpdexAvailable` is true with an empty `UpdexError` (and `Merged` only under
+the matching `SysextAvailable`/`SysextError` pair), and skips the extension
+entirely otherwise. It also requires `Managed`: the aggregate is a *union*, so
+an extension installed or merged straight through systemd-sysext with no updex
+definition appears with `Managed: false` and an `Enabled` nobody populated.
+That last guard is what keeps this reason byte-identical to the pre-#52
+`List()`-based behavior, which iterated updex's feature list alone and so
+never saw unmanaged extensions at all. The net effect is that an unknown
+enabled-state contributes nothing, exactly like every other unreadable source
+here — an absent or failed updex costs the extension-derived reasons rather
+than inventing them.
+
+Beyond that one reason, `maintenance.State` no longer carries an `Updates`
+field, the Maintenance page no longer renders an "Available updates" table or
+an update count, the dashboard Summary card no longer carries an "Updates"
+mini-row, and `Module.Health` no longer emits the
 `maintenance.updates` finding. Ownership of extension inventory and
 per-extension/aggregate update availability has moved to Extensions, whose
 `QueryExtensionsState` response already carries it per extension in

@@ -137,7 +137,7 @@ are gated on *different* capability expressions:
 | `GET /maintenance` | `HasAny(Systemd, Bootc, RPMOStree)` | `platform.GateAny` in `Mount` (`internal/modules/maintenance/module.go`) |
 | `POST /maintenance/reboot` | `Has(Systemd)` | a separate, plain `platform.Gate` in the same `Mount` |
 | `/attention` health collection | `HasAny(Systemd, Bootc, RPMOStree)` | `attention.Module.findings`' `CapabilityGateAny` type-assert |
-| `QueryMaintenanceState` (reboot posture, reasons, updates, jobs) | `Has(Systemd)` | `queryState` web-side; `registerMaintenance` daemon-side |
+| `QueryMaintenanceState` (reboot posture, reasons, jobs; no extension update availability — that is `QueryExtensionsState`'s) | `Has(Systemd)` | `queryState` web-side; `registerMaintenance` daemon-side |
 | `ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (`cmd/pilothoused/main.go`); serialized on its own `maintenance/global` lock, no longer `sysext/global` — see "Per-resource action serialization" below |
 | `QueryHostImageStatus` (booted/staged/rollback, digests, soft-reboot eligibility) | `HasAny(Bootc, RPMOStree)` | `queryHostImage` web-side; `registerHostImage` daemon-side |
 | `QueryAutoUpdateStatus` (per-updater timer/service state, next trigger, policy, drop-in presence) | `HasAny(Bootc, RPMOStree)` | `queryAutoUpdate` web-side; `registerAutoUpdate` daemon-side. The `Autoupdate*` capabilities gate nothing here — they drive the configured/not-configured split *inside* the response, so the "no updater configured" report stays reachable |
@@ -481,11 +481,20 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   failures. `Jobs`, `OSVersion`, the OS-marker and completed-job reasons, and
   the staged-host-image reason are computed exactly as before regardless.
   From the returned `Extensions` slice maintenance derives exactly one thing —
-  a `Merged && !Enabled` entry becomes "<name> is disabled but remains active
-  until reboot." — and nothing else: `State.Updates`, the "Available updates"
-  page section, the Summary card's "Updates" mini-row, and the
-  `maintenance.updates` Health finding are all gone, update availability
-  being Extensions' to own. The source is shared with `registerExtensions`
+  a merged extension *known* to be disabled becomes "<name> is disabled but
+  remains active until reboot." — and nothing else. "Known" is the load-bearing
+  word: `Enabled` is populated only by updex and `Merged` only by
+  systemd-sysext, so `mergedButDisabledReasons` reads each field only when its
+  own source's `*Available`/`*Error` pair says that source actually answered,
+  and additionally requires `Managed`, since an extension merged through
+  systemd-sysext with no updex definition has an `Enabled` nobody set. A plain
+  `Merged && !Enabled` filter would report every merged extension as disabled
+  on a host without updex and would newly over-report unmanaged ones — the
+  `Managed` guard is what holds this reason identical to the pre-#52
+  `List()`-based behavior, which only ever iterated updex's own feature list.
+  Beyond that reason, `State.Updates`, the "Available updates" page section,
+  the Summary card's "Updates" mini-row, and the `maintenance.updates` Health
+  finding are all gone, update availability being Extensions' to own. The source is shared with `registerExtensions`
   as one daemon-internal *instance*, not one *result*:
   `sysext.SystemManager.State` has no cache, so the two consumers each run
   their own read; maintenance's own 1-minute `extensionState` cache is the

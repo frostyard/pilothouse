@@ -75,7 +75,7 @@ type Manager interface {
 type SystemManager struct {
 	bootcAvailable  bool
 	cacheAt         time.Time
-	cacheExtensions []sysext.Extension
+	cacheState      sysext.ExtensionsState
 	extensions      sysext.ExtensionsSource
 	hostImage       HostImageSource
 	jobs            JobSource
@@ -154,11 +154,7 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	if staged {
 		state.RebootReasons = append(state.RebootReasons, stagedHostImageReason)
 	}
-	for _, extension := range extensions {
-		if extension.Merged && !extension.Enabled {
-			state.RebootReasons = append(state.RebootReasons, extension.Name+" is disabled but remains active until reboot.")
-		}
-	}
+	state.RebootReasons = append(state.RebootReasons, mergedButDisabledReasons(extensions)...)
 	bootedAt, err := m.bootedAt()
 	if err != nil {
 		return State{}, err
@@ -174,12 +170,60 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
-// extensionState reads the shared extensions aggregate and returns the union
-// inventory State derives its merged-but-disabled reboot reasons from. It
-// cannot fail: every extension failure mode degrades to "no extension-derived
-// reboot reasons" rather than to an error, which is what keeps
-// QueryMaintenanceState a 200 on a host whose updex or systemd-sysext cannot
-// answer.
+// mergedButDisabledReasons derives the one fact maintenance takes from the
+// extensions aggregate: a merged-but-disabled extension is active right now but
+// will not be after a reboot, so it is a reboot reason.
+//
+// The three guards are the whole point of this helper, and each one exists
+// because the field it protects is populated by exactly one of the aggregate's
+// two independently-failing sources:
+//
+//   - UpdexAvailable (with an empty UpdexError) gates every read of Enabled.
+//     Enabled comes only from updex, so when updex is absent or failed it is
+//     left at its Go zero value — false — for every extension. "Disabled
+//     because updex said so" and "false because updex never answered" are
+//     byte-identical on the wire, and only the source's own availability pair
+//     tells them apart. Without this guard a host whose updex is missing
+//     reports every merged extension as disabled, which is exactly the
+//     extension-failure-leaks-into-Maintenance bug spec resolution 3 forbids.
+//   - SysextAvailable (with an empty SysextError) gates Merged for the same
+//     reason on the other side. It is belt-and-braces today — nothing sets
+//     Merged unless the systemd-sysext leg succeeded — but it keeps the
+//     symmetry explicit rather than resting on that implementation detail.
+//   - Managed gates the pair per extension, and it is what preserves this
+//     reason's pre-#52 behavior exactly. Enabled is only ever meaningful for
+//     an extension updex enumerated a definition for; the aggregate is a
+//     *union*, so an extension installed or merged straight through
+//     systemd-sysext with no updex definition appears here with Managed false
+//     and Enabled false — again not "disabled", just unanswered. The
+//     List()-based code this replaced iterated updex's feature list alone and
+//     so never saw those extensions at all; skipping them here is what keeps
+//     the reason identical rather than newly over-reporting.
+//
+// The result is that an unknown enabled-state contributes nothing, which is
+// the same degrade every other unreadable source in this file takes.
+func mergedButDisabledReasons(state sysext.ExtensionsState) []string {
+	if !state.UpdexAvailable || state.UpdexError != "" {
+		return nil
+	}
+	if !state.SysextAvailable || state.SysextError != "" {
+		return nil
+	}
+	var reasons []string
+	for _, extension := range state.Extensions {
+		if extension.Managed && extension.Merged && !extension.Enabled {
+			reasons = append(reasons, extension.Name+" is disabled but remains active until reboot.")
+		}
+	}
+	return reasons
+}
+
+// extensionState reads the shared extensions aggregate and returns it whole —
+// per-source availability pairs included, because mergedButDisabledReasons
+// above cannot honestly read Enabled or Merged without them. It cannot fail:
+// every extension failure mode degrades to "no extension-derived reboot
+// reasons" rather than to an error, which is what keeps QueryMaintenanceState a
+// 200 on a host whose updex or systemd-sysext cannot answer.
 //
 // There is no per-capability branching here on purpose. The probed
 // updexAvailable/sysextAvailable flags are threaded straight into
@@ -199,22 +243,25 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 // The 1-minute cache is unchanged in behavior and is this manager's alone: the
 // sysext source it wraps has no cache, so a concurrent QueryExtensionsState
 // runs its own independent read.
-func (m *SystemManager) extensionState(ctx context.Context) []sysext.Extension {
+func (m *SystemManager) extensionState(ctx context.Context) sysext.ExtensionsState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.extensions == nil {
-		return nil
+		return sysext.ExtensionsState{}
 	}
 	if !m.cacheAt.IsZero() && m.now().Sub(m.cacheAt) < time.Minute {
-		return slices.Clone(m.cacheExtensions)
+		cached := m.cacheState
+		cached.Extensions = slices.Clone(m.cacheState.Extensions)
+		return cached
 	}
 	state, err := m.extensions.State(ctx, m.updexAvailable, m.sysextAvailable)
 	if err != nil {
-		return nil
+		return sysext.ExtensionsState{}
 	}
-	m.cacheExtensions = slices.Clone(state.Extensions)
+	m.cacheState = state
+	m.cacheState.Extensions = slices.Clone(state.Extensions)
 	m.cacheAt = m.now()
-	return state.Extensions
+	return state
 }
 
 // hostImageState reads the host-image source at most once per State call and
