@@ -215,6 +215,39 @@ func (r *fakeHostImageRunner) Run(_ context.Context, name string, args ...string
 	}
 }
 
+// fakeAutoUpdateSystemdClient stands in for the host's systemd session so a
+// real maintenance.AutoUpdateManager -- the same type run() constructs -- can
+// be exercised without a live D-Bus connection. It implements exactly the two
+// read-only property getters maintenance's systemdClient seam requires (the
+// same two-method shape backups/services depend on), answering every unit with
+// a fixed, populated set of timer/service properties so a configured-updater
+// response carries concrete state (an active/enabled timer, a successful
+// service, a real next-trigger, no drop-ins -> the shipped "apply" bootc
+// policy) rather than zero values.
+type fakeAutoUpdateSystemdClient struct{}
+
+func (fakeAutoUpdateSystemdClient) GetUnitPropertiesContext(context.Context, string) (map[string]any, error) {
+	return map[string]any{
+		"ActiveState":   "active",
+		"UnitFileState": "enabled",
+		// A present-but-empty drop-in array is what systemd reports for an
+		// unmodified unit, which is exactly the "known, and empty" signal the
+		// bootc classifier turns into the shipped "apply" policy.
+		"DropInPaths": []string{},
+	}, nil
+}
+
+func (fakeAutoUpdateSystemdClient) GetUnitTypePropertiesContext(_ context.Context, _, unitType string) (map[string]any, error) {
+	switch unitType {
+	case "Timer":
+		return map[string]any{"NextElapseUSecRealtime": uint64(1_900_000_000_000_000)}, nil
+	case "Service":
+		return map[string]any{"Result": "success"}, nil
+	default:
+		return map[string]any{}, nil
+	}
+}
+
 // fakeSysextManager satisfies sysext.Manager so registerSysextActions'
 // per-action capability guards can be tested without exercising a real
 // updex/systemd-sysext dependency.
@@ -385,6 +418,122 @@ func TestRegisterHostImageServesRawHostImageFactsOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "reboot_required", "host-image status reports raw facts, never reboot-required posture")
 	assert.NotContains(t, string(encoded), "reboot_reasons")
+}
+
+// TestRegisterAutoUpdateGatedOnAnyUpdaterSource walks the same truth table
+// TestRegisterHostImageGatedOnAnyHostImageSource does: QueryAutoUpdateStatus is
+// registered iff caps.HasAny(Bootc, RPMOStree) -- either source alone suffices,
+// both suffice, neither does -- and the Systemd capability neither grants nor
+// withholds it, in either direction. The gate is deliberately independent of the
+// Autoupdate* capabilities, which drive only the in-body configured/not-configured
+// split. The manager under test is the real maintenance.AutoUpdateManager wired
+// as run() wires it (a nil systemd client stands in for an unreachable bus),
+// so the fixture cannot drift from production.
+func TestRegisterAutoUpdateGatedOnAnyUpdaterSource(t *testing.T) {
+	for _, testCase := range []struct {
+		caps capability.Set
+		name string
+		want bool
+	}{
+		{name: "no capabilities at all", caps: capability.New(), want: false},
+		{name: "systemd host with no image stack", caps: capability.New(capability.Systemd, capability.Journald), want: false},
+		{name: "bootc only, no systemd", caps: capability.New(capability.Bootc), want: true},
+		{name: "rpm-ostree only, no systemd", caps: capability.New(capability.RPMOStree), want: true},
+		{name: "bootc plus rpm-ostree, no systemd", caps: capability.New(capability.Bootc, capability.RPMOStree), want: true},
+		{name: "bootc plus systemd", caps: capability.New(capability.Systemd, capability.Bootc), want: true},
+		{name: "rpm-ostree plus systemd", caps: capability.New(capability.Systemd, capability.RPMOStree), want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			queries := broker.NewQueryRegistry()
+			manager := maintenance.NewAutoUpdateManager(nil, testCase.caps.Has(capability.AutoupdateBootc), testCase.caps.Has(capability.AutoupdateRPMOStree), t.TempDir())
+			require.NoError(t, registerAutoUpdate(queries, manager, testCase.caps))
+			assert.Equal(t, testCase.want, queries.Registered(broker.QueryAutoUpdateStatus))
+		})
+	}
+}
+
+// TestNewAutoUpdateManagerGuardsTypedNilSystemdClient proves run()'s
+// nil-*dbus.Conn guard through the production helper: when systemd is
+// unreachable, connectSystemd returns a nil *dbus.Conn, and newAutoUpdateManager
+// must hand the manager a genuinely nil systemdClient interface -- never a
+// typed-nil *dbus.Conn wrapped in a non-nil interface, the classic Go trap that
+// would make the manager's own `client == nil` short-circuit miss and panic on
+// the first property read. The query is executed end to end so the read path
+// actually runs, and its absence of a panic is the assertion.
+func TestNewAutoUpdateManagerGuardsTypedNilSystemdClient(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	manager := newAutoUpdateManager(nil, true, true)
+	caps := capability.New(capability.Bootc, capability.RPMOStree)
+	require.NoError(t, registerAutoUpdate(queries, manager, caps))
+
+	require.NotPanics(t, func() {
+		result, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryAutoUpdateStatus, nil)
+		require.NoError(t, err)
+		status, ok := result.(maintenance.AutoUpdateStatus)
+		require.True(t, ok, "the query must answer with a maintenance.AutoUpdateStatus")
+		// Both updaters are configured, so their payload pointers are non-nil,
+		// but with no systemd every systemd-sourced field reads as zero.
+		require.NotNil(t, status.Bootc)
+		assert.Empty(t, status.Bootc.TimerActiveState)
+	})
+}
+
+// TestRegisterAutoUpdateServesNotConfiguredEmptyStateOnImageHostWithNoUpdater is
+// the spec's required no-updater fixture: an image host advertising bootc and
+// rpm-ostree (so the query registers) but neither Autoupdate* capability (so no
+// updater is configured). The registered handler is executed through the broker
+// registry -- the production path -- and the decoded response is the canonical
+// "not configured" empty state: both *_configured false with nil payloads,
+// answered rather than 404'd.
+func TestRegisterAutoUpdateServesNotConfiguredEmptyStateOnImageHostWithNoUpdater(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	caps := capability.New(capability.Bootc, capability.RPMOStree)
+	manager := maintenance.NewAutoUpdateManager(fakeAutoUpdateSystemdClient{}, caps.Has(capability.AutoupdateBootc), caps.Has(capability.AutoupdateRPMOStree), t.TempDir())
+	require.NoError(t, registerAutoUpdate(queries, manager, caps))
+	require.True(t, queries.Registered(broker.QueryAutoUpdateStatus), "an image host must register the query so it can report the not-configured state")
+
+	result, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryAutoUpdateStatus, nil)
+	require.NoError(t, err)
+	status, ok := result.(maintenance.AutoUpdateStatus)
+	require.True(t, ok, "the query must answer with a maintenance.AutoUpdateStatus")
+
+	assert.False(t, status.BootcConfigured)
+	assert.Nil(t, status.Bootc)
+	assert.False(t, status.RPMOStreeConfigured)
+	assert.Nil(t, status.RPMOStree)
+}
+
+// TestRegisterAutoUpdateServesPopulatedPayloadForConfiguredUpdaters executes the
+// registered query end to end against a live fake systemd client with both
+// Autoupdate* capabilities present, and asserts a populated payload -- non-zero
+// timer/service state and a concrete policy string -- actually reaches the
+// decoded response, not merely that registration occurred. It mirrors
+// TestRegisterHostImageServesRawHostImageFactsOnly.
+func TestRegisterAutoUpdateServesPopulatedPayloadForConfiguredUpdaters(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	caps := capability.New(capability.Systemd, capability.Bootc, capability.RPMOStree, capability.AutoupdateBootc, capability.AutoupdateRPMOStree)
+	manager := maintenance.NewAutoUpdateManager(fakeAutoUpdateSystemdClient{}, caps.Has(capability.AutoupdateBootc), caps.Has(capability.AutoupdateRPMOStree), t.TempDir())
+	require.NoError(t, registerAutoUpdate(queries, manager, caps))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryAutoUpdateStatus, nil)
+	require.NoError(t, err)
+	status, ok := result.(maintenance.AutoUpdateStatus)
+	require.True(t, ok, "the query must answer with a maintenance.AutoUpdateStatus")
+
+	require.True(t, status.BootcConfigured)
+	require.NotNil(t, status.Bootc)
+	assert.Equal(t, "active", status.Bootc.TimerActiveState)
+	assert.Equal(t, "enabled", status.Bootc.TimerUnitFileState)
+	assert.Equal(t, "active", status.Bootc.ServiceActiveState)
+	assert.Equal(t, "success", status.Bootc.ServiceResult)
+	assert.False(t, status.Bootc.NextTrigger.IsZero(), "the timer's next trigger reaches the response")
+	assert.Equal(t, maintenance.BootcPolicyApply, status.Bootc.Policy, "no drop-ins normalizes to the shipped apply policy -- a concrete policy string")
+
+	require.True(t, status.RPMOStreeConfigured)
+	require.NotNil(t, status.RPMOStree)
+	assert.Equal(t, "active", status.RPMOStree.TimerActiveState)
+	assert.Equal(t, "success", status.RPMOStree.ServiceResult)
+	assert.NotEmpty(t, status.RPMOStree.Policy, "rpm-ostree reports a concrete normalized policy string")
 }
 
 // blockingMaintenanceManager parks inside Reboot until released so a test can

@@ -48,6 +48,7 @@ const (
 
 const (
 	QueryActivity         = "org.frostyard.pilothouse.activity.list"
+	QueryAutoUpdateStatus = "org.frostyard.pilothouse.maintenance.autoupdate_status"
 	QueryBackupsState     = "org.frostyard.pilothouse.backups.state"
 	QueryCapabilities     = "org.frostyard.pilothouse.capabilities.list"
 	QueryDockerLogs       = "org.frostyard.pilothouse.docker.logs"

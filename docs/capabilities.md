@@ -15,11 +15,11 @@ landed behavior, not a future guarantee, and
 a fixture matrix of capability sets.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
-constants and 17 `Query*` constants today — 52 IDs total, reproducible with:
+constants and 18 `Query*` constants today — 53 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 35
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 17
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 18
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -27,11 +27,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 52 IDs is registered exactly once across the four
+Every one of the 53 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 35/17 above, not IDs
-added on top. This table therefore has exactly 52 rows.
+via `StreamQueryRegistry`) — both are members of the 35/18 above, not IDs
+added on top. This table therefore has exactly 53 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +40,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-35/17/52 all fail the build. It additionally checks that an `Action*`
+35/18/53 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -54,11 +54,19 @@ described, is compared against the live constant declarations rather than
 against a second hand-maintained list.
 
 `QueryHostImageStatus` (`org.frostyard.pilothouse.maintenance.host_image_status`)
-is the newest ID, added by phase 2 (#51) for read-only host-image reporting,
-and is the reason the totals above read 17/52 rather than the 16/51 phase 1a
-ended with. It is the table's first **any-of** row: `registerHostImage`
-guards it with `caps.HasAny(capability.Bootc, capability.RPMOStree)`, not
-`HasAll`, so either source alone is enough (see exception #4 below).
+was added by phase 2 (#51) for read-only host-image reporting, raising the
+totals from the 16/51 phase 1a ended with to 17/52. It is the table's first
+**any-of** row: `registerHostImage` guards it with
+`caps.HasAny(capability.Bootc, capability.RPMOStree)`, not `HasAll`, so either
+source alone is enough (see exception #4 below).
+
+`QueryAutoUpdateStatus` (`org.frostyard.pilothouse.maintenance.autoupdate_status`)
+is the newest ID, added by #58 for read-only automatic-update reporting, and is
+why the totals above now read 18/53. Like `QueryHostImageStatus` it is an
+**any-of** row: `registerAutoUpdate` guards it with the same
+`caps.HasAny(capability.Bootc, capability.RPMOStree)` gate, and for the same
+reason — a no-updater image host must still be able to report the "not
+configured" empty state (see exception #5 below).
 
 Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
@@ -104,11 +112,12 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionStorageUnmount` | storage (remote-mount) | systemd |
 | `ActionStorageDelete` | storage (remote-mount) | systemd |
 
-## Queries (17)
+## Queries (18)
 
 | Broker ID | Module | Capability |
 |---|---|---|
 | `QueryActivity` | activity | none |
+| `QueryAutoUpdateStatus` | maintenance (auto-update) | bootc OR rpm-ostree *(exception — see below)* |
 | `QueryBackupsState` | backups | systemd |
 | `QueryCapabilities` | capability | none *(unconditional — see below)* |
 | `QueryDockerLogs` | docker | docker |
@@ -168,7 +177,7 @@ page through `QueryMaintenanceState` (see the extension-read note below).
 
 ## Exceptions to the module-level defaults
 
-Four rows in this table deviate from the spec's literal module-default
+Five rows in this table deviate from the spec's literal module-default
 prose. Each is grounded in the actual manager code, not just spec wording —
 the module defaults describe steady-state intent; these are the exceptions
 section is precisely where actual code dependencies that exceed that intent
@@ -236,9 +245,9 @@ capability.Journald)` before registering `QueryLogs` at all. Documented
 here as the exceptions section's job: recording a real code dependency that
 exceeds the module default's literal wording.
 
-### 4. `QueryHostImageStatus` is `bootc OR rpm-ostree`, the table's only any-of row
+### 4. `QueryHostImageStatus` is `bootc OR rpm-ostree`, the first of the table's two any-of rows
 
-Every other row is an AND: the ID registers iff
+Every ordinary row is an AND: the ID registers iff
 `caps.HasAll(required...)`. `QueryHostImageStatus` is the first row whose
 guard is `caps.HasAny(capability.Bootc, capability.RPMOStree)`
 (`registerHostImage` in `cmd/pilothoused/main.go`), because either source
@@ -298,6 +307,27 @@ an independent copy of the same parsed value, not a recomputation, and
 informational only: it never makes `reboot_required` true and no soft-reboot
 action exists. See the extension-read note below for how the bootc leg
 degrades.
+
+### 5. `QueryAutoUpdateStatus` is `bootc OR rpm-ostree`, the table's second any-of row
+
+`QueryAutoUpdateStatus` shares `QueryHostImageStatus`'s any-of gate exactly:
+`registerAutoUpdate` (`cmd/pilothoused/main.go`) registers it iff
+`caps.HasAny(capability.Bootc, capability.RPMOStree)`, and is a separate
+function from both `registerMaintenance` and `registerHostImage`, consulting
+neither `capability.Systemd` nor either other guard. Automatic-update reporting
+only applies to an image-based host, and "no updater configured" is itself a
+meaningful, reportable state — so gating on the `Autoupdate*` capabilities
+instead would 404 the query on precisely the no-updater host, making the
+required "not configured" empty state unreachable. The `AutoupdateBootc` /
+`AutoupdateRPMOStree` capabilities (from #50) instead drive the per-updater
+configured vs. not-configured split *inside* the `maintenance.AutoUpdateManager`
+body: a configured updater carries a non-nil payload pointer, and a no-updater
+image host returns both `*_configured=false` with nil payloads. The query
+reuses the one systemd connection `cmd/pilothoused` already probes and opens
+for backups/services/logs — no second D-Bus dial — and is read-only in the same
+strong sense as `QueryHostImageStatus`: served by an `AutoUpdateSource`
+interface with no mutating method, with no matching action in the broker's ID
+vocabulary. It is registered daemon-side with no web consumer yet.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 

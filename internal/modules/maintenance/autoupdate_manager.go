@@ -38,6 +38,18 @@ type AutoUpdateManager struct {
 	rpmOStreeConfigured bool
 }
 
+// AutoUpdateSource is the read-only automatic-update seam, exactly parallel to
+// HostImageSource: everything that needs the host's automatic-update picture --
+// today only cmd/pilothoused's registerAutoUpdate, which serves
+// broker.QueryAutoUpdateStatus from it -- depends on this interface rather than
+// on the concrete *AutoUpdateManager. It exposes no mutation of any kind, by
+// construction, and *AutoUpdateManager satisfies it.
+type AutoUpdateSource interface {
+	Status(context.Context) (AutoUpdateStatus, error)
+}
+
+var _ AutoUpdateSource = (*AutoUpdateManager)(nil)
+
 // The exact updater unit allowlist. These four unit names are the complete set
 // of systemd units this package ever asks about, and they are the same four
 // internal/capability's systemd probe keys AutoupdateBootc and

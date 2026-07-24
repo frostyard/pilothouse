@@ -169,6 +169,22 @@ func run() error {
 	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
 		return err
 	}
+	// The automatic-update reporter reuses the one systemd connection already
+	// probed and opened above -- the same bounded-context probe-then-reuse dial
+	// backups/services/logs consume -- so no new D-Bus dial is added. It is told
+	// which of the two updaters the probe found configured
+	// (capability.AutoupdateBootc / capability.AutoupdateRPMOStree); those flags
+	// drive the per-updater configured/not-configured split inside the manager,
+	// never registerAutoUpdate's own registration gate. newAutoUpdateManager
+	// guards the classic nil-interface trap: a typed-nil *dbus.Conn handed
+	// straight into the systemdClient interface would be a non-nil interface
+	// value, defeating the manager's own nil-client short-circuit, so the
+	// concrete connection is passed only when it is actually non-nil, mirroring
+	// buildSystemdManagers' own `if client == nil` guard.
+	autoUpdateManager := newAutoUpdateManager(systemdClient, caps.Has(capability.AutoupdateBootc), caps.Has(capability.AutoupdateRPMOStree))
+	if err := registerAutoUpdate(queries, autoUpdateManager, caps); err != nil {
+		return err
+	}
 	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
 	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
@@ -755,6 +771,51 @@ func registerHostImage(queries *broker.QueryRegistry, manager maintenance.HostIm
 		return nil
 	}
 	return queries.Register(broker.QueryHostImageStatus, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.Status(ctx)
+	})
+}
+
+// newAutoUpdateManager builds the automatic-update reporter from the one
+// systemd connection run() already opened, guarding the Go nil-interface trap.
+// client is the probed-and-reused *dbus.Conn (nil when systemd is absent or
+// unreachable); passing a nil *dbus.Conn straight into
+// maintenance.NewAutoUpdateManager's interface parameter would wrap a typed nil
+// in a non-nil interface, so the manager's own `client == nil` short-circuit
+// would miss and it would panic on the first property read. Handing over the
+// literal untyped nil in that case keeps the interface genuinely nil, exactly
+// as buildSystemdManagers refuses to build its managers when client == nil. The
+// root is the host root ("/") so the manager reads the real
+// /etc/rpm-ostreed.conf, mirroring the other real managers run() constructs.
+func newAutoUpdateManager(client *dbus.Conn, bootcConfigured, rpmOStreeConfigured bool) *maintenance.AutoUpdateManager {
+	if client == nil {
+		return maintenance.NewAutoUpdateManager(nil, bootcConfigured, rpmOStreeConfigured, "/")
+	}
+	return maintenance.NewAutoUpdateManager(client, bootcConfigured, rpmOStreeConfigured, "/")
+}
+
+// registerAutoUpdate registers QueryAutoUpdateStatus iff the host advertises at
+// least one host-image source -- caps.HasAny(capability.Bootc,
+// capability.RPMOStree) -- identical in shape to registerHostImage and for the
+// same reason: automatic-update reporting only applies to an image-based host,
+// and "no updater configured" is itself a reportable state a no-updater image
+// host must be able to answer. Gating on the Autoupdate* capabilities instead
+// would 404 the query on precisely that host, making the required
+// "not configured" empty state unreachable. Those two capabilities drive the
+// per-updater configured/not-configured split inside the AutoUpdateManager
+// body, never this registration gate.
+//
+// Like registerHostImage it is deliberately independent of registerMaintenance's
+// Systemd guard: reading how the updaters are set up needs no reboot machinery,
+// so a bootc host without systemd still gets this query (its systemd-sourced
+// fields simply read as zero). It is read-only in the strongest sense here --
+// served by an AutoUpdateSource, an interface with no mutating method, and no
+// bootc/rpm-ostree action exists in broker's ID vocabulary to pair it with --
+// and, like QueryHostImageStatus, available to any authenticated identity.
+func registerAutoUpdate(queries *broker.QueryRegistry, manager maintenance.AutoUpdateSource, caps capability.Set) error {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil
+	}
+	return queries.Register(broker.QueryAutoUpdateStatus, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
 		return manager.Status(ctx)
 	})
 }
