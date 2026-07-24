@@ -323,10 +323,10 @@ configured, and the section renders that as two explicit "not configured"
 statements rather than as nothing. Neither section contains any control —
 `queryAutoUpdate` has no mutating counterpart in the broker's ID vocabulary at
 all. `Dashboard` and
-`Health` call only `queryState`, so the host-image *section* is a
-`GET /maintenance`-only surface — but do not conclude that the card and
-`/attention` are host-image-free. `QueryMaintenanceState`'s `State` is partly
-host-image-derived: `SystemManager.State` reads the same `HostImageSource`
+`Health` call only `queryState`, so both the host-image and the
+automatic-update *sections* are `GET /maintenance`-only surfaces — but do not
+conclude that the card and `/attention` are host-image-free.
+`QueryMaintenanceState`'s `State` is partly host-image-derived: `SystemManager.State` reads the same `HostImageSource`
 (under the probed `Bootc` flag), appends "A staged host image deployment requires
 activation by reboot." to `RebootReasons` when a deployment is staged, and copies
 `SoftRebootCapable`. The card's `Summary` renders `rebootSummary(state)`, which
@@ -347,6 +347,13 @@ route on a host that 404s it. Nothing in the host-image section is a control:
 it renders no upgrade, switch, rebase, rollback, or automatic-update link,
 button, or form, and `views_test.go`'s
 `TestPageExposesNoHostImageMutationControl` asserts that across every fixture.
+The automatic-update section is equally control-free: it reports how each
+updater is configured and renders no link, button, or form that enables,
+disables, triggers, or reconfigures either one — there is no broker action it
+could target — and `views_test.go`'s
+`TestPageExposesNoAutoUpdateMutationControl` asserts that across every payload
+combination, including the configured-both-updaters one where a control would
+be most tempting.
 
 A fact that a module reports from more than one gated source needs its rendering
 leg attached to the *broader* gate, or the narrower one silently hides it.
