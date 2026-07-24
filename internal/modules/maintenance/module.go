@@ -18,7 +18,7 @@ type Module struct{}
 func New() *Module { return &Module{} }
 
 func (*Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.DashboardCard, error) {
-	state, err := queryState(ctx, host)
+	state, err := queryState(ctx, host, host.Capabilities(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +26,7 @@ func (*Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.Da
 }
 
 func (*Module) Health(ctx context.Context, host platform.Host) ([]platform.Finding, error) {
-	state, err := queryState(ctx, host)
+	state, err := queryState(ctx, host, host.Capabilities(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -62,23 +62,39 @@ func (*Module) Manifest() platform.Manifest {
 	return platform.Manifest{ID: "maintenance", Name: "Maintenance", Description: "Updates, jobs, and reboot posture", Icon: "refresh", Order: 34, Path: "/maintenance"}
 }
 
-// RequiredCapabilities makes the whole module — its nav entry, dashboard
-// card, and both routes below — available only on a host that advertises
-// systemd: the reboot action and auto-update reporting both depend on it.
-func (*Module) RequiredCapabilities() []capability.ID {
-	return []capability.ID{capability.Systemd}
+// RequiredAnyCapabilities makes the whole module — its nav entry, dashboard
+// card, and GET /maintenance below — available on a host that advertises
+// *any* of systemd, bootc, or rpm-ostree (platform.CapabilityGateAny's
+// HasAny semantics), rather than requiring systemd specifically. Maintenance
+// reports on two independent sources: reboot posture, update availability,
+// and maintenance jobs come from the systemd-gated QueryMaintenanceState,
+// while host-image status comes from the separately-gated
+// QueryHostImageStatus (bootc OR rpm-ostree, per docs/capabilities.md). A
+// bootc-only host with no systemd therefore still has something to show, so
+// the module must not disappear there. The module deliberately does not
+// implement platform.CapabilityGate as well: the two whole-module gates are
+// alternatives, and each individual broker call is capability-gated inside
+// the handlers below instead.
+func (*Module) RequiredAnyCapabilities() []capability.ID {
+	return []capability.ID{capability.Systemd, capability.Bootc, capability.RPMOStree}
 }
 
-func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
-	mux.HandleFunc("GET /maintenance", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
+func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
+	// GET /maintenance follows the whole-module any-of gate: it is served
+	// whenever at least one of the module's capabilities is present, and
+	// 404s (indistinguishable from a route that does not exist) when none
+	// are. POST /maintenance/reboot below keeps its own, narrower,
+	// systemd-only platform.Gate: rebooting is a systemd operation and the
+	// broker's ActionMaintenanceReboot is registered only under Systemd.
+	mux.HandleFunc("GET /maintenance", platform.GateAny(host, m.RequiredAnyCapabilities(), func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		state, err := queryState(ctx, host)
+		inputs, err := collectPage(ctx, host)
 		if err != nil {
 			http.Error(w, "Maintenance status is unavailable.", http.StatusServiceUnavailable)
 			return
 		}
-		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(state, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
+		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(inputs.state, inputs.hostImage, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
 	}))
 	mux.HandleFunc("POST /maintenance/reboot", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) || !host.ConfirmAction(w, r, "Reboot the host", "maintenance/reboot") {
@@ -98,8 +114,88 @@ func (*Module) Mount(mux *http.ServeMux, host platform.Host) {
 	}))
 }
 
-func queryState(ctx context.Context, host platform.Host) (State, error) {
+// pageInputs holds the capability-conditional inputs GET /maintenance
+// renders from. Every field is populated only when the capability the
+// underlying broker call needs is advertised, so a host that satisfies the
+// whole-module any-of gate through only one of the three capabilities still
+// gets a page rather than an error.
+type pageInputs struct {
+	// state is QueryMaintenanceState's response when the host advertises
+	// Systemd, and the zero State otherwise (see queryState).
+	state State
+	// hostImage is QueryHostImageStatus's response when the host advertises
+	// HasAny(Bootc, RPMOStree), and nil when it advertises neither (see
+	// queryHostImage). Page renders the whole "Host image" section — the
+	// booted/staged/rollback deployments, the per-source unavailable
+	// indicators, and the page's single soft-reboot-eligibility indicator —
+	// only when this is non-nil, so a host with no host-image source omits
+	// the section entirely rather than showing an empty placeholder.
+	//
+	// Nil-ness is the availability flag: the page can only render host-image
+	// content it actually fetched, so there is no separate boolean that
+	// could disagree with the data.
+	hostImage *HostImageStatus
+}
+
+// collectPage gathers GET /maintenance's inputs, reading the host's
+// capability set exactly once and gating each broker call on it
+// independently.
+func collectPage(ctx context.Context, host platform.Host) (pageInputs, error) {
+	caps := host.Capabilities(ctx)
+	state, err := queryState(ctx, host, caps)
+	if err != nil {
+		return pageInputs{}, err
+	}
+	hostImage, err := queryHostImage(ctx, host, caps)
+	if err != nil {
+		return pageInputs{}, err
+	}
+	return pageInputs{state: state, hostImage: hostImage}, nil
+}
+
+// queryHostImage returns QueryHostImageStatus's response when caps advertises
+// at least one host-image source, and nil when it advertises neither. The
+// daemon registers that query only under HasAny(Bootc, RPMOStree)
+// (docs/capabilities.md's one any-of row), so on a systemd-only host it is
+// absent rather than empty: calling it there would fail. Returning nil instead
+// is what makes the page omit the host-image section on such a host rather
+// than 503 or render an error placeholder.
+//
+// The gate is HasAny(Bootc, RPMOStree) and deliberately says nothing about
+// Systemd, so everything the section renders — including soft-reboot
+// eligibility, which the page renders from HostImageStatus.SoftRebootCapable
+// and not from the Systemd-gated State.SoftRebootCapable — is available on a
+// bootc-only host exactly as it is on a bootc-plus-systemd one.
+//
+// A non-nil error here means the broker call itself failed, which takes the
+// page down as any other failed page query does. It is not how a *source*
+// failure arrives: a host whose bootc or rpm-ostree is present but did not
+// answer still gets a successful response, carrying BootcError/RPMOStreeError,
+// which the section renders as a per-source unavailable indicator.
+func queryHostImage(ctx context.Context, host platform.Host, caps capability.Set) (*HostImageStatus, error) {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil, nil
+	}
+	var status HostImageStatus
+	if err := host.Query(ctx, broker.QueryHostImageStatus, nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// queryState returns QueryMaintenanceState's response, or the zero State
+// when caps lacks Systemd. The query's daemon-side handler is registered
+// only under Systemd (docs/capabilities.md), so on a bootc-only host it is
+// not merely empty but absent: calling it would fail, and failing it would
+// take the whole page, dashboard card, or health finding set down with it.
+// Omitting the call instead lets Page/Summary/Health render what the host
+// does have — "nothing to report" — which is the honest answer for a host
+// with no systemd rather than a 503.
+func queryState(ctx context.Context, host platform.Host, caps capability.Set) (State, error) {
 	var state State
+	if !caps.Has(capability.Systemd) {
+		return state, nil
+	}
 	err := host.Query(ctx, broker.QueryMaintenanceState, nil, &state)
 	return state, err
 }

@@ -157,7 +157,19 @@ func run() error {
 	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext))
+	// The host-image reporter is constructed unconditionally (it runs nothing
+	// until queried) and told which of its two sources the probe actually
+	// found; registerHostImage's own guard decides whether the query is
+	// exposed at all. It is built before the maintenance manager because that
+	// manager consumes this same instance as its HostImageSource: the staged
+	// deployment it reports is one input to reboot-required posture, and its
+	// soft-reboot eligibility is copied onto maintenance state. One reader,
+	// two consumers — never a second path to bootc.
+	hostImageManager := maintenance.NewHostImageManager(sysext.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
+	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
+		return err
+	}
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
 	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
@@ -681,6 +693,16 @@ func filesPublicError(err error) error {
 	return broker.NewPublicError(503, "files service unavailable", "unavailable", err)
 }
 
+// maintenanceLockResource is the serialization key ActionMaintenanceReboot
+// holds for the duration of a reboot attempt. It is deliberately distinct
+// from the "sysext/global" key every sysext lifecycle action shares: reboot
+// once reused that key, but the coupling was accidental rather than
+// intentional, and the only thing the reboot action needs is that two
+// concurrent reboots cannot overlap. Owning its own resource keeps that
+// guarantee while letting an in-flight extension refresh/update and a reboot
+// proceed independently.
+const maintenanceLockResource = "maintenance/global"
+
 // registerMaintenance registers QueryMaintenanceState and
 // ActionMaintenanceReboot iff caps has Systemd -- both require Systemd
 // uniformly, so the guard sits once at the top rather than per call.
@@ -689,9 +711,11 @@ func filesPublicError(err error) error {
 // backups/services/logs/storage there is no nil-manager backstop here: the
 // manager is always non-nil regardless of systemd's presence, and this
 // guard is the only thing withholding registration. Extension-derived
-// fields (Updates, Feature/merged-derived reboot reasons) degrade inside
-// SystemManager.State itself based on the probed updex/sysext capabilities
-// passed into NewSystemManager, independent of this systemd guard.
+// fields (Updates, Feature/merged-derived reboot reasons) and the
+// host-image-derived ones (the staged-deployment reboot reason,
+// SoftRebootCapable) all degrade inside SystemManager.State itself based on
+// the probed updex/sysext/bootc capabilities passed into NewSystemManager,
+// independent of this systemd guard.
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
 	if !caps.Has(capability.Systemd) {
 		return nil
@@ -704,8 +728,34 @@ func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRe
 	return actions.RegisterDefinition(broker.ActionDefinition{
 		ID: broker.ActionMaintenanceReboot, Admin: true, ConfirmationRequired: true, NonBlocking: true,
 		Resource:     func(map[string]string) (string, error) { return "maintenance/reboot", nil },
-		LockResource: func(map[string]string) (string, error) { return "sysext/global", nil },
+		LockResource: func(map[string]string) (string, error) { return maintenanceLockResource, nil },
 		Handler:      func(ctx context.Context, _ auth.Identity, _ map[string]string) error { return manager.Reboot(ctx) },
+	})
+}
+
+// registerHostImage registers QueryHostImageStatus iff the host advertises at
+// least one host-image source -- caps.HasAny(capability.Bootc,
+// capability.RPMOStree). The guard is deliberately an any-of, not an all-of:
+// either source alone yields a usable (if partial) report, and the handler
+// itself only ever runs the sources whose capability was probed present.
+//
+// It is also deliberately independent of registerMaintenance's Systemd guard.
+// Reboot posture and the reboot action need systemd; reading which image the
+// host booted does not, so a bootc host without systemd still gets this query
+// while QueryMaintenanceState and ActionMaintenanceReboot stay withheld.
+//
+// The query is read-only in the strongest sense available here: it is served
+// by a HostImageSource, an interface with no mutating method, and no
+// bootc/rpm-ostree action exists in broker's ID vocabulary to pair it with.
+// Like QueryMaintenanceState it is available to any authenticated identity
+// (admin is not required), since it reports facts about the running image
+// rather than privileged content.
+func registerHostImage(queries *broker.QueryRegistry, manager maintenance.HostImageSource, caps capability.Set) error {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil
+	}
+	return queries.Register(broker.QueryHostImageStatus, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.Status(ctx)
 	})
 }
 

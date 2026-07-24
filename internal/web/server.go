@@ -202,8 +202,9 @@ func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Pa
 // availableManifests returns the Manifest of every registered module whose
 // capability requirement (if any) is satisfied by the currently cached
 // capability.Set. A module with no capability requirement (it does not
-// implement platform.CapabilityGate) is always included, matching the
-// spec's default for system/files/activity/fleet/storage-inventory.
+// implement platform.CapabilityGate or platform.CapabilityGateAny) is always
+// included, matching the spec's default for
+// system/files/activity/fleet/storage-inventory.
 func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
 	caps := s.Capabilities(ctx)
 	modules := s.registry.Modules()
@@ -219,12 +220,19 @@ func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
 
 // moduleAvailable reports whether module is available given caps: a module
 // implementing platform.CapabilityGate is available only when caps has every
-// one of its RequiredCapabilities; a module that does not implement
-// CapabilityGate has no capability requirement and is always available. It
-// delegates to platform.Available so the gating decision has exactly one
-// implementation, shared with internal/platform's own tests.
+// one of its RequiredCapabilities; a module implementing
+// platform.CapabilityGateAny is available only when caps has at least one of
+// its RequiredAnyCapabilities; a module implementing neither interface has
+// no capability requirement and is always available. platform.Available and
+// platform.AvailableAny each default to true for a module that doesn't
+// implement their respective interface, so this AND-of-two-defaults
+// composition is correct for all three cases a module can be in
+// (CapabilityGate only, CapabilityGateAny only, or neither) without any
+// type-switching here. It delegates to platform.Available/platform.AvailableAny
+// so the gating decision has exactly one implementation of each, shared with
+// internal/platform's own tests.
 func moduleAvailable(module platform.Module, caps capability.Set) bool {
-	return platform.Available(module, caps)
+	return platform.Available(module, caps) && platform.AvailableAny(module, caps)
 }
 
 func (s *Server) ValidateAction(w http.ResponseWriter, r *http.Request) bool {

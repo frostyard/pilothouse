@@ -38,29 +38,51 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 
 // findings collects Health results from every registered provider, skipping
 // any provider whose module is unavailable on this host. A provider that
-// implements platform.CapabilityGate is treated the same way its module's
-// own routes (platform.Gate) and nav/dashboard entry (platform.Available)
-// are: when host's current capability.Set doesn't satisfy the provider's
-// RequiredCapabilities, its Health method is never called and it
-// contributes nothing — not even an "unavailable" placeholder — since an
-// absent module is not the same as one whose status collection failed.
+// implements platform.CapabilityGate and/or platform.CapabilityGateAny is
+// treated the same way its module's own routes (platform.Gate/GateAny) and
+// nav/dashboard entry (internal/web's moduleAvailable, itself
+// platform.Available && platform.AvailableAny) are: when host's current
+// capability.Set doesn't satisfy the provider's RequiredCapabilities
+// (HasAll) or its RequiredAnyCapabilities (HasAny), its Health method is
+// never called and it contributes nothing — not even an "unavailable"
+// placeholder — since an absent module is not the same as one whose status
+// collection failed.
+//
+// The two gates are applied as an AND of two defaults, exactly as
+// moduleAvailable composes them: a provider implementing neither interface
+// is always collected. platform.Available/AvailableAny themselves take a
+// platform.Module, which a platform.HealthProvider need not be (it has no
+// Dashboard/Mount), so the same two tests are applied to the provider value
+// here rather than being called directly.
+//
+// Both branches have real providers today: services and backups gate on
+// RequiredCapabilities (HasAll), and maintenance — whose module is present
+// whenever any of Systemd, Bootc, or RPMOStree is — gates on
+// RequiredAnyCapabilities (HasAny), so it is skipped here only when a host
+// has none of those three.
 func (m *Module) findings(ctx context.Context, host platform.Host) []platform.Finding {
 	findings := make([]platform.Finding, 0)
 	var caps capability.Set
 	capsLoaded := false
 	for _, provider := range m.providers {
-		if gate, ok := provider.(platform.CapabilityGate); ok {
+		gate, isGate := provider.(platform.CapabilityGate)
+		gateAny, isGateAny := provider.(platform.CapabilityGateAny)
+		if isGate || isGateAny {
 			if !capsLoaded {
 				caps = host.Capabilities(ctx)
 				capsLoaded = true
 			}
-			if !caps.HasAll(gate.RequiredCapabilities()...) {
-				// The provider's module is absent on this host (the same
-				// capability check platform.Gate applies to its routes and
-				// platform.Available applies to its nav/dashboard entry).
-				// Skip it entirely: no Health call, and no "unavailable"
-				// finding either, since an absent module is not the same
-				// as one whose status collection failed.
+			// The provider's module is absent on this host when either gate
+			// it declares is unsatisfied (the same capability checks
+			// platform.Gate/GateAny apply to its routes and
+			// platform.Available/AvailableAny apply to its nav/dashboard
+			// entry). Skip it entirely: no Health call, and no "unavailable"
+			// finding either, since an absent module is not the same as one
+			// whose status collection failed.
+			if isGate && !caps.HasAll(gate.RequiredCapabilities()...) {
+				continue
+			}
+			if isGateAny && !caps.HasAny(gateAny.RequiredAnyCapabilities()...) {
 				continue
 			}
 		}

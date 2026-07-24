@@ -11,6 +11,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/capability"
+	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,35 @@ func (p gatedProvider) Health(ctx context.Context, host platform.Host) ([]platfo
 }
 
 func (p gatedProvider) RequiredCapabilities() []capability.ID { return p.required }
+
+// gatedAnyProvider is the any-of counterpart of gatedProvider: it implements
+// platform.CapabilityGateAny (and, when requiredAll is non-nil, also
+// platform.CapabilityGate) and counts Health calls the same way, so tests
+// can prove findings() honors the any-of whole-module gate on this direct
+// call path too — not just platform.GateAny-wrapped routes and the web
+// shell's nav/dashboard.
+type gatedAnyProvider struct {
+	fakeProvider
+	requiredAny []capability.ID
+	healthHits  *int
+}
+
+func (p gatedAnyProvider) Health(ctx context.Context, host platform.Host) ([]platform.Finding, error) {
+	*p.healthHits++
+	return p.fakeProvider.Health(ctx, host)
+}
+
+func (p gatedAnyProvider) RequiredAnyCapabilities() []capability.ID { return p.requiredAny }
+
+// bothGatedProvider implements both whole-module gate interfaces at once, so
+// tests can prove findings() applies them as an AND of two defaults, exactly
+// as internal/web's moduleAvailable does.
+type bothGatedProvider struct {
+	gatedAnyProvider
+	required []capability.ID
+}
+
+func (p bothGatedProvider) RequiredCapabilities() []capability.ID { return p.required }
 
 type capsHost struct {
 	caps capability.Set
@@ -130,6 +160,155 @@ func TestFindingsCallsGatedProviderWhenRequiredCapabilityPresent(t *testing.T) {
 	assert.Equal(t, 1, hits)
 	require.Len(t, findings, 1)
 	assert.Equal(t, "backups.nightly", findings[0].ID)
+}
+
+// TestFindingsSkipsProviderWhenNoneOfRequiredAnyCapabilitiesPresent extends
+// the "gate every call path" fix to platform.CapabilityGateAny: a provider
+// whose module is absent because none of its any-of capabilities are present
+// must have Health left uncalled here too, exactly as a CapabilityGate
+// provider does. Without this, a CapabilityGateAny module would be hidden
+// from nav/dashboard and 404 on its own routes while /attention still called
+// its Health and rendered findings (or an "unavailable" placeholder) for it.
+func TestFindingsSkipsProviderWhenNoneOfRequiredAnyCapabilitiesPresent(t *testing.T) {
+	hits := 0
+	module := New(
+		fakeProvider{manifest: platform.Manifest{ID: "system", Name: "System", Path: "/system"}, findings: []platform.Finding{{ID: "system.disk", Severity: platform.SeverityWarning}}},
+		gatedAnyProvider{
+			fakeProvider: fakeProvider{manifest: platform.Manifest{ID: "workloads", Name: "Workloads", Path: "/workloads"}, findings: []platform.Finding{{ID: "workloads.api", Severity: platform.SeverityCritical}}},
+			requiredAny:  []capability.ID{capability.Docker, capability.Podman},
+			healthHits:   &hits,
+		},
+	)
+	host := capsHost{caps: capability.New(capability.Systemd)} // neither docker nor podman
+
+	findings := module.findings(context.Background(), host)
+
+	assert.Equal(t, 0, hits, "any-of gated provider's Health must never be called when none of its capabilities are present")
+	require.Len(t, findings, 1)
+	assert.Equal(t, "system.disk", findings[0].ID)
+}
+
+// TestFindingsCallsAnyGatedProviderWhenOneRequiredAnyCapabilityPresent proves
+// the any-of gate is additive: one of the alternatives being present is
+// enough for the provider to contribute its findings normally.
+func TestFindingsCallsAnyGatedProviderWhenOneRequiredAnyCapabilityPresent(t *testing.T) {
+	hits := 0
+	module := New(
+		gatedAnyProvider{
+			fakeProvider: fakeProvider{manifest: platform.Manifest{ID: "workloads", Name: "Workloads", Path: "/workloads"}, findings: []platform.Finding{{ID: "workloads.api", Severity: platform.SeverityCritical}}},
+			requiredAny:  []capability.ID{capability.Docker, capability.Podman},
+			healthHits:   &hits,
+		},
+	)
+	host := capsHost{caps: capability.New(capability.Podman)} // only one of the two
+
+	findings := module.findings(context.Background(), host)
+
+	assert.Equal(t, 1, hits)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "workloads.api", findings[0].ID)
+}
+
+// TestFindingsAppliesBothGatesAsAnAnd covers the remaining cells of the
+// gate matrix for a provider declaring both interfaces: it is collected only
+// when the HasAll gate and the HasAny gate are both satisfied, mirroring
+// internal/web's moduleAvailable AND-of-two-defaults composition.
+func TestFindingsAppliesBothGatesAsAnAnd(t *testing.T) {
+	newModule := func(hits *int) *Module {
+		return New(bothGatedProvider{
+			gatedAnyProvider: gatedAnyProvider{
+				fakeProvider: fakeProvider{manifest: platform.Manifest{ID: "workloads", Name: "Workloads", Path: "/workloads"}, findings: []platform.Finding{{ID: "workloads.api", Severity: platform.SeverityCritical}}},
+				requiredAny:  []capability.ID{capability.Docker, capability.Podman},
+				healthHits:   hits,
+			},
+			required: []capability.ID{capability.Systemd},
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		caps      capability.Set
+		wantHits  int
+		wantCount int
+	}{
+		{name: "neither gate satisfied", caps: capability.New(capability.Journald), wantHits: 0, wantCount: 0},
+		{name: "only HasAll gate satisfied", caps: capability.New(capability.Systemd), wantHits: 0, wantCount: 0},
+		{name: "only HasAny gate satisfied", caps: capability.New(capability.Docker), wantHits: 0, wantCount: 0},
+		{name: "both gates satisfied", caps: capability.New(capability.Systemd, capability.Docker), wantHits: 1, wantCount: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			findings := newModule(&hits).findings(context.Background(), capsHost{caps: tc.caps})
+
+			assert.Equal(t, tc.wantHits, hits)
+			assert.Len(t, findings, tc.wantCount)
+		})
+	}
+}
+
+// countingMaintenance wraps the *real* maintenance.Module — the first
+// production adopter of platform.CapabilityGateAny — and counts Health
+// calls, so the tests below prove findings() honors that module's actual
+// RequiredAnyCapabilities (promoted from the embedded module, not a
+// synthetic list) on this direct method-call path. The embedded pointer
+// also supplies Manifest, so an "unavailable" placeholder, if one were
+// produced, would carry maintenance's real manifest.
+type countingMaintenance struct {
+	*maintenance.Module
+	healthHits *int
+}
+
+func (p countingMaintenance) Health(ctx context.Context, host platform.Host) ([]platform.Finding, error) {
+	*p.healthHits++
+	return p.Module.Health(ctx, host)
+}
+
+// TestFindingsSkipsMaintenanceWhenNoneOfItsCapabilitiesPresent proves the
+// gate-every-call-path obligation is met for maintenance's switch from a
+// Systemd CapabilityGate to a HasAny(Systemd, Bootc, RPMOStree)
+// CapabilityGateAny: a host with none of the three gets no Health call and
+// no "maintenance.unavailable" placeholder, exactly as its nav entry,
+// dashboard card, and GET /maintenance route are absent.
+func TestFindingsSkipsMaintenanceWhenNoneOfItsCapabilitiesPresent(t *testing.T) {
+	hits := 0
+	module := New(
+		fakeProvider{manifest: platform.Manifest{ID: "system", Name: "System", Path: "/system"}, findings: []platform.Finding{{ID: "system.disk", Severity: platform.SeverityWarning}}},
+		countingMaintenance{Module: maintenance.New(), healthHits: &hits},
+	)
+	host := capsHost{caps: capability.New(capability.Journald)} // no systemd, bootc, or rpm-ostree
+
+	findings := module.findings(context.Background(), host)
+
+	assert.Equal(t, 0, hits, "maintenance's Health must never be called when none of its any-of capabilities are present")
+	require.Len(t, findings, 1)
+	assert.Equal(t, "system.disk", findings[0].ID)
+	for _, finding := range findings {
+		assert.NotEqual(t, "maintenance.unavailable", finding.ID)
+	}
+}
+
+// TestFindingsCollectsMaintenanceOnEachOfItsCapabilities is the present-end
+// counterpart: any one of the three capabilities makes maintenance's module
+// available, so findings() calls its Health and gets a clean, error-free
+// result — including on a bootc-only host, where the Systemd-gated
+// QueryMaintenanceState is skipped inside the module rather than failing
+// and producing an "unavailable" finding.
+func TestFindingsCollectsMaintenanceOnEachOfItsCapabilities(t *testing.T) {
+	for name, caps := range map[string]capability.Set{
+		"systemd only":    capability.New(capability.Systemd),
+		"bootc only":      capability.New(capability.Bootc),
+		"rpm-ostree only": capability.New(capability.RPMOStree),
+	} {
+		t.Run(name, func(t *testing.T) {
+			hits := 0
+			module := New(countingMaintenance{Module: maintenance.New(), healthHits: &hits})
+
+			findings := module.findings(context.Background(), capsHost{caps: caps})
+
+			assert.Equal(t, 1, hits, "maintenance's Health must be called when its module is available")
+			assert.Empty(t, findings, "a host with nothing to report contributes no findings, not an unavailable placeholder")
+		})
+	}
 }
 
 func TestSummaryAndPageRenderChevronIcons(t *testing.T) {

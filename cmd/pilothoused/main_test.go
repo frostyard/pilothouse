@@ -93,6 +93,19 @@ func (s *recordingAuditStore) last() audit.Attempt {
 	return s.attempts[len(s.attempts)-1]
 }
 
+// resources returns the audited resource of every attempt begun so far. The
+// lock tests execute two actions concurrently, so they must read recorded
+// attempts through the store's mutex rather than touching the slice.
+func (s *recordingAuditStore) resources() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	recorded := make([]string, 0, len(s.attempts))
+	for _, attempt := range s.attempts {
+		recorded = append(recorded, attempt.Resource)
+	}
+	return recorded
+}
+
 type fakeFilesManager struct {
 	download files.Download
 	err      error
@@ -131,6 +144,75 @@ type fakeMaintenanceManager struct{ rebooted bool }
 func (m *fakeMaintenanceManager) Reboot(context.Context) error { m.rebooted = true; return nil }
 func (*fakeMaintenanceManager) State(context.Context) (maintenance.State, error) {
 	return maintenance.State{OSVersion: "Snosi"}, nil
+}
+
+// cannedBootcStatus and cannedRPMOStreeStatus are realistically shaped
+// `bootc status --json` and `rpm-ostree status --json` payloads describing one
+// host from both sides: the same booted and staged deployments, matched by
+// manifest digest, with bootc reporting image identity plus soft-reboot
+// eligibility and rpm-ostree adding the version string and ostree checksum it
+// alone knows. They are populated (rather than minimal or empty) so a test
+// asserting which fields reach the broker response is proving real merge
+// behavior instead of comparing two zero values.
+const (
+	cannedBootcStatus = `{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "status": {
+    "staged": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:next", "transport": "registry"},
+        "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "softRebootCapable": true
+    },
+    "booted": {
+      "image": {
+        "image": {"image": "quay.io/frostyard/snosi:stable", "transport": "registry"},
+        "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  }
+}`
+	cannedRPMOStreeStatus = `{
+  "deployments": [
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:next",
+      "container-image-reference-digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "checksum": "bbbb222222222222222222222222222222222222222222222222222222222222",
+      "version": "41.20260715.0",
+      "booted": false,
+      "staged": true
+    },
+    {
+      "container-image-reference": "ostree-unverified-registry:quay.io/frostyard/snosi:stable",
+      "container-image-reference-digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checksum": "aaaa111111111111111111111111111111111111111111111111111111111111",
+      "version": "41.20260701.0",
+      "booted": true,
+      "staged": false
+    }
+  ]
+}`
+)
+
+// fakeHostImageRunner stands in for the host's bootc/rpm-ostree executables so
+// a real maintenance.HostImageManager -- the same type run() constructs -- can
+// be exercised without either tool installed. It records every command line it
+// is handed, and fails any command that is not one of the two read-only status
+// reads the manager is allowed to run.
+type fakeHostImageRunner struct{ calls []string }
+
+func (r *fakeHostImageRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
+	switch name {
+	case "bootc":
+		return []byte(cannedBootcStatus), nil
+	case "rpm-ostree":
+		return []byte(cannedRPMOStreeStatus), nil
+	default:
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
 }
 
 // fakeSysextManager satisfies sysext.Manager so registerSysextActions'
@@ -207,6 +289,358 @@ func TestRegisterMaintenanceNoOpsWithoutSystemdCapability(t *testing.T) {
 	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, capability.New(capability.Updex, capability.Sysext)))
 	assert.False(t, queries.Registered(broker.QueryMaintenanceState))
 	assert.False(t, actions.Registered(broker.ActionMaintenanceReboot))
+}
+
+// TestRegisterHostImageGatedOnAnyHostImageSource walks the gate's full truth
+// table: QueryHostImageStatus is registered iff caps.HasAny(Bootc,
+// RPMOStree) -- either source alone suffices, both suffice, neither does --
+// and the Systemd capability neither grants nor withholds it, in either
+// direction. The manager under test is the real
+// maintenance.NewHostImageManager wired exactly as run() wires it, from the
+// same capability set, so the fixture cannot drift from production.
+func TestRegisterHostImageGatedOnAnyHostImageSource(t *testing.T) {
+	for _, testCase := range []struct {
+		caps capability.Set
+		name string
+		want bool
+	}{
+		{name: "no capabilities at all", caps: capability.New(), want: false},
+		{name: "systemd host with no image stack", caps: capability.New(capability.Systemd, capability.Journald), want: false},
+		{name: "bootc only, no systemd", caps: capability.New(capability.Bootc), want: true},
+		{name: "rpm-ostree only, no systemd", caps: capability.New(capability.RPMOStree), want: true},
+		{name: "bootc plus rpm-ostree, no systemd", caps: capability.New(capability.Bootc, capability.RPMOStree), want: true},
+		{name: "bootc plus systemd", caps: capability.New(capability.Systemd, capability.Bootc), want: true},
+		{name: "rpm-ostree plus systemd", caps: capability.New(capability.Systemd, capability.RPMOStree), want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			queries := broker.NewQueryRegistry()
+			manager := maintenance.NewHostImageManager(&fakeHostImageRunner{}, testCase.caps.Has(capability.Bootc), testCase.caps.Has(capability.RPMOStree))
+			require.NoError(t, registerHostImage(queries, manager, testCase.caps))
+			assert.Equal(t, testCase.want, queries.Registered(broker.QueryHostImageStatus))
+		})
+	}
+}
+
+// TestRegisterHostImageIsIndependentOfMaintenanceSystemdGate pins the reason
+// the two registrations are separate functions: a bootc host with no systemd
+// gets host-image reporting while reboot posture and the reboot action stay
+// withheld, and a systemd host with no image stack gets the reverse.
+func TestRegisterHostImageIsIndependentOfMaintenanceSystemdGate(t *testing.T) {
+	t.Run("bootc without systemd", func(t *testing.T) {
+		caps := capability.New(capability.Bootc)
+		actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+		require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))
+		require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, true, false), caps))
+
+		assert.True(t, queries.Registered(broker.QueryHostImageStatus))
+		assert.False(t, queries.Registered(broker.QueryMaintenanceState), "reboot posture still requires systemd")
+		assert.False(t, actions.Registered(broker.ActionMaintenanceReboot), "the reboot action still requires systemd")
+	})
+
+	t.Run("systemd without an image stack", func(t *testing.T) {
+		caps := capability.New(capability.Systemd)
+		actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
+		require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))
+		require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, false, false), caps))
+
+		assert.False(t, queries.Registered(broker.QueryHostImageStatus))
+		assert.True(t, queries.Registered(broker.QueryMaintenanceState))
+		assert.True(t, actions.Registered(broker.ActionMaintenanceReboot))
+	})
+}
+
+// TestRegisterHostImageServesRawHostImageFactsOnly executes the registered
+// query end to end through the broker registry -- the production path, not the
+// manager directly -- and asserts the response is raw host-image facts merged
+// from both sources, readable by a non-admin identity, and carries no
+// reboot-required posture (that stays QueryMaintenanceState's job, per the
+// spec's round-3 clarification).
+func TestRegisterHostImageServesRawHostImageFactsOnly(t *testing.T) {
+	queries := broker.NewQueryRegistry()
+	runner := &fakeHostImageRunner{}
+	caps := capability.New(capability.Bootc, capability.RPMOStree)
+	require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(runner, true, true), caps))
+
+	result, err := queries.Execute(context.Background(), auth.Identity{}, broker.QueryHostImageStatus, nil)
+	require.NoError(t, err)
+	status, ok := result.(maintenance.HostImageStatus)
+	require.True(t, ok, "the query must answer with a maintenance.HostImageStatus")
+
+	assert.Equal(t, []string{"bootc status --json", "rpm-ostree status --json"}, runner.calls, "only the two read-only status reads may run")
+	assert.True(t, status.BootcAvailable)
+	assert.Empty(t, status.BootcError)
+	assert.True(t, status.RPMOStreeAvailable)
+	assert.Empty(t, status.RPMOStreeError)
+	require.NotNil(t, status.Booted)
+	assert.Equal(t, "quay.io/frostyard/snosi:stable", status.Booted.Image)
+	assert.Equal(t, "41.20260701.0", status.Booted.Version, "rpm-ostree's supplementary detail reaches the response")
+	require.NotNil(t, status.Staged)
+	assert.Equal(t, "quay.io/frostyard/snosi:next", status.Staged.Image)
+	assert.Equal(t, "bbbb222222222222222222222222222222222222222222222222222222222222", status.Staged.Checksum)
+	assert.Nil(t, status.Rollback, "the fixture host has nothing to roll back to")
+	require.NotNil(t, status.SoftRebootCapable)
+	assert.True(t, *status.SoftRebootCapable)
+
+	encoded, err := json.Marshal(status)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "reboot_required", "host-image status reports raw facts, never reboot-required posture")
+	assert.NotContains(t, string(encoded), "reboot_reasons")
+}
+
+// blockingMaintenanceManager parks inside Reboot until released so a test can
+// hold ActionMaintenanceReboot's lock across another action's execution.
+type blockingMaintenanceManager struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingMaintenanceManager) Reboot(context.Context) error {
+	m.entered <- struct{}{}
+	<-m.release
+	return nil
+}
+
+func (*blockingMaintenanceManager) State(context.Context) (maintenance.State, error) {
+	return maintenance.State{OSVersion: "Snosi"}, nil
+}
+
+func (m *blockingMaintenanceManager) releaseAll() { m.once.Do(func() { close(m.release) }) }
+
+// blockingSysextManager parks inside the two sysext lifecycle operations the
+// lock tests drive (Refresh, the background action, and Enable, a synchronous
+// one) so a sysext action can be held in flight while a reboot is attempted.
+type blockingSysextManager struct {
+	entered chan string
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingSysextManager) Refresh(context.Context) error {
+	m.entered <- "refresh"
+	<-m.release
+	return nil
+}
+
+func (m *blockingSysextManager) Enable(context.Context, string) error {
+	m.entered <- "enable"
+	<-m.release
+	return nil
+}
+
+func (*blockingSysextManager) Check(context.Context) ([]sysext.AvailableUpdate, error) {
+	return nil, nil
+}
+func (*blockingSysextManager) Disable(context.Context, string) error          { return nil }
+func (*blockingSysextManager) List(context.Context) ([]sysext.Feature, error) { return nil, nil }
+func (*blockingSysextManager) Update(context.Context) error                   { return nil }
+
+func (m *blockingSysextManager) releaseAll() { m.once.Do(func() { close(m.release) }) }
+
+// stubJobStore satisfies the broker's background-job store so background
+// sysext actions (ActionSysextRefresh) run through the real registry path.
+type stubJobStore struct {
+	mu   sync.Mutex
+	next uint64
+}
+
+func (s *stubJobStore) Enqueue(context.Context, jobs.Attempt) (jobs.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next++
+	return jobs.Job{ID: s.next}, nil
+}
+
+func (*stubJobStore) Start(context.Context, uint64) error                          { return nil }
+func (*stubJobStore) Complete(context.Context, uint64, string, string, bool) error { return nil }
+
+// rebootLockHarness wires ActionMaintenanceReboot and the sysext lifecycle
+// actions onto one real *broker.ActionRegistry through the same
+// registerMaintenance/registerSysextActions calls cmd/pilothoused makes at
+// startup, so every lock key comes from production LockResource/Resource
+// functions and both actions share the registry's single lock table exactly
+// as they do in the daemon.
+type rebootLockHarness struct {
+	actions     *broker.ActionRegistry
+	audit       *recordingAuditStore
+	maintenance *blockingMaintenanceManager
+	sysext      *blockingSysextManager
+}
+
+func newRebootLockHarness(t *testing.T) *rebootLockHarness {
+	t.Helper()
+	harness := &rebootLockHarness{
+		audit:       &recordingAuditStore{},
+		maintenance: &blockingMaintenanceManager{entered: make(chan struct{}, 4), release: make(chan struct{})},
+		sysext:      &blockingSysextManager{entered: make(chan string, 4), release: make(chan struct{})},
+	}
+	harness.actions = broker.NewActionRegistry(harness.audit)
+	harness.actions.UseJobs(&stubJobStore{})
+	require.NoError(t, registerMaintenance(harness.actions, broker.NewQueryRegistry(), harness.maintenance, capability.New(capability.Systemd)))
+	require.NoError(t, registerSysextActions(harness.actions, harness.sysext, capability.New(capability.Updex, capability.Sysext)))
+	t.Cleanup(func() {
+		harness.maintenance.releaseAll()
+		harness.sysext.releaseAll()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		assert.NoError(t, harness.actions.Shutdown(ctx))
+	})
+	return harness
+}
+
+func (h *rebootLockHarness) startReboot() chan error {
+	done := make(chan error, 1)
+	go func() {
+		done <- h.actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot")
+	}()
+	return done
+}
+
+func (h *rebootLockHarness) startSysext(test sysextLockCase) chan error {
+	done := make(chan error, 1)
+	go func() {
+		done <- h.actions.Execute(context.Background(), auth.Identity{Admin: true}, test.action, test.parameters, test.confirmation)
+	}()
+	return done
+}
+
+// awaitReboot fails the test unless the reboot handler is entered, which
+// happens only once Execute has acquired the reboot action's lock.
+func (h *rebootLockHarness) awaitReboot(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.maintenance.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reboot never reached its handler; its lock was not acquired")
+	}
+}
+
+// awaitSysext fails the test unless the sysext handler is entered, and
+// returns which sysext operation ran.
+func (h *rebootLockHarness) awaitSysext(t *testing.T) string {
+	t.Helper()
+	select {
+	case operation := <-h.sysext.entered:
+		return operation
+	case <-time.After(5 * time.Second):
+		t.Fatal("sysext action never reached its handler; its lock was not acquired")
+		return ""
+	}
+}
+
+type sysextLockCase struct {
+	action       string
+	confirmation string
+	name         string
+	operation    string
+	parameters   map[string]string
+}
+
+// resource is the audited resource the sysext case's action records, which
+// is independent of the lock key both sysext actions share.
+func (c sysextLockCase) resource() string {
+	if c.action == broker.ActionSysextEnable {
+		return "sysext/feature/" + c.parameters["name"]
+	}
+	return "sysext/global"
+}
+
+// sysextLockCases covers both shapes of sysext action holding the shared
+// "sysext/global" key: ActionSysextRefresh, the background action named by
+// this chunk's acceptance criteria, whose key comes from its Resource; and
+// ActionSysextEnable, a synchronous action whose key comes from
+// registerNamedActions' explicit LockResource.
+var sysextLockCases = []sysextLockCase{
+	{name: "refresh", action: broker.ActionSysextRefresh, confirmation: "sysext/global", operation: "refresh"},
+	{name: "enable", action: broker.ActionSysextEnable, parameters: map[string]string{"name": "demo"}, operation: "enable"},
+}
+
+// TestRebootAndSysextActionsDoNotContendForOneLock proves the reboot action
+// no longer serializes on sysext's "sysext/global" key: in both directions,
+// one action being in flight leaves the other free to run.
+func TestRebootAndSysextActionsDoNotContendForOneLock(t *testing.T) {
+	for _, test := range sysextLockCases {
+		t.Run(test.name+"/reboot in flight", func(t *testing.T) {
+			harness := newRebootLockHarness(t)
+			reboot := harness.startReboot()
+			harness.awaitReboot(t)
+
+			sysextAction := harness.startSysext(test)
+			assert.Equal(t, test.operation, harness.awaitSysext(t))
+
+			harness.sysext.releaseAll()
+			require.NoError(t, <-sysextAction)
+			harness.maintenance.releaseAll()
+			require.NoError(t, <-reboot)
+			assert.ElementsMatch(t, []string{"maintenance/reboot", test.resource()}, harness.audit.resources())
+		})
+
+		t.Run(test.name+"/sysext action in flight", func(t *testing.T) {
+			harness := newRebootLockHarness(t)
+			sysextAction := harness.startSysext(test)
+			assert.Equal(t, test.operation, harness.awaitSysext(t))
+
+			reboot := harness.startReboot()
+			harness.awaitReboot(t)
+
+			harness.maintenance.releaseAll()
+			require.NoError(t, <-reboot)
+			harness.sysext.releaseAll()
+			require.NoError(t, <-sysextAction)
+			assert.ElementsMatch(t, []string{"maintenance/reboot", test.resource()}, harness.audit.resources())
+		})
+	}
+}
+
+// TestRebootStillSerializesAgainstAnotherReboot proves the reboot action's
+// own lock still does its job for the resource it now owns alone: a second
+// reboot attempted while the first is in flight is refused, never reaches the
+// handler, and is admitted again once the first releases.
+func TestRebootStillSerializesAgainstAnotherReboot(t *testing.T) {
+	harness := newRebootLockHarness(t)
+	first := harness.startReboot()
+	harness.awaitReboot(t)
+	// The audit attempt is recorded before the handler runs, so the in-flight
+	// reboot is already on record while it blocks.
+	assert.Equal(t, []string{"maintenance/reboot"}, harness.audit.resources())
+
+	err := harness.actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already has a maintenance job")
+	select {
+	case <-harness.maintenance.entered:
+		t.Fatal("second reboot bypassed the maintenance lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	assert.Equal(t, []string{"maintenance/reboot"}, harness.audit.resources())
+
+	harness.maintenance.releaseAll()
+	require.NoError(t, <-first)
+	require.NoError(t, harness.actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot"))
+	harness.awaitReboot(t)
+	assert.Equal(t, []string{"maintenance/reboot", "maintenance/reboot"}, harness.audit.resources())
+}
+
+// TestRebootRemainsAdminOnlyConfirmedAndAuditedBeforeRunning pins the
+// authorization, confirmation, and audit wiring this chunk leaves untouched
+// alongside the lock-key change.
+func TestRebootRemainsAdminOnlyConfirmedAndAuditedBeforeRunning(t *testing.T) {
+	store := &recordingAuditStore{}
+	actions := broker.NewActionRegistry(store)
+	manager := &fakeMaintenanceManager{}
+	require.NoError(t, registerMaintenance(actions, broker.NewQueryRegistry(), manager, capability.New(capability.Systemd)))
+
+	require.Error(t, actions.Execute(context.Background(), auth.Identity{Username: "viewer"}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot"))
+	assert.False(t, manager.rebooted)
+	assert.Empty(t, store.resources())
+
+	require.ErrorIs(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, ""), broker.ErrConfirmationRequired)
+	assert.False(t, manager.rebooted)
+	assert.Empty(t, store.resources())
+
+	require.NoError(t, actions.Execute(context.Background(), auth.Identity{Admin: true}, broker.ActionMaintenanceReboot, nil, "maintenance/reboot"))
+	assert.True(t, manager.rebooted)
+	assert.Equal(t, []string{"maintenance/reboot"}, store.resources())
 }
 
 func TestRegisterJobsRequiresAdministrator(t *testing.T) {

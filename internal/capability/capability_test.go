@@ -28,9 +28,14 @@ func TestZeroValueSetIsNilSafe(t *testing.T) {
 	assert.False(t, zero.Has(Systemd))
 	assert.False(t, zero.HasAll(Systemd))
 	assert.False(t, zero.HasAll(Systemd, Podman))
+	assert.False(t, zero.HasAny(Systemd))
+	assert.False(t, zero.HasAny(Systemd, Podman))
+	assert.False(t, zero.HasAny())
 	assert.NotPanics(t, func() {
 		zero.Has(Systemd)
 		zero.HasAll(Systemd, Journald)
+		zero.HasAny(Systemd, Journald)
+		zero.HasAny()
 	})
 	assert.Empty(t, zero.List())
 }
@@ -40,6 +45,7 @@ func TestLiteralZeroValueSetIsNilSafe(t *testing.T) {
 	zero := Set{}
 	assert.False(t, zero.Has(Podman))
 	assert.False(t, zero.HasAll(Podman))
+	assert.False(t, zero.HasAny(Podman))
 }
 
 func TestSetHasAndHasAll(t *testing.T) {
@@ -55,6 +61,34 @@ func TestSetHasAndHasAll(t *testing.T) {
 	assert.True(t, s.HasAll(Systemd, Journald, Podman))
 	assert.False(t, s.HasAll(Systemd, Docker))
 	assert.False(t, s.HasAll(Docker, Incus))
+}
+
+func TestSetHasAny(t *testing.T) {
+	s := New(Systemd, Journald, Podman)
+
+	// Single-id present.
+	assert.True(t, s.HasAny(Systemd))
+
+	// Single-id absent.
+	assert.False(t, s.HasAny(Docker))
+
+	// Multi-id with one present.
+	assert.True(t, s.HasAny(Docker, Journald))
+	assert.True(t, s.HasAny(Systemd, Docker, Incus))
+
+	// Multi-id with none present.
+	assert.False(t, s.HasAny(Docker, Incus))
+	assert.False(t, s.HasAny(Docker, Incus, Bootc))
+
+	// Zero-ids case: "any of nothing" is false, unlike HasAll's zero-ids
+	// (vacuously true) case.
+	assert.False(t, s.HasAny())
+}
+
+func TestEmptySetHasAny(t *testing.T) {
+	empty := New()
+	assert.False(t, empty.HasAny(Systemd))
+	assert.False(t, empty.HasAny())
 }
 
 func TestNewCollapsesDuplicates(t *testing.T) {

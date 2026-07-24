@@ -78,12 +78,264 @@ directory. Current modules:
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
-| `maintenance` | Extension update availability, maintenance-job state, reboot posture, confirmed reboot. |
+| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation and no automatic-update reporting. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
 | `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
 
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
+
+**Host-image status (#51) — landed end state.** Maintenance is no longer a
+systemd-only surface: it is a read-only host-image lifecycle *and* reboot-posture
+module. Every piece has landed — the parsers, the manager, the broker query, the
+reboot posture that consumes it, the module's any-of capability gate, and the
+Maintenance page section that renders it. Two things it deliberately does **not**
+do, and no sentence below should be read as saying otherwise: it exposes no bootc
+or rpm-ostree mutation of any kind — no upgrade, switch, rebase, or rollback
+action exists, and `cmd/pilothoused/capability_contract_test.go`'s
+`TestNoHostImageMutationActionExists` keeps it that way by asserting that none of
+`internal/broker/api.go`'s 35 `Action*` constants names bootc, ostree, or
+rpm-ostree in either its Go identifier or its wire ID (`Query*` constants are
+deliberately exempt — `QueryHostImageStatus` is the read-only surface this phase
+adds) — and it does no automatic-update reporting: normalized updater
+policy/timer reporting was split out of #51 into #58 and has not landed. The
+`autoupdate-bootc`/`autoupdate-rpm-ostree` capabilities #50 probes are advertised
+over `QueryCapabilities`, but no production code path in `cmd/pilothoused` or any
+module gates on or reports them — outside `internal/capability` they appear only
+in tests' full-capability fixtures. Zincati is neither queried nor special-cased:
+`TestMaintenanceNeverReferencesZincati` fails on any non-comment mention of it in
+any `.go` or `.templ` file under `internal/modules/maintenance`.
+
+The per-surface capability split is the thing to hold in mind — Maintenance is
+the one module where module presence, one route, and each individual broker call
+are gated on *different* capability expressions:
+
+| Surface | Gate | Where |
+|---|---|---|
+| Module presence: nav entry, dashboard card | `HasAny(Systemd, Bootc, RPMOStree)` | `Module.RequiredAnyCapabilities` → `platform.AvailableAny`, via `internal/web/server.go`'s `moduleAvailable` |
+| `GET /maintenance` | `HasAny(Systemd, Bootc, RPMOStree)` | `platform.GateAny` in `Mount` (`internal/modules/maintenance/module.go`) |
+| `POST /maintenance/reboot` | `Has(Systemd)` | a separate, plain `platform.Gate` in the same `Mount` |
+| `/attention` health collection | `HasAny(Systemd, Bootc, RPMOStree)` | `attention.Module.findings`' `CapabilityGateAny` type-assert |
+| `QueryMaintenanceState` (reboot posture, reasons, updates, jobs) | `Has(Systemd)` | `queryState` web-side; `registerMaintenance` daemon-side |
+| `ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (`cmd/pilothoused/main.go`); serialized on its own `maintenance/global` lock, no longer `sysext/global` — see "Per-resource action serialization" below |
+| `QueryHostImageStatus` (booted/staged/rollback, digests, soft-reboot eligibility) | `HasAny(Bootc, RPMOStree)` | `queryHostImage` web-side; `registerHostImage` daemon-side |
+
+What makes the first row real is `internal/web/server.go`'s
+`moduleAvailable(module, caps)` — the single choke point `availableManifests`
+(nav) and the dashboard loop both call — which composes the two whole-module
+tests as `platform.Available(module, caps) && platform.AvailableAny(module,
+caps)`. Each half defaults to `true` for a module that doesn't implement its
+interface, so this AND-of-two-defaults is exactly right for all three shapes a
+module can be in, and maintenance — which implements `CapabilityGateAny` only —
+is filtered purely by the `HasAny` half with no type-switching in `server.go`.
+
+Neither `Dashboard` nor `Health` fetches `QueryHostImageStatus`: both call only
+`queryState`, so the *host-image section* — deployments, digests, per-source
+unavailable indicators, the soft-reboot indicator — is rendered on
+`GET /maintenance` and nowhere else. That is not the same as the card and
+`/attention` being host-image-free, and the distinction matters:
+`QueryMaintenanceState`'s `State` is itself partly host-image-derived on the
+daemon side. `SystemManager.State` calls `HostImageSource.Status` (only when the
+probed `capability.Bootc` flag passed to `NewSystemManager` is true and the
+source is non-nil), appends `stagedHostImageReason` — "A staged host image
+deployment requires activation by reboot." — to `State.RebootReasons` when a
+staged deployment exists, and copies `SoftRebootCapable` onto `State`. `Summary`
+renders `rebootSummary(state)`, which is `state.RebootReasons[0]` whenever
+`RebootRequired`, and `Health`'s `maintenance.reboot` finding uses that same
+`RebootReasons[0]` as its detail. Reasons are appended in a fixed order —
+`/run/reboot-required` marker, staged host image, merged-but-disabled extension,
+completed extension update — so on a host whose only reboot reason is a staged
+host-image deployment, that host-image-derived sentence *is* what the dashboard
+card and the `/attention` finding display. What the card and `/attention` never
+show is raw host-image data (image references, digests, rollback slots,
+soft-reboot eligibility); the reboot posture they show can be host-image-caused.
+
+Soft-reboot eligibility reaches exactly three places:
+`HostImageStatus.SoftRebootCapable` on `QueryHostImageStatus`'s response (set by
+`ParseBootcStatus`, preserved by `MergeHostImage`); `State.SoftRebootCapable` on
+`QueryMaintenanceState`'s response, copied verbatim by `SystemManager.State` from
+the same single `hostImageState` read that supplies that call's
+staged-deployment reboot reason; and exactly one UI indicator, rendered by
+`hostImageSection`.
+
+Do **not** read that as one parse feeding all three legs. `hostImageState`
+reading the source once is a guarantee *within a single `State` call* and
+nothing more. `QueryMaintenanceState` and `QueryHostImageStatus` are separate
+broker queries, and `HostImageManager.Status` memoizes nothing — it re-runs
+`bootc status --json` (and, when rpm-ostree is advertised,
+`rpm-ostree status --json`) on every call. One `GET /maintenance` on a
+systemd-plus-bootc host therefore runs bootc twice: `collectPage` calls
+`queryState`, whose daemon handler reaches `Status` through
+`SystemManager.State` → `hostImageState`, and then `queryHostImage`, whose
+daemon handler calls `Status` directly. The single `HostImageManager` instance
+wired in `cmd/pilothoused/main.go` shares the *code path* to bootc, not the
+*result*: `State.SoftRebootCapable` and the `HostImageStatus` the page renders
+come from two independent runs and are not guaranteed to agree.
+
+The UI leg reads `HostImageStatus.SoftRebootCapable` — **not** `State.SoftRebootCapable` —
+so the indicator's availability follows `HasAny(Bootc, RPMOStree)` and never
+`Systemd`: it renders identically on a bootc-only host with no systemd, where
+`QueryMaintenanceState` is never called and `State.SoftRebootCapable` is
+therefore always nil. `State.SoftRebootCapable` still lands and is still
+populated — it is the fact's API-surface leg for any consumer reading the full
+systemd-gated posture response in one call — it is simply not what the page
+renders from. All three legs keep the value's three states (non-nil true, non-nil
+false, nil for "this bootc does not report it"), and nothing in the tree performs
+a soft reboot: only the pre-existing full `ActionMaintenanceReboot` exists.
+
+`internal/modules/maintenance/hostimage.go` adds the read-only host-image
+domain types — `Deployment` (bootc's image reference + manifest digest, plus
+rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
+(the booted/staged/rollback deployment slots, a three-state
+`SoftRebootCapable`, and a symmetric availability/error pair per source:
+`BootcAvailable`/`BootcError` and `RPMOStreeAvailable`/`RPMOStreeError`) —
+plus `ParseBootcStatus`, a pure decoder for `bootc status --json`;
+`ParseRPMOStreeStatus`, a pure decoder for `rpm-ostree status --json` into an
+unexported supplement type; and `MergeHostImage`, which combines the two under
+a bootc-authoritative precedence rule.
+
+Those parsers have exactly one caller:
+`internal/modules/maintenance/hostimage_manager.go`'s `HostImageManager`,
+which in turn has exactly two consumers, both wired to the *same* instance in
+`cmd/pilothoused/main.go`: the broker query `QueryHostImageStatus`
+(`org.frostyard.pilothouse.maintenance.host_image_status`, registered by
+`registerHostImage`), and `maintenance.SystemManager`, which takes it as a
+`HostImageSource` and reads it while computing `QueryMaintenanceState`'s
+posture. Sharing the instance shares the *path*, not the *result*: `Status`
+memoizes nothing, so each of the two consumers re-runs the underlying commands.
+The query now has a web-side consumer as well: `GET /maintenance`
+fetches it when the host advertises `HasAny(Bootc, RPMOStree)` and renders it
+as the page's "Host image" section — see the "Maintenance: whole-module
+`HasAny(Systemd, Bootc, RPMOStree)` gate" bullet below for exactly what that
+section renders. `QueryMaintenanceState`'s response also changed shape (see
+the `State` bullet below). The `maintenance` module's own
+nav/route/dashboard gating was reworked separately, to
+`HasAny(Systemd, Bootc, RPMOStree)` — see the "Maintenance: whole-module
+`HasAny(Systemd, Bootc, RPMOStree)` gate" bullet in the web-side gating
+narrative below. What the daemon side now does:
+
+- `NewHostImageManager(runner, bootcAvailable, rpmOstreeAvailable)` takes the
+  probed `capability.Bootc`/`capability.RPMOStree` facts and runs, at most,
+  `bootc status --json` and `rpm-ostree status --json` — each at most once per
+  `Status` call, only when its flag is true, always through the injected
+  `Runner`, never a shell and never a second subcommand. `Status` merges the
+  two with `MergeHostImage` and returns raw facts only; it computes no
+  reboot-required posture (still `SystemManager.State`'s job) and exposes no
+  mutation.
+- Per-source failure is symmetric and never fatal: an exec failure *or* a
+  parse failure on either source sets that source's `*Available` to false and
+  its `*Error` to the message, leaving the other source's data intact.
+  `Status` returns no error of its own for a source-level failure, so a host
+  where only one tool answers still gets an honest, partial report. A source
+  whose capability is absent is never attempted at all, and reports neither
+  availability nor an error.
+- `registerHostImage` guards the query with
+  `caps.HasAny(capability.Bootc, capability.RPMOStree)` — the first any-of
+  guard in the daemon's registration code — and is deliberately independent of
+  `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
+  host-image reporting while the reboot posture query and reboot action stay
+  withheld. `docs/capabilities.md`'s binding table carries the row (52 IDs,
+  17 queries) and `cmd/pilothoused/capability_contract_test.go` exercises it
+  across bootc-only, rpm-ostree-only, both, and neither fixtures.
+- `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
+  where reboot-required posture is assembled and, per the spec's
+  "reboot-required posture lives in exactly one place" rule, the only place a
+  staged bootc deployment becomes a reason:
+  `NewSystemManager(..., hostImage HostImageSource, ..., bootcAvailable bool)`
+  reads the source **once** per `State` call, when `bootcAvailable`, and uses
+  the single result for two independent purposes. A non-nil `Staged`
+  deployment appends "A staged host image deployment requires activation by
+  reboot." (`stagedHostImageReason`) alongside the `/run/reboot-required`
+  marker, the merged-but-disabled extension reasons, and the completed-job
+  reason, and factors into `RebootRequired` the same way. Independently,
+  `HostImageStatus.SoftRebootCapable` is copied verbatim onto the new
+  `State.SoftRebootCapable *bool` (`soft_reboot_capable,omitempty`) — copied,
+  never recomputed, so there is no second source of truth — and is purely
+  informational: it is reported whether or not anything is staged and never
+  makes `RebootRequired` true on its own. Its three states survive the copy:
+  nil means "this bootc does not report eligibility," never a synthesized
+  false. The bootc leg follows the same degrade convention as the
+  `updexAvailable`/`sysextAvailable` legs: with `bootcAvailable` false the
+  source is never called at all (no staged reason, `SoftRebootCapable` nil,
+  whatever the source would have said), and when it is called and fails, the
+  failure is dropped rather than propagated — per-source availability and
+  errors are `QueryHostImageStatus`'s to report (`BootcAvailable`/`BootcError`),
+  and the aggregate posture stays answerable. `State` never returns an error
+  because of bootc. Only the existing full reboot action is exposed; nothing
+  performs a soft reboot.
+
+Contracts of the parsers themselves, worth knowing before consuming them:
+
+- `hostimage.go` executes nothing. Its imports are limited to
+  `encoding/json`/`fmt`/`strings`, enforced mechanically by a test over the
+  file's AST, so no bootc invocation — least of all a mutation such as
+  upgrade, switch, rebase, or rollback — can originate there. Obtaining the
+  bytes is the manager's job, and `hostimage_manager.go` imports only
+  `context`, so the injected `Runner` is provably the only way a command
+  leaves the package.
+- A structurally malformed payload returns a non-nil error together with a
+  zero `HostImageStatus` (`BootcAvailable` false), never partial data. The
+  caller decides whether to record that as `HostImageStatus.BootcError` on an
+  otherwise usable report; `ParseBootcStatus` itself never sets `BootcError`.
+- "Malformed" covers substance, not just syntax, because a confident but empty
+  success would mislead every downstream consumer. Beyond non-JSON, truncated
+  JSON, and wrong-typed fields, the parser rejects a document that omits any
+  element bootc always emits: `apiVersion` and `kind` are both *required*
+  discriminators (an omitted `apiVersion` is a failure, not a bypass — only its
+  value is matched loosely, by prefix, so `org.containers.bootc/v2` still
+  parses), and the `status` object and its `booted` deployment must be present.
+  A payload that satisfies the discriminators but reports nothing — for
+  instance `{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost"}` —
+  is an error rather than a successful `HostImageStatus` with every slot nil.
+  Consequently `Booted` is always non-nil on success. Only `staged` and
+  `rollback` are optional: a host with nothing pending and nothing to roll
+  back to is ordinary, so those slots stay nil without error.
+- `SoftRebootCapable` is three-state: non-nil true/false when the host's bootc
+  exposes soft-reboot eligibility, nil when it does not. The key is
+  `softRebootCapable` on a boot entry, confirmed against bootc's published
+  schema (`crates/lib/src/spec.rs`: `BootEntry.soft_reboot_capable`, camelCase,
+  `#[serde(default)]`; `HostStatus` has no such field). The parser prefers the
+  staged entry — the deployment a soft reboot would activate — and falls back
+  to the booted entry when nothing is staged (upstream computes the flag per
+  deployment for every reported slot, booted included, so that fallback is not
+  a reinterpretation of a staged-only field). A bootc new enough to have the
+  field always emits it — it is a plain `bool` with no `skip_serializing_if`,
+  so it serializes even when false — which means an absent key reliably
+  indicates a bootc predating soft-reboot support: unknown, never a parse
+  error and never false.
+- rpm-ostree is the *supplementary* source, and its parser's return type says
+  so: `ParseRPMOStreeStatus` yields an unexported `rpmOStreeSupplement` (per
+  deployment: version string, ostree checksum, plus image/digest/role used
+  only for matching), never a `HostImageStatus`, so rpm-ostree output cannot
+  stand alone as a host-image report even by accident. rpm-ostree's document
+  has no apiVersion/kind discriminator, so the required top-level
+  `deployments` array plays that role: a payload without it is a parse error,
+  while a payload whose array is empty is a *success* with nothing to add.
+  That distinction is the point — it lets the caller tell "rpm-ostree ran but
+  its output could not be read" (record `RPMOStreeError`) from "rpm-ostree
+  read fine and had nothing to say."
+- `MergeHostImage(bootc, rpmOstree)` encodes the spec's precedence rule as
+  behavior, not prose. bootc owns deployment identity outright: which slots
+  exist, their image reference, their digest, and `SoftRebootCapable` all come
+  from bootc alone, and rpm-ostree can only ever fill in `Version`/`Checksum`
+  on a slot bootc already reported. It cannot add, remove, or rename a slot —
+  merging a full supplement into a failed bootc parse still yields no
+  deployments. Entries are matched by the role rpm-ostree itself flags (booted,
+  staged) and, for the rollback slot it does not flag, by identity — the digest
+  bootc reported, or the image reference when neither side reports a digest,
+  compared after stripping the ostree transport decoration rpm-ostree puts in
+  front of a reference (`ostree-unverified-registry:`, `…:docker://…`) and
+  bootc does not. On conflict the entry is dropped *whole*, version and
+  checksum included: a deployment the two sources describe differently is not
+  evidently the same deployment, so the failure direction is always less
+  detail, never wrong detail.
+- `MergeHostImage` returns `RPMOStreeAvailable`/`RPMOStreeError` at their zero
+  value and does not carry over an incoming value for either. It only ever
+  receives an already-parsed supplement, so it cannot know whether rpm-ostree
+  failed, reported nothing, or was never run; the caller that runs the command
+  owns those fields and sets them after merging, exactly as it does for bootc.
+  The merged result also shares no memory with either argument, so it never
+  writes back into the caller's own parse.
 
 ## Key Patterns
 
@@ -109,6 +361,22 @@ rules for adding a new module (routes, actions, queries).
   unavailable, the action does not run. Long-running mutations (extension
   update/refresh) run as durable background jobs so a browser disconnect
   doesn't cancel in-flight work.
+- **Per-resource action serialization, keyed per subsystem.** Every action
+  definition resolves a lock key — `LockResource` when set, otherwise the
+  audited `Resource` — and `internal/broker`'s action registry holds it for
+  the action's duration, so conflicting operations on one resource cannot
+  overlap. The keys are deliberately per subsystem: the sysext lifecycle
+  actions (enable/disable/refresh/update) share `sysext/global`; storage
+  remote-mount lifecycle actions key on their opaque
+  `storage/mount/<id>` with creation on `storage/mounts`; and
+  `ActionMaintenanceReboot` holds `maintenance/global`
+  (`maintenanceLockResource` in `cmd/pilothoused/main.go`). Reboot formerly
+  reused sysext's key, which was reuse rather than an intentional coupling —
+  it now serializes only against another reboot, and an in-flight extension
+  refresh/update no longer refuses a reboot (nor the reverse). Confirmation,
+  admin authorization, and the audited `maintenance/reboot` resource are
+  unchanged. `cmd/pilothoused/main_test.go` proves both halves through real
+  `broker.ActionRegistry.Execute` calls.
 - **Streams for large/blocking data.** File upload/download use fixed
   `stream-actions`/`stream-queries` registrations with explicit size caps
   (256 MiB) rather than the generic action/query path.
@@ -188,7 +456,10 @@ rules for adding a new module (routes, actions, queries).
   reboot-marker-derived reasons are computed exactly as before regardless.
   See `docs/capabilities.md`'s extension-read note for the full table and
   `internal/modules/maintenance/manager_test.go` for one dedicated test case
-  per combination.
+  per combination. (`NewSystemManager` has since grown a third
+  `hostImage`/`bootcAvailable` pair for the host-image leg described in the
+  #51 section above; it follows the same degrade convention and leaves the
+  updex/sysext behavior here untouched.)
 - **Sysext: the one module guarded per-action, not per-function.**
   `registerSysextActions` (`cmd/pilothoused/main.go`) is the final capability
   conversion in this phase, and the only one where the four registrations
@@ -256,9 +527,13 @@ rules for adding a new module (routes, actions, queries).
   wires the interface (not `Gate`, which individual modules call from their
   own `Mount`) into the two web-side registries the spec calls out: an
   unexported `moduleAvailable(module platform.Module, caps capability.Set)
-  bool` delegates straight to `platform.Available` — so the gating decision
-  has exactly one implementation, shared with `internal/platform`'s own
-  tests — and `Render` now builds the shell's `Modules` nav list from a new
+  bool` delegates the gating decision to `internal/platform` rather than
+  reimplementing it — in this chunk that was `platform.Available` alone; the
+  next bullet's any-of work changed the body to
+  `platform.Available(module, caps) && platform.AvailableAny(module, caps)`,
+  and it remains the single choke point both web-side registries call, with
+  each half implemented once in `internal/platform` and shared with that
+  package's own tests — and `Render` now builds the shell's `Modules` nav list from a new
   `s.availableManifests(ctx)` (filters `s.registry.Modules()` through
   `moduleAvailable` before mapping to `Manifest`, replacing the previous
   unfiltered `s.registry.Manifests()` call) and the `dashboard` handler's
@@ -278,6 +553,43 @@ rules for adding a new module (routes, actions, queries).
   `internal/web/server_test.go`, and every real module's
   nav/dashboard/route behavior was unchanged. `services` is the first real
   module to adopt it — see the next bullet.
+- **`HasAny`/`CapabilityGateAny`/`GateAny`/`AvailableAny`: an any-of sibling
+  (added as mechanism by #54, adopted by `maintenance` in #51).**
+  `internal/capability.Set` gained `HasAny(ids ...ID)
+  bool`, reporting true iff at least one given id is present; unlike
+  `HasAll`'s zero-ids case (vacuously true), `HasAny()` with zero ids is
+  always false ("any of nothing" has no capability to satisfy), and a
+  nil/zero-value `Set`'s `HasAny` is nil-safe like `Has`/`HasAll`.
+  `internal/platform` mirrors `CapabilityGate`/`Gate`/`Available` with a
+  parallel any-of trio — `CapabilityGateAny` (`RequiredAnyCapabilities()
+  []capability.ID`), `GateAny(host, ids, next)`, and `AvailableAny(module,
+  caps)` — kept as separate types rather than folding an any-of flag into
+  `CapabilityGate`, since no module needs both AND and OR semantics on its
+  whole-module gate at once. `moduleAvailable` now composes both:
+  `platform.Available(module, caps) && platform.AvailableAny(module,
+  caps)`. Because `Available` defaults to `true` for a module that doesn't
+  implement `CapabilityGate` and `AvailableAny` defaults to `true` for a
+  module that doesn't implement `CapabilityGateAny`, this
+  AND-of-two-defaults composition is correct for all three shapes a module
+  can be in (`CapabilityGate` only, `CapabilityGateAny` only, or neither)
+  with no type-switching in `server.go` itself. The one other place that
+  gates a module's surface outside `Mount`/nav/dashboard —
+  `internal/modules/attention.Module.findings`, which calls
+  `HealthProvider.Health` directly — was updated in the same chunk to
+  type-assert `CapabilityGateAny` alongside `CapabilityGate` and skip a
+  provider when either gate is unsatisfied, so a future `CapabilityGateAny`
+  module can't be hidden from nav/dashboard and 404 on its routes while
+  `/attention` still calls its `Health`. No production module implemented
+  `CapabilityGateAny` in this chunk — the mechanism was proven the same
+  way `CapabilityGate` was before its first real adopter: a synthetic fake
+  module in `internal/platform/capability_test.go` (exercising `AvailableAny`
+  through a fake `Host`'s real `Capabilities()`) and a synthetic fake module
+  registered into a real `*web.Server` in `internal/web/server_test.go`
+  proving nav/dashboard/route behavior through a real registry and HTTP
+  round trip. #51 then made `maintenance` the first — and still the only —
+  production adopter, with `RequiredAnyCapabilities()` returning
+  `{Systemd, Bootc, RPMOStree}`; see the Maintenance bullet below for the
+  per-surface split that adoption produced.
 - **Services module: the first real `CapabilityGate` adopter.**
   `internal/modules/services.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -301,36 +613,31 @@ rules for adding a new module (routes, actions, queries).
   Systemd-present/-absent and Journald-present/-absent independently via
   real `ServeMux` round trips through `Mount`, rather than calling handler
   logic directly.
-- **Backups and maintenance: whole-module `Systemd` gates.**
-  `internal/modules/backups.Module` and `internal/modules/maintenance.Module`
-  now also implement `RequiredCapabilities() []capability.ID`, each returning
-  `[]capability.ID{capability.Systemd}` — unlike services, neither has a
+- **Backups: whole-module `Systemd` gate.**
+  `internal/modules/backups.Module` now also implements
+  `RequiredCapabilities() []capability.ID`, returning
+  `[]capability.ID{capability.Systemd}` — unlike services, it has no
   sub-feature with a broader requirement, so there is exactly one
-  `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` wrap per
-  route: backups' single `GET /backups`, and maintenance's `GET /maintenance`
-  and `POST /maintenance/reboot`. With `Systemd` absent, the whole module
-  disappears — nav entry, dashboard card, and every route 404s at request
-  time; with `Systemd` present, both modules behave exactly as before this
-  chunk. Neither module's `views.templ` changed: an absent module 404s
-  before any page renders, so there is no conditional view content to add,
-  unlike services' `journalAvailable` parameter. Maintenance's existing
-  extension-read degrade (`QueryMaintenanceState`'s updex/sysext handling,
-  from #50) is untouched by this chunk; the systemd gate sits on top of it,
-  at the module/route level, not inside the query handler. Both
-  `module_test.go` files gained the same configurable `caps
-  capability.Set`/`capsSet bool` pair on their fake `Host` that services'
-  test uses (defaulting to a full-capability set), so gated/ungated route
-  behavior is exercised via real `ServeMux` round trips through `Mount`.
+  `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` wrap, on
+  its single `GET /backups` route. With `Systemd` absent, the whole module
+  disappears — nav entry, dashboard card, and the route 404s at request
+  time; with `Systemd` present, the module behaves exactly as before this
+  chunk. Its `views.templ` did not change: an absent module 404s before any
+  page renders, so there is no conditional view content to add, unlike
+  services' `journalAvailable` parameter. `module_test.go` gained the same
+  configurable `caps capability.Set`/`capsSet bool` pair on its fake `Host`
+  that services' test uses (defaulting to a full-capability set), so
+  gated/ungated route behavior is exercised via real `ServeMux` round trips
+  through `Mount`.
   `platform.Gate`/`Available` only guard requests that arrive through a
   module's own `Mount`-registered routes or the web-side nav/dashboard
   loops, though — they do nothing for other in-process code that holds a
   `platform.HealthProvider` reference and calls `Health` directly.
   `internal/modules/attention.Module.findings` is exactly that: it iterates
-  every registered provider (including `backupModule` and
-  `maintenanceModule`, passed into `attention.New(...)` in
-  `cmd/pilothouse/main.go`) and previously called `provider.Health(ctx,
-  host)` unconditionally, so a `Systemd`-absent host still reached
-  `QueryBackupsState`/`QueryMaintenanceState` through `/attention` and
+  every registered provider (including `backupModule`, passed into
+  `attention.New(...)` in `cmd/pilothouse/main.go`) and previously called
+  `provider.Health(ctx, host)` unconditionally, so a `Systemd`-absent host
+  still reached `QueryBackupsState` through `/attention` and
   rendered a degraded "status is unavailable" finding instead of the
   provider being absent entirely. `findings` now type-asserts each
   provider to `platform.CapabilityGate` and, when the host's cached
@@ -341,7 +648,81 @@ rules for adding a new module (routes, actions, queries).
   already apply, generalized to this aggregator's direct method calls;
   `internal/modules/attention/module_test.go` proves it with a
   Health-call-counting fake provider, at both the absent- and
-  present-capability ends.
+  present-capability ends. (The any-of bullet above later extended the same
+  skip to `platform.CapabilityGateAny`/`HasAny`; see "Attention's
+  per-provider capability skip" in the current-state section for the
+  composed behavior.)
+- **Maintenance: whole-module `HasAny(Systemd, Bootc, RPMOStree)` gate
+  (reworked by #51).** `internal/modules/maintenance.Module` adopted #54's
+  whole-module `Systemd` `CapabilityGate` alongside backups; #51 replaced
+  it. `module.go` now implements `platform.CapabilityGateAny`
+  (`RequiredAnyCapabilities()` returning `[]capability.ID{capability.Systemd,
+  capability.Bootc, capability.RPMOStree}`), **not**
+  `platform.CapabilityGate`, because the module reports on two independent
+  sources: systemd-gated reboot posture, update availability, and jobs
+  (`QueryMaintenanceState`), and separately gated host-image status
+  (`QueryHostImageStatus`, `Bootc OR RPMOStree`). `GET /maintenance` is
+  wrapped in `platform.GateAny(host, {Systemd, Bootc, RPMOStree}, ...)`;
+  `POST /maintenance/reboot` remains wrapped in a separate, plain
+  `platform.Gate(host, {Systemd}, ...)`, unchanged, since rebooting is a
+  systemd operation and `ActionMaintenanceReboot` is registered only under
+  `Systemd`. So: with none of the three capabilities present the whole
+  module disappears (no nav entry, no dashboard card, `GET /maintenance`
+  404s); with any one of them present the nav entry, dashboard card, and
+  `GET /maintenance` are available, while `POST /maintenance/reboot` remains
+  available only when `Systemd` specifically is present, regardless of
+  bootc/rpm-ostree. Each broker call the module makes is independently
+  capability-gated so no newly-possible capability combination turns an
+  available module into an error: `queryState` calls
+  `QueryMaintenanceState` only when the host advertises `Systemd` and
+  substitutes the zero `State` otherwise, so `Page`, `Summary`, and `Health`
+  degrade to "nothing to report" on a bootc-only host rather than the
+  handler 503ing (or the dashboard card/`attention` finding erroring) on a
+  query the daemon never registered there; symmetrically, `queryHostImage`
+  calls `QueryHostImageStatus` only when the host advertises
+  `HasAny(Bootc, RPMOStree)` and returns `nil` otherwise, which is what the
+  page renders from. `views.templ`'s `Page` therefore takes a
+  `hostImage *HostImageStatus` alongside `state`, and nil-ness *is* the
+  availability flag — the page can only render host-image content it actually
+  fetched. When it is non-nil, `Page` renders the conditional
+  `hostImageSection` (unexported — `Page` is its only caller): the booted,
+  staged, and rollback deployments bootc reported (image
+  reference and digest, plus rpm-ostree's supplementary version and checksum
+  where the broker-side merge attached them), an independent per-source
+  unavailable indicator for each of `BootcError` and `RPMOStreeError` so one
+  failed source never hides the other's data, and — exactly once on the whole
+  page — the soft-reboot-eligibility indicator, read straight from
+  `HostImageStatus.SoftRebootCapable` (non-nil true renders "a soft reboot may
+  be sufficient…", non-nil false "a full reboot is required…", nil renders
+  nothing). That indicator is gated on `HasAny(Bootc, RPMOStree)`, **not** on
+  `Systemd`, so it renders identically on a bootc-only host and a
+  bootc-plus-systemd one; it is deliberately not duplicated inside the
+  `Systemd`-gated reboot-posture area, which still renders only the
+  pre-existing reboot-required card and reboot form.
+  `State.SoftRebootCapable` remains the same fact's API-surface leg on
+  `QueryMaintenanceState`'s full posture response, it is just not the page's
+  rendering source. With neither bootc nor rpm-ostree advertised the section
+  is omitted outright rather than rendered empty or errored. Nothing in the
+  section is a control: no upgrade, switch, rebase, rollback, or
+  automatic-update link, button, or form exists anywhere on the page for
+  bootc or rpm-ostree, and `views_test.go` asserts that mechanically across
+  every host-image fixture. The dead-control audit a
+  whole-module-present/route-gated combination normally demands is unchanged
+  by all of this: the only view element targeting the systemd-only reboot
+  route is still the admin "Reboot host" form nested inside
+  `if state.RebootRequired`, and the zero `State` substituted when `Systemd`
+  is absent leaves that condition false, so the form cannot render on a host
+  where the route 404s (`TestPageRendersNoRebootControlWithoutSystemd` pins
+  both ends of that).
+  Because the module's whole-module gate is
+  now an any-of gate, `attention.Module.findings` reaches it through the
+  `platform.CapabilityGateAny`/`AvailableAny` (`HasAny`) type-assert rather
+  than the `platform.CapabilityGate` (`HasAll`) one, so maintenance is
+  skipped there — no `Health` call, no "unavailable" placeholder — only when
+  a host has none of the three. Maintenance's existing extension-read
+  degrade (`QueryMaintenanceState`'s updex/sysext handling, from #50) is
+  untouched by either chunk: the capability gating sits on top of it, at the
+  module/route level, not inside the query handler.
 - **Logs: whole-module `Systemd AND Journald` gate.**
   `internal/modules/logs.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -432,7 +813,9 @@ rules for adding a new module (routes, actions, queries).
   unaffected; with the capability present, both modules behave exactly as
   before this chunk. Neither module's `views.templ` changed: an absent
   module 404s before any page renders, so there is no conditional view
-  content to add, the same as backups/maintenance/logs. Neither module is a
+  content to add, the same as backups/logs (maintenance's `views.templ`
+  gained conditional host-image content in #51; see the Maintenance bullet
+  above for its now-different behavior). Neither module is a
   `platform.HealthProvider` (see the module table above), so no `attention`
   aggregator change was needed here either. Both `module_test.go` files
   gained the same configurable `caps capability.Set`/`capsSet bool` pair on
@@ -457,7 +840,9 @@ rules for adding a new module (routes, actions, queries).
   unaffected; with incus present, the module behaves exactly as before this
   chunk. `views.templ` is unchanged: an absent module 404s before any page
   renders, so there is no conditional view content to add, the same as
-  podman/docker/backups/maintenance/logs. Incus is not a
+  podman/docker/backups/logs (maintenance's `views.templ` gained conditional
+  host-image content in #51; see the Maintenance bullet above for its
+  now-different behavior). Incus is not a
   `platform.HealthProvider` either, so no `attention` aggregator change was
   needed. `module_test.go` gained the same configurable
   `caps capability.Set`/`capsSet bool` pair on its fake `Host` that the other
@@ -535,16 +920,27 @@ optional tooling never shows a dead link or a button that always fails.
   capability.Set`, added to the `platform.Host` interface in #54 and satisfied
   by `web.Server` from the cache above. Because it takes a `context.Context`
   rather than an `*http.Request`, it is callable from both HTTP handlers and
-  `Module.Dashboard(ctx, host)`. Modules implementing `CapabilityGate`
-  (whole-module gate):
+  `Module.Dashboard(ctx, host)`. `internal/platform` also has an any-of
+  sibling set — `CapabilityGateAny` (`RequiredAnyCapabilities()
+  []capability.ID`), `GateAny`, and `AvailableAny`, using `Set.HasAny`
+  semantics instead of `HasAll` — and `moduleAvailable` composes both:
+  `platform.Available(module, caps) && platform.AvailableAny(module,
+  caps)`. Modules implementing `CapabilityGate` (whole-module gate):
   - `services` → `Systemd` (plus a `Systemd AND Journald` `Gate` on just
     `GET /services/{unit}/logs`)
   - `logs` → `Systemd AND Journald`
   - `backups` → `Systemd`
-  - `maintenance` → `Systemd`
   - `podman` → `Podman`
   - `docker` → `Docker`
   - `incus` → `Incus`
+
+  Modules implementing `CapabilityGateAny` (whole-module any-of gate, added
+  by #51):
+  - `maintenance` → `HasAny(Systemd, Bootc, RPMOStree)`
+
+  `POST /maintenance/reboot` is additionally, separately gated by a plain
+  `Systemd`-only `platform.Gate` outside the whole-module mechanism, so it
+  404s on a bootc-only host whose maintenance module is otherwise present.
 
   Modules with partial or no gating: `storage` deliberately does *not*
   implement `CapabilityGate` — its inventory (nav, dashboard card,
@@ -559,11 +955,26 @@ optional tooling never shows a dead link or a button that always fails.
   (`internal/modules/attention/module.go`). The attention aggregator holds
   `[]platform.HealthProvider` and calls `Health` directly — outside any
   `Mount` route or the nav/dashboard filter — so its `findings` type-asserts
-  each provider to `platform.CapabilityGate` and, when `host.Capabilities(ctx)`
-  doesn't `HasAll` its `RequiredCapabilities`, skips it outright: no `Health`
-  call and no "unavailable" finding, since an absent module is not a failed
-  one. On a no-systemd host, `services`/`maintenance`/`backups` contribute
-  nothing to `/attention` rather than a degraded placeholder.
+  each provider to *both* whole-module gate interfaces and skips it outright
+  when either is unsatisfied: `platform.CapabilityGate` when
+  `host.Capabilities(ctx)` doesn't `HasAll` its `RequiredCapabilities`, and
+  `platform.CapabilityGateAny` when it doesn't `HasAny` its
+  `RequiredAnyCapabilities`. Skipping means no `Health` call and no
+  "unavailable" finding, since an absent module is not a failed one. The two
+  checks are an AND of two defaults — a provider implementing neither
+  interface is always collected — mirroring `moduleAvailable`'s composition,
+  so this call path stays gate-complete for a module of any of the three
+  shapes. (`platform.Available`/`AvailableAny` take a `platform.Module`,
+  which a `HealthProvider` need not be, so `findings` applies the same two
+  tests to the provider value rather than calling them directly.) On a
+  no-systemd host, `services`/`backups` contribute nothing to `/attention`
+  rather than a degraded placeholder, via the plain
+  `CapabilityGate`/`HasAll` check. `maintenance` is skipped on a different
+  condition: it implements `CapabilityGateAny`, so it contributes nothing
+  only when *none* of `Systemd`/`Bootc`/`RPMOStree` is present (the
+  `CapabilityGateAny`/`AvailableAny` `HasAny` check added by #51) — a
+  bootc-only host still collects its `Health`, which reports what it can
+  without the systemd-gated query.
 - **Routes stay mounted; absence 404s at request time.** No route is ever
   conditionally registered at startup based on capability — every module's
   `Mount` runs unconditionally and mounts all its routes on the shared mux.
@@ -710,6 +1121,20 @@ rationale.
   `frostyard/mill` repo; this repo carries only config, learned skills, and
   cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
   `.github/copilot-instructions.md`, all pointing back to `AGENTS.md`).
+  `CLAUDE.md` is a symlink to `AGENTS.md`, so the two are byte-identical by
+  construction and can never drift.
+- `AGENTS.md` (and therefore `CLAUDE.md`) is deliberately generic: it carries
+  only repository-wide process, stack, build-target, templ, release, and
+  skill-review instructions, with no per-module feature inventory and no
+  module-specific claim anywhere in it. A change that adds or reshapes a
+  module's surface therefore does not make any sentence in it stale — the
+  per-module feature narrative lives here in `yeti/OVERVIEW.md`, in
+  `docs/modules.md`, and in `README.md`'s "What works" list. Confirm this is
+  still true when reviewing AGENTS.md's "update relevant documentation after
+  any change to source code" invariant for a feature change, rather than
+  assuming either that it must be edited or that it can be skipped
+  unexamined. (#51's host-image series was reviewed against it on exactly
+  these grounds and required no edit to either file.)
 - `docs/agents/skills/` holds durable lessons harvested from previous mill
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,

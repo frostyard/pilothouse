@@ -26,7 +26,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
 - Durable privileged-action history, destructive confirmations, and per-resource action serialization
 - Durable background jobs for extension update and refresh operations
-- Extension update availability, reboot-required posture, and confirmed host reboot
+- Extension update availability, reboot-required posture, confirmed host reboot, and read-only host-image status — booted, staged, and rollback deployments with the image references and manifest digests `bootc` reports as the authoritative source, supplemented but never overridden by `rpm-ostree` version and checksum detail where it is present, plus soft-reboot eligibility when bootc exposes it
 - Exact systemd backup timer monitoring with freshness and last-result health
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts
