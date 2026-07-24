@@ -61,8 +61,8 @@ totals from the 16/51 phase 1a ended with to 17/52. It is the table's first
 source alone is enough (see exception #4 below).
 
 `QueryAutoUpdateStatus` (`org.frostyard.pilothouse.maintenance.autoupdate_status`)
-was added by #58 for read-only automatic-update reporting, raising the totals
-to 18/53. Like `QueryHostImageStatus` it is an
+was added by #58 for read-only automatic-update reporting, the increment before
+the current 19/54 total. Like `QueryHostImageStatus` it is an
 **any-of** row: `registerAutoUpdate` guards it with the same
 `caps.HasAny(capability.Bootc, capability.RPMOStree)` gate, and for the same
 reason — a no-updater image host must still be able to report the "not
