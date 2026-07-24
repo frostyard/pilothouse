@@ -107,13 +107,14 @@ func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 	return allOfPresent(caps, row.required)
 }
 
-// capabilityTable is the complete 52-row mirror of docs/capabilities.md.
+// capabilityTable is the complete 53-row mirror of docs/capabilities.md.
 // Every Action*/Query* constant declared in internal/broker/api.go (35
-// Action* + 17 Query*, the 17 including QueryCapabilities and
-// QueryHostImageStatus) appears exactly once. QueryServicesJournal and
+// Action* + 18 Query*, the 18 including QueryCapabilities, QueryHostImageStatus,
+// and QueryAutoUpdateStatus) appears exactly once. QueryServicesJournal and
 // QueryLogs use the corrected "systemd AND journald" requirement
 // (docs/capabilities.md exceptions #2 and #3), not "journald" alone, and
-// QueryHostImageStatus is the table's one any-of row (exception #4).
+// QueryHostImageStatus and QueryAutoUpdateStatus are the table's two any-of
+// rows (exceptions #4 and #5).
 //
 // Columns, in positional order: broker ID, registry, required capabilities,
 // and whether the requirement is satisfied by any one of them (true) rather
@@ -155,8 +156,9 @@ var capabilityTable = []capabilityRequirement{
 	{broker.ActionStorageMount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageUnmount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageDelete, inActions, []capability.ID{capability.Systemd}, false},
-	// Queries (17).
+	// Queries (18).
 	{broker.QueryActivity, inQueries, nil, false},
+	{broker.QueryAutoUpdateStatus, inQueries, []capability.ID{capability.Bootc, capability.RPMOStree}, true},
 	{broker.QueryBackupsState, inQueries, []capability.ID{capability.Systemd}, false},
 	{broker.QueryCapabilities, inQueries, nil, false},
 	{broker.QueryDockerLogs, inQueries, []capability.ID{capability.Docker}, false},
@@ -177,7 +179,7 @@ var capabilityTable = []capabilityRequirement{
 
 // moduleLevelNoneIDs is the exact 7 broker IDs whose documented requirement
 // is "none" -- the only IDs a minimal (empty capability.Set) fixture should
-// register. Verified against capabilityTable at TestCapabilityTableHasExactlyFiftyTwoRows.
+// register. Verified against capabilityTable at TestCapabilityTableHasExactlyFiftyThreeRows.
 var moduleLevelNoneIDs = []string{
 	broker.QueryFilesList,
 	broker.QueryFilesDownload,
@@ -190,9 +192,9 @@ var moduleLevelNoneIDs = []string{
 
 // --- live source of truth: internal/broker/api.go ----------------------
 //
-// docs/capabilities.md states the 52/35/17 totals as a documented,
+// docs/capabilities.md states the 53/35/18 totals as a documented,
 // reproducible fact ("grep -c '^[[:space:]]*Action' internal/broker/api.go"
-// → 35, "grep -c '^[[:space:]]*Query' internal/broker/api.go" → 17; both
+// → 35, "grep -c '^[[:space:]]*Query' internal/broker/api.go" → 18; both
 // re-run against this tree while writing this chunk). The helpers below turn
 // that documented grep into an executed assertion by parsing the same file
 // with go/ast, so the table above is compared against the *live* constant
@@ -262,7 +264,7 @@ func declaredBrokerIDs(t *testing.T) []declaredBrokerID {
 // against internal/broker/api.go's live Action*/Query* declarations in both
 // directions, so neither a new constant missing from the table nor a table
 // row naming an ID that no longer exists can survive. It also pins the
-// documented 35/17/52 totals to the parsed source rather than to the table,
+// documented 35/18/53 totals to the parsed source rather than to the table,
 // and cross-checks that an Action* constant is filed in an action registry
 // and a Query* constant in a query registry.
 func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
@@ -280,8 +282,8 @@ func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 35, declaredActions, "%s must declare 35 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Equal(t, 17, declaredQueries, "%s must declare 17 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Len(t, declared, 52, "%s must declare 52 broker IDs in total", brokerAPIPath)
+	assert.Equal(t, 18, declaredQueries, "%s must declare 18 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Len(t, declared, 53, "%s must declare 53 broker IDs in total", brokerAPIPath)
 
 	tableIDs := make(map[string]capabilityRequirement, len(capabilityTable))
 	for _, row := range capabilityTable {
@@ -411,8 +413,8 @@ func nonCommentMentions(t *testing.T, path string, source []byte, isGo bool, nee
 	return mentions
 }
 
-func TestCapabilityTableHasExactlyFiftyTwoRows(t *testing.T) {
-	require.Len(t, capabilityTable, 52, "docs/capabilities.md documents 52 broker IDs (35 Action* + 17 Query*, including QueryCapabilities and QueryHostImageStatus)")
+func TestCapabilityTableHasExactlyFiftyThreeRows(t *testing.T) {
+	require.Len(t, capabilityTable, 53, "docs/capabilities.md documents 53 broker IDs (35 Action* + 18 Query*, including QueryCapabilities, QueryHostImageStatus, and QueryAutoUpdateStatus)")
 	seen := make(map[string]bool, len(capabilityTable))
 	actionCount, queryCount := 0, 0
 	for _, row := range capabilityTable {
@@ -432,7 +434,7 @@ func TestCapabilityTableHasExactlyFiftyTwoRows(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 35, actionCount, "expected 35 Action* IDs")
-	assert.Equal(t, 17, queryCount, "expected 17 Query* IDs")
+	assert.Equal(t, 18, queryCount, "expected 18 Query* IDs")
 	none := 0
 	for _, row := range capabilityTable {
 		if len(row.required) == 0 {
@@ -536,6 +538,26 @@ func registerEverythingForFixture(t *testing.T, caps capability.Set) contractReg
 	// bootc/rpm-ostree executables themselves are faked), so the fixture
 	// cannot register a manager production would have configured differently.
 	require.NoError(t, registerHostImage(queries, maintenance.NewHostImageManager(&fakeHostImageRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree)), caps))
+
+	// The automatic-update reporter is the real maintenance.AutoUpdateManager,
+	// built from this fixture's capability set exactly as run() builds it. Its
+	// *_Configured booleans are driven by the Autoupdate* capability pair, which
+	// is a *different* pair from the Bootc/RPMOStree registration gate, so only
+	// the real type keeps that distinction honest under the fixture matrix. Its
+	// systemd client follows buildSystemdManagers' own Systemd-gated-fake
+	// convention: a fake when Systemd is advertised, nil otherwise. The variable
+	// is an interface type, so the no-systemd case passes a genuinely nil
+	// interface into NewAutoUpdateManager -- never a typed-nil concrete pointer
+	// that would defeat the manager's own nil-client guard, exactly as run()
+	// hands over the real *dbus.Conn only when it is non-nil.
+	var autoUpdateSystemdClient interface {
+		GetUnitPropertiesContext(context.Context, string) (map[string]any, error)
+		GetUnitTypePropertiesContext(context.Context, string, string) (map[string]any, error)
+	}
+	if caps.Has(capability.Systemd) {
+		autoUpdateSystemdClient = fakeAutoUpdateSystemdClient{}
+	}
+	require.NoError(t, registerAutoUpdate(queries, maintenance.NewAutoUpdateManager(autoUpdateSystemdClient, caps.Has(capability.AutoupdateBootc), caps.Has(capability.AutoupdateRPMOStree), t.TempDir()), caps))
 
 	// podman/docker/incus client construction never depends on a probed
 	// capability either (a bad socket/env just makes the engine
@@ -643,7 +665,7 @@ func TestCapabilityContractHostImageOnNamedHostFixtures(t *testing.T) {
 
 // TestCapabilityContractAcrossFixtureMatrix is the binding contract test the
 // spec requires as the final chunk of this phase: for every fixture
-// capability.Set below, every one of the 52 registered broker IDs must be
+// capability.Set below, every one of the 53 registered broker IDs must be
 // present in its registry iff the fixture's Set satisfies that ID's
 // documented requirement from capabilityTable (whose *set of IDs* is diffed
 // against internal/broker/api.go's live go/ast-parsed declarations by
@@ -669,7 +691,7 @@ func TestCapabilityContractHostImageOnNamedHostFixtures(t *testing.T) {
 // The last two fixtures are the spec's own named host shapes -- "ucore"
 // (systemd + journald + bootc + rpm-ostree + every engine) and
 // "snosi-without-bootc" (systemd + journald + updex/sysext + every engine,
-// with neither host-image source) -- walked here against the full 52-row
+// with neither host-image source) -- walked here against the full 53-row
 // table so every row, not only the host-image ones, is proven on the two
 // real-world combinations the acceptance criteria name.
 // TestCapabilityContractHostImageOnNamedHostFixtures above additionally
@@ -709,10 +731,11 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 }
 
 // TestCapabilityContractAllOnReproducesPrePhaseBehavior asserts the all-on
-// fixture registers every one of the 52 IDs -- reproducing pre-phase
+// fixture registers every one of the 53 IDs -- reproducing pre-phase
 // behavior exactly for the 50 pre-existing Action*/Query* constants, plus
-// QueryCapabilities and QueryHostImageStatus (52 total), since every
-// documented requirement is a subset of the full capability vocabulary.
+// QueryCapabilities, QueryHostImageStatus, and QueryAutoUpdateStatus (53
+// total), since every documented requirement is a subset of the full
+// capability vocabulary.
 func TestCapabilityContractAllOnReproducesPrePhaseBehavior(t *testing.T) {
 	registries := registerEverythingForFixture(t, capability.New(allCapabilityIDs...))
 	for _, row := range capabilityTable {
