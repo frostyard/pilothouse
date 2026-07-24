@@ -7,7 +7,9 @@ to change any of it.
 
 ## What exists today
 
-This document currently covers exactly what these three files contain:
+The surface is complete end to end: the domain types and normalizers, the
+daemon-side reader, the broker query that serves it, and the Maintenance-page
+section that renders it. This document covers what these four pieces contain:
 
 - `internal/modules/maintenance/autoupdate.go` — the response domain types
   `AutoUpdateStatus`, `BootcAutoUpdate`, and `RPMOStreeAutoUpdate`, plus
@@ -16,17 +18,61 @@ This document currently covers exactly what these three files contain:
 - `internal/modules/maintenance/autoupdate_rpmostree.go` — the `RPMOStreePolicy*`
   vocabulary and `ParseRPMOStreeAutomaticUpdatePolicy`, a pure, zero-I/O parser
   that maps the *content* of rpm-ostree's daemon configuration file to a
-  normalized policy string; and
+  normalized policy string;
 - `internal/modules/maintenance/autoupdate_manager.go` — `AutoUpdateManager`,
   the daemon-side reader that gives those two pure functions their real inputs
-  (see [The daemon-side manager](#the-daemon-side-manager) below).
+  (see [The daemon-side manager](#the-daemon-side-manager) below); and
+- `internal/modules/maintenance/module.go` and `views.templ` — the web-side
+  consumer, `queryAutoUpdate`, and the Maintenance page's "Automatic updates"
+  section it feeds (see [Web rendering](#web-rendering) below).
 
-There is no broker query and no web surface for automatic-update status yet:
-`AutoUpdateManager` has no production caller in the tree at this commit. It is
-constructed and its `Status` is served over the broker only in a later change
-(the `QueryAutoUpdateStatus` registration in `cmd/pilothoused`), and the
-Maintenance-page rendering lands after that. Both normalizers, and the manager
-that drives them, are reachable only from their tests at this commit.
+Both ends of the surface are wired. `cmd/pilothoused`'s `registerAutoUpdate`
+constructs one `AutoUpdateManager` and serves its `Status` over the broker as
+`QueryAutoUpdateStatus`, guarded by `caps.HasAny(capability.Bootc,
+capability.RPMOStree)`. Neither the normalizers nor the manager is
+test-only-reachable any more: the query is registered on every image-based host,
+and the web process consumes it there on every `GET /maintenance`.
+
+### Web rendering
+
+`internal/modules/maintenance`'s `queryAutoUpdate` (`module.go`) is the query's
+only web consumer. `collectPage` calls it on every `GET /maintenance`, behind
+the same `HasAny(capability.Bootc, capability.RPMOStree)` test the daemon
+registers the query under, and it returns `nil` — not an error and not a zero
+value — when the host advertises neither source. Nil-ness *is* the availability
+flag: `Page(state, hostImage, autoUpdate, ...)` renders the section only when
+`autoUpdate != nil`, so a host with no image-based updater source omits the
+section entirely instead of showing an empty or errored placeholder. The gate is
+deliberately `Bootc`/`RPMOStree` and **not** `AutoupdateBootc`/
+`AutoupdateRPMOStree`, for the reason
+[The daemon-side manager](#the-daemon-side-manager) gives: the `Autoupdate*`
+pair drives the configured/not-configured split *inside* the response, so gating
+the call on it would make the "no updater is configured" report unreachable on
+precisely the host it describes.
+
+`views.templ`'s `autoUpdateSection` renders the response as two independent,
+symmetric subsections, one per updater, each keyed off that updater's
+`*Configured` flag and payload pointer: a configured updater renders its timer
+active and unit-file states, next trigger, service active state and last
+result, normalized policy, and both drop-in-presence booleans, and an
+unconfigured one renders an explicit, updater-naming "not configured"
+statement. Neither subsection can be empty or hidden, and one updater being
+unconfigured never suppresses the other's detail. A configured updater whose
+individual sub-value is unpopulated renders "Not reported" rather than a blank
+line. `views_test.go` covers all four payload combinations (neither updater,
+bootc only, rpm-ostree only, both), and
+`cmd/pilothouse/capability_contract_test.go` covers the fetch/omit decision and
+the rendered section per capability fixture, with each fixture's canned
+response calibrated to the `AutoUpdateStatus` the real `AutoUpdateManager`
+would return for that capability set.
+
+There is **no mutation on the web side either**. The section is read-only in
+the strong sense this document opens with: it contains no link, button, form,
+or HTMX request that enables, disables, triggers, or reconfigures either
+updater, and no broker action exists that such a control could target —
+`queryAutoUpdate` has no mutating counterpart anywhere in the broker's ID
+vocabulary. `views_test.go`'s `TestPageExposesNoAutoUpdateMutationControl`
+asserts that mechanically across every fixture.
 
 ## Response schema
 

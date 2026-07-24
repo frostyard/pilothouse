@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/web"
@@ -32,17 +33,30 @@ templ Summary(state State) {
 // placeholder: a host with no host-image source has nothing to report there,
 // which is not a failure.
 //
-// The section is deliberately independent of state (the Systemd-gated
-// QueryMaintenanceState response): it renders on a bootc-only host with no
-// systemd exactly as it does on a bootc-plus-systemd one. Only the
+// autoUpdate is the host's automatic-update picture as reported by
+// broker.QueryAutoUpdateStatus, and follows the identical convention under the
+// identical gate: nil exactly when the host advertises neither bootc nor
+// rpm-ostree, in which case the whole "Automatic updates" section is omitted.
+// Non-nil is *not* the same as "an updater is configured" — the zero
+// AutoUpdateStatus is the ordinary report of an image host with no updater
+// configured, and the section renders that as two explicit "not configured"
+// statements rather than as nothing.
+//
+// Both sections are deliberately independent of state (the Systemd-gated
+// QueryMaintenanceState response): they render on a bootc-only host with no
+// systemd exactly as they do on a bootc-plus-systemd one. Only the
 // reboot-required card and its reboot form still key off state, as they always
-// have. No control in this page mutates the host image in any way.
-templ Page(state State, hostImage *HostImageStatus, csrf string, admin bool) {
+// have. No control in this page mutates the host image or either updater's
+// configuration in any way.
+templ Page(state State, hostImage *HostImageStatus, autoUpdate *AutoUpdateStatus, csrf string, admin bool) {
 	<div class="page-stack">
 		<div class="page-intro"><p>Update availability, durable maintenance jobs, and host reboot posture.</p></div>
 		<section class="engine-stats" aria-label="Maintenance summary"><div class="engine-stat"><span>System</span><strong class="version">{ state.OSVersion }</strong><small>running image</small></div><div class="engine-stat"><span>Updates</span><strong>{ fmt.Sprint(len(state.Updates)) }</strong><small>available components</small></div><div class="engine-stat"><span>Jobs</span><strong>{ fmt.Sprint(activeJobs(state)) }</strong><small>queued or running</small></div></section>
 		if hostImage != nil {
 			@hostImageSection(*hostImage)
+		}
+		if autoUpdate != nil {
+			@autoUpdateSection(*autoUpdate)
 		}
 		if state.RebootRequired {
 			<article class="card error-card">
@@ -173,6 +187,185 @@ templ hostImageDeployment(slug string, label string, deployment *Deployment) {
 			</div>
 		</div>
 	}
+}
+
+// autoUpdateSection renders the read-only "Automatic updates" section: one
+// independent subsection per updater (bootc, rpm-ostree), each reporting either
+// that updater's configured detail or an explicit "not configured" statement.
+// It is unexported for the same reason hostImageSection is: Page is its only
+// caller.
+//
+// Everything here is descriptive, exactly as in hostImageSection. The section
+// contains no form, button, or link that enables, disables, triggers, or
+// reconfigures either updater, and no control that changes a policy; Pilothouse
+// reports automatic-update configuration and never changes it. There is no
+// broker action it could target even if one were added here.
+//
+// The two subsections are independent and symmetric, mirroring
+// AutoUpdateStatus's own symmetric BootcConfigured/Bootc and
+// RPMOStreeConfigured/RPMOStree pairs: one updater being unconfigured never
+// hides the other's detail, and an unconfigured updater always renders its own
+// visible statement rather than collapsing to nothing.
+templ autoUpdateSection(status AutoUpdateStatus) {
+	<article class="card" id="auto-update" aria-label="Automatic updates">
+		<div class="card-heading">
+			<span class="card-icon">
+				@web.Icon("refresh")
+			</span>
+			<div><h2>Automatic updates</h2><p>Read-only report of how each image updater is configured. Pilothouse never changes it.</p></div>
+		</div>
+		@autoUpdaterBlock("bootc", "bootc", bootcAutoUpdater(status))
+		@autoUpdaterBlock("rpm-ostree", "rpm-ostree", rpmOStreeAutoUpdater(status))
+	</article>
+}
+
+// autoUpdaterBlock renders one updater's subsection. fields is non-nil exactly
+// when that updater is configured (see bootcAutoUpdater/rpmOStreeAutoUpdater),
+// in which case every field AutoUpdateStatus carries for it is rendered — the
+// timer's active and unit-file states, its next trigger, the service's active
+// state and last result, the normalized policy, and both drop-in-presence
+// booleans. A configured updater always reports the same field set, so an
+// unpopulated sub-value renders as an explicit "Not reported" rather than a
+// blank line.
+//
+// A nil fields renders the explicit not-configured statement instead. The
+// subsection is never empty and never hidden: "this host does not run this
+// updater" is a fact worth stating, not an absence to paper over.
+templ autoUpdaterBlock(slug string, label string, fields *autoUpdaterFields) {
+	<section class="mini-list" data-updater={ slug } data-configured={ configuredState(fields) }>
+		<div class="mini-row">
+			<div><strong>{ label }</strong></div>
+			<span class={ "badge", templ.KV("active", fields != nil) }>{ configuredLabel(fields) }</span>
+		</div>
+		if fields != nil {
+			<div class="mini-row" data-field="timer-active-state"><div><strong>Timer state</strong><small>{ reportedValue(fields.TimerActiveState) }</small></div></div>
+			<div class="mini-row" data-field="timer-unit-file-state"><div><strong>Timer enablement</strong><small>{ reportedValue(fields.TimerUnitFileState) }</small></div></div>
+			<div class="mini-row" data-field="next-trigger"><div><strong>Next trigger</strong><small>{ nextTriggerLabel(fields.NextTrigger) }</small></div></div>
+			<div class="mini-row" data-field="service-active-state"><div><strong>Service state</strong><small>{ reportedValue(fields.ServiceActiveState) }</small></div></div>
+			<div class="mini-row" data-field="service-result"><div><strong>Last result</strong><small>{ reportedValue(fields.ServiceResult) }</small></div></div>
+			<div class="mini-row" data-field="policy"><div><strong>Policy</strong><small>{ reportedValue(fields.Policy) }</small></div></div>
+			<div class="mini-row" data-field="service-dropins"><div><strong>Service drop-ins</strong><small>{ dropinLabel(fields.ServiceDropinsPresent) }</small></div></div>
+			<div class="mini-row" data-field="timer-dropins"><div><strong>Timer drop-ins</strong><small>{ dropinLabel(fields.TimerDropinsPresent) }</small></div></div>
+		} else {
+			<div class="mini-row" data-field="not-configured"><div><small>{ notConfiguredLabel(label) }</small></div></div>
+		}
+	</section>
+}
+
+// autoUpdaterFields is the render-shaped copy of one updater's payload.
+// BootcAutoUpdate and RPMOStreeAutoUpdate are deliberately separate types
+// (their Policy vocabularies are separate closed enums), so this view type
+// exists purely so one subsection template can render either without letting a
+// bootc policy string reach an rpm-ostree payload or vice versa: the two
+// converters below are the only way to build one.
+type autoUpdaterFields struct {
+	NextTrigger           time.Time
+	Policy                string
+	ServiceActiveState    string
+	ServiceDropinsPresent bool
+	ServiceResult         string
+	TimerActiveState      string
+	TimerDropinsPresent   bool
+	TimerUnitFileState    string
+}
+
+// bootcAutoUpdater returns the bootc subsection's fields, or nil when bootc's
+// updater is not configured.
+//
+// AutoUpdateStatus's documented invariant is that BootcConfigured is true
+// exactly when Bootc is non-nil, so either half alone would do. Both are
+// checked because the two disagreeing would mean a malformed response, and the
+// honest rendering of a malformed response is the not-configured statement —
+// never a subsection of blank values claiming to describe a configured updater.
+func bootcAutoUpdater(status AutoUpdateStatus) *autoUpdaterFields {
+	if !status.BootcConfigured || status.Bootc == nil {
+		return nil
+	}
+	return &autoUpdaterFields{
+		NextTrigger:           status.Bootc.NextTrigger,
+		Policy:                status.Bootc.Policy,
+		ServiceActiveState:    status.Bootc.ServiceActiveState,
+		ServiceDropinsPresent: status.Bootc.ServiceDropinsPresent,
+		ServiceResult:         status.Bootc.ServiceResult,
+		TimerActiveState:      status.Bootc.TimerActiveState,
+		TimerDropinsPresent:   status.Bootc.TimerDropinsPresent,
+		TimerUnitFileState:    status.Bootc.TimerUnitFileState,
+	}
+}
+
+// rpmOStreeAutoUpdater is bootcAutoUpdater's exact counterpart for rpm-ostree,
+// reading RPMOStreeConfigured/RPMOStree and applying the same rule.
+func rpmOStreeAutoUpdater(status AutoUpdateStatus) *autoUpdaterFields {
+	if !status.RPMOStreeConfigured || status.RPMOStree == nil {
+		return nil
+	}
+	return &autoUpdaterFields{
+		NextTrigger:           status.RPMOStree.NextTrigger,
+		Policy:                status.RPMOStree.Policy,
+		ServiceActiveState:    status.RPMOStree.ServiceActiveState,
+		ServiceDropinsPresent: status.RPMOStree.ServiceDropinsPresent,
+		ServiceResult:         status.RPMOStree.ServiceResult,
+		TimerActiveState:      status.RPMOStree.TimerActiveState,
+		TimerDropinsPresent:   status.RPMOStree.TimerDropinsPresent,
+		TimerUnitFileState:    status.RPMOStree.TimerUnitFileState,
+	}
+}
+
+// configuredState is the machine-readable form of one updater's
+// configured-ness, so a test (or a stylesheet) can distinguish the two rendered
+// subsection states without matching prose.
+func configuredState(fields *autoUpdaterFields) string {
+	if fields != nil {
+		return "true"
+	}
+	return "false"
+}
+
+// configuredLabel is the human-readable form of the same fact.
+func configuredLabel(fields *autoUpdaterFields) string {
+	if fields != nil {
+		return "Configured"
+	}
+	return "Not configured"
+}
+
+// notConfiguredLabel is the explicit statement an unconfigured updater renders.
+// It names the updater, so a section carrying both subsections says which one
+// is unconfigured.
+func notConfiguredLabel(label string) string {
+	return label + " automatic updates are not configured on this host."
+}
+
+// reportedValue renders a systemd-sourced state string, or a plain statement
+// that the host did not report one. A configured updater always carries the
+// same field set, so an unpopulated sub-value is a reportable fact rather than
+// a blank.
+func reportedValue(value string) string {
+	if value == "" {
+		return "Not reported"
+	}
+	return value
+}
+
+// nextTriggerLabel renders the timer's next scheduled run. The zero time means
+// the host reports no next run — an ordinary state for a disabled or inactive
+// timer — and is stated rather than left blank.
+func nextTriggerLabel(next time.Time) string {
+	if next.IsZero() {
+		return "No next run is scheduled"
+	}
+	return next.Local().Format("2006-01-02 15:04 MST")
+}
+
+// dropinLabel renders one drop-in-presence boolean. The service and the timer
+// carry independent booleans — a drop-in on the timer changes when the updater
+// runs, one on the service changes what it does — so each is rendered in its
+// own row and never merged into a single flag.
+func dropinLabel(present bool) string {
+	if present {
+		return "Local drop-in present"
+	}
+	return "No local drop-in"
 }
 
 // hasDeployments reports whether the status names any deployment slot at all.

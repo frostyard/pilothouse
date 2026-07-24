@@ -327,7 +327,26 @@ reuses the one systemd connection `cmd/pilothoused` already probes and opens
 for backups/services/logs — no second D-Bus dial — and is read-only in the same
 strong sense as `QueryHostImageStatus`: served by an `AutoUpdateSource`
 interface with no mutating method, with no matching action in the broker's ID
-vocabulary. It is registered daemon-side with no web consumer yet.
+vocabulary.
+
+This query, too, now has a web consumer: `internal/modules/maintenance`'s
+`queryAutoUpdate` (`module.go`) calls it from `collectPage` whenever the
+advertised set satisfies `HasAny(Bootc, RPMOStree)` and returns `nil` (omitting
+the page's whole "Automatic updates" section) when it does not, so the web side
+never attempts the query on a host where it is unregistered. What it renders is
+the Maintenance page's read-only "Automatic updates" section, which exposes no
+control of any kind — there is no automatic-update action in the ID vocabulary
+for one to target. Both sides are covered by
+`cmd/pilothouse/capability_contract_test.go`, whose `capabilityAnyRequirements`
+table carries this ID's any-of requirement, hand-transcribed from this document;
+its fake broker fails the test outright if the web process ever invokes a broker
+ID whose capability the fixture's host does not advertise. That harness also
+calibrates each fixture's canned `AutoUpdateStatus` to the response the real
+`AutoUpdateManager` would produce for that capability set, so a fixture
+advertising `bootc`/`rpm-ostree` *without* the matching `Autoupdate*` capability
+is served the zero-value, both-updaters-not-configured response rather than an
+impossible populated one — the distinction the paragraph above turns on, pinned
+in test code.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
