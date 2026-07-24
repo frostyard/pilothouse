@@ -78,7 +78,7 @@ directory. Current modules:
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
-| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation. Read-only automatic-update (updater policy/timer) status is reported daemon-side through `QueryAutoUpdateStatus`; the module page has no web consumer for it yet. |
+| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation. Read-only automatic-update (updater policy/timer) status is reported daemon-side through `QueryAutoUpdateStatus` and rendered by the Maintenance page's "Automatic updates" section — one independent subsection per updater (bootc, rpm-ostree) carrying its timer active/unit-file state, next trigger, service active state and last result, normalized policy, and both drop-in-presence booleans, or an explicit "not configured" statement when that updater has no payload. The section is fetched and shown under the same `HasAny(bootc, rpm-ostree)` gate as the host-image section, so it is absent entirely on a host advertising neither. No automatic-update mutation. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
 | `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
 
@@ -112,8 +112,12 @@ over `QueryCapabilities` now have a production consumer that gates on and report
 them, not only tests' full-capability fixtures. The manager reuses the same probed
 systemd `*dbus.Conn` `cmd/pilothoused` already opens for backups/services/logs (no
 second D-Bus dial), passing it through only when non-nil so a typed-nil never
-reaches the manager's own nil-client guard. The query is registered daemon-side
-with no web consumer yet. Zincati is neither queried nor special-cased:
+reaches the manager's own nil-client guard. The query's web consumer is
+`internal/modules/maintenance`'s `queryAutoUpdate`, which `collectPage` calls
+under the same `HasAny(Bootc, RPMOStree)` gate `queryHostImage` uses — never on
+a host advertising neither, where the query is unregistered — threading the
+response into `Page`'s `autoUpdate *AutoUpdateStatus` parameter and its
+`autoUpdateSection` view. Zincati is neither queried nor special-cased:
 `TestMaintenanceNeverReferencesZincati` fails on any non-comment mention of it in
 any `.go` or `.templ` file under `internal/modules/maintenance`.
 
@@ -130,6 +134,7 @@ are gated on *different* capability expressions:
 | `QueryMaintenanceState` (reboot posture, reasons, updates, jobs) | `Has(Systemd)` | `queryState` web-side; `registerMaintenance` daemon-side |
 | `ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (`cmd/pilothoused/main.go`); serialized on its own `maintenance/global` lock, no longer `sysext/global` — see "Per-resource action serialization" below |
 | `QueryHostImageStatus` (booted/staged/rollback, digests, soft-reboot eligibility) | `HasAny(Bootc, RPMOStree)` | `queryHostImage` web-side; `registerHostImage` daemon-side |
+| `QueryAutoUpdateStatus` (per-updater timer/service state, next trigger, policy, drop-in presence) | `HasAny(Bootc, RPMOStree)` | `queryAutoUpdate` web-side; `registerAutoUpdate` daemon-side. The `Autoupdate*` capabilities gate nothing here — they drive the configured/not-configured split *inside* the response, so the "no updater configured" report stays reachable |
 
 What makes the first row real is `internal/web/server.go`'s
 `moduleAvailable(module, caps)` — the single choke point `availableManifests`

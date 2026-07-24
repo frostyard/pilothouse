@@ -21,12 +21,22 @@ This document currently covers exactly what these three files contain:
   the daemon-side reader that gives those two pure functions their real inputs
   (see [The daemon-side manager](#the-daemon-side-manager) below).
 
-There is no broker query and no web surface for automatic-update status yet:
-`AutoUpdateManager` has no production caller in the tree at this commit. It is
-constructed and its `Status` is served over the broker only in a later change
-(the `QueryAutoUpdateStatus` registration in `cmd/pilothoused`), and the
-Maintenance-page rendering lands after that. Both normalizers, and the manager
-that drives them, are reachable only from their tests at this commit.
+Both ends of the surface are now wired. `cmd/pilothoused`'s `registerAutoUpdate`
+constructs one `AutoUpdateManager` and serves its `Status` over the broker as
+`QueryAutoUpdateStatus`, guarded by `caps.HasAny(capability.Bootc,
+capability.RPMOStree)`. On the web side, `internal/modules/maintenance`'s
+`queryAutoUpdate` calls that query from `collectPage` behind the same any-of
+test, and `views.templ`'s `autoUpdateSection` renders the response on the
+Maintenance page: one subsection per updater, showing that updater's timer
+active/unit-file state, next trigger, service active state and last result,
+normalized policy, and both drop-in-presence booleans when it is configured, and
+an explicit "not configured" statement when it is not. A host advertising
+neither bootc nor rpm-ostree never has the query made and never sees the
+section at all.
+
+The section is read-only in the strong sense this document opens with: it
+contains no link, button, form, or HTMX request, and there is no broker action
+it could target.
 
 ## Response schema
 

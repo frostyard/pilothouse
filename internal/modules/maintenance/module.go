@@ -94,7 +94,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.Error(w, "Maintenance status is unavailable.", http.StatusServiceUnavailable)
 			return
 		}
-		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(inputs.state, inputs.hostImage, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
+		_ = host.Render(w, r, platform.Page{Active: "maintenance", Body: Page(inputs.state, inputs.hostImage, inputs.autoUpdate, host.CSRFToken(r), host.Identity(r).Admin), Eyebrow: "Host lifecycle", Title: "Maintenance"})
 	}))
 	mux.HandleFunc("POST /maintenance/reboot", platform.Gate(host, []capability.ID{capability.Systemd}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) || !host.ConfirmAction(w, r, "Reboot the host", "maintenance/reboot") {
@@ -135,6 +135,19 @@ type pageInputs struct {
 	// content it actually fetched, so there is no separate boolean that
 	// could disagree with the data.
 	hostImage *HostImageStatus
+	// autoUpdate is QueryAutoUpdateStatus's response when the host advertises
+	// HasAny(Bootc, RPMOStree), and nil when it advertises neither (see
+	// queryAutoUpdate). Page renders the whole "Automatic updates" section —
+	// both updaters' configured detail and their explicit not-configured
+	// states — only when this is non-nil, so a host with no image-based
+	// updater source omits the section entirely rather than showing an empty
+	// placeholder.
+	//
+	// It follows hostImage's nil-ness-is-availability convention for the same
+	// reason and under the same any-of gate; the two are separate fields
+	// because they are separate broker queries whose responses are
+	// independent.
+	autoUpdate *AutoUpdateStatus
 }
 
 // collectPage gathers GET /maintenance's inputs, reading the host's
@@ -150,7 +163,43 @@ func collectPage(ctx context.Context, host platform.Host) (pageInputs, error) {
 	if err != nil {
 		return pageInputs{}, err
 	}
-	return pageInputs{state: state, hostImage: hostImage}, nil
+	autoUpdate, err := queryAutoUpdate(ctx, host, caps)
+	if err != nil {
+		return pageInputs{}, err
+	}
+	return pageInputs{state: state, hostImage: hostImage, autoUpdate: autoUpdate}, nil
+}
+
+// queryAutoUpdate returns QueryAutoUpdateStatus's response when caps advertises
+// at least one image-based updater source, and nil when it advertises neither.
+// It mirrors queryHostImage exactly, because the daemon registers both queries
+// under the same any-of gate: registerAutoUpdate (cmd/pilothoused/main.go)
+// guards QueryAutoUpdateStatus with HasAny(Bootc, RPMOStree), so on a
+// systemd-only host the query is absent rather than empty and calling it would
+// fail. Returning nil instead is what makes the page omit the
+// "Automatic updates" section on such a host rather than 503.
+//
+// The gate is deliberately Bootc/RPMOStree and *not* AutoupdateBootc /
+// AutoupdateRPMOStree. Those two capabilities drive the per-updater
+// configured/not-configured split inside the response itself
+// (AutoUpdateStatus.BootcConfigured / RPMOStreeConfigured); gating the call on
+// them would make the "no updater is configured" report — a valid, reportable
+// state on an image host — unreachable, because the query 404s on precisely
+// that host.
+//
+// A non-nil error here means the broker call itself failed, which takes the
+// page down as any other failed page query does. It is not how "this updater
+// is not configured" arrives: that is an ordinary successful response carrying
+// both *Configured flags false and both payload pointers nil.
+func queryAutoUpdate(ctx context.Context, host platform.Host, caps capability.Set) (*AutoUpdateStatus, error) {
+	if !caps.HasAny(capability.Bootc, capability.RPMOStree) {
+		return nil, nil
+	}
+	var status AutoUpdateStatus
+	if err := host.Query(ctx, broker.QueryAutoUpdateStatus, nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 // queryHostImage returns QueryHostImageStatus's response when caps advertises

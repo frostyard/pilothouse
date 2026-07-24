@@ -27,6 +27,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Durable privileged-action history, destructive confirmations, and per-resource action serialization
 - Durable background jobs for extension update and refresh operations
 - Extension update availability, reboot-required posture, confirmed host reboot, and read-only host-image status — booted, staged, and rollback deployments with the image references and manifest digests `bootc` reports as the authoritative source, supplemented but never overridden by `rpm-ostree` version and checksum detail where it is present, plus soft-reboot eligibility when bootc exposes it
+- Read-only automatic-update reporting on the Maintenance page for `bootc` and `rpm-ostree` — each updater's timer enablement and active state, next scheduled run, service state and last result, normalized policy, and whether local drop-ins customize its service or timer, or an explicit "not configured" statement when that updater is not set up; Pilothouse never enables, disables, triggers, or reconfigures either one
 - Exact systemd backup timer monitoring with freshness and last-result health
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts

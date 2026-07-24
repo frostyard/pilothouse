@@ -327,7 +327,11 @@ reuses the one systemd connection `cmd/pilothoused` already probes and opens
 for backups/services/logs — no second D-Bus dial — and is read-only in the same
 strong sense as `QueryHostImageStatus`: served by an `AutoUpdateSource`
 interface with no mutating method, with no matching action in the broker's ID
-vocabulary. It is registered daemon-side with no web consumer yet.
+vocabulary. Its web consumer is `internal/modules/maintenance`'s
+`queryAutoUpdate`, called from `collectPage` behind the identical
+`HasAny(Bootc, RPMOStree)` test — so the web side never attempts the query on a
+host where it is unregistered — and rendered by the Maintenance page's
+read-only "Automatic updates" section, which exposes no control of any kind.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 

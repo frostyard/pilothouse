@@ -39,6 +39,12 @@ type moduleHost struct {
 	// can populate it richly and still prove the whole "Host image" section
 	// is absent on a host advertising neither bootc nor rpm-ostree.
 	hostImage HostImageStatus
+	// autoUpdate is the canned QueryAutoUpdateStatus response, on exactly the
+	// same terms as hostImage: it is only ever returned when the handler
+	// actually asks for that query, so a fixture can populate it richly and
+	// still prove the whole "Automatic updates" section is absent on a host
+	// advertising neither bootc nor rpm-ostree.
+	autoUpdate AutoUpdateStatus
 	// queries records every broker query ID this host was asked for, in
 	// order, so a test can prove a capability-gated call (notably
 	// QueryMaintenanceState, which the daemon registers only under Systemd)
@@ -82,6 +88,8 @@ func (h *moduleHost) Query(_ context.Context, id string, _ map[string]string, ta
 		*target.(*State) = h.state
 	case broker.QueryHostImageStatus:
 		*target.(*HostImageStatus) = h.hostImage
+	case broker.QueryAutoUpdateStatus:
+		*target.(*AutoUpdateStatus) = h.autoUpdate
 	}
 	return nil
 }
@@ -249,7 +257,7 @@ func TestPageRendersWithoutSystemdQueryOnHostImageOnlyHosts(t *testing.T) {
 			assert.Equal(t, http.StatusOK, response.Code)
 			assert.NotContains(t, host.queries, broker.QueryMaintenanceState)
 			require.True(t, host.rendered)
-			assert.Equal(t, renderComponent(t, Page(State{}, &HostImageStatus{}, "csrf", true)), renderComponent(t, host.page.Body), "the page must render from the zero State when systemd is absent")
+			assert.Equal(t, renderComponent(t, Page(State{}, &HostImageStatus{}, &AutoUpdateStatus{}, "csrf", true)), renderComponent(t, host.page.Body), "the page must render from the zero State when systemd is absent")
 			assert.NotContains(t, renderComponent(t, host.page.Body), "/maintenance/reboot", "the page must not render a control targeting the systemd-only reboot route on a host where that route 404s")
 		})
 	}
@@ -326,7 +334,7 @@ func TestRoutesServeWhenSystemdPresent(t *testing.T) {
 	assert.Equal(t, "maintenance", host.page.Active)
 	assert.Equal(t, "Host lifecycle", host.page.Eyebrow)
 	assert.Equal(t, "Maintenance", host.page.Title)
-	assert.Equal(t, renderComponent(t, Page(state, &HostImageStatus{}, "csrf", true)), renderComponent(t, host.page.Body))
+	assert.Equal(t, renderComponent(t, Page(state, &HostImageStatus{}, &AutoUpdateStatus{}, "csrf", true)), renderComponent(t, host.page.Body))
 
 	response = httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/maintenance/reboot", nil))
@@ -390,6 +398,76 @@ func TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised(t *testing.T) {
 			}
 		})
 	}
+}
+
+// autoUpdateGateFixtures is the capability matrix for the automatic-update
+// query's gate, deliberately the same shape as
+// TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised's: the daemon
+// registers QueryAutoUpdateStatus under exactly QueryHostImageStatus's any-of
+// gate, so the web side's fetch decision must match it capability for
+// capability. Every subset boundary is covered — neither source, an unrelated
+// capability only, each source alone, both, and one source alongside systemd.
+var autoUpdateGateFixtures = []struct {
+	name string
+	caps capability.Set
+	want bool
+}{
+	{name: "systemd only", caps: capability.New(capability.Systemd), want: false},
+	{name: "journald only", caps: capability.New(capability.Journald), want: false},
+	{name: "empty set", caps: capability.Set{}, want: false},
+	{name: "bootc only", caps: capability.New(capability.Bootc), want: true},
+	{name: "rpm-ostree only", caps: capability.New(capability.RPMOStree), want: true},
+	{name: "bootc and rpm-ostree", caps: capability.New(capability.Bootc, capability.RPMOStree), want: true},
+	{name: "systemd and bootc", caps: capability.New(capability.Systemd, capability.Bootc), want: true},
+	{name: "systemd and rpm-ostree", caps: capability.New(capability.Systemd, capability.RPMOStree), want: true},
+}
+
+// TestCollectPageFetchesAutoUpdateOnlyWhenASourceIsAdvertised pins the third
+// leg of the page handler's capability decision, mirroring
+// TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised: collectPage
+// fetches QueryAutoUpdateStatus exactly when the host advertises
+// HasAny(Bootc, RPMOStree) and never otherwise. The fake host records every
+// query ID it is asked for, so this proves the gated-off call is not made at
+// all — the daemon registers it only under that any-of gate, so calling it on
+// a systemd-only host would fail.
+//
+// The canned response is a *configured* one so the assertion is not vacuous:
+// the query being skipped is what makes inputs.autoUpdate nil, not the fixture
+// data being empty.
+func TestCollectPageFetchesAutoUpdateOnlyWhenASourceIsAdvertised(t *testing.T) {
+	for _, fixture := range autoUpdateGateFixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			host := &moduleHost{caps: fixture.caps, capsSet: true, autoUpdate: bothConfiguredAutoUpdate()}
+			inputs, err := collectPage(context.Background(), host)
+			require.NoError(t, err)
+
+			if fixture.want {
+				assert.Contains(t, host.queries, broker.QueryAutoUpdateStatus)
+				require.NotNil(t, inputs.autoUpdate, "an advertised updater source must yield a fetched status")
+				assert.Equal(t, host.autoUpdate, *inputs.autoUpdate)
+			} else {
+				assert.NotContains(t, host.queries, broker.QueryAutoUpdateStatus, "the query must not be attempted without bootc or rpm-ostree")
+				assert.Nil(t, inputs.autoUpdate, "with no updater source the page must omit the section, not render an empty one")
+			}
+		})
+	}
+}
+
+// TestCollectPageFetchesAutoUpdateEvenWithoutAutoupdateCapabilities pins the
+// distinction the spec calls out explicitly: the *query* is gated on
+// Bootc/RPMOStree, while the AutoupdateBootc/AutoupdateRPMOStree capabilities
+// drive only the configured/not-configured split inside the response. A host
+// advertising bootc but no Autoupdate* capability must still have the query
+// made — that is precisely the host whose honest answer is "not configured",
+// and gating the call on Autoupdate* would make that answer unreachable.
+func TestCollectPageFetchesAutoUpdateEvenWithoutAutoupdateCapabilities(t *testing.T) {
+	host := &moduleHost{caps: capability.New(capability.Bootc, capability.RPMOStree), capsSet: true}
+	inputs, err := collectPage(context.Background(), host)
+	require.NoError(t, err)
+
+	assert.Contains(t, host.queries, broker.QueryAutoUpdateStatus)
+	require.NotNil(t, inputs.autoUpdate)
+	assert.Equal(t, AutoUpdateStatus{}, *inputs.autoUpdate, "a host with no Autoupdate* capability reports the zero, not-configured status")
 }
 
 // navE2EBroker is a minimal fake satisfying web.BrokerClient, used only to

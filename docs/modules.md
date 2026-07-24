@@ -301,6 +301,7 @@ shape when a module aggregates independently-sourced reports:
 | `broker.QueryMaintenanceState` | `Has(Systemd)` | `queryState` in `module.go` (web) / `registerMaintenance` (daemon) |
 | `broker.ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (daemon); it also serializes on its own `maintenance/global` lock rather than sharing sysext's |
 | `broker.QueryHostImageStatus` | `HasAny(Bootc, RPMOStree)` | `queryHostImage` in `module.go` (web) / `registerHostImage` (daemon) |
+| `broker.QueryAutoUpdateStatus` | `HasAny(Bootc, RPMOStree)` | `queryAutoUpdate` in `module.go` (web) / `registerAutoUpdate` (daemon) |
 
 `maintenance.Module` returns `{Systemd, Bootc, RPMOStree}` from
 `RequiredAnyCapabilities` and deliberately does **not** also implement
@@ -311,10 +312,17 @@ bootc-only host with no systemd keeps the module's nav entry, dashboard card, an
 Each broker call is skipped rather than failed when its own capability is absent,
 so no capability combination can turn an available module into a 503:
 `queryState` substitutes the zero `State` without `Systemd`, and `queryHostImage`
-returns `nil` without `HasAny(Bootc, RPMOStree)`. On the page, nil-ness *is* the
-availability flag — `Page(state, hostImage, ...)` renders the whole "Host image"
-section only when `hostImage != nil`, so a host with no host-image source omits
-the section instead of showing an empty or errored placeholder. `Dashboard` and
+and `queryAutoUpdate` each return `nil` without `HasAny(Bootc, RPMOStree)`. On
+the page, nil-ness *is* the availability flag —
+`Page(state, hostImage, autoUpdate, ...)` renders the whole "Host image" section
+only when `hostImage != nil` and the whole "Automatic updates" section only when
+`autoUpdate != nil`, so a host with no image source omits both instead of showing
+empty or errored placeholders. Non-nil is not the same as "populated": the zero
+`AutoUpdateStatus` is the ordinary report of an image host with no updater
+configured, and the section renders that as two explicit "not configured"
+statements rather than as nothing. Neither section contains any control —
+`queryAutoUpdate` has no mutating counterpart in the broker's ID vocabulary at
+all. `Dashboard` and
 `Health` call only `queryState`, so the host-image *section* is a
 `GET /maintenance`-only surface — but do not conclude that the card and
 `/attention` are host-image-free. `QueryMaintenanceState`'s `State` is partly
