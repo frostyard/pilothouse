@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"log/slog"
@@ -61,6 +62,27 @@ import (
 // advertising bootc/rpm-ostree but neither Autoupdate* capability gets the
 // zero-value response the real AutoUpdateManager would produce for it, never
 // the populated one.
+//
+// Issue #52 adds the Extensions module to the same harness. Its query,
+// QueryExtensionsState, is the third any-of broker ID (updex OR sysext) and
+// sysext.Module is the second any-of module gate, so the two get the same
+// treatment host-image and automatic-update status already had, one layer
+// deeper:
+//
+//   - cannedExtensionsState() is a populated, multi-row inventory carrying one
+//     extension of every kind the spec names — managed+merged,
+//     managed-not-installed, installed-unmanaged, merged-but-disabled — plus
+//     both sides of the pending-update axis, so every conditionally-rendered
+//     element has data behind it and no absence assertion is vacuous;
+//   - extensionsStateFromSources projects it down per source, and
+//     calibratedExtensionsState(caps) is the only way an ordinary fixture gets
+//     one, so no fixture can be served inventory its host could not produce;
+//   - cannedExtensionsStateUpdexFailed/…SysextFailed cover the two per-source
+//     read-failure shapes no capability set can express;
+//   - assertExtensionsSurfaces audits every view element per region — nav,
+//     dashboard Summary card (including its update-count mini-row), page
+//     intro actions, the "Available extensions" table row by row, and the
+//     "Available updates" table.
 
 // contractIdentity is the authenticated identity used by every contract
 // test: an administrator, so every module's admin-gated view (activity,
@@ -175,6 +197,44 @@ func snosiWithoutBootcCapabilitySet() capability.Set {
 // 404, and QueryMaintenanceState must never be called.
 func bootcOnlyCapabilitySet() capability.Set {
 	return capability.New(capability.Bootc)
+}
+
+// bootcSnosiCapabilitySet is the spec's "bootc Snosi" fixture — the host shape
+// the acceptance criterion "a bootc Snosi fixture exposes bootc lifecycle
+// (read-only) and sysext management together" names, and the direct expression
+// of the requirement "keep updex/systemd-sysext management independent from
+// bootc so a future bootc Snosi host exposes both".
+//
+// It deliberately omits systemd (and rpm-ostree, and every container engine) so
+// the two surfaces it proves coexisting are each carried by their *own*
+// capability and nothing else: Maintenance is present only because of Bootc
+// (its any-of gate's systemd and rpm-ostree members are both absent, so its
+// host-image half is the only reason the module exists at all), and Extensions
+// is present only because of Updex/Sysext. A fixture that also advertised
+// systemd would leave "Maintenance renders" satisfiable by the reboot half and
+// prove nothing about bootc.
+func bootcSnosiCapabilitySet() capability.Set {
+	return capability.New(capability.Bootc, capability.Updex, capability.Sysext)
+}
+
+// updexWithoutSysextCapabilitySet and sysextWithoutUpdexCapabilitySet are the
+// two single-tool extension fixtures. They are what make the "a fixture lacking
+// updex never renders managed-only data, and a fixture lacking systemd-sysext
+// never renders installed/merged-only data" proof non-vacuous: a fixture
+// lacking *both* tools (ucore, bootc-only) renders no Extensions surface at
+// all, so an absence assertion there would hold identically whether the
+// calibration worked or the whole module were deleted.
+//
+// They also prove sysext.Module's whole-module gate is a real OR rather than a
+// disguised HasAll: either tool alone must yield a live nav entry, dashboard
+// card, and GET /sysext, with only the sub-routes the missing tool owns gated
+// off.
+func updexWithoutSysextCapabilitySet() capability.Set {
+	return capability.New(capability.Updex)
+}
+
+func sysextWithoutUpdexCapabilitySet() capability.Set {
+	return capability.New(capability.Sysext)
 }
 
 // withoutCapabilities returns fullCapabilitySet() minus the given IDs, by
@@ -473,6 +533,7 @@ type fakeCapabilityBroker struct {
 	t            *testing.T
 	autoUpdate   maintenance.AutoUpdateStatus
 	capabilities capability.Set
+	extensions   sysext.ExtensionsState
 	hostImage    maintenance.HostImageStatus
 	calls        map[string]int
 }
@@ -485,11 +546,26 @@ type fakeCapabilityBroker struct {
 // whose capability set lacks the Autoupdate* capabilities gets the zero-value
 // AutoUpdateStatus the daemon would really return for it rather than a
 // populated payload that host can never emit (docs/agents/skills/calibrate-
-// canned-fixture-data-per-capability-set.md). runCapabilityContractFixture
-// supplies cannedHostImageStatus() and calibratedAutoUpdateStatus(caps) for
-// the ordinary case.
-func newFakeCapabilityBroker(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus, autoUpdate maintenance.AutoUpdateStatus) *fakeCapabilityBroker {
-	return &fakeCapabilityBroker{t: t, autoUpdate: autoUpdate, capabilities: caps, hostImage: hostImage, calls: map[string]int{}}
+// canned-fixture-data-per-capability-set.md).
+//
+// extensions is passed in for the same reason, and one more: besides the
+// per-capability calibration calibratedExtensionsState performs, the aggregate
+// has two *source-failure* shapes (updex answered / systemd-sysext did not, and
+// the mirror image) that no capability set can express — the tool is advertised
+// and simply did not answer. Those fixtures supply their own response here.
+//
+// runCapabilityContractFixture supplies cannedHostImageStatus(),
+// calibratedAutoUpdateStatus(caps), and calibratedExtensionsState(caps) for the
+// ordinary case.
+func newFakeCapabilityBroker(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus, autoUpdate maintenance.AutoUpdateStatus, extensions sysext.ExtensionsState) *fakeCapabilityBroker {
+	return &fakeCapabilityBroker{
+		t:            t,
+		autoUpdate:   autoUpdate,
+		capabilities: caps,
+		extensions:   extensions,
+		hostImage:    hostImage,
+		calls:        map[string]int{},
+	}
 }
 
 // called reports how many times the web side invoked the given broker ID
@@ -584,11 +660,12 @@ func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[stri
 		}
 		return json.Unmarshal(encoded, target)
 	case broker.QueryExtensionsState:
-		// Derived from this fixture's own capability set rather than a shared
-		// constant, so a fixture can never be served inventory its host could
-		// not produce (docs/agents/skills/calibrate-canned-fixture-data-per-
-		// capability-set.md).
-		encoded, err := json.Marshal(calibratedExtensionsState(b.capabilities))
+		// Never a shared constant: every fixture's response is either derived
+		// from its own capability set (calibratedExtensionsState) or is one of
+		// the two explicit per-source failure shapes, so a fixture can never be
+		// served inventory its host could not produce (docs/agents/skills/
+		// calibrate-canned-fixture-data-per-capability-set.md).
+		encoded, err := json.Marshal(b.extensions)
 		if err != nil {
 			return err
 		}
@@ -849,60 +926,225 @@ func calibratedAutoUpdateStatus(caps capability.Set) maintenance.AutoUpdateStatu
 	return status
 }
 
-// calibratedExtensionsState is the QueryExtensionsState response for a
-// fixture, derived from that fixture's own capability set so it can only
-// ever contain inventory the fixture's host could actually produce
-// (docs/agents/skills/calibrate-canned-fixture-data-per-capability-set.md).
-// The aggregate is a union of two independently-gated sources, and the split
-// here mirrors the daemon's SystemManager.State exactly:
+// The four extension names the contract fixtures use, one per inventory kind
+// the spec's "fixtures cover managed/unmanaged/merged/empty extension states"
+// criterion names, plus the pending-update axis c3's update-availability
+// rendering needs. Each name is a distinct, non-overlapping string so a
+// row-scoped assertion can never be satisfied by another row's markup.
+const (
+	// managed by updex, installed and merged by systemd-sysext, enabled, and
+	// carrying a pending component update: the fully-populated happy path, and
+	// one of the two "managed with a non-empty Updates slice" rows.
+	contractExtensionManagedMerged = "contract-managed-merged"
+	// managed by updex but neither enabled, installed, nor merged, and with
+	// *no* pending update: the "managed, nothing installed yet" kind, the
+	// mandatory managed-with-an-empty-Updates-slice counterpart without which
+	// "the Update available badge renders only for rows that have updates"
+	// would be unprovable, and the only row that renders the per-row *enable*
+	// form (every other managed row is enabled or installed, so views.templ
+	// offers removal instead).
+	contractExtensionManagedPending = "contract-managed-pending"
+	// managed and enabled by updex and installed by systemd-sysext, but not
+	// merged: the only row that renders the "Enabled" badge (the middle of
+	// views.templ's three-way status branch, which neither the merged rows nor
+	// the untouched ones can reach) and the plain "Remove" wording, as opposed
+	// to the merged rows' "Remove at reboot". It carries no pending update, so
+	// it is the second managed-without-updates row.
+	contractExtensionManagedEnabled = "contract-managed-enabled"
+	// installed per `systemd-sysext list` with no updex definition at all: the
+	// read-only kind, which must never render an enable/disable control even
+	// where both tools are present.
+	contractExtensionUnmanagedInstalled = "contract-unmanaged-installed"
+	// merged per `systemd-sysext status` but disabled in updex: the
+	// merged-but-disabled kind Maintenance derives a reboot reason from, and
+	// the second row carrying a pending update (so the "Available updates"
+	// table genuinely flattens rows from more than one extension).
+	contractExtensionManagedDisabled = "contract-managed-disabled"
+)
+
+// The two representative per-source extension read failures, one per source, so
+// the symmetric UpdexAvailable/UpdexError and SysextAvailable/SysextError pairs
+// are each exercised in both directions — the same shape the host-image
+// fixtures above use, because ExtensionsState follows the same flat per-source
+// availability/error convention.
+const (
+	contractUpdexError  = "run updex list: exit status 1"
+	contractSysextError = "run systemd-sysext list: exit status 1"
+)
+
+// cannedExtensionsState is the fully-populated QueryExtensionsState response —
+// the union a host with *both* updex and systemd-sysext answering would
+// produce. Every other extensions fixture in this file is a projection of it
+// (see extensionsStateFromSources), so the fixtures can only ever differ by
+// which source contributed, never by carrying unrelated invented data.
 //
-//   - updex contributes Managed, Enabled, Description, and Updates. A fixture
-//     without updex therefore reports UpdexAvailable false, no managed
-//     extension, and — since Check() is updex-only — no pending updates at
-//     all, which is what makes the "Available updates" table's empty state
-//     and the absent "Update available" badge genuinely provable there.
-//   - systemd-sysext contributes Installed, Merged, and Version, including
-//     for extensions that have no updex definition at all.
+// It is populated, and populated across every kind, for the reason
+// docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
+// assert.md records: each of the Extensions page's conditionally-rendered
+// elements only exists on a row of the matching kind, so a thinner fixture
+// would make the corresponding absence assertion vacuously true — it would pass
+// identically whether the gating/rendering logic were correct or deleted
+// outright. Concretely:
 //
-// It is populated rather than zero-valued for the same reason
-// cannedStorageSnapshot is (docs/agents/skills/canned-fixtures-need-populated-
-// data-for-what-they-assert.md): the per-row enable/disable forms only exist
-// on a rendered extension row, so a fixture with an empty inventory would
-// make "no enable/disable form is rendered" vacuously true.
-func calibratedExtensionsState(caps capability.Set) sysext.ExtensionsState {
-	updexPresent := caps.Has(capability.Updex)
-	sysextPresent := caps.Has(capability.Sysext)
+//   - the per-row enable/disable form renders only for a Managed row, so an
+//     inventory of unmanaged rows could never prove it hidden when gated —
+//     and the *enable* half only for a managed row that is neither enabled nor
+//     installed, since every other managed row is offered removal instead;
+//   - the "Unmanaged" read-only marker renders only for a non-Managed row;
+//   - the "Remove at reboot" wording renders only for a Merged row, and the
+//     plain "Remove" wording only for an installed-but-unmerged one;
+//   - each of the three status badges (Active / Enabled / Available) renders
+//     only for its own merged / enabled-but-unmerged / neither row;
+//   - the "Update available" badge, the "Available updates" table's rows, and
+//     the Summary card's update-count mini-row render only from a non-empty
+//     Extension.Updates — while the badge's *absence* and the table's empty
+//     state are only provable against a managed row that has none. Both are
+//     present here, which is what TestCannedExtensionsFixtureIsPopulated pins.
+func cannedExtensionsState() sysext.ExtensionsState {
+	return sysext.ExtensionsState{
+		Extensions: []sysext.Extension{
+			{
+				Description: "Merged, enabled, and one component behind",
+				Enabled:     true,
+				Installed:   true,
+				Managed:     true,
+				Merged:      true,
+				Name:        contractExtensionManagedMerged,
+				Path:        "/var/lib/extensions/" + contractExtensionManagedMerged,
+				Updates: []sysext.AvailableUpdate{
+					{Extension: contractExtensionManagedMerged, Component: "contract-runtime", Current: "1.0.0", Newest: "1.1.0"},
+				},
+				Version: "1.0.0",
+			},
+			{
+				Description: "Defined by updex but not installed on this host",
+				Managed:     true,
+				Name:        contractExtensionManagedPending,
+			},
+			{
+				Description: "Enabled and installed, waiting for the next merge",
+				Enabled:     true,
+				Installed:   true,
+				Managed:     true,
+				Name:        contractExtensionManagedEnabled,
+				Path:        "/var/lib/extensions/" + contractExtensionManagedEnabled,
+				Version:     "4.0.0",
+			},
+			{
+				Description: "",
+				Installed:   true,
+				Name:        contractExtensionUnmanagedInstalled,
+				Path:        "/var/lib/extensions/" + contractExtensionUnmanagedInstalled,
+				Version:     "2.0.0",
+			},
+			{
+				Description: "Merged now, disabled in updex, removed at reboot",
+				Installed:   true,
+				Managed:     true,
+				Merged:      true,
+				Name:        contractExtensionManagedDisabled,
+				Path:        "/var/lib/extensions/" + contractExtensionManagedDisabled,
+				Updates: []sysext.AvailableUpdate{
+					{Extension: contractExtensionManagedDisabled, Component: "contract-legacy", Current: "3.0.0", Newest: "3.2.0"},
+				},
+				Version: "3.0.0",
+			},
+		},
+		SysextAvailable: true,
+		UpdexAvailable:  true,
+	}
+}
+
+// extensionsStateFromSources projects cannedExtensionsState down to what a host
+// on which only some of the two sources answered could actually report. It is
+// the single place every extensions fixture in this file is derived from, and
+// it reproduces by hand — never by calling into internal/modules/sysext or
+// cmd/pilothoused — the one rule the daemon's aggregate union applies
+// (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md):
+//
+//   - updex contributes Description, Enabled, Managed, and Updates. Updates in
+//     particular is updex-only because Check() is: a host without updex reports
+//     no pending updates at all, which is what makes the "Available updates"
+//     table's empty state, the absent per-row "Update available" badge, and a
+//     zero Summary mini-row count genuinely provable there rather than needing
+//     a separate capability flag.
+//   - systemd-sysext contributes Installed, Merged, Path, and Version,
+//     including for extensions that have no updex definition at all.
+//
+// An entry neither source contributed disappears from the union entirely — a
+// name is in the inventory because updex defined it or because systemd-sysext
+// saw it, so a managed-only extension is simply not there when updex did not
+// answer, and an unmanaged installed one is not there when systemd-sysext did
+// not. That is a different fact from an entry rendered with blank fields, and
+// the daemon keeps them distinguishable, so this fixture must too.
+func extensionsStateFromSources(updexAnswered, sysextAnswered bool) sysext.ExtensionsState {
 	state := sysext.ExtensionsState{
 		Extensions:      []sysext.Extension{},
-		SysextAvailable: sysextPresent,
-		UpdexAvailable:  updexPresent,
+		SysextAvailable: sysextAnswered,
+		UpdexAvailable:  updexAnswered,
 	}
-	if updexPresent {
-		managed := sysext.Extension{
-			Description: "Contract-managed extension",
-			Enabled:     true,
-			Managed:     true,
-			Name:        "contract-managed",
-			Updates: []sysext.AvailableUpdate{
-				{Extension: "contract-managed", Component: "contract-ext", Current: "1.0.0", Newest: "1.1.0"},
-			},
+	for _, extension := range cannedExtensionsState().Extensions {
+		projected := sysext.Extension{Name: extension.Name}
+		if updexAnswered {
+			projected.Description = extension.Description
+			projected.Enabled = extension.Enabled
+			projected.Managed = extension.Managed
+			projected.Updates = extension.Updates
 		}
-		if sysextPresent {
-			managed.Installed = true
-			managed.Merged = true
-			managed.Version = "1.0.0"
+		if sysextAnswered {
+			projected.Installed = extension.Installed
+			projected.Merged = extension.Merged
+			projected.Path = extension.Path
+			projected.Version = extension.Version
 		}
-		state.Extensions = append(state.Extensions, managed)
+		if !projected.Managed && !projected.Installed && !projected.Merged {
+			continue
+		}
+		state.Extensions = append(state.Extensions, projected)
 	}
-	if sysextPresent {
-		// No updex definition: Managed stays false, so no enable/disable
-		// control may render for this row under any capability set.
-		state.Extensions = append(state.Extensions, sysext.Extension{
-			Installed: true,
-			Name:      "contract-unmanaged",
-			Version:   "2.0.0",
-		})
-	}
+	return state
+}
+
+// calibratedExtensionsState is the single place a fixture's canned
+// QueryExtensionsState response is chosen from its capability set, mirroring
+// calibratedAutoUpdateStatus's shape: the rule is spelled out per capability
+// with capability.Set.Has rather than delegated to HasAny/HasAll or to any
+// production helper, so no fixture can be handed inventory its host could not
+// produce (docs/agents/skills/calibrate-canned-fixture-data-per-capability-
+// set.md).
+//
+// A fixture without updex therefore reports UpdexAvailable false, no Managed
+// extension anywhere, and no pending updates at all; a fixture without
+// systemd-sysext reports SysextAvailable false and no Installed or Merged
+// extension anywhere. A fixture with neither gets the empty inventory — though
+// such a host never reaches the query, since sysext.Module's any-of gate keeps
+// its whole surface off the page.
+func calibratedExtensionsState(caps capability.Set) sysext.ExtensionsState {
+	return extensionsStateFromSources(caps.Has(capability.Updex), caps.Has(capability.Sysext))
+}
+
+// cannedExtensionsStateUpdexFailed and cannedExtensionsStateSysextFailed are the
+// two per-source read-failure fixtures. Neither is expressible as a capability
+// set: the tool is advertised (so the query is registered, the module is
+// present, and every control the tool gates still renders) and simply did not
+// answer, which is a different fact from the tool being absent. Without both,
+// only half of ExtensionsState's symmetric availability/error convention is
+// ever exercised — exactly the gap docs/agents/skills/calibrate-canned-fixture-
+// data-per-capability-set.md records for the host-image sources.
+//
+// Each keeps the other source's contribution completely intact, which is what
+// the "a source that fails leaves the other source's data intact" half of the
+// spec's response-shape resolution says and what the paired fixtures below
+// assert against the rendered page.
+func cannedExtensionsStateUpdexFailed() sysext.ExtensionsState {
+	state := extensionsStateFromSources(false, true)
+	state.UpdexError = contractUpdexError
+	return state
+}
+
+func cannedExtensionsStateSysextFailed() sysext.ExtensionsState {
+	state := extensionsStateFromSources(true, false)
+	state.SysextError = contractSysextError
 	return state
 }
 
@@ -1728,6 +1970,325 @@ func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capabi
 	}
 }
 
+// --- extensions surface --------------------------------------------------
+//
+// The Extensions module renders across four structurally distinct regions —
+// the primary nav, the dashboard's Summary card, the Extensions page's
+// intro/actions block, and the page's two table cards ("Available extensions"
+// and "Available updates"). Each assertion below is scoped to its own region
+// before Contains/NotContains runs, per docs/agents/skills/scope-html-
+// assertions-to-the-region-under-test.md: an extension name, a version string,
+// a "0 pending" count, or the word "Updates" can legitimately appear in more
+// than one of those regions (and the Summary card repeats up to four extension
+// rows verbatim), so a whole-page check could not tell "rendered in the updates
+// table" apart from "rendered in the Summary mini-list" and would stay green
+// through a regression that dropped either region alone.
+//
+// The container markers are transcribed by hand from
+// internal/modules/sysext/views.templ rather than read out of it, so a change
+// to either has to be made deliberately in both places.
+var (
+	// The dashboard Summary card, anchored on its own heading so no other
+	// module's <article class="card"> can match. Summary renders no nested
+	// <article>, so the first closing tag is this card's own.
+	sysextSummaryCardPattern = regexp.MustCompile(`(?s)(<article class="card"><div class="card-heading split"><div><h2>System extensions</h2>.*?</article>)`)
+	// The Extensions page's intro block, which is where the two global action
+	// forms (refresh, update) live. It is delimited by the first table card
+	// rather than by a closing </div>, because the block nests one.
+	sysextPageIntroPattern = regexp.MustCompile(`(?s)<div class="page-intro">(.*?)<article class="card table-card">`)
+	// The page's two table cards. Both capture groups deliberately start at the
+	// toolbar's count <span> so the per-card totals ("N enabled", "N pending")
+	// are inside the region they describe.
+	sysextInventoryCardPattern = regexp.MustCompile(`(?s)<article class="card table-card"><div class="table-toolbar"><h2>Available extensions</h2>(.*?)</article>`)
+	sysextUpdatesCardPattern   = regexp.MustCompile(`(?s)<article class="card table-card"><div class="table-toolbar"><h2>Available updates</h2>(.*?)</article>`)
+)
+
+// sysextAbsenceMarkers is every marker the Extensions surface — and nothing
+// else in the app — emits: its nav/dashboard link, its Summary card heading,
+// and each family of route-targeting control the page renders. A host
+// advertising neither tool must show none of them in any region.
+//
+// The two action-form markers are listed separately from the generic
+// `action="/sysext` prefix on purpose: the prefix alone would also be satisfied
+// by a stray substring, while naming each form makes the enumeration an audit
+// of the module's actual route families (docs/agents/skills/partial-gate-
+// modules-need-full-view-element-audit.md) rather than one catch-all check.
+func sysextAbsenceMarkers() []string {
+	return []string{
+		`href="/sysext"`,
+		`<h2>System extensions</h2>`,
+		`action="/sysext/actions/refresh"`,
+		`action="/sysext/actions/update"`,
+		`action="/sysext/`,
+	}
+}
+
+// contractPendingUpdates flattens a fixture's per-extension Updates slices into
+// the flat row list the "Available updates" table renders, and
+// contractUpdateCount is its size — the number the Summary card's mini-row
+// shows. Both are re-derived here from the fixture's own data with plain Go
+// rather than by calling internal/modules/sysext's pendingUpdates/updateCount
+// helpers (which are unexported anyway), so the expectation stays an
+// independent statement of what should render.
+func contractPendingUpdates(state sysext.ExtensionsState) []sysext.AvailableUpdate {
+	updates := []sysext.AvailableUpdate{}
+	for _, extension := range state.Extensions {
+		updates = append(updates, extension.Updates...)
+	}
+	return updates
+}
+
+func contractUpdateCount(state sysext.ExtensionsState) int {
+	return len(contractPendingUpdates(state))
+}
+
+// sysextExtensionRow isolates one extension's <tr> from an already-isolated
+// "Available extensions" table region, so a per-row assertion can never be
+// satisfied by a sibling row's markup. Splitting on the row delimiter (rather
+// than matching a lazy span from the table's start to the row's name) is what
+// keeps a row that appears later in the table from silently swallowing the ones
+// before it.
+func sysextExtensionRow(t *testing.T, inventorySection, name string) string {
+	t.Helper()
+	for _, row := range strings.Split(inventorySection, "<tr>") {
+		if strings.Contains(row, "<strong>"+name+"</strong>") {
+			return row
+		}
+	}
+	t.Fatalf("GET /sysext: the Available extensions table renders no row for extension %q", name)
+	return ""
+}
+
+// contractPageBody drives one GET through the fixture's already-assembled real
+// server and returns the rendered page, so a caller can scope its own
+// assertions to a region of the very same handler the runner exercised.
+func contractPageBody(t *testing.T, run contractFixtureRun, path string) string {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(run.cookie)
+	recorder := httptest.NewRecorder()
+	run.handler.ServeHTTP(recorder, request)
+	require.Equalf(t, http.StatusOK, recorder.Code, "GET %s must render for this fixture", path)
+	return recorder.Body.String()
+}
+
+// assertExtensionsSurfaces is the Extensions counterpart of
+// assertMaintenanceSurfaces: a per-element audit of every view element the
+// module renders, checked against expectations written out by hand from
+// docs/capabilities.md and from the fixture's own canned response, never from
+// platform.AvailableAny, sysext.Module's own RequiredAnyCapabilities, or
+// capability.Set.HasAny/HasAll (docs/agents/skills/dont-use-the-gate-under-
+// test-as-the-test-oracle.md).
+//
+// Four independent facts are asserted, because the production code keeps them
+// independent (see internal/modules/sysext/module.go's Mount):
+//
+//   - whether the module renders at all — and whether QueryExtensionsState is
+//     called — follows updex OR systemd-sysext, the module's any-of gate and
+//     the query's registration guard;
+//   - the per-row enable/disable form follows updex AND systemd-sysext, the
+//     daemon's registerSysextActions requirement for those two actions;
+//   - the global "Refresh merge" form follows systemd-sysext alone and the
+//     global "Update enabled" form follows updex alone;
+//   - every update-availability surface (the per-row badge, the "Available
+//     updates" table, the Summary card's mini-row count) follows the fixture's
+//     own Updates data, which is empty whenever updex did not contribute — so
+//     no separate capability flag gates them.
+func assertExtensionsSurfaces(t *testing.T, run contractFixtureRun, caps capability.Set, state sysext.ExtensionsState) {
+	t.Helper()
+
+	// Hand-derived from docs/capabilities.md's any-of row for
+	// QueryExtensionsState and its sysext action rows, spelled out per
+	// capability so these expectations cannot move with a change to the
+	// predicates the production gates call.
+	moduleAvailable := caps.Has(capability.Updex) || caps.Has(capability.Sysext)
+	enableDisableAvailable := caps.Has(capability.Updex) && caps.Has(capability.Sysext)
+	refreshAvailable := caps.Has(capability.Sysext)
+	updateAvailable := caps.Has(capability.Updex)
+
+	dashboardBody := contractPageBody(t, run, "/")
+	navSection := extractRequiredSection(t, navSectionPattern, dashboardBody, "GET /", "primary navigation")
+	dashboardSection := extractRequiredSection(t, dashboardSectionPattern, dashboardBody, "GET /", "dashboard cards")
+
+	pageRequest := httptest.NewRequest(http.MethodGet, "/sysext", nil)
+	pageRequest.AddCookie(run.cookie)
+	pageRecorder := httptest.NewRecorder()
+	run.handler.ServeHTTP(pageRecorder, pageRequest)
+
+	if !moduleAvailable {
+		require.Equal(t, http.StatusNotFound, pageRecorder.Code,
+			"a host advertising neither updex nor systemd-sysext must 404 GET /sysext")
+		assert.Zero(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"the web side must never call QueryExtensionsState on a host advertising neither updex nor systemd-sysext")
+		// Each region is checked on its own: the nav link and the dashboard
+		// card are two distinct web-side registries, and a whole-page check
+		// could not tell a nav-only regression from a dashboard-only one.
+		for _, marker := range sysextAbsenceMarkers() {
+			assert.NotContainsf(t, navSection, marker,
+				"GET /: primary navigation rendered an Extensions marker (%s) on a host with no extension tooling", marker)
+			assert.NotContainsf(t, dashboardSection, marker,
+				"GET /: the dashboard rendered an Extensions marker (%s) on a host with no extension tooling", marker)
+		}
+		return
+	}
+
+	assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+		"a host advertising updex or systemd-sysext must actually read the extension inventory through QueryExtensionsState")
+	assert.Contains(t, navSection, `href="/sysext"`,
+		"GET /: primary navigation must link to Extensions when either extension tool is advertised")
+
+	// Dashboard region: the Summary card, and inside it the update-count
+	// mini-row that replaced Maintenance's removed one. The count is compared
+	// for equality against the fixture's own flattened update total, so a card
+	// that rendered a stale or hardcoded number fails here.
+	summaryCard := extractRequiredSection(t, sysextSummaryCardPattern, dashboardSection, "GET /", "Extensions summary card")
+	assert.Containsf(t, summaryCard,
+		`<div class="mini-row"><div><strong>Updates</strong><small>Enabled system extensions</small></div><span class="badge">`+fmt.Sprint(contractUpdateCount(state))+`</span></div>`,
+		"GET /: the Extensions summary card must report %d pending component updates in its Updates mini-row", contractUpdateCount(state))
+
+	// Page regions.
+	require.Equal(t, http.StatusOK, pageRecorder.Code,
+		"a host advertising updex or systemd-sysext must serve GET /sysext")
+	body := pageRecorder.Body.String()
+	assert.Contains(t, extractRequiredSection(t, navSectionPattern, body, "GET /sysext", "primary navigation"), `href="/sysext"`,
+		"GET /sysext: the nav rendered on the module's own page must keep its entry too")
+
+	intro := extractRequiredSection(t, sysextPageIntroPattern, body, "GET /sysext", "page intro actions")
+	if refreshAvailable {
+		assert.Contains(t, intro, `action="/sysext/actions/refresh"`,
+			"GET /sysext: the Refresh merge form must render when systemd-sysext is advertised")
+	} else {
+		assert.NotContains(t, intro, `action="/sysext/actions/refresh"`,
+			"GET /sysext: the Refresh merge form targets a systemd-sysext-gated route and must not render without it")
+	}
+	if updateAvailable {
+		assert.Contains(t, intro, `action="/sysext/actions/update"`,
+			"GET /sysext: the Update enabled form must render when updex is advertised")
+	} else {
+		assert.NotContains(t, intro, `action="/sysext/actions/update"`,
+			"GET /sysext: the Update enabled form targets an updex-gated route and must not render without it")
+	}
+
+	inventory := extractRequiredSection(t, sysextInventoryCardPattern, body, "GET /sysext", "Available extensions table")
+	if len(state.Extensions) == 0 {
+		assert.Contains(t, inventory, "No extension definitions were found.",
+			"GET /sysext: an empty inventory is a successful empty state, not an error")
+		assert.NotContains(t, inventory, "<table",
+			"GET /sysext: an empty inventory must render no extension table at all")
+	} else {
+		assert.NotContains(t, inventory, "No extension definitions were found.",
+			"GET /sysext: a populated inventory must not render the empty state")
+		for _, extension := range state.Extensions {
+			row := sysextExtensionRow(t, inventory, extension.Name)
+
+			switch {
+			case extension.Merged:
+				assert.Containsf(t, row, `<span class="badge active">Active</span>`,
+					"GET /sysext: the merged extension %q must render the Active badge", extension.Name)
+			case extension.Enabled:
+				assert.Containsf(t, row, `<span class="badge update">Enabled</span>`,
+					"GET /sysext: the enabled-but-unmerged extension %q must render the Enabled badge", extension.Name)
+			default:
+				assert.Containsf(t, row, `<span class="badge">Available</span>`,
+					"GET /sysext: the neither-merged-nor-enabled extension %q must render the Available badge", extension.Name)
+			}
+
+			if len(extension.Updates) > 0 {
+				assert.Containsf(t, row, `<span class="badge update">Update available</span>`,
+					"GET /sysext: extension %q has a pending component update, so its row must carry the badge", extension.Name)
+			} else {
+				assert.NotContainsf(t, row, "Update available",
+					"GET /sysext: extension %q has no pending component update, so its row must carry no badge", extension.Name)
+			}
+
+			// Version is systemd-sysext's and Description is updex's, so each
+			// is asserted in *both* directions: present with its own value
+			// when that source contributed, and rendered as an empty element
+			// (not as some other row's value, and not omitted) when it did
+			// not. The absence half is what a fixture missing one tool proves.
+			if extension.Version != "" {
+				assert.Containsf(t, row, `<span class="version">`+extension.Version+`</span>`,
+					"GET /sysext: extension %q must render the version systemd-sysext reported", extension.Name)
+			} else {
+				assert.Containsf(t, row, `<span class="version"></span>`,
+					"GET /sysext: extension %q has no systemd-sysext version, so its version cell must render empty", extension.Name)
+			}
+			if extension.Description != "" {
+				assert.Containsf(t, row, extension.Description,
+					"GET /sysext: extension %q must render the description updex reported", extension.Name)
+			} else {
+				assert.Containsf(t, row, `<small></small>`,
+					"GET /sysext: extension %q has no updex definition description, so its description must render empty", extension.Name)
+			}
+
+			// The per-row action cell is a partial gate over the
+			// POST /sysext/{name}/{action} family, whose two members share one
+			// requirement — so both forms are audited together as one unit
+			// (docs/agents/skills/partial-gate-modules-need-full-view-element-
+			// audit.md), and an unmanaged row must render neither regardless of
+			// capabilities, because the broker could not act on it.
+			enableForm := `action="/sysext/` + extension.Name + `/enable"`
+			disableForm := `action="/sysext/` + extension.Name + `/disable"`
+			switch {
+			case !extension.Managed:
+				assert.Containsf(t, row, "Unmanaged",
+					"GET /sysext: extension %q has no updex definition, so its row must be marked read-only", extension.Name)
+				assert.NotContainsf(t, row, enableForm,
+					"GET /sysext: unmanaged extension %q must render no enable form", extension.Name)
+				assert.NotContainsf(t, row, disableForm,
+					"GET /sysext: unmanaged extension %q must render no disable form", extension.Name)
+			case !enableDisableAvailable:
+				assert.Containsf(t, row, "Unavailable",
+					"GET /sysext: managed extension %q must state its controls are unavailable when the host lacks both extension tools", extension.Name)
+				assert.NotContainsf(t, row, enableForm,
+					"GET /sysext: extension %q must render no enable form targeting a route gated on updex AND systemd-sysext", extension.Name)
+				assert.NotContainsf(t, row, disableForm,
+					"GET /sysext: extension %q must render no disable form targeting a route gated on updex AND systemd-sysext", extension.Name)
+			case extension.Enabled || extension.Installed:
+				assert.Containsf(t, row, disableForm,
+					"GET /sysext: managed, present extension %q must offer removal", extension.Name)
+				assert.NotContainsf(t, row, enableForm,
+					"GET /sysext: managed, present extension %q must not also offer installation", extension.Name)
+				if extension.Merged {
+					assert.Containsf(t, row, `<button class="button danger" type="submit">Remove at reboot</button>`,
+						"GET /sysext: merged extension %q is removed at reboot, and its control must say so", extension.Name)
+				} else {
+					assert.Containsf(t, row, `<button class="button danger" type="submit">Remove</button>`,
+						"GET /sysext: unmerged extension %q is removed immediately, and its control must say so", extension.Name)
+				}
+			default:
+				assert.Containsf(t, row, enableForm,
+					"GET /sysext: managed, absent extension %q must offer installation", extension.Name)
+				assert.NotContainsf(t, row, disableForm,
+					"GET /sysext: managed, absent extension %q must not also offer removal", extension.Name)
+			}
+		}
+	}
+
+	// The "Available updates" table — c3's one-for-one relocation of the
+	// section Maintenance used to own — scoped to its own card so the
+	// inventory table's rows (which repeat every extension name) can never
+	// satisfy an assertion about it.
+	updatesCard := extractRequiredSection(t, sysextUpdatesCardPattern, body, "GET /sysext", "Available updates table")
+	pending := contractPendingUpdates(state)
+	assert.Containsf(t, updatesCard, `<span>`+fmt.Sprintf("%d pending", len(pending))+`</span>`,
+		"GET /sysext: the Available updates card must report %d pending component updates", len(pending))
+	if len(pending) == 0 {
+		assert.Contains(t, updatesCard, "Enabled extensions are up to date.",
+			"GET /sysext: no pending update is a successful empty state, not an omitted section")
+		assert.NotContains(t, updatesCard, "<table",
+			"GET /sysext: the Available updates card must render no table when nothing is pending")
+		return
+	}
+	assert.NotContains(t, updatesCard, "Enabled extensions are up to date.",
+		"GET /sysext: the Available updates card must not claim everything is up to date while rows are pending")
+	for _, update := range pending {
+		assert.Containsf(t, updatesCard,
+			`<tr><td><strong>`+update.Extension+`</strong></td><td>`+update.Component+`</td><td>`+update.Current+`</td><td>`+update.Newest+`</td></tr>`,
+			"GET /sysext: the Available updates table must carry a row for %s/%s", update.Extension, update.Component)
+	}
+}
+
 // TestCannedHostImageFixtureIsPopulated pins the shape of the default
 // host-image fixture, which is what makes every "this element is absent under
 // a degraded fixture" assertion in this file meaningful rather than vacuously
@@ -1828,8 +2389,8 @@ var contractSubRoutes = []struct {
 	// HasAny(Updex, Sysext): enable/disable need both tools, refresh needs
 	// only systemd-sysext, and update needs only updex — matching
 	// cmd/pilothoused's registerSysextActions split exactly.
-	{http.MethodPost, "/sysext/contract-managed/enable", []capability.ID{capability.Updex, capability.Sysext}},
-	{http.MethodPost, "/sysext/contract-managed/disable", []capability.ID{capability.Updex, capability.Sysext}},
+	{http.MethodPost, "/sysext/" + contractExtensionManagedPending + "/enable", []capability.ID{capability.Updex, capability.Sysext}},
+	{http.MethodPost, "/sysext/" + contractExtensionManagedMerged + "/disable", []capability.ID{capability.Updex, capability.Sysext}},
 	{http.MethodPost, "/sysext/actions/refresh", []capability.ID{capability.Sysext}},
 	{http.MethodPost, "/sysext/actions/update", []capability.ID{capability.Updex}},
 	{http.MethodGet, "/podman/containers/" + sampleContainerID + "/logs", []capability.ID{capability.Podman}},
@@ -1874,18 +2435,37 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) contractFix
 // runCapabilityContractFixtureWithHostImage is runCapabilityContractFixture
 // with an explicit QueryHostImageStatus response, so the same assertions can
 // be replayed against the rpm-ostree read-failure shape.
-//
-// The QueryAutoUpdateStatus response stays calibrated to caps
-// (calibratedAutoUpdateStatus) rather than being a second parameter here: the
-// two responses vary along different axes, and every host-image fixture in this
-// file is a host-image variation, not an automatic-update one. Routing it
-// through the calibration helper is also what makes it structurally impossible
-// for a fixture to be handed a populated payload its capability set could not
-// produce — a caller cannot forget, because there is nothing to pass.
 func runCapabilityContractFixtureWithHostImage(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus) contractFixtureRun {
 	t.Helper()
+	return runCapabilityContractFixtureWith(t, caps, hostImage, calibratedExtensionsState(caps))
+}
+
+// runCapabilityContractFixtureWithExtensions is the same runner with an
+// explicit QueryExtensionsState response, so the two per-source extension
+// read-failure shapes — which no capability set can express, since the tool is
+// advertised and simply did not answer — get the full fixture treatment rather
+// than a bespoke one-off server.
+func runCapabilityContractFixtureWithExtensions(t *testing.T, caps capability.Set, extensions sysext.ExtensionsState) contractFixtureRun {
+	t.Helper()
+	return runCapabilityContractFixtureWith(t, caps, cannedHostImageStatus(), extensions)
+}
+
+// runCapabilityContractFixtureWith is the single implementation the three
+// wrappers above share.
+//
+// The QueryAutoUpdateStatus response stays calibrated to caps
+// (calibratedAutoUpdateStatus) rather than being a fourth parameter here: the
+// responses vary along different axes, and no fixture in this file is an
+// automatic-update variation. Routing it through the calibration helper is also
+// what makes it structurally impossible for a fixture to be handed a populated
+// payload its capability set could not produce — a caller cannot forget,
+// because there is nothing to pass. The extensions response is calibrated the
+// same way by both wrappers that do not take it explicitly, for the same
+// reason.
+func runCapabilityContractFixtureWith(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus, extensions sysext.ExtensionsState) contractFixtureRun {
+	t.Helper()
 	autoUpdate := calibratedAutoUpdateStatus(caps)
-	brokerClient := newFakeCapabilityBroker(t, caps, hostImage, autoUpdate)
+	brokerClient := newFakeCapabilityBroker(t, caps, hostImage, autoUpdate, extensions)
 	registry, handler := newCapabilityContractServer(t, brokerClient)
 	cookie := loginSession(t, handler)
 	run := contractFixtureRun{brokerClient: brokerClient, cookie: cookie, handler: handler}
@@ -2025,6 +2605,12 @@ func runCapabilityContractFixtureWithHostImage(t *testing.T, caps capability.Set
 	// audit.md).
 	assertMaintenanceSurfaces(t, run, caps, hostImage, autoUpdate)
 
+	// Extensions is this phase's composite surface — a whole-module any-of
+	// gate over per-route and per-action guards that are each narrower than
+	// it, plus the update-availability surfaces relocated from Maintenance —
+	// so it gets the same per-element audit for the same reason.
+	assertExtensionsSurfaces(t, run, caps, extensions)
+
 	return run
 }
 
@@ -2146,11 +2732,38 @@ func TestCapabilityContractHostImageFixtures(t *testing.T) {
 	// rpm-ostree detail" — every host-image surface and every systemd
 	// surface present at once.
 	t.Run("ucore", func(t *testing.T) {
-		run := runCapabilityContractFixture(t, ucoreCapabilitySet())
+		caps := ucoreCapabilitySet()
+		require.False(t, caps.Has(capability.Updex) || caps.Has(capability.Sysext),
+			"uCore is the spec's no-sysext-tools fixture: neither extension tool may be advertised")
+		run := runCapabilityContractFixture(t, caps)
 		assert.Positive(t, run.brokerClient.called(broker.QueryHostImageStatus),
 			"uCore must fetch host-image status")
 		assert.Positive(t, run.brokerClient.called(broker.QueryMaintenanceState),
 			"uCore has systemd, so reboot posture must still be fetched")
+
+		// The carry-forward's required no-sysext-tools assertion, stated
+		// directly from the fake broker's recorded call log rather than only
+		// inferred from requireAvailable's t.Fatalf: uCore is an image host
+		// with every other capability present, so a regression that left the
+		// Extensions surface ungated would show up here as a real call and a
+		// real rendered control, not merely as a page that 404s.
+		assert.Zero(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"uCore advertises no extension tooling, so the web side must never call QueryExtensionsState")
+		dashboardBody := contractPageBody(t, run, "/")
+		navSection := extractRequiredSection(t, navSectionPattern, dashboardBody, "GET /", "primary navigation")
+		dashboardSection := extractRequiredSection(t, dashboardSectionPattern, dashboardBody, "GET /", "dashboard cards")
+		for _, marker := range sysextAbsenceMarkers() {
+			assert.NotContainsf(t, navSection, marker,
+				"uCore: primary navigation rendered an Extensions marker (%s) on a host with no extension tooling", marker)
+			assert.NotContainsf(t, dashboardSection, marker,
+				"uCore: the dashboard rendered an Extensions marker (%s) on a host with no extension tooling", marker)
+		}
+		sysextRequest := httptest.NewRequest(http.MethodGet, "/sysext", nil)
+		sysextRequest.AddCookie(run.cookie)
+		sysextRecorder := httptest.NewRecorder()
+		run.handler.ServeHTTP(sysextRecorder, sysextRequest)
+		assert.Equal(t, http.StatusNotFound, sysextRecorder.Code,
+			"uCore advertises no extension tooling, so GET /sysext must 404")
 	})
 
 	// "Snosi without bootc remains supported; host-image state is omitted
@@ -2365,12 +2978,7 @@ func TestCapabilityContractAutoUpdateFixtures(t *testing.T) {
 // exercised.
 func maintenancePageBody(t *testing.T, run contractFixtureRun) string {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodGet, "/maintenance", nil)
-	request.AddCookie(run.cookie)
-	recorder := httptest.NewRecorder()
-	run.handler.ServeHTTP(recorder, request)
-	require.Equal(t, http.StatusOK, recorder.Code, "GET /maintenance must render for this fixture")
-	return recorder.Body.String()
+	return contractPageBody(t, run, "/maintenance")
 }
 
 // autoUpdateSectionFor is maintenancePageBody narrowed to the automatic-update
@@ -2461,6 +3069,373 @@ func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
 // all go absent together). Each subtest reuses the exact same
 // runCapabilityContractFixture assertions the full-capability fixture
 // above uses, driven purely by the fixture's capability.Set.
+// TestCannedExtensionsFixtureIsPopulatedAndCalibrated pins both halves of the
+// extensions fixture requirement at the data level, so a regression in the
+// fixtures themselves fails here loudly instead of quietly making every
+// rendering assertion in assertExtensionsSurfaces agree with an emptier or an
+// impossible response (docs/agents/skills/canned-fixtures-need-populated-data-
+// for-what-they-assert.md and calibrate-canned-fixture-data-per-capability-
+// set.md).
+func TestCannedExtensionsFixtureIsPopulatedAndCalibrated(t *testing.T) {
+	canned := cannedExtensionsState()
+	require.True(t, canned.UpdexAvailable, "the default fixture must report updex as having answered")
+	require.True(t, canned.SysextAvailable, "the default fixture must report systemd-sysext as having answered")
+	require.Empty(t, canned.UpdexError, "the default fixture is the success case for updex")
+	require.Empty(t, canned.SysextError, "the default fixture is the success case for systemd-sysext")
+
+	// Every inventory kind the spec's acceptance criteria name is present and
+	// non-empty. Each predicate is stated independently rather than by counting
+	// rows, so a fixture that lost one kind (or collapsed two into one row)
+	// fails here instead of silently making the matching rendering assertion
+	// unreachable.
+	kinds := map[string]func(sysext.Extension) bool{
+		"managed and merged":     func(e sysext.Extension) bool { return e.Managed && e.Merged },
+		"managed, not installed": func(e sysext.Extension) bool { return e.Managed && !e.Installed && !e.Merged },
+		"installed, unmanaged":   func(e sysext.Extension) bool { return e.Installed && !e.Managed },
+		"merged but disabled":    func(e sysext.Extension) bool { return e.Merged && !e.Enabled },
+		"managed with updates":   func(e sysext.Extension) bool { return e.Managed && len(e.Updates) > 0 },
+		"managed without updates": func(e sysext.Extension) bool {
+			return e.Managed && len(e.Updates) == 0
+		},
+		// The remaining two rendering branches views.templ has, which the four
+		// spec-named kinds above do not by themselves reach: the "Enabled"
+		// status badge (enabled but not yet merged) and the per-row *enable*
+		// form (managed but neither enabled nor installed, so removal is not
+		// what is offered). Without a row of each, assertExtensionsSurfaces'
+		// corresponding branches would be dead code no fixture ever entered.
+		"managed, enabled, not merged": func(e sysext.Extension) bool {
+			return e.Managed && e.Enabled && !e.Merged
+		},
+		"managed, neither enabled nor installed": func(e sysext.Extension) bool {
+			return e.Managed && !e.Enabled && !e.Installed
+		},
+	}
+	for kind, matches := range kinds {
+		found := false
+		for _, extension := range canned.Extensions {
+			if matches(extension) {
+				require.NotEmptyf(t, extension.Name, "the %q extension must be named", kind)
+				found = true
+				break
+			}
+		}
+		require.Truef(t, found, "the default extensions fixture must carry at least one %q extension", kind)
+	}
+
+	// The flattened update list spans more than one extension, so the
+	// "Available updates" table's flattening is exercised rather than being
+	// indistinguishable from rendering a single extension's slice.
+	pending := contractPendingUpdates(canned)
+	require.GreaterOrEqual(t, len(pending), 2, "the fixture must carry pending updates from more than one extension")
+	owners := map[string]bool{}
+	for _, update := range pending {
+		require.NotEmpty(t, update.Component)
+		require.NotEmpty(t, update.Current)
+		require.NotEmpty(t, update.Newest)
+		require.NotEqual(t, update.Current, update.Newest, "a pending update must actually differ from what is installed")
+		owners[update.Extension] = true
+	}
+	require.GreaterOrEqual(t, len(owners), 2, "pending updates must come from at least two different extensions")
+
+	// Calibrated: each fixture sees exactly the union its own sources could
+	// produce, and nothing a missing source owns.
+	for _, fixture := range []struct {
+		name   string
+		caps   capability.Set
+		updex  bool
+		sysext bool
+	}{
+		{"full", fullCapabilitySet(), true, true},
+		{"no-systemd", noSystemdCapabilitySet(), true, true},
+		{"snosi-without-bootc", snosiWithoutBootcCapabilitySet(), true, true},
+		{"bootc-snosi", bootcSnosiCapabilitySet(), true, true},
+		{"updex-without-sysext", updexWithoutSysextCapabilitySet(), true, false},
+		{"sysext-without-updex", sysextWithoutUpdexCapabilitySet(), false, true},
+		{"ucore", ucoreCapabilitySet(), false, false},
+		{"bootc-only", bootcOnlyCapabilitySet(), false, false},
+	} {
+		state := calibratedExtensionsState(fixture.caps)
+		require.Equalf(t, fixture.updex, state.UpdexAvailable, "fixture %q must report updex availability from its own capability set", fixture.name)
+		require.Equalf(t, fixture.sysext, state.SysextAvailable, "fixture %q must report systemd-sysext availability from its own capability set", fixture.name)
+		require.Emptyf(t, state.UpdexError, "fixture %q is a capability calibration, not a read failure", fixture.name)
+		require.Emptyf(t, state.SysextError, "fixture %q is a capability calibration, not a read failure", fixture.name)
+		if !fixture.updex && !fixture.sysext {
+			require.Emptyf(t, state.Extensions, "fixture %q has neither tool, so its only producible inventory is empty", fixture.name)
+			continue
+		}
+		require.NotEmptyf(t, state.Extensions, "fixture %q has a tool, so its inventory must be populated", fixture.name)
+		for _, extension := range state.Extensions {
+			if !fixture.updex {
+				require.Falsef(t, extension.Managed, "fixture %q lacks updex, so no extension may be managed (%s)", fixture.name, extension.Name)
+				require.Falsef(t, extension.Enabled, "fixture %q lacks updex, so no extension may be enabled (%s)", fixture.name, extension.Name)
+				require.Emptyf(t, extension.Updates, "fixture %q lacks updex, so Check() never ran and nothing may be pending (%s)", fixture.name, extension.Name)
+				require.Emptyf(t, extension.Description, "fixture %q lacks updex, so no definition description exists (%s)", fixture.name, extension.Name)
+			}
+			if !fixture.sysext {
+				require.Falsef(t, extension.Installed, "fixture %q lacks systemd-sysext, so nothing may report as installed (%s)", fixture.name, extension.Name)
+				require.Falsef(t, extension.Merged, "fixture %q lacks systemd-sysext, so nothing may report as merged (%s)", fixture.name, extension.Name)
+				require.Emptyf(t, extension.Version, "fixture %q lacks systemd-sysext, so no image version exists (%s)", fixture.name, extension.Name)
+			}
+		}
+	}
+
+	// The two read-failure fixtures each differ from the calibrated shape in
+	// exactly their own source's direction, so neither degenerates into a
+	// second run of the success case, and each leaves the other source intact.
+	updexFailed := cannedExtensionsStateUpdexFailed()
+	require.False(t, updexFailed.UpdexAvailable)
+	require.Equal(t, contractUpdexError, updexFailed.UpdexError)
+	require.True(t, updexFailed.SysextAvailable, "an updex failure must leave systemd-sysext answering")
+	require.Empty(t, updexFailed.SysextError)
+	require.NotEmpty(t, updexFailed.Extensions, "systemd-sysext still answered, so its installed/merged rows must survive")
+	require.Empty(t, contractPendingUpdates(updexFailed), "Check() is updex-only, so an updex failure leaves nothing pending")
+
+	sysextFailed := cannedExtensionsStateSysextFailed()
+	require.False(t, sysextFailed.SysextAvailable)
+	require.Equal(t, contractSysextError, sysextFailed.SysextError)
+	require.True(t, sysextFailed.UpdexAvailable, "a systemd-sysext failure must leave updex answering")
+	require.Empty(t, sysextFailed.UpdexError)
+	require.NotEmpty(t, sysextFailed.Extensions, "updex still answered, so its managed definitions must survive")
+	require.NotEmpty(t, contractPendingUpdates(sysextFailed), "updex still answered, so its pending updates must survive")
+}
+
+// TestCapabilityContractExtensionsFixtures closes #52's web-side matrix the way
+// TestCapabilityContractHostImageFixtures closed #51's. Every assertion goes
+// through a real newRegistry + web.NewServer + HTTP round trip against the fake
+// broker, never through a direct call to platform.AvailableAny or any other
+// gating helper (docs/agents/skills/exercise-the-actual-boundary-not-a-
+// precomputed-shim.md).
+//
+// The four fixtures separate the two independent axes the Extensions surface
+// depends on: which tools the host advertises (the module's any-of gate and the
+// per-action guards), and which sources actually answered (the aggregate's
+// per-source availability/error pairs).
+func TestCapabilityContractExtensionsFixtures(t *testing.T) {
+	// updex alone: the module, its nav entry, its dashboard card, and the
+	// updex-owned "Update enabled" action are all live, while everything
+	// systemd-sysext owns — the refresh action, the per-row enable/disable
+	// forms, and every installed/merged row — is gone. Together with its
+	// mirror below, this is what makes "a fixture lacking updex renders no
+	// managed data" a real proof rather than a statement about a page that
+	// isn't rendered at all.
+	t.Run("updex-without-sysext", func(t *testing.T) {
+		caps := updexWithoutSysextCapabilitySet()
+		run := runCapabilityContractFixture(t, caps)
+		assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"updex alone is enough to register QueryExtensionsState, so the web side must read it")
+
+		body := contractPageBody(t, run, "/sysext")
+		inventory := extractRequiredSection(t, sysextInventoryCardPattern, body, "GET /sysext", "Available extensions table")
+		assert.NotContains(t, inventory, contractExtensionUnmanagedInstalled,
+			"an extension known only to systemd-sysext cannot appear on a host without systemd-sysext")
+		assert.Contains(t, inventory, contractExtensionManagedPending,
+			"updex's own definitions must still render")
+		assert.NotContains(t, inventory, `<span class="badge active">Active</span>`,
+			"nothing can report as merged without systemd-sysext")
+		for _, version := range []string{"1.0.0", "2.0.0", "3.0.0", "4.0.0"} {
+			assert.NotContainsf(t, inventory, `<span class="version">`+version+`</span>`,
+				"image versions come only from systemd-sysext, so none may render without it (%s)", version)
+		}
+		assert.NotContains(t, inventory, `<div class="actions"><form`,
+			"enable and disable need both tools, so no row may render either form on a host with updex alone")
+
+		intro := extractRequiredSection(t, sysextPageIntroPattern, body, "GET /sysext", "page intro actions")
+		assert.Contains(t, intro, `action="/sysext/actions/update"`,
+			"the updex-gated update action must stay available")
+		assert.NotContains(t, intro, `action="/sysext/actions/refresh"`,
+			"the systemd-sysext-gated refresh action must be gone")
+	})
+
+	// systemd-sysext alone: the inventory and the refresh action are live,
+	// while every updex-owned surface — managed rows, descriptions, the
+	// per-row enable/disable forms, the "Update enabled" action, the per-row
+	// "Update available" badge, and every row of the Available updates table —
+	// is gone, because Check() is updex-only.
+	t.Run("sysext-without-updex", func(t *testing.T) {
+		caps := sysextWithoutUpdexCapabilitySet()
+		run := runCapabilityContractFixture(t, caps)
+		assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"systemd-sysext alone is enough to register QueryExtensionsState, so the web side must read it")
+
+		body := contractPageBody(t, run, "/sysext")
+		inventory := extractRequiredSection(t, sysextInventoryCardPattern, body, "GET /sysext", "Available extensions table")
+		assert.NotContains(t, inventory, contractExtensionManagedPending,
+			"an extension known only to updex cannot appear on a host without updex")
+		assert.Contains(t, inventory, contractExtensionUnmanagedInstalled,
+			"systemd-sysext's own installed images must still render")
+		assert.NotContains(t, inventory, "Update available",
+			"Check() is updex-only, so no row may claim a pending update without updex")
+		assert.NotContains(t, inventory, `<div class="actions"><form`,
+			"no row may offer a mutation control without updex: every extension is unmanaged there")
+		assert.NotContains(t, inventory, "Defined by updex but not installed on this host",
+			"descriptions come only from updex, so none may render without it")
+
+		updates := extractRequiredSection(t, sysextUpdatesCardPattern, body, "GET /sysext", "Available updates table")
+		assert.Contains(t, updates, "Enabled extensions are up to date.",
+			"without updex the Available updates table has no rows, and must say so rather than render an empty table")
+	})
+
+	// updex advertised but failing. The other source's rows still render, no
+	// managed data or update badge survives, and the module — nav, dashboard,
+	// route, and every action the advertised tools gate — stays fully
+	// available: a per-source read failure is a degradation of the response,
+	// not of the surface.
+	t.Run("updex-read-failure", func(t *testing.T) {
+		caps := snosiWithoutBootcCapabilitySet()
+		require.True(t, caps.Has(capability.Updex) && caps.Has(capability.Sysext),
+			"this subtest's premise is that both tools are advertised and one of them failed")
+		state := cannedExtensionsStateUpdexFailed()
+		run := runCapabilityContractFixtureWithExtensions(t, caps, state)
+
+		body := contractPageBody(t, run, "/sysext")
+		intro := extractRequiredSection(t, sysextPageIntroPattern, body, "GET /sysext", "page intro actions")
+		assert.Contains(t, intro, `action="/sysext/actions/update"`,
+			"updex is still advertised, so its action stays available even though this read of it failed")
+
+		inventory := extractRequiredSection(t, sysextInventoryCardPattern, body, "GET /sysext", "Available extensions table")
+		assert.Contains(t, inventory, contractExtensionUnmanagedInstalled,
+			"systemd-sysext answered, so its rows must survive updex's failure intact")
+		assert.NotContains(t, inventory, contractExtensionManagedPending,
+			"updex did not answer, so an extension only it knows about must not render")
+		assert.NotContains(t, inventory, "Update available",
+			"updex did not answer, so no update-availability badge may render")
+		row := sysextExtensionRow(t, inventory, contractExtensionManagedMerged)
+		assert.Contains(t, row, "Unmanaged",
+			"updex did not answer, so a row systemd-sysext still sees must fall back to read-only rather than offering controls the broker could not honour")
+
+		updates := extractRequiredSection(t, sysextUpdatesCardPattern, body, "GET /sysext", "Available updates table")
+		assert.Contains(t, updates, "Enabled extensions are up to date.",
+			"updex did not answer, so the Available updates table must render its empty state, not stale rows")
+
+		summary := extractRequiredSection(t, sysextSummaryCardPattern,
+			extractRequiredSection(t, dashboardSectionPattern, contractPageBody(t, run, "/"), "GET /", "dashboard cards"),
+			"GET /", "Extensions summary card")
+		assert.Contains(t, summary, `<span class="badge">0</span>`,
+			"the Summary card's update-count mini-row must report zero when updex did not answer")
+	})
+
+	// systemd-sysext advertised but failing: the mirror image, so the
+	// per-source symmetry is proven in both directions rather than only for
+	// updex.
+	t.Run("sysext-read-failure", func(t *testing.T) {
+		caps := snosiWithoutBootcCapabilitySet()
+		state := cannedExtensionsStateSysextFailed()
+		run := runCapabilityContractFixtureWithExtensions(t, caps, state)
+
+		body := contractPageBody(t, run, "/sysext")
+		intro := extractRequiredSection(t, sysextPageIntroPattern, body, "GET /sysext", "page intro actions")
+		assert.Contains(t, intro, `action="/sysext/actions/refresh"`,
+			"systemd-sysext is still advertised, so its action stays available even though this read of it failed")
+
+		inventory := extractRequiredSection(t, sysextInventoryCardPattern, body, "GET /sysext", "Available extensions table")
+		assert.Contains(t, inventory, contractExtensionManagedPending,
+			"updex answered, so its definitions must survive systemd-sysext's failure intact")
+		assert.NotContains(t, inventory, contractExtensionUnmanagedInstalled,
+			"systemd-sysext did not answer, so an extension only it knows about must not render")
+		assert.NotContains(t, inventory, `<span class="badge active">Active</span>`,
+			"systemd-sysext did not answer, so nothing may claim to be merged")
+		assert.NotContains(t, inventory, `<span class="version">3.0.0</span>`,
+			"systemd-sysext did not answer, so no image version may render")
+
+		updates := extractRequiredSection(t, sysextUpdatesCardPattern, body, "GET /sysext", "Available updates table")
+		assert.Contains(t, updates, contractExtensionManagedMerged,
+			"updex answered, so its pending updates must still render")
+	})
+}
+
+// TestCapabilityContractBootcSnosiFixture is the spec's "a bootc Snosi fixture
+// exposes bootc lifecycle (read-only) and sysext management together"
+// acceptance criterion, and the direct exercise of the requirement "keep
+// updex/systemd-sysext management independent from bootc so a future bootc
+// Snosi host exposes both".
+//
+// The independence claim is two separate facts, so it gets two separate
+// proofs rather than one coexistence render that could pass while either
+// module secretly required the other's capability.
+func TestCapabilityContractBootcSnosiFixture(t *testing.T) {
+	// Both at once. The host-image response is calibrated to bootc-only, since
+	// a host advertising bootc without rpm-ostree cannot produce rpm-ostree
+	// supplementary detail (docs/agents/skills/calibrate-canned-fixture-data-
+	// per-capability-set.md).
+	t.Run("both-surfaces-together", func(t *testing.T) {
+		caps := bootcSnosiCapabilitySet()
+		require.False(t, caps.Has(capability.Systemd),
+			"this fixture's premise is that Maintenance is present because of bootc alone, not because of systemd")
+		run := runCapabilityContractFixtureWithHostImage(t, caps, cannedHostImageStatusBootcOnly())
+
+		// bootc lifecycle, read-only: the host-image section renders with its
+		// bootc-authoritative deployments, and the systemd-gated reboot action
+		// is absent — this host has no systemd at all.
+		assert.Positive(t, run.brokerClient.called(broker.QueryHostImageStatus),
+			"a bootc Snosi host must fetch host-image status")
+		assert.Zero(t, run.brokerClient.called(broker.QueryMaintenanceState),
+			"a bootc Snosi host has no systemd, so the web side must never call QueryMaintenanceState")
+		maintenanceBody := maintenancePageBody(t, run)
+		hostImage := extractRequiredSection(t, hostImageSectionPattern, maintenanceBody, "GET /maintenance", "host image")
+		assert.Contains(t, hostImage, contractBootedImage,
+			"the host-image section must render bootc's booted deployment")
+		assert.Contains(t, hostImage, `data-deployment="staged"`,
+			"the host-image section must render bootc's staged deployment")
+		assert.NotContains(t, maintenanceBody, maintenanceRebootFormAction,
+			"a host without systemd must not render the reboot form")
+
+		// sysext management: every registry the module participates in.
+		assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"a bootc Snosi host advertises both extension tools, so it must read the inventory")
+		dashboardBody := contractPageBody(t, run, "/")
+		navSection := extractRequiredSection(t, navSectionPattern, dashboardBody, "GET /", "primary navigation")
+		assert.Contains(t, navSection, `href="/sysext"`, "the Extensions nav entry must render")
+		assert.Contains(t, navSection, `href="/maintenance"`, "the Maintenance nav entry must render in the same nav")
+		dashboardSection := extractRequiredSection(t, dashboardSectionPattern, dashboardBody, "GET /", "dashboard cards")
+		assert.Contains(t, dashboardSection, `<h2>System extensions</h2>`, "the Extensions dashboard card must render")
+
+		sysextBody := contractPageBody(t, run, "/sysext")
+		intro := extractRequiredSection(t, sysextPageIntroPattern, sysextBody, "GET /sysext", "page intro actions")
+		assert.Contains(t, intro, `action="/sysext/actions/refresh"`, "the refresh action must render")
+		assert.Contains(t, intro, `action="/sysext/actions/update"`, "the update action must render")
+		inventory := extractRequiredSection(t, sysextInventoryCardPattern, sysextBody, "GET /sysext", "Available extensions table")
+		assert.Contains(t, sysextExtensionRow(t, inventory, contractExtensionManagedPending),
+			`action="/sysext/`+contractExtensionManagedPending+`/enable"`,
+			"the per-row enable form must render: both tools are advertised, and bootc is irrelevant to it")
+		updates := extractRequiredSection(t, sysextUpdatesCardPattern, sysextBody, "GET /sysext", "Available updates table")
+		assert.Contains(t, updates, contractExtensionManagedMerged,
+			"the Available updates section must render its pending rows on a bootc Snosi host")
+	})
+
+	// Extensions does not depend on bootc: a host with the two extension tools
+	// and no host-image source at all still exposes the whole module, while
+	// Maintenance is absent entirely.
+	t.Run("extensions-without-bootc", func(t *testing.T) {
+		caps := sysextWithoutUpdexCapabilitySet()
+		require.False(t, caps.Has(capability.Bootc), "this subtest's premise is that no host-image source is advertised")
+		run := runCapabilityContractFixture(t, caps)
+		assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"Extensions must be readable with no host-image source present")
+
+		navSection := extractRequiredSection(t, navSectionPattern, contractPageBody(t, run, "/"), "GET /", "primary navigation")
+		assert.Contains(t, navSection, `href="/sysext"`, "Extensions must keep its nav entry with no bootc present")
+		assert.NotContains(t, navSection, `href="/maintenance"`,
+			"this host advertises none of systemd/bootc/rpm-ostree, so Maintenance must be absent — which is what makes Extensions' presence independent of it")
+	})
+
+	// Maintenance does not depend on the extension tools: the bootc-only host
+	// keeps its whole host-image surface while Extensions is absent entirely.
+	t.Run("maintenance-without-extension-tools", func(t *testing.T) {
+		caps := bootcOnlyCapabilitySet()
+		require.False(t, caps.Has(capability.Updex) || caps.Has(capability.Sysext),
+			"this subtest's premise is that no extension tooling is advertised")
+		run := runCapabilityContractFixtureWithHostImage(t, caps, cannedHostImageStatusBootcOnly())
+		assert.Zero(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"no extension tool is advertised, so QueryExtensionsState must never be called")
+		assert.Positive(t, run.brokerClient.called(broker.QueryHostImageStatus),
+			"Maintenance's host-image half must work with no extension tooling present")
+
+		hostImage := extractRequiredSection(t, hostImageSectionPattern, maintenancePageBody(t, run), "GET /maintenance", "host image")
+		assert.Contains(t, hostImage, contractBootedImage,
+			"the host-image section must render in full with no extension tooling present")
+	})
+}
+
 func TestCapabilityContractDegradedFixtures(t *testing.T) {
 	t.Run("no-journald", func(t *testing.T) {
 		runCapabilityContractFixture(t, noJournaldCapabilitySet())
