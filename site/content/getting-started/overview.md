@@ -16,8 +16,9 @@ The application is built from Go and templ on the server, HTMX for focused page 
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
 - Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` snosi definitions through updex
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
+- Extension update availability on the Extensions page, per extension and in aggregate
 - System Podman, Docker Engine, and local Incus inventories with lifecycle controls and bounded log viewing
-- Extension update availability, reboot-required posture, and confirmed host reboot
+- Reboot-required posture and confirmed host reboot
 - Exact systemd backup timer monitoring with freshness and last-result health
 
 ## How it is built

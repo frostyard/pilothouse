@@ -20,6 +20,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
+	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/frostyard/pilothouse/internal/web"
 	"github.com/stretchr/testify/assert"
@@ -287,34 +288,18 @@ var capabilityAnyRequirements = map[string][]capability.ID{
 	broker.QueryExtensionsState:  {capability.Updex, capability.Sysext},
 }
 
-// webSideUngatedBrokerIDs is the exact, closed set of broker IDs whose
-// *web-side* capability gate does not exist yet by explicit, documented
-// design decision, so a rendered sysext control can still lead to a broker
-// call the fixture's host does not advertise. docs/capabilities.md's "Phase
-// 1b (#54) — web-side gating complete" section states this outright: "The
-// sysext web surface is unchanged and out of scope for #54. The web process
-// still constructs sysext.NewSystemManager directly from its own --updex
-// config, and no platform.CapabilityGate or platform.Gate is applied to any
-// sysext route, navigation entry, dashboard card, or action ... deferred to
-// #52." The spec's round-2 clarification 3 repeats it for this phase: #51
-// "leaves the existing sysext update reporting and the /sysext link exactly
-// as they are on main".
-//
-// This is a UX gap, not a hole in the privilege boundary: the *daemon* still
-// withholds these actions entirely when updex/sysext are absent, which
-// cmd/pilothoused/capability_contract_test.go proves for every fixture in
-// its own matrix, so such a call fails at the broker rather than executing.
-// The exemption is deliberately keyed to individual IDs (not to a module or
-// a prefix) so that when #52 lands the web-side gate, deleting these four
-// entries is what re-arms the check — and any *other* ID that starts leaking
-// through an ungated web control fails immediately, including every ID this
-// phase adds.
-var webSideUngatedBrokerIDs = map[string]bool{
-	broker.ActionSysextDisable: true,
-	broker.ActionSysextEnable:  true,
-	broker.ActionSysextRefresh: true,
-	broker.ActionSysextUpdate:  true,
-}
+// The web-side gating exemption that used to live here
+// (webSideUngatedBrokerIDs — the four ActionSysext* IDs deliberately skipped
+// by requireAvailable's capability check, "deferred to #52") is gone. #52
+// landed the sysext web-side gate, so those four IDs are now subject to the
+// ordinary check like every other broker ID: sysext.Module implements
+// platform.CapabilityGateAny{Updex, Sysext} for its nav entry, dashboard
+// card, and GET /sysext; POST /sysext/{name}/{action} carries a
+// platform.Gate on HasAll(Updex, Sysext); and POST /sysext/actions/{action}
+// carries the module's any-of gate plus a per-action check (refresh needs
+// Sysext, update needs Updex), exactly matching cmd/pilothoused's
+// registerSysextActions split. requireAvailable below therefore has no
+// relaxation left at all.
 
 // moduleRequiredCapabilities is the independent, hand-maintained oracle for
 // which whole-module capability gate each web module carries, transcribed
@@ -346,7 +331,6 @@ var moduleRequiredCapabilities = map[string][]capability.ID{
 	"fleet":     nil,
 	"system":    nil,
 	"storage":   nil, // partial-gate: inventory always present; remote-mount routes gated (see contractSubRoutes)
-	"sysext":    nil,
 	"files":     nil,
 	"services":  {capability.Systemd},
 	"backups":   {capability.Systemd},
@@ -361,17 +345,26 @@ var moduleRequiredCapabilities = map[string][]capability.ID{
 // platform.CapabilityGateAny (HasAny semantics) rather than
 // platform.CapabilityGate (HasAll). It is likewise transcribed by hand from
 // docs/capabilities.md and docs/modules.md, never derived from
-// platform.AvailableAny. maintenance is the only entry: per #51 it reports
-// on two independently gated sources — systemd-gated reboot posture, update
-// availability, and jobs (QueryMaintenanceState), and bootc-or-rpm-ostree-
-// gated host-image status (QueryHostImageStatus) — so the module is present
-// whenever any one of the three is, and only its POST /maintenance/reboot
-// sub-route stays systemd-only (see contractSubRoutes).
+// platform.AvailableAny. Two entries:
+//
+//   - maintenance: per #51 it reports on two independently gated sources —
+//     systemd-gated reboot posture and jobs (QueryMaintenanceState), and
+//     bootc-or-rpm-ostree-gated host-image status (QueryHostImageStatus) — so
+//     the module is present whenever any one of the three is, and only its
+//     POST /maintenance/reboot sub-route stays systemd-only (see
+//     contractSubRoutes).
+//   - sysext: per #52 its inventory is a union of updex definitions and
+//     systemd-sysext installed/merged state, so either tool alone yields a
+//     useful Extensions surface. The module gate is HasAny(Updex, Sysext),
+//     matching QueryExtensionsState's own registration guard, while its three
+//     mutating sub-routes keep the daemon's narrower per-action requirements
+//     (see contractSubRoutes).
 //
 // A module ID must appear in exactly one of the two maps; appearing in both
 // fails the test, as does appearing in neither.
 var moduleRequiredAnyCapabilities = map[string][]capability.ID{
 	"maintenance": {capability.Systemd, capability.Bootc, capability.RPMOStree},
+	"sysext":      {capability.Updex, capability.Sysext},
 }
 
 // allOfPresent reports whether every id is in caps, and anyOfPresent whether
@@ -513,22 +506,14 @@ func (b *fakeCapabilityBroker) called(id string) int { return b.calls[id] }
 // internal/broker/api.go declarations; here an unlisted ID most likely means
 // these tables fell out of sync while a new ID was added).
 //
-// The one documented relaxation is webSideUngatedBrokerIDs above.
+// There are no relaxations: the four ActionSysext* IDs that used to be
+// exempted via webSideUngatedBrokerIDs are checked like every other ID now
+// that #52 has landed the sysext web-side gate.
 func (b *fakeCapabilityBroker) requireAvailable(id string) {
 	b.t.Helper()
 	b.calls[id]++
 	required, known := capabilityRequirements[id]
 	requiredAny, knownAny := capabilityAnyRequirements[id]
-	if webSideUngatedBrokerIDs[id] {
-		// Still required to be documented in exactly one table (below's
-		// completeness rule is not relaxed) — only the capability check is
-		// skipped, for the IDs docs/capabilities.md explicitly records as
-		// having no web-side gate yet.
-		if !known && !knownAny {
-			b.t.Fatalf("broker ID %q is listed in webSideUngatedBrokerIDs but not in capabilityRequirements or capabilityAnyRequirements; add it (see docs/capabilities.md)", id)
-		}
-		return
-	}
 	switch {
 	case known && knownAny:
 		b.t.Fatalf("broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
@@ -594,6 +579,16 @@ func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[stri
 		// the real broker would use — including AutoUpdateStatus's omitempty
 		// payload pointers, whose absence is what spells "not configured".
 		encoded, err := json.Marshal(b.autoUpdate)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(encoded, target)
+	case broker.QueryExtensionsState:
+		// Derived from this fixture's own capability set rather than a shared
+		// constant, so a fixture can never be served inventory its host could
+		// not produce (docs/agents/skills/calibrate-canned-fixture-data-per-
+		// capability-set.md).
+		encoded, err := json.Marshal(calibratedExtensionsState(b.capabilities))
 		if err != nil {
 			return err
 		}
@@ -854,6 +849,63 @@ func calibratedAutoUpdateStatus(caps capability.Set) maintenance.AutoUpdateStatu
 	return status
 }
 
+// calibratedExtensionsState is the QueryExtensionsState response for a
+// fixture, derived from that fixture's own capability set so it can only
+// ever contain inventory the fixture's host could actually produce
+// (docs/agents/skills/calibrate-canned-fixture-data-per-capability-set.md).
+// The aggregate is a union of two independently-gated sources, and the split
+// here mirrors the daemon's SystemManager.State exactly:
+//
+//   - updex contributes Managed, Enabled, Description, and Updates. A fixture
+//     without updex therefore reports UpdexAvailable false, no managed
+//     extension, and — since Check() is updex-only — no pending updates at
+//     all, which is what makes the "Available updates" table's empty state
+//     and the absent "Update available" badge genuinely provable there.
+//   - systemd-sysext contributes Installed, Merged, and Version, including
+//     for extensions that have no updex definition at all.
+//
+// It is populated rather than zero-valued for the same reason
+// cannedStorageSnapshot is (docs/agents/skills/canned-fixtures-need-populated-
+// data-for-what-they-assert.md): the per-row enable/disable forms only exist
+// on a rendered extension row, so a fixture with an empty inventory would
+// make "no enable/disable form is rendered" vacuously true.
+func calibratedExtensionsState(caps capability.Set) sysext.ExtensionsState {
+	updexPresent := caps.Has(capability.Updex)
+	sysextPresent := caps.Has(capability.Sysext)
+	state := sysext.ExtensionsState{
+		Extensions:      []sysext.Extension{},
+		SysextAvailable: sysextPresent,
+		UpdexAvailable:  updexPresent,
+	}
+	if updexPresent {
+		managed := sysext.Extension{
+			Description: "Contract-managed extension",
+			Enabled:     true,
+			Managed:     true,
+			Name:        "contract-managed",
+			Updates: []sysext.AvailableUpdate{
+				{Feature: "contract-managed", Component: "contract-ext", Current: "1.0.0", Newest: "1.1.0"},
+			},
+		}
+		if sysextPresent {
+			managed.Installed = true
+			managed.Merged = true
+			managed.Version = "1.0.0"
+		}
+		state.Extensions = append(state.Extensions, managed)
+	}
+	if sysextPresent {
+		// No updex definition: Managed stays false, so no enable/disable
+		// control may render for this row under any capability set.
+		state.Extensions = append(state.Extensions, sysext.Extension{
+			Installed: true,
+			Name:      "contract-unmanaged",
+			Version:   "2.0.0",
+		})
+	}
+	return state
+}
+
 // cannedMaintenanceState is the QueryMaintenanceState response the contract
 // fixtures use. Like cannedStorageSnapshot, it is populated rather than
 // zero-valued so that every conditionally-rendered element of the
@@ -966,7 +1018,7 @@ func cannedQueryResponse(target any) error {
 }
 
 // newCapabilityContractServer builds the production registry via
-// newRegistry("", "") and wires it into a real web.NewServer backed by
+// newRegistry() and wires it into a real web.NewServer backed by
 // brokerClient, returning both the registry (so tests can enumerate the
 // real module list) and the assembled HTTP handler. Using newRegistry(...)
 // rather than a hand-built module list is the whole point of this harness:
@@ -976,7 +1028,7 @@ func cannedQueryResponse(target any) error {
 // could silently drift from it.
 func newCapabilityContractServer(t *testing.T, brokerClient web.BrokerClient) (*platform.Registry, http.Handler) {
 	t.Helper()
-	registry, err := newRegistry("", "")
+	registry, err := newRegistry()
 	require.NoError(t, err)
 	server, err := web.NewServer(registry, brokerClient, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 	require.NoError(t, err)
@@ -1771,6 +1823,15 @@ var contractSubRoutes = []struct {
 	{http.MethodPost, "/storage/mounts", []capability.ID{capability.Systemd}},
 	{http.MethodPost, "/storage/mounts/" + sampleDefinitionID + "/mount", []capability.ID{capability.Systemd}},
 	{http.MethodPost, "/maintenance/reboot", []capability.ID{capability.Systemd}},
+	// sysext's three mutating sub-routes keep the daemon's narrower
+	// per-action requirements even though the module gate is the looser
+	// HasAny(Updex, Sysext): enable/disable need both tools, refresh needs
+	// only systemd-sysext, and update needs only updex — matching
+	// cmd/pilothoused's registerSysextActions split exactly.
+	{http.MethodPost, "/sysext/contract-managed/enable", []capability.ID{capability.Updex, capability.Sysext}},
+	{http.MethodPost, "/sysext/contract-managed/disable", []capability.ID{capability.Updex, capability.Sysext}},
+	{http.MethodPost, "/sysext/actions/refresh", []capability.ID{capability.Sysext}},
+	{http.MethodPost, "/sysext/actions/update", []capability.ID{capability.Updex}},
 	{http.MethodGet, "/podman/containers/" + sampleContainerID + "/logs", []capability.ID{capability.Podman}},
 	{http.MethodPost, "/podman/containers/" + sampleContainerID + "/start", []capability.ID{capability.Podman}},
 	{http.MethodPost, "/podman/images/" + sampleContainerID + "/remove", []capability.ID{capability.Podman}},
@@ -1976,26 +2037,47 @@ func runCapabilityContractFixtureWithHostImage(t *testing.T, caps capability.Set
 // re-asserted unchanged by construction, not by a parallel copy of the
 // assertions.
 func TestCapabilityContractFullCapabilityFixture(t *testing.T) {
-	runCapabilityContractFixture(t, fullCapabilitySet())
+	run := runCapabilityContractFixture(t, fullCapabilitySet())
+
+	// The positive counterpart to the bootc-only fixture's "never called"
+	// assertion below: on a host with both tools the Extensions surface is
+	// live and genuinely reads through the broker. Without this, "the web
+	// side never calls QueryExtensionsState on a gated-off host" would also
+	// pass if the module had simply stopped reading anything at all.
+	assert.Positive(t, run.brokerClient.called(broker.QueryExtensionsState),
+		"a host with updex and sysext must read the extension inventory through QueryExtensionsState")
 }
 
-// TestWebSideUngatedExemptionExcludesHostImageSurfaces pins the one
-// relaxation in this harness so it cannot quietly grow to cover the surfaces
-// this phase adds. webSideUngatedBrokerIDs exists solely for the sysext web
-// controls that #52 owns; if any maintenance or host-image broker ID were
-// added to it, every "the web side never calls a gated-off broker ID"
-// assertion about this phase would silently stop meaning anything.
-func TestWebSideUngatedExemptionExcludesHostImageSurfaces(t *testing.T) {
-	for _, id := range []string{
-		broker.QueryHostImageStatus,
-		broker.QueryMaintenanceState,
-		broker.ActionMaintenanceReboot,
+// TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck replaces the old
+// TestWebSideUngatedExemptionExcludesHostImageSurfaces, which pinned
+// webSideUngatedBrokerIDs (the four-entry exemption from requireAvailable's
+// capability check) at exactly 4 entries. #52 landed the sysext web-side
+// gate, so the map and its Len==4 assertion are gone and every sysext broker
+// ID is checked like any other.
+//
+// What remains worth pinning is that each of the four sysext IDs is still
+// carried by exactly one oracle table with the daemon's own requirement — the
+// requirement requireAvailable now actually enforces against every fixture.
+// Transcribed by hand from docs/capabilities.md's sysext action rows and
+// cmd/pilothoused's registerSysextActions, not read back from the production
+// gate (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-
+// oracle.md).
+func TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck(t *testing.T) {
+	for id, want := range map[string][]capability.ID{
+		broker.ActionSysextDisable: {capability.Updex, capability.Sysext},
+		broker.ActionSysextEnable:  {capability.Updex, capability.Sysext},
+		broker.ActionSysextRefresh: {capability.Sysext},
+		broker.ActionSysextUpdate:  {capability.Updex},
 	} {
-		assert.NotContainsf(t, webSideUngatedBrokerIDs, id,
-			"%q must stay subject to the fake broker's capability check; the web-side gating exemption covers only the sysext controls deferred to #52", id)
+		assert.Equalf(t, want, capabilityRequirements[id],
+			"%q must stay an all-of ID with the daemon's own requirement, now that the web-side exemption is gone", id)
+		assert.NotContainsf(t, capabilityAnyRequirements, id,
+			"%q is an all-of ID; it must not appear in the any-of table", id)
 	}
-	assert.Len(t, webSideUngatedBrokerIDs, 4,
-		"the web-side gating exemption is exactly the four sysext actions; growing it needs a deliberate decision and a docs/capabilities.md update")
+	// QueryExtensionsState is the read side of the same module and is the
+	// any-of ID the module gate mirrors.
+	assert.Equal(t, []capability.ID{capability.Updex, capability.Sysext}, capabilityAnyRequirements[broker.QueryExtensionsState],
+		"QueryExtensionsState must stay updex OR sysext, matching sysext.Module's RequiredAnyCapabilities")
 }
 
 // TestWebSideOracleTablesAreCompleteAndDisjoint pins the two hand-transcribed
@@ -2029,8 +2111,8 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are two
 	// of the API's three any-of IDs (bootc OR rpm-ostree, exception #4), the
 	// third being QueryExtensionsState (updex OR sysext, exception #6), and
-	// maintenance is the one module whose whole-module gate is any-of (systemd
-	// OR bootc OR rpm-ostree).
+	// maintenance and sysext are the two modules whose whole-module gate is
+	// any-of.
 	assert.Equal(t, map[string][]capability.ID{
 		broker.QueryHostImageStatus:  {capability.Bootc, capability.RPMOStree},
 		broker.QueryAutoUpdateStatus: {capability.Bootc, capability.RPMOStree},
@@ -2039,8 +2121,9 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 		"QueryHostImageStatus, QueryAutoUpdateStatus, and QueryExtensionsState must be the three any-of broker IDs — the first two requiring bootc OR rpm-ostree, the third updex OR sysext")
 	assert.Equal(t, map[string][]capability.ID{
 		"maintenance": {capability.Systemd, capability.Bootc, capability.RPMOStree},
+		"sysext":      {capability.Updex, capability.Sysext},
 	}, moduleRequiredAnyCapabilities,
-		"maintenance must remain the sole any-of module gate, requiring systemd OR bootc OR rpm-ostree")
+		"maintenance (systemd OR bootc OR rpm-ostree) and sysext (updex OR sysext, added by #52) must be the two any-of module gates")
 
 	// The two oracle helpers must genuinely differ; collapsing one into the
 	// other would silently turn every any-of expectation above into an all-of
@@ -2106,6 +2189,14 @@ func TestCapabilityContractHostImageFixtures(t *testing.T) {
 			"a bootc-only host has no systemd, so the web side must never call QueryMaintenanceState")
 		assert.Positive(t, run.brokerClient.called(broker.QueryHostImageStatus),
 			"a bootc-only host must still fetch host-image status")
+		// The same property for #52's query: bootc-only advertises neither
+		// updex nor sysext, so sysext.Module's any-of gate must keep its nav
+		// entry, dashboard card, and GET /sysext out of every render — and
+		// with them the query itself. This is the fixture the sysext gate had
+		// to land in the same commit as the query call for: an ungated call
+		// here would trip requireAvailable on every existing fixture run.
+		assert.Zero(t, run.brokerClient.called(broker.QueryExtensionsState),
+			"a bootc-only host has neither updex nor sysext, so the web side must never call QueryExtensionsState")
 
 		dashboardRequest := httptest.NewRequest(http.MethodGet, "/", nil)
 		dashboardRequest.AddCookie(run.cookie)

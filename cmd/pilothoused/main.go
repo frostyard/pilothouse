@@ -39,6 +39,7 @@ import (
 	servicejournal "github.com/frostyard/pilothouse/internal/modules/services/journal"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
+	"github.com/frostyard/pilothouse/internal/modules/sysext/extctl"
 	dockerclient "github.com/moby/moby/client"
 )
 
@@ -153,7 +154,7 @@ func run() error {
 	if err := registerLogs(queries, managers.logsManager, caps); err != nil {
 		return err
 	}
-	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
+	sysextManager := extctl.NewSystemManager(extctl.ExecRunner{}, *definitionsRoot, *updex)
 	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
@@ -177,7 +178,7 @@ func run() error {
 	// deployment it reports is one input to reboot-required posture, and its
 	// soft-reboot eligibility is copied onto maintenance state. One reader,
 	// two consumers — never a second path to bootc.
-	hostImageManager := maintenance.NewHostImageManager(sysext.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
+	hostImageManager := maintenance.NewHostImageManager(extctl.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
 	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
 		return err
 	}
@@ -197,7 +198,7 @@ func run() error {
 	if err := registerAutoUpdate(queries, autoUpdateManager, caps); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, extctl.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
 	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}

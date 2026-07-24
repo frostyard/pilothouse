@@ -30,7 +30,6 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
-	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -253,12 +252,10 @@ func (fakeAutoUpdateSystemdClient) GetUnitTypePropertiesContext(_ context.Contex
 // updex/systemd-sysext dependency.
 type fakeSysextManager struct{}
 
-func (fakeSysextManager) Check(context.Context) ([]sysext.AvailableUpdate, error) { return nil, nil }
-func (fakeSysextManager) Disable(context.Context, string) error                   { return nil }
-func (fakeSysextManager) Enable(context.Context, string) error                    { return nil }
-func (fakeSysextManager) List(context.Context) ([]sysext.Feature, error)          { return nil, nil }
-func (fakeSysextManager) Refresh(context.Context) error                           { return nil }
-func (fakeSysextManager) Update(context.Context) error                            { return nil }
+func (fakeSysextManager) Disable(context.Context, string) error { return nil }
+func (fakeSysextManager) Enable(context.Context, string) error  { return nil }
+func (fakeSysextManager) Refresh(context.Context) error         { return nil }
+func (fakeSysextManager) Update(context.Context) error          { return nil }
 
 func (*fakeServicesManager) Disable(context.Context, string) error     { return nil }
 func (*fakeServicesManager) Enable(context.Context, string) error      { return nil }
@@ -577,12 +574,8 @@ func (m *blockingSysextManager) Enable(context.Context, string) error {
 	return nil
 }
 
-func (*blockingSysextManager) Check(context.Context) ([]sysext.AvailableUpdate, error) {
-	return nil, nil
-}
-func (*blockingSysextManager) Disable(context.Context, string) error          { return nil }
-func (*blockingSysextManager) List(context.Context) ([]sysext.Feature, error) { return nil, nil }
-func (*blockingSysextManager) Update(context.Context) error                   { return nil }
+func (*blockingSysextManager) Disable(context.Context, string) error { return nil }
+func (*blockingSysextManager) Update(context.Context) error          { return nil }
 
 func (m *blockingSysextManager) releaseAll() { m.once.Do(func() { close(m.release) }) }
 

@@ -1,4 +1,4 @@
-package sysext
+package extctl
 
 import (
 	"context"
@@ -8,14 +8,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// *SystemManager is the only production ExtensionsSource; cmd/pilothoused's
+// *SystemManager is the only production sysext.ExtensionsSource; cmd/pilothoused's
 // registerExtensions serves broker.QueryExtensionsState from this interface,
 // so the concrete manager must keep satisfying it.
-var _ ExtensionsSource = (*SystemManager)(nil)
+var _ sysext.ExtensionsSource = (*SystemManager)(nil)
 
 // stateFixture builds a SystemManager over a temp definitions root holding one
 // sysupdate.d directory with a feature file (so definitionDirectories finds it)
@@ -90,7 +91,7 @@ func (f *stateFixture) invoked(command string) bool {
 	return false
 }
 
-func extensionByName(t *testing.T, state ExtensionsState, name string) Extension {
+func extensionByName(t *testing.T, state sysext.ExtensionsState, name string) sysext.Extension {
 	t.Helper()
 	for _, extension := range state.Extensions {
 		if extension.Name == name {
@@ -98,7 +99,7 @@ func extensionByName(t *testing.T, state ExtensionsState, name string) Extension
 		}
 	}
 	require.FailNowf(t, "extension missing", "no extension named %q in %v", name, state.Extensions)
-	return Extension{}
+	return sysext.Extension{}
 }
 
 // TestStateUnionsBothSourcesWhenAvailable is the headline success case: both
@@ -121,7 +122,7 @@ func TestStateUnionsBothSourcesWhenAvailable(t *testing.T) {
 		"the union inventory is sorted by extension name")
 
 	docker := extensionByName(t, state, "docker")
-	assert.Equal(t, Extension{
+	assert.Equal(t, sysext.Extension{
 		Description: "Docker engine",
 		Enabled:     true,
 		Installed:   true,
@@ -129,7 +130,7 @@ func TestStateUnionsBothSourcesWhenAvailable(t *testing.T) {
 		Merged:      true,
 		Name:        "docker",
 		Path:        "/not-present/docker_9.9_13_x86-64.raw",
-		Updates:     []AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}},
+		Updates:     []sysext.AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}},
 		Version:     "9.9",
 	}, docker, "a managed, installed, merged extension carries every field from both sources plus its pending update")
 
@@ -277,7 +278,7 @@ func TestStateDegradesSysextSourceIndependently(t *testing.T) {
 			assert.True(t, docker.Managed)
 			assert.True(t, docker.Enabled)
 			assert.Equal(t, "Docker engine", docker.Description)
-			assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, docker.Updates)
+			assert.Equal(t, []sysext.AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, docker.Updates)
 			assert.False(t, docker.Installed)
 			assert.False(t, docker.Merged)
 			assert.Empty(t, extensionByName(t, state, "zinc").Updates)

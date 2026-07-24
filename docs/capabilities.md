@@ -391,10 +391,16 @@ enable/disable/update/refresh), `Installed`, and `Merged`, plus the fields the
 surface renders — and an `Updates []AvailableUpdate` field holding the pending
 component updates updex's feature check reported for that extension. `Updates`
 is empty for an unmanaged extension in every case, since the check only ever
-reports on definitions updex itself enumerated. No web-side caller exists yet;
-this is a registered, capability-guarded daemon surface with no web consumer
-until the Extensions module is converted to read through it. The
-`sysext.ExtensionsSource` behind it does have a second *daemon-internal*
+reports on definitions updex itself enumerated. The web-side caller is
+`internal/modules/sysext`, which as of #52 reads through this query and
+nothing else: `Module.Dashboard` and the `GET /sysext` handler each call
+`host.Query(ctx, broker.QueryExtensionsState, nil, &state)`, and the
+Extensions page renders `Updates` as an aggregate "Updates" count on the
+dashboard Summary card, a flattened "Available updates"
+(Extension/Component/Current/Newest) table, and a per-row "Update available"
+badge — the update-availability surface that moved off Maintenance in the
+same phase. The `sysext.ExtensionsSource` behind it does have a second
+*daemon-internal*
 consumer: `maintenance.SystemManager` calls the same interface (on the same
 instance) to derive its merged-but-disabled reboot reason — see the
 extension-read note below.
@@ -421,11 +427,11 @@ exactly one call: `sysext.ExtensionsSource.State(ctx, updexAvailable,
 sysextAvailable)`, with the two probed capability facts threaded in from
 `NewSystemManager`'s `updexAvailable`/`sysextAvailable` parameters. That is
 the same interface — and, in `cmd/pilothoused`, the same concrete
-`*sysext.SystemManager` instance — `registerExtensions` serves
+`*extctl.SystemManager` instance — `registerExtensions` serves
 `QueryExtensionsState` from, so this is daemon-internal instance reuse
 (exactly like `HostImageManager` in the host-image note below), not a second
 broker round trip. It is instance reuse, not result reuse:
-`sysext.SystemManager.State` has no cache of its own, so a
+`extctl.SystemManager.State` has no cache of its own, so a
 `QueryExtensionsState` and a `QueryMaintenanceState` in the same moment each
 run their own read. The only cache in play is maintenance's own pre-existing
 1-minute `extensionState` cache, which belongs to the maintenance manager
@@ -450,7 +456,7 @@ failed read is only the extension-derived reboot reasons; the OS-marker,
 completed-job, and staged-host-image reasons, plus `Jobs` and `OSVersion`,
 are computed exactly as before.
 `internal/modules/maintenance/manager_test.go` has a dedicated test case per
-combination, including one that drives the real `*sysext.SystemManager` with
+combination, including one that drives the real `*extctl.SystemManager` with
 a failing command runner.
 
 **What maintenance derives, and what it no longer owns.** From the returned
@@ -484,9 +490,17 @@ mini-row, and `Module.Health` no longer emits the
 `maintenance.updates` finding. Ownership of extension inventory and
 per-extension/aggregate update availability has moved to Extensions, whose
 `QueryExtensionsState` response already carries it per extension in
-`Extension.Updates`; the Extensions web surface that renders it lands with
-the rest of that module's conversion to query-based reads, and is not
-described here yet.
+`Extension.Updates`. As of #52 the Extensions surface renders it in three
+places: the dashboard Summary card's "Updates" mini-row (the aggregate sum of
+`len(Extension.Updates)`, in the position maintenance's removed mini-row
+used), an "Available updates" table on `GET /sysext` with the same
+Extension/Component/Current/Newest columns and the same "Enabled extensions
+are up to date." empty state the Maintenance page's removed table had, and an
+"Update available" badge on each extension row whose own `Updates` is
+non-empty. None of this needs its own capability flag: `Check()` is
+updex-only, so `Extension.Updates` is empty whenever `UpdexAvailable` is
+false and these surfaces render their empty/absent form on an updex-less host
+without additional gating.
 
 ### Host-image read note (`QueryMaintenanceState` / bootc)
 
@@ -554,28 +568,51 @@ nav entry and dashboard card are omitted from that render. See `docs/modules.md`
 capability gating (end state, #54)" for the mechanism and the exact
 module→capability mapping the web process applies.
 
-The **sysext web surface is unchanged and out of scope for #54.** The web
-process still constructs `sysext.NewSystemManager` directly from its own
-`--updex` config, and no `platform.CapabilityGate` or `platform.Gate` is
-applied to any sysext route, navigation entry, dashboard card, or action.
-Web-side capability-gating of sysext reads is deferred to **#52**, where
-those reads move behind the broker. The sysext *action* rows above
-(`ActionSysext*`) describe the daemon-side (`cmd/pilothoused`) per-action guard
-from phase 1a (#50); they are the broker's registration guard, not a web-side
-gate, and #54 does not touch them.
+The **sysext web surface was out of scope for #54 and is gated as of #52.**
+`sysext.Module` no longer constructs an extension manager of its own:
+`cmd/pilothouse`'s `newRegistry` calls `sysext.New()` with no arguments, the
+web binary's `--definitions-root`/`--updex` flags are gone, and every read
+goes through `QueryExtensionsState`. The exec-backed implementation moved out
+of `internal/modules/sysext` into the new `internal/modules/sysext/extctl`
+subpackage in the same change, so the separation is structural rather than
+conventional: `sysext` (which the web binary links) holds only the `Manager`
+and `ExtensionsSource` interfaces and the types they exchange, and imports
+neither `os/exec` nor any `CommandRunner`; `extctl` (which only
+`cmd/pilothoused` links) holds `NewSystemManager`, `ExecRunner`, and every
+`updex`/`systemd-sysext` invocation. The dependency runs one way only.
+The gate is applied per logical group,
+mirroring `cmd/pilothoused`'s `registerSysextActions` split exactly:
 
-Because the sysext web controls render unconditionally, a fixture whose host
-advertises neither `updex` nor `sysext` can still reach an `ActionSysext*`
-call from a rendered control. `cmd/pilothouse/capability_contract_test.go`
-records this as `webSideUngatedBrokerIDs`, a closed four-entry exemption from
-its fake broker's "never invoke a gated-off broker ID" check, and
-`TestWebSideUngatedExemptionExcludesHostImageSurfaces` pins it so it cannot
-grow to cover any maintenance or host-image ID. The privilege boundary is not
-affected: the *daemon* does not register those actions at all without
-`updex`/`sysext`, which
+| Surface | Predicate | Where it is enforced |
+|---|---|---|
+| Nav entry, dashboard card | `HasAny(Updex, Sysext)` | `Module.RequiredAnyCapabilities` → `platform.AvailableAny` via `moduleAvailable` |
+| `GET /sysext` | `HasAny(Updex, Sysext)` | `platform.GateAny(host, m.RequiredAnyCapabilities(), ...)` in `Mount` |
+| `POST /sysext/{name}/{action}` (enable, disable) | `HasAll(Updex, Sysext)` | `platform.Gate(host, []capability.ID{capability.Updex, capability.Sysext}, ...)` in `Mount` |
+| `POST /sysext/actions/refresh` | `Has(Sysext)` | `platform.GateAny` at the route plus an in-handler check that 404s without `sysext` |
+| `POST /sysext/actions/update` | `Has(Updex)` | `platform.GateAny` at the route plus an in-handler check that 404s without `updex` |
+
+The two global actions share one route pattern but not one requirement, so
+the route-level gate is the module's any-of condition and the per-action
+requirement is re-checked inside the handler; an action whose tool is absent
+404s indistinguishably from an unknown action. The rendered controls follow
+the same three predicates — the refresh button, the update button, and every
+per-row enable/disable form each collapse with the route they target, and an
+extension with `Managed: false` (installed through `systemd-sysext` with no
+updex definition) renders no enable/disable control under any capability set.
+
+`webSideUngatedBrokerIDs` **no longer exists.**
+`cmd/pilothouse/capability_contract_test.go` used to carry it as a closed
+four-entry exemption from its fake broker's "never invoke a gated-off broker
+ID" check, covering the four `ActionSysext*` IDs; #52 deleted the map, its
+`Len == 4` assertion, and the relaxation branch in `requireAvailable`, so
+those four IDs are now subject to the ordinary capability check like every
+other broker ID. `TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck`
+replaces the old exemption test and pins each one's requirement instead. The
+privilege boundary was never affected by the exemption: the *daemon* does not
+register those actions at all without `updex`/`sysext`, which
 `cmd/pilothoused/capability_contract_test.go`'s matrix proves for every
-fixture, so such a call fails at the broker rather than executing. Deleting
-the four entries is what re-arms the web-side check once #52 lands the gate.
+fixture, so such a call failed at the broker rather than executing. What
+changed is that the UI no longer offers the control in the first place.
 
 ## Phase 2 (#51) — host-image contract parity (daemon + web)
 

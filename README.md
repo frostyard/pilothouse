@@ -14,6 +14,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
 - Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` Snosi definitions through updex
 - Installed and merged state from `systemd-sysext`
+- Extension update availability on the Extensions page — the pending component updates for each extension, an "Update available" badge on every affected extension row, and the aggregate count on the dashboard card
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - System Podman inventory for containers, pods, images, engine version, reported image storage, and bounded log viewing
 - Administrator-only container start, stop, restart, and safe removal actions

@@ -63,7 +63,10 @@ packaging/            systemd units, PAM policy, sysusers declaration
 
 Each module is a vertical slice: collector/manager, `module.go` (routes +
 manifest + dashboard cards), `views.templ`, and tests, all under one
-directory. Current modules:
+directory. Two modules push their privileged, host-tool-invoking half into a
+subpackage the web binary never links — `services/journal` and, as of #52,
+`sysext/extctl` — so the unprivileged process cannot reach a host tool even
+by accident. Current modules:
 
 | Module | Purpose |
 |---|---|
@@ -71,7 +74,7 @@ directory. Current modules:
 | `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. SMB creation optionally supports paired numeric local UID/GID mapping. Expected immutable EROFS mounts retain their inventory usage and read-only state but are excluded from capacity and read-only health findings; other filesystems retain those checks. |
 | `attention` | Aggregates `platform.HealthProvider` findings from other modules (bounded 2s/provider) into one "needs attention" view. |
 | `services` | Systemd service/socket/timer inventory and lifecycle/enablement control via system D-Bus; bounded journal diagnostics. |
-| `sysext` | Snosi `updex` feature discovery/install state and `systemd-sysext` merge state; install/remove/update/refresh actions. |
+| `sysext` | Snosi `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
 | `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`; lifecycle actions. |
@@ -496,12 +499,12 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   the Summary card's "Updates" mini-row, and the `maintenance.updates` Health
   finding are all gone, update availability being Extensions' to own. The source is shared with `registerExtensions`
   as one daemon-internal *instance*, not one *result*:
-  `sysext.SystemManager.State` has no cache, so the two consumers each run
+  `extctl.SystemManager.State` has no cache, so the two consumers each run
   their own read; maintenance's own 1-minute `extensionState` cache is the
   only cache involved and is this manager's alone. See
   `docs/capabilities.md`'s extension-read note for the full mechanism and
   `internal/modules/maintenance/manager_test.go` for the per-combination
-  cases, including one driving the real `*sysext.SystemManager` with a
+  cases, including one driving the real `*extctl.SystemManager` with a
   failing command runner. (`NewSystemManager` also carries a
   `hostImage`/`bootcAvailable` pair for the host-image leg described in the
   #51 section above; it follows the same degrade convention and leaves the
@@ -516,7 +519,7 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   requires `updex` alone — those two already lived in a separate local loop,
   so each entry there now carries its own required capability, checked
   in-loop, without changing `registerNamedActions`/`registerProjectActions`
-  (every other caller has a uniform per-call requirement). `sysext.NewSystemManager`
+  (every other caller has a uniform per-call requirement). `extctl.NewSystemManager`
   has no systemd D-Bus dependency (exec/`CommandRunner`-based only), so — like
   maintenance — there is no construction-level non-fatal-startup fix needed;
   `sysextManager` is constructed unconditionally regardless of capability, and
@@ -1011,10 +1014,18 @@ optional tooling never shows a dead link or a button that always fails.
   Modules implementing `CapabilityGateAny` (whole-module any-of gate, added
   by #51):
   - `maintenance` → `HasAny(Systemd, Bootc, RPMOStree)`
+  - `sysext` → `HasAny(Updex, Sysext)` (added by #52)
 
   `POST /maintenance/reboot` is additionally, separately gated by a plain
   `Systemd`-only `platform.Gate` outside the whole-module mechanism, so it
   404s on a bootc-only host whose maintenance module is otherwise present.
+  `sysext` has the same shape with three narrower sub-guards instead of one:
+  `POST /sysext/{name}/{action}` (enable, disable) carries a plain
+  `platform.Gate` on `HasAll(Updex, Sysext)`, and
+  `POST /sysext/actions/{action}` carries the module's own `GateAny` plus a
+  per-action check inside the handler (`refresh` needs `Sysext`, `update`
+  needs `Updex`) because the two actions share one route pattern but not one
+  requirement — see the sysext bullet below.
 
   Modules with partial or no gating: `storage` deliberately does *not*
   implement `CapabilityGate` — its inventory (nav, dashboard card,
@@ -1056,14 +1067,33 @@ optional tooling never shows a dead link or a button that always fails.
   reflected in nav/dashboard by `moduleAvailable` (per render), so a gated-off
   surface is indistinguishable from a route that does not exist, both in the
   UI and at the URL.
-- **sysext is out of scope for #54.** The sysext web surface is unchanged:
-  `cmd/pilothouse`'s `newRegistry` still constructs `sysext.NewSystemManager`
-  directly from the web process's own `--updex` config, and `sysext.Module`
-  implements neither `CapabilityGate` nor any route-level `platform.Gate`.
-  Web-side capability-gating of sysext reads is deferred to #52, when those
-  reads move behind the broker. The daemon-side per-action
-  `registerSysextActions` guard described earlier is #50's phase-1a work in
-  `cmd/pilothoused`, not a web-side gate.
+- **sysext was out of scope for #54; #52 landed its web-side gate.**
+  `cmd/pilothouse`'s `newRegistry` now calls `sysext.New()` with no arguments
+  — the web process constructs no extension manager and has no
+  `--definitions-root`/`--updex` flags — and reads the inventory through
+  `broker.QueryExtensionsState`. The exec-backed manager moved out of
+  `internal/modules/sysext` into `internal/modules/sysext/extctl` in the same
+  change, so the boundary is enforced by the package graph rather than by
+  convention: `sysext` keeps only the `Manager`/`ExtensionsSource` interfaces
+  and their types and imports no `os/exec`, while `extctl` — linked by
+  `cmd/pilothoused` alone — owns `NewSystemManager`, `ExecRunner`, and every
+  `updex`/`systemd-sysext` invocation. `sysext.Module` implements
+  `platform.CapabilityGateAny` returning `{Updex, Sysext}` (and, like
+  `maintenance`, deliberately not `CapabilityGate`), which gates its nav
+  entry, dashboard card, and `GET /sysext`. Its mutating routes keep the
+  daemon's narrower requirements, mirroring `registerSysextActions` exactly:
+  `POST /sysext/{name}/{action}` (enable, disable) is wrapped in
+  `platform.Gate` on `HasAll(Updex, Sysext)`, while
+  `POST /sysext/actions/{action}` is wrapped in `platform.GateAny` at the
+  route and re-checks per action in the handler — `refresh` 404s without
+  `sysext`, `update` 404s without `updex` — because the two actions share one
+  route pattern but not one requirement. The rendered controls follow the same
+  three predicates via `Page`'s `enableDisableAvailable`/`refreshAvailable`/
+  `updateAvailable` parameters, and an extension with `Managed: false` renders
+  no enable/disable control at all. `cmd/pilothouse/capability_contract_test.go`'s
+  `webSideUngatedBrokerIDs` exemption (the four `ActionSysext*` IDs) and its
+  `Len == 4` assertion were deleted in the same change, so those IDs are now
+  subject to the ordinary web-side capability check.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 
@@ -1144,7 +1174,6 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 **`pilothouse` (web) flags** — `cmd/pilothouse/main.go`:
 - `--listen` (default `127.0.0.1:8888`), `--broker-socket`
   (default `/run/pilothouse/broker.sock`)
-- `--definitions-root`, `--updex` (sysext support)
 - repeatable `--allowed-origin`; also augmented by `PILOTHOUSE_ALLOWED_ORIGINS`
 - `--secure-cookie` (set behind a TLS-terminating proxy)
 

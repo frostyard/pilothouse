@@ -12,6 +12,7 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/jobs"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
+	"github.com/frostyard/pilothouse/internal/modules/sysext/extctl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -472,13 +473,13 @@ func (failingRunner) Run(context.Context, string, ...string) ([]byte, error) {
 
 // TestSystemManagerConsumesTheRealSysextManager proves the seam State depends
 // on is the one cmd/pilothoused actually passes it -- the same concrete
-// *sysext.SystemManager instance registerExtensions serves
+// *extctl.SystemManager instance registerExtensions serves
 // broker.QueryExtensionsState from -- and that spec resolution 3 holds through
 // that real implementation rather than only through a hand-written fake: with
 // every command failing, the aggregate reports both sources errored, and
 // State still answers with err == nil.
 func TestSystemManagerConsumesTheRealSysextManager(t *testing.T) {
-	var source sysext.ExtensionsSource = sysext.NewSystemManager(failingRunner{}, "", "updex")
+	var source sysext.ExtensionsSource = extctl.NewSystemManager(failingRunner{}, "", "updex")
 
 	// The real source's own contract first: a command failure is reported in
 	// the state, never as the method's error.

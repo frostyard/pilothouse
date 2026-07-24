@@ -547,7 +547,7 @@ func registerEverythingForFixture(t *testing.T, caps capability.Set) contractReg
 	require.NoError(t, registerServices(actions, queries, servicesManager, caps))
 	require.NoError(t, registerLogs(queries, logsManager, caps))
 
-	// maintenance.NewSystemManager and sysext.NewSystemManager have no
+	// maintenance.NewSystemManager and extctl.NewSystemManager have no
 	// systemd D-Bus dependency, so their fakes are always live; only the
 	// registration-time capability guard withholds anything.
 	require.NoError(t, registerMaintenance(actions, queries, &fakeMaintenanceManager{}, caps))

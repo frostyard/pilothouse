@@ -108,7 +108,7 @@ type SystemManager struct {
 // "no extension-derived reboot reasons".
 //
 // The two consumers share the interface and the instance, not a result:
-// sysext.SystemManager.State has no cache of its own, so a QueryExtensionsState
+// extctl.SystemManager.State has no cache of its own, so a QueryExtensionsState
 // and a QueryMaintenanceState in the same minute may run it twice (only the
 // 1-minute cache in extensionState below is a real cache, and it is this
 // manager's alone).
