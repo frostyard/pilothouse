@@ -884,7 +884,7 @@ func calibratedExtensionsState(caps capability.Set) sysext.ExtensionsState {
 			Managed:     true,
 			Name:        "contract-managed",
 			Updates: []sysext.AvailableUpdate{
-				{Feature: "contract-managed", Component: "contract-ext", Current: "1.0.0", Newest: "1.1.0"},
+				{Extension: "contract-managed", Component: "contract-ext", Current: "1.0.0", Newest: "1.1.0"},
 			},
 		}
 		if sysextPresent {

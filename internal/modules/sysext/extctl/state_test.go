@@ -130,7 +130,7 @@ func TestStateUnionsBothSourcesWhenAvailable(t *testing.T) {
 		Merged:      true,
 		Name:        "docker",
 		Path:        "/not-present/docker_9.9_13_x86-64.raw",
-		Updates:     []sysext.AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}},
+		Updates:     []sysext.AvailableUpdate{{Extension: "docker", Component: "engine", Current: "1", Newest: "2"}},
 		Version:     "9.9",
 	}, docker, "a managed, installed, merged extension carries every field from both sources plus its pending update")
 
@@ -278,7 +278,7 @@ func TestStateDegradesSysextSourceIndependently(t *testing.T) {
 			assert.True(t, docker.Managed)
 			assert.True(t, docker.Enabled)
 			assert.Equal(t, "Docker engine", docker.Description)
-			assert.Equal(t, []sysext.AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, docker.Updates)
+			assert.Equal(t, []sysext.AvailableUpdate{{Extension: "docker", Component: "engine", Current: "1", Newest: "2"}}, docker.Updates)
 			assert.False(t, docker.Installed)
 			assert.False(t, docker.Merged)
 			assert.Empty(t, extensionByName(t, state, "zinc").Updates)

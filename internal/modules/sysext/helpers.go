@@ -62,7 +62,7 @@ func updateCount(extensions []Extension) int {
 }
 
 // pendingUpdates flattens every extension's Updates slice into the flat row
-// list the "Available updates" table renders. AvailableUpdate.Feature
+// list the "Available updates" table renders. AvailableUpdate.Extension
 // carries the owning extension's name, so the flattened rows stay
 // self-describing without a parallel key.
 func pendingUpdates(extensions []Extension) []AvailableUpdate {

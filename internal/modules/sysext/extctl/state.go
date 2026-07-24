@@ -126,10 +126,10 @@ func (m *SystemManager) updexInventory(ctx context.Context) (map[string]sysext.E
 	}
 	updates := map[string][]sysext.AvailableUpdate{}
 	for _, update := range available {
-		if _, isManaged := managed[update.Feature]; !isManaged {
+		if _, isManaged := managed[update.Extension]; !isManaged {
 			continue
 		}
-		updates[update.Feature] = append(updates[update.Feature], update)
+		updates[update.Extension] = append(updates[update.Extension], update)
 	}
 	return managed, updates, nil
 }

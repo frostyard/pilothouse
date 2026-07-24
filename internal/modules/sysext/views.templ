@@ -137,7 +137,7 @@ templ Page(state ExtensionsState, csrf string, admin bool, enableDisableAvailabl
 					<thead><tr><th>Extension</th><th>Component</th><th>Current</th><th>Newest</th></tr></thead>
 					<tbody>
 						for _, update := range pendingUpdates(state.Extensions) {
-							<tr><td><strong>{ update.Feature }</strong></td><td>{ update.Component }</td><td>{ update.Current }</td><td>{ update.Newest }</td></tr>
+							<tr><td><strong>{ update.Extension }</strong></td><td>{ update.Component }</td><td>{ update.Current }</td><td>{ update.Newest }</td></tr>
 						}
 					</tbody>
 				</table>

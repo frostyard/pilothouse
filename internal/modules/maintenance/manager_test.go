@@ -180,7 +180,7 @@ func mergedButDisabledState() sysext.ExtensionsState {
 			Managed:   true,
 			Merged:    true,
 			Name:      "docker",
-			Updates:   []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}},
+			Updates:   []sysext.AvailableUpdate{{Extension: "docker", Component: "root", Current: "1", Newest: "2"}},
 			Enabled:   false,
 			Installed: true,
 		}},

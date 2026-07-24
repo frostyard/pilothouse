@@ -139,7 +139,7 @@ func (m *SystemManager) Check(ctx context.Context) ([]sysext.AvailableUpdate, er
 		updates = append(updates, parsed...)
 	}
 	slices.SortFunc(updates, func(a, b sysext.AvailableUpdate) int {
-		if order := strings.Compare(a.Feature, b.Feature); order != 0 {
+		if order := strings.Compare(a.Extension, b.Extension); order != 0 {
 			return order
 		}
 		return strings.Compare(a.Component, b.Component)
@@ -403,7 +403,7 @@ func parseUpdexCheck(output []byte) ([]sysext.AvailableUpdate, error) {
 			for _, result := range check.Results {
 				if result.UpdateAvailable {
 					updates = append(updates, sysext.AvailableUpdate{
-						Feature:   check.Feature,
+						Extension: check.Feature,
 						Component: result.Component,
 						Current:   result.CurrentVersion,
 						Newest:    result.NewestVersion,

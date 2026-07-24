@@ -33,7 +33,7 @@ func TestParseUpdexCheckAcceptsMessageAndArrayStream(t *testing.T) {
 	updates, err := parseUpdexCheck(output)
 
 	require.NoError(t, err)
-	assert.Equal(t, []sysext.AvailableUpdate{{Feature: "docker", Component: "rootfs", Current: "1", Newest: "2"}}, updates)
+	assert.Equal(t, []sysext.AvailableUpdate{{Extension: "docker", Component: "rootfs", Current: "1", Newest: "2"}}, updates)
 }
 
 func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
@@ -45,7 +45,7 @@ func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
 	updates, err := parseUpdexCheck(output)
 
 	require.NoError(t, err)
-	assert.Equal(t, []sysext.AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
+	assert.Equal(t, []sysext.AvailableUpdate{{Extension: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
 }
 
 func TestParseUpdexCheckAcceptsNullAsNoUpdates(t *testing.T) {
@@ -86,8 +86,8 @@ func TestSystemManagerCheckCombinesDirectoriesAndSortsUpdates(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []sysext.AvailableUpdate{
-		{Feature: "docker", Component: "engine", Current: "3", Newest: "4"},
-		{Feature: "zinc", Component: "base", Current: "1", Newest: "2"},
+		{Extension: "docker", Component: "engine", Current: "3", Newest: "4"},
+		{Extension: "zinc", Component: "base", Current: "1", Newest: "2"},
 	}, updates)
 	assert.Equal(t, [][]string{
 		{"updex", "-C", shared, "--json", "features", "check"},

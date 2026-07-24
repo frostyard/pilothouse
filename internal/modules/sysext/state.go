@@ -63,7 +63,7 @@ type ExtensionsState struct {
 // simply leaves its own fields zeroed.
 //
 // Updates carries the pending component updates updex's check reported for
-// this extension, matched by AvailableUpdate.Feature. It is empty for an
+// this extension, matched by AvailableUpdate.Extension. It is empty for an
 // unmanaged extension in every case -- the check only ever reports on
 // definitions updex itself enumerated -- and empty for a managed extension
 // with nothing pending.
@@ -80,12 +80,13 @@ type Extension struct {
 }
 
 // AvailableUpdate is one pending component update updex reported for one
-// extension. Feature names the owning extension (updex's own vocabulary for
-// a definition), which is redundant with the enclosing Extension.Name inside
-// Extension.Updates but is what keeps a row self-describing once the
-// Extensions page flattens every extension's Updates into one table.
+// extension. Extension names the owning extension (updex reports it under its
+// own "feature" vocabulary), which is redundant with the enclosing
+// Extension.Name inside Extension.Updates but is what keeps a row
+// self-describing once the Extensions page flattens every extension's Updates
+// into one table.
 type AvailableUpdate struct {
-	Feature   string
+	Extension string
 	Component string
 	Current   string
 	Newest    string

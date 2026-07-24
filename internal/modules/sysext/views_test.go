@@ -43,7 +43,7 @@ func mixedState() ExtensionsState {
 				Managed:     true,
 				Name:        "managed-ext",
 				Updates: []AvailableUpdate{
-					{Feature: "managed-ext", Component: "managed-component", Current: "1.0.0", Newest: "1.1.0"},
+					{Extension: "managed-ext", Component: "managed-component", Current: "1.0.0", Newest: "1.1.0"},
 				},
 				Version: "1.0.0",
 			},
@@ -166,9 +166,9 @@ func TestSummaryCountsPendingUpdates(t *testing.T) {
 	// third — so a per-extension count (2) and a per-component count (3)
 	// cannot both pass.
 	state.Extensions[0].Updates = append(state.Extensions[0].Updates,
-		AvailableUpdate{Feature: "managed-ext", Component: "second-component", Current: "1.0.0", Newest: "1.2.0"})
+		AvailableUpdate{Extension: "managed-ext", Component: "second-component", Current: "1.0.0", Newest: "1.2.0"})
 	state.Extensions[2].Updates = []AvailableUpdate{
-		{Feature: "merged-disabled-ext", Component: "third-component", Current: "3.0.0", Newest: "3.1.0"},
+		{Extension: "merged-disabled-ext", Component: "third-component", Current: "3.0.0", Newest: "3.1.0"},
 	}
 
 	body := renderSummary(t, state)
