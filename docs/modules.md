@@ -241,10 +241,11 @@ for the failure mode this avoids.
 ### Any-of whole-module gating (`CapabilityGateAny`)
 
 `CapabilityGate`/`Available` above always require *every* listed capability
-(`capability.Set.HasAll` semantics). Some modules will instead need *any
-one* of several capabilities — e.g. a module whose surface works given
-either of two alternative container engines. For that shape,
-`internal/capability`'s `Set` gained a sibling predicate,
+(`capability.Set.HasAll` semantics). Some modules instead need *any one* of
+several capabilities — `maintenance` is the real example: it reports host-image
+status from bootc or rpm-ostree *and* reboot posture from systemd, so its
+surface is worth showing as soon as any one of the three is present. For that
+shape, `internal/capability`'s `Set` gained a sibling predicate,
 `HasAny(ids ...ID) bool`, that reports true iff at least one given id is
 present; unlike `HasAll`'s zero-ids case (vacuously true), `HasAny()` with
 zero ids is always false, since "any of nothing" has no capability to
@@ -284,25 +285,67 @@ change if a module later switches from one interface to the other.
 Reach for `CapabilityGateAny` instead of `CapabilityGate` when a module's
 whole surface should appear as soon as *any one* of a set of alternative
 capabilities is present, rather than requiring all of them together.
-`maintenance` is the first and, so far, only production adopter: it returns
-`{Systemd, Bootc, RPMOStree}` from `RequiredAnyCapabilities` (and no longer
-implements `CapabilityGate`), so a bootc-only host with no systemd keeps the
-module's nav entry, dashboard card, and `GET /maintenance` — which is wrapped
-in `platform.GateAny` accordingly. Its `POST /maintenance/reboot` is a
-separate matter: rebooting is a systemd operation, so that one route keeps a
-plain `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` outside
-the whole-module mechanism, and each broker call the module makes is gated on
-its own capability inside the handler (`QueryMaintenanceState` is skipped, not
-failed, when `Systemd` is absent) so no capability combination can turn an
-available module into a 503. Keeping a narrower route gate inside an
-available module also carries the partial-gate obligation: audit every view
-element that targets the narrower route. Maintenance's only one is the
-"Reboot host" form, which renders solely when `state.RebootRequired` is
-true — impossible under the zero `State` a systemd-less host gets — so no
-control ever points at the reboot route on a host that 404s it. The
-mechanism itself (`HasAny`, `GateAny`,
-`AvailableAny`, and the `moduleAvailable` composition) also remains proven
-with synthetic fake modules in `internal/capability/capability_test.go`,
+
+#### Worked example: `maintenance`'s per-surface split
+
+`maintenance` is the only production `CapabilityGateAny` adopter, and it is the
+one module in the tree where module presence, an individual route, and each
+individual broker call are gated on *different* capability expressions. Copy its
+shape when a module aggregates independently-sourced reports:
+
+| Surface | Predicate | Where it is enforced |
+|---|---|---|
+| Nav entry, dashboard card | `HasAny(Systemd, Bootc, RPMOStree)` | `Module.RequiredAnyCapabilities` → `platform.AvailableAny` via `moduleAvailable` |
+| `GET /maintenance` | `HasAny(Systemd, Bootc, RPMOStree)` | `platform.GateAny(host, m.RequiredAnyCapabilities(), ...)` in `Mount` |
+| `POST /maintenance/reboot` | `Has(Systemd)` (`HasAll` of a one-element set) | a separate, plain `platform.Gate(host, []capability.ID{capability.Systemd}, ...)` in the same `Mount` |
+| `broker.QueryMaintenanceState` | `Has(Systemd)` | `queryState` in `module.go` (web) / `registerMaintenance` (daemon) |
+| `broker.ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (daemon); it also serializes on its own `maintenance/global` lock rather than sharing sysext's |
+| `broker.QueryHostImageStatus` | `HasAny(Bootc, RPMOStree)` | `queryHostImage` in `module.go` (web) / `registerHostImage` (daemon) |
+
+`maintenance.Module` returns `{Systemd, Bootc, RPMOStree}` from
+`RequiredAnyCapabilities` and deliberately does **not** also implement
+`CapabilityGate` — the two whole-module gates are alternatives, not layers. So a
+bootc-only host with no systemd keeps the module's nav entry, dashboard card, and
+`GET /maintenance`, while `POST /maintenance/reboot` 404s there.
+
+Each broker call is skipped rather than failed when its own capability is absent,
+so no capability combination can turn an available module into a 503:
+`queryState` substitutes the zero `State` without `Systemd`, and `queryHostImage`
+returns `nil` without `HasAny(Bootc, RPMOStree)`. On the page, nil-ness *is* the
+availability flag — `Page(state, hostImage, ...)` renders the whole "Host image"
+section only when `hostImage != nil`, so a host with no host-image source omits
+the section instead of showing an empty or errored placeholder. `Dashboard` and
+`Health` call only `queryState`, so the card and the `/attention` findings carry
+no host-image content at all.
+
+Keeping a narrower route gate inside an available module also carries the
+partial-gate obligation from the previous section: audit every view element that
+targets the narrower route. Maintenance's only one is the "Reboot host" form,
+which renders solely when `state.RebootRequired` is true — impossible under the
+zero `State` a systemd-less host gets — so no control ever points at the reboot
+route on a host that 404s it. Nothing in the host-image section is a control:
+it renders no upgrade, switch, rebase, rollback, or automatic-update link,
+button, or form, and `views_test.go`'s
+`TestPageExposesNoHostImageMutationControl` asserts that across every fixture.
+
+A fact that a module reports from more than one gated source needs its rendering
+leg attached to the *broader* gate, or the narrower one silently hides it.
+Soft-reboot eligibility is the worked case: it is parsed once from
+`bootc status --json` and reaches three places — `HostImageStatus.SoftRebootCapable`
+on `QueryHostImageStatus`'s response, `State.SoftRebootCapable` copied verbatim
+onto `QueryMaintenanceState`'s response by `SystemManager.State`, and one UI
+indicator in `hostImageSection`. The UI indicator reads
+`HostImageStatus.SoftRebootCapable`, **not** `State.SoftRebootCapable`, so its
+availability follows `HasAny(Bootc, RPMOStree)` and never `Systemd`: it renders
+identically on a bootc-only host, where `QueryMaintenanceState` is never called
+and `State.SoftRebootCapable` is therefore always nil. `State.SoftRebootCapable`
+is still populated and still useful — it is the fact's API-surface leg for a
+consumer reading the full systemd-gated posture response in one call — it is
+simply not what the page renders from.
+
+The mechanism itself (`HasAny`, `GateAny`, `AvailableAny`, and the
+`moduleAvailable` composition) also remains proven with synthetic fake modules in
+`internal/capability/capability_test.go`,
 `internal/platform/capability_test.go`, `internal/web/server_test.go`, and
 `internal/modules/attention/module_test.go`, independent of that adopter.
 

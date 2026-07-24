@@ -78,16 +78,79 @@ directory. Current modules:
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
-| `maintenance` | Extension update availability, maintenance-job state, reboot posture, confirmed reboot. |
+| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation and no automatic-update reporting. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
 | `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
 
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
 
-**In progress (#51, host-image status): the parsers, the manager, the broker
-query, the reboot posture that consumes it, and the Maintenance page section
-that renders it.**
+**Host-image status (#51) — landed end state.** Maintenance is no longer a
+systemd-only surface: it is a read-only host-image lifecycle *and* reboot-posture
+module. Every piece has landed — the parsers, the manager, the broker query, the
+reboot posture that consumes it, the module's any-of capability gate, and the
+Maintenance page section that renders it. Two things it deliberately does **not**
+do, and no sentence below should be read as saying otherwise: it exposes no bootc
+or rpm-ostree mutation of any kind — no upgrade, switch, rebase, or rollback
+action exists, and `cmd/pilothoused/capability_contract_test.go`'s
+`TestNoHostImageMutationActionExists` keeps it that way by asserting that none of
+`internal/broker/api.go`'s 35 `Action*` constants names bootc, ostree, or
+rpm-ostree in either its Go identifier or its wire ID (`Query*` constants are
+deliberately exempt — `QueryHostImageStatus` is the read-only surface this phase
+adds) — and it does no automatic-update reporting: normalized updater
+policy/timer reporting was split out of #51 into #58 and has not landed. The
+`autoupdate-bootc`/`autoupdate-rpm-ostree` capabilities #50 probes are advertised
+over `QueryCapabilities`, but no production code path in `cmd/pilothoused` or any
+module gates on or reports them — outside `internal/capability` they appear only
+in tests' full-capability fixtures. Zincati is neither queried nor special-cased:
+`TestMaintenanceNeverReferencesZincati` fails on any non-comment mention of it in
+any `.go` or `.templ` file under `internal/modules/maintenance`.
+
+The per-surface capability split is the thing to hold in mind — Maintenance is
+the one module where module presence, one route, and each individual broker call
+are gated on *different* capability expressions:
+
+| Surface | Gate | Where |
+|---|---|---|
+| Module presence: nav entry, dashboard card | `HasAny(Systemd, Bootc, RPMOStree)` | `Module.RequiredAnyCapabilities` → `platform.AvailableAny`, via `internal/web/server.go`'s `moduleAvailable` |
+| `GET /maintenance` | `HasAny(Systemd, Bootc, RPMOStree)` | `platform.GateAny` in `Mount` (`internal/modules/maintenance/module.go`) |
+| `POST /maintenance/reboot` | `Has(Systemd)` | a separate, plain `platform.Gate` in the same `Mount` |
+| `/attention` health collection | `HasAny(Systemd, Bootc, RPMOStree)` | `attention.Module.findings`' `CapabilityGateAny` type-assert |
+| `QueryMaintenanceState` (reboot posture, reasons, updates, jobs) | `Has(Systemd)` | `queryState` web-side; `registerMaintenance` daemon-side |
+| `ActionMaintenanceReboot` | `Has(Systemd)` | `registerMaintenance` (`cmd/pilothoused/main.go`); serialized on its own `maintenance/global` lock, no longer `sysext/global` — see "Per-resource action serialization" below |
+| `QueryHostImageStatus` (booted/staged/rollback, digests, soft-reboot eligibility) | `HasAny(Bootc, RPMOStree)` | `queryHostImage` web-side; `registerHostImage` daemon-side |
+
+What makes the first row real is `internal/web/server.go`'s
+`moduleAvailable(module, caps)` — the single choke point `availableManifests`
+(nav) and the dashboard loop both call — which composes the two whole-module
+tests as `platform.Available(module, caps) && platform.AvailableAny(module,
+caps)`. Each half defaults to `true` for a module that doesn't implement its
+interface, so this AND-of-two-defaults is exactly right for all three shapes a
+module can be in, and maintenance — which implements `CapabilityGateAny` only —
+is filtered purely by the `HasAny` half with no type-switching in `server.go`.
+
+Neither `Dashboard` nor `Health` fetches host-image status at all: both call only
+`queryState`, so the dashboard card and `/attention` findings are still purely
+`QueryMaintenanceState`-derived, and host-image content appears only on the page.
+
+Soft-reboot eligibility reaches exactly three places, all fed by one parse of one
+`bootc status --json` run and never independently recomputed:
+`HostImageStatus.SoftRebootCapable` on `QueryHostImageStatus`'s response (set by
+`ParseBootcStatus`, preserved by `MergeHostImage`); `State.SoftRebootCapable` on
+`QueryMaintenanceState`'s response, copied verbatim by `SystemManager.State` from
+the same `HostImageSource` read that supplies the staged-deployment reboot
+reason; and exactly one UI indicator, rendered by `hostImageSection`. The UI leg
+reads `HostImageStatus.SoftRebootCapable` — **not** `State.SoftRebootCapable` —
+so the indicator's availability follows `HasAny(Bootc, RPMOStree)` and never
+`Systemd`: it renders identically on a bootc-only host with no systemd, where
+`QueryMaintenanceState` is never called and `State.SoftRebootCapable` is
+therefore always nil. `State.SoftRebootCapable` still lands and is still
+populated — it is the fact's API-surface leg for any consumer reading the full
+systemd-gated posture response in one call — it is simply not what the page
+renders from. All three legs keep the value's three states (non-nil true, non-nil
+false, nil for "this bootc does not report it"), and nothing in the tree performs
+a soft reboot: only the pre-existing full `ActionMaintenanceReboot` exists.
+
 `internal/modules/maintenance/hostimage.go` adds the read-only host-image
 domain types — `Deployment` (bootc's image reference + manifest digest, plus
 rpm-ostree's supplementary version + ostree checksum) and `HostImageStatus`
@@ -99,7 +162,7 @@ plus `ParseBootcStatus`, a pure decoder for `bootc status --json`;
 unexported supplement type; and `MergeHostImage`, which combines the two under
 a bootc-authoritative precedence rule.
 
-As of this commit those parsers have exactly one caller:
+Those parsers have exactly one caller:
 `internal/modules/maintenance/hostimage_manager.go`'s `HostImageManager`,
 which in turn has exactly two consumers, both wired to the *same* instance in
 `cmd/pilothoused/main.go`: the broker query `QueryHostImageStatus`
@@ -1021,6 +1084,20 @@ rationale.
   `frostyard/mill` repo; this repo carries only config, learned skills, and
   cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
   `.github/copilot-instructions.md`, all pointing back to `AGENTS.md`).
+  `CLAUDE.md` is a symlink to `AGENTS.md`, so the two are byte-identical by
+  construction and can never drift.
+- `AGENTS.md` (and therefore `CLAUDE.md`) is deliberately generic: it carries
+  only repository-wide process, stack, build-target, templ, release, and
+  skill-review instructions, with no per-module feature inventory and no
+  module-specific claim anywhere in it. A change that adds or reshapes a
+  module's surface therefore does not make any sentence in it stale — the
+  per-module feature narrative lives here in `yeti/OVERVIEW.md`, in
+  `docs/modules.md`, and in `README.md`'s "What works" list. Confirm this is
+  still true when reviewing AGENTS.md's "update relevant documentation after
+  any change to source code" invariant for a feature change, rather than
+  assuming either that it must be edited or that it can be skipped
+  unexamined. (#51's host-image series was reviewed against it on exactly
+  these grounds and required no edit to either file.)
 - `docs/agents/skills/` holds durable lessons harvested from previous mill
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,
