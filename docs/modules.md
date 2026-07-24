@@ -315,8 +315,20 @@ returns `nil` without `HasAny(Bootc, RPMOStree)`. On the page, nil-ness *is* the
 availability flag — `Page(state, hostImage, ...)` renders the whole "Host image"
 section only when `hostImage != nil`, so a host with no host-image source omits
 the section instead of showing an empty or errored placeholder. `Dashboard` and
-`Health` call only `queryState`, so the card and the `/attention` findings carry
-no host-image content at all.
+`Health` call only `queryState`, so the host-image *section* is a
+`GET /maintenance`-only surface — but do not conclude that the card and
+`/attention` are host-image-free. `QueryMaintenanceState`'s `State` is partly
+host-image-derived: `SystemManager.State` reads the same `HostImageSource`
+(under the probed `Bootc` flag), appends "A staged host image deployment requires
+activation by reboot." to `RebootReasons` when a deployment is staged, and copies
+`SoftRebootCapable`. The card's `Summary` renders `rebootSummary(state)`, which
+returns `state.RebootReasons[0]` whenever `RebootRequired`, and `Health`'s
+`maintenance.reboot` finding uses that same first reason as its detail — so on a
+host whose only reboot reason is a staged host image, that host-image-derived
+sentence is exactly what the dashboard card and `/attention` display. What those
+two surfaces never carry is host-image *data* (deployment slots, image
+references, digests, soft-reboot eligibility) — only reboot posture that a
+host-image fact may have caused.
 
 Keeping a narrower route gate inside an available module also carries the
 partial-gate obligation from the previous section: audit every view element that
@@ -330,11 +342,17 @@ button, or form, and `views_test.go`'s
 
 A fact that a module reports from more than one gated source needs its rendering
 leg attached to the *broader* gate, or the narrower one silently hides it.
-Soft-reboot eligibility is the worked case: it is parsed once from
-`bootc status --json` and reaches three places — `HostImageStatus.SoftRebootCapable`
-on `QueryHostImageStatus`'s response, `State.SoftRebootCapable` copied verbatim
-onto `QueryMaintenanceState`'s response by `SystemManager.State`, and one UI
-indicator in `hostImageSection`. The UI indicator reads
+Soft-reboot eligibility is the worked case: it reaches three places —
+`HostImageStatus.SoftRebootCapable` on `QueryHostImageStatus`'s response,
+`State.SoftRebootCapable` copied verbatim onto `QueryMaintenanceState`'s response
+by `SystemManager.State`, and one UI indicator in `hostImageSection`. Those are
+three independent legs, not one shared parse. The two broker queries call the
+same `HostImageManager` instance, but sharing an instance is not sharing a
+result: `Status` memoizes nothing and re-runs `bootc status --json` on every
+call, so on a systemd-plus-bootc host `collectPage`'s `queryState` and
+`queryHostImage` produce the `State` copy and the rendered `HostImageStatus`
+from two separate bootc runs, which are not guaranteed to agree. The UI
+indicator reads
 `HostImageStatus.SoftRebootCapable`, **not** `State.SoftRebootCapable`, so its
 availability follows `HasAny(Bootc, RPMOStree)` and never `Systemd`: it renders
 identically on a bootc-only host, where `QueryMaintenanceState` is never called

@@ -129,18 +129,50 @@ interface, so this AND-of-two-defaults is exactly right for all three shapes a
 module can be in, and maintenance — which implements `CapabilityGateAny` only —
 is filtered purely by the `HasAny` half with no type-switching in `server.go`.
 
-Neither `Dashboard` nor `Health` fetches host-image status at all: both call only
-`queryState`, so the dashboard card and `/attention` findings are still purely
-`QueryMaintenanceState`-derived, and host-image content appears only on the page.
+Neither `Dashboard` nor `Health` fetches `QueryHostImageStatus`: both call only
+`queryState`, so the *host-image section* — deployments, digests, per-source
+unavailable indicators, the soft-reboot indicator — is rendered on
+`GET /maintenance` and nowhere else. That is not the same as the card and
+`/attention` being host-image-free, and the distinction matters:
+`QueryMaintenanceState`'s `State` is itself partly host-image-derived on the
+daemon side. `SystemManager.State` calls `HostImageSource.Status` (only when the
+probed `capability.Bootc` flag passed to `NewSystemManager` is true and the
+source is non-nil), appends `stagedHostImageReason` — "A staged host image
+deployment requires activation by reboot." — to `State.RebootReasons` when a
+staged deployment exists, and copies `SoftRebootCapable` onto `State`. `Summary`
+renders `rebootSummary(state)`, which is `state.RebootReasons[0]` whenever
+`RebootRequired`, and `Health`'s `maintenance.reboot` finding uses that same
+`RebootReasons[0]` as its detail. Reasons are appended in a fixed order —
+`/run/reboot-required` marker, staged host image, merged-but-disabled extension,
+completed extension update — so on a host whose only reboot reason is a staged
+host-image deployment, that host-image-derived sentence *is* what the dashboard
+card and the `/attention` finding display. What the card and `/attention` never
+show is raw host-image data (image references, digests, rollback slots,
+soft-reboot eligibility); the reboot posture they show can be host-image-caused.
 
-Soft-reboot eligibility reaches exactly three places, all fed by one parse of one
-`bootc status --json` run and never independently recomputed:
+Soft-reboot eligibility reaches exactly three places:
 `HostImageStatus.SoftRebootCapable` on `QueryHostImageStatus`'s response (set by
 `ParseBootcStatus`, preserved by `MergeHostImage`); `State.SoftRebootCapable` on
 `QueryMaintenanceState`'s response, copied verbatim by `SystemManager.State` from
-the same `HostImageSource` read that supplies the staged-deployment reboot
-reason; and exactly one UI indicator, rendered by `hostImageSection`. The UI leg
-reads `HostImageStatus.SoftRebootCapable` — **not** `State.SoftRebootCapable` —
+the same single `hostImageState` read that supplies that call's
+staged-deployment reboot reason; and exactly one UI indicator, rendered by
+`hostImageSection`.
+
+Do **not** read that as one parse feeding all three legs. `hostImageState`
+reading the source once is a guarantee *within a single `State` call* and
+nothing more. `QueryMaintenanceState` and `QueryHostImageStatus` are separate
+broker queries, and `HostImageManager.Status` memoizes nothing — it re-runs
+`bootc status --json` (and, when rpm-ostree is advertised,
+`rpm-ostree status --json`) on every call. One `GET /maintenance` on a
+systemd-plus-bootc host therefore runs bootc twice: `collectPage` calls
+`queryState`, whose daemon handler reaches `Status` through
+`SystemManager.State` → `hostImageState`, and then `queryHostImage`, whose
+daemon handler calls `Status` directly. The single `HostImageManager` instance
+wired in `cmd/pilothoused/main.go` shares the *code path* to bootc, not the
+*result*: `State.SoftRebootCapable` and the `HostImageStatus` the page renders
+come from two independent runs and are not guaranteed to agree.
+
+The UI leg reads `HostImageStatus.SoftRebootCapable` — **not** `State.SoftRebootCapable` —
 so the indicator's availability follows `HasAny(Bootc, RPMOStree)` and never
 `Systemd`: it renders identically on a bootc-only host with no systemd, where
 `QueryMaintenanceState` is never called and `State.SoftRebootCapable` is
@@ -169,7 +201,9 @@ which in turn has exactly two consumers, both wired to the *same* instance in
 (`org.frostyard.pilothouse.maintenance.host_image_status`, registered by
 `registerHostImage`), and `maintenance.SystemManager`, which takes it as a
 `HostImageSource` and reads it while computing `QueryMaintenanceState`'s
-posture. The query now has a web-side consumer as well: `GET /maintenance`
+posture. Sharing the instance shares the *path*, not the *result*: `Status`
+memoizes nothing, so each of the two consumers re-runs the underlying commands.
+The query now has a web-side consumer as well: `GET /maintenance`
 fetches it when the host advertises `HasAny(Bootc, RPMOStree)` and renders it
 as the page's "Host image" section — see the "Maintenance: whole-module
 `HasAny(Systemd, Bootc, RPMOStree)` gate" bullet below for exactly what that
@@ -520,7 +554,8 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   nav/dashboard/route behavior was unchanged. `services` is the first real
   module to adopt it — see the next bullet.
 - **`HasAny`/`CapabilityGateAny`/`GateAny`/`AvailableAny`: an any-of sibling
-  (mechanism only).** `internal/capability.Set` gained `HasAny(ids ...ID)
+  (added as mechanism by #54, adopted by `maintenance` in #51).**
+  `internal/capability.Set` gained `HasAny(ids ...ID)
   bool`, reporting true iff at least one given id is present; unlike
   `HasAll`'s zero-ids case (vacuously true), `HasAny()` with zero ids is
   always false ("any of nothing" has no capability to satisfy), and a
@@ -551,8 +586,10 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   through a fake `Host`'s real `Capabilities()`) and a synthetic fake module
   registered into a real `*web.Server` in `internal/web/server_test.go`
   proving nav/dashboard/route behavior through a real registry and HTTP
-  round trip. `maintenance` is the first real adopter — see the Maintenance
-  bullet below.
+  round trip. #51 then made `maintenance` the first — and still the only —
+  production adopter, with `RequiredAnyCapabilities()` returning
+  `{Systemd, Bootc, RPMOStree}`; see the Maintenance bullet below for the
+  per-surface split that adoption produced.
 - **Services module: the first real `CapabilityGate` adopter.**
   `internal/modules/services.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
