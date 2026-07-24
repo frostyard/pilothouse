@@ -136,11 +136,20 @@ func NewAutoUpdateManager(client systemdClient, bootcConfigured, rpmOStreeConfig
 // Failure handling is per-field. Any individual D-Bus or file read that fails
 // degrades exactly the field or fields it feeds to their zero value; it never
 // drops the whole payload and never becomes Status's own error. Policy falls
-// back to custom/unknown whenever the properties needed to classify it could
-// not be read, so an unreadable host is never reported as running defaults. A
-// nil systemd client behaves precisely as though every systemd read failed --
-// all systemd-sourced fields zero, Policy custom/unknown -- and panics
-// nowhere.
+// back to custom/unknown whenever the input needed to classify it could not be
+// read, so an unreadable host is never reported as running defaults. The two
+// updaters differ in what that input is: bootc's policy is inferred from
+// systemd drop-in presence, so an unreadable systemd session forces it to
+// custom/unknown, whereas rpm-ostree's policy comes from rpm-ostreed.conf on
+// disk and is independent of systemd entirely.
+//
+// A nil systemd client behaves precisely as though every systemd read failed:
+// all systemd-sourced fields zero, and panics nowhere. Because bootc's policy
+// depends on systemd, a nil client leaves BootcAutoUpdate.Policy at
+// custom/unknown. rpm-ostree's policy is not systemd-sourced, so a nil client
+// does not touch it -- RPMOStreeAutoUpdate.Policy still reflects
+// rpm-ostreed.conf whenever that file is readable, and only falls back to
+// custom/unknown when the config read itself fails.
 //
 // Status therefore never returns a non-nil error today. Like
 // HostImageManager.Status, the error result exists for conditions outside

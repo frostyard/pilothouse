@@ -291,14 +291,24 @@ discipline `HostImageManager.Status` keeps.
 Failure handling is per-field. Any single D-Bus or file read that fails
 degrades exactly the field(s) it feeds to their zero value; it never drops the
 whole payload and never becomes `Status`'s own error. `Policy` falls back to
-`custom/unknown` whenever the properties needed to classify it could not be read
-— for bootc, that includes not being able to read *either* unit's drop-in list,
-since the "no drop-ins anywhere means the shipped `apply` default" inference is
-only sound when the absence was actually observed. A nil `client` behaves
-exactly as though every systemd read failed — all systemd-sourced fields zero,
-`Policy` `custom/unknown` — and panics nowhere. `Status` therefore never returns
-a non-nil error today; like `HostImageManager.Status`, the error result exists
-for conditions outside per-updater reporting, of which this design has none, and
+`custom/unknown` whenever the input needed to classify it could not be read, but
+the two updaters differ in what that input is. Bootc's policy is inferred from
+systemd drop-in presence, so it falls back to `custom/unknown` whenever *either*
+unit's drop-in list is unreadable — the "no drop-ins anywhere means the shipped
+`apply` default" inference is only sound when the absence was actually observed.
+rpm-ostree's policy, by contrast, comes from `/etc/rpm-ostreed.conf` on disk and
+is independent of systemd entirely; it only falls back to `custom/unknown` when
+that config read itself fails or the file is absent.
+
+A nil `client` behaves exactly as though every systemd read failed — all
+systemd-sourced fields zero — and panics nowhere. Because bootc's policy is
+systemd-sourced, a nil client leaves `BootcAutoUpdate.Policy` at
+`custom/unknown`. rpm-ostree's policy is *not* systemd-sourced, so a nil client
+does not affect it: `RPMOStreeAutoUpdate.Policy` still reflects
+`/etc/rpm-ostreed.conf` whenever that file is readable, and only degrades to
+`custom/unknown` when the config read fails. `Status` therefore never returns a
+non-nil error today; like `HostImageManager.Status`, the error result exists for
+conditions outside per-updater reporting, of which this design has none, and
 callers must still check it.
 
 Both updaters share one unexported helper that reads a timer+service pair's
