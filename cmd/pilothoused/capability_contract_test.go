@@ -2,9 +2,17 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/scanner"
+	"go/token"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/coreos/go-systemd/v22/dbus"
@@ -43,14 +51,21 @@ const (
 // requireAny selects which satisfaction rule the row uses, matching the
 // gating primitive its registerX function actually calls:
 //
-//   - false (the default, an AND row): caps.HasAll(required...) must equal
-//     whether the ID ends up Registered() in its registry.
-//   - true (an OR row, e.g. QueryHostImageStatus's HasAny(Bootc,
-//     RPMOStree)): caps.HasAny(required...) must equal it instead.
+//   - false (the default, an AND row): "every capability in required is
+//     present" must equal whether the ID ends up Registered() in its registry.
+//   - true (an OR row, e.g. QueryHostImageStatus, whose registerHostImage
+//     guard is HasAny(Bootc, RPMOStree)): "at least one capability in required
+//     is present" must equal it instead.
 //
-// Both sides are evaluated with capability.Set's own predicates -- the same
-// functions the production guards call -- rather than a second
-// reimplementation of set membership here.
+// Both rules are evaluated by this file's own allOfPresent/anyOfPresent
+// helpers, which combine single-membership capability.Set.Has checks with Go's
+// own && / || -- deliberately NOT by calling capability.Set.HasAll/HasAny.
+// Those two aggregation predicates are precisely what this phase's guards are
+// built on (registerHostImage calls caps.HasAny(Bootc, RPMOStree)), so using
+// them as the expectation would make the matrix tautological in exactly the
+// way docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md
+// describes: an any-of guard that silently degraded into an all-of one would
+// shift the expected and actual sides together and keep passing.
 type capabilityRequirement struct {
 	id         string
 	registry   registryKind
@@ -58,13 +73,38 @@ type capabilityRequirement struct {
 	requireAny bool
 }
 
+// allOfPresent reports whether every id is in caps. It is the independent
+// re-derivation of HasAll semantics (vacuously true for zero ids, which is how
+// a "none" row spells "always registered"), built only from Has.
+func allOfPresent(caps capability.Set, ids []capability.ID) bool {
+	for _, id := range ids {
+		if !caps.Has(id) {
+			return false
+		}
+	}
+	return true
+}
+
+// anyOfPresent reports whether at least one id is in caps. It is the
+// independent re-derivation of HasAny semantics (false for zero ids -- "any of
+// nothing" has nothing to satisfy it), built only from Has.
+func anyOfPresent(caps capability.Set, ids []capability.ID) bool {
+	for _, id := range ids {
+		if caps.Has(id) {
+			return true
+		}
+	}
+	return false
+}
+
 // satisfiedBy reports whether a fixture's capability set satisfies this row,
-// under whichever of the two satisfaction rules the row declares.
+// under whichever of the two satisfaction rules the row declares, without
+// routing through the HasAll/HasAny predicates the production guards call.
 func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 	if row.requireAny {
-		return caps.HasAny(row.required...)
+		return anyOfPresent(caps, row.required)
 	}
-	return caps.HasAll(row.required...)
+	return allOfPresent(caps, row.required)
 }
 
 // capabilityTable is the complete 52-row mirror of docs/capabilities.md.
@@ -146,6 +186,229 @@ var moduleLevelNoneIDs = []string{
 	broker.QueryJobs,
 	broker.QueryStorageState,
 	broker.QueryCapabilities,
+}
+
+// --- live source of truth: internal/broker/api.go ----------------------
+//
+// docs/capabilities.md states the 52/35/17 totals as a documented,
+// reproducible fact ("grep -c '^[[:space:]]*Action' internal/broker/api.go"
+// → 35, "grep -c '^[[:space:]]*Query' internal/broker/api.go" → 17; both
+// re-run against this tree while writing this chunk). The helpers below turn
+// that documented grep into an executed assertion by parsing the same file
+// with go/ast, so the table above is compared against the *live* constant
+// declarations rather than against a second hand-maintained list that could
+// drift with it (docs/agents/skills/completeness-tests-need-live-source-of-
+// truth.md: a fixture-vs-fixture length check would pass identically if a
+// real ID were silently dropped and a placeholder substituted).
+
+// brokerAPIPath is internal/broker/api.go relative to this package's
+// directory, which is the working directory `go test` runs this file in.
+const brokerAPIPath = "../../internal/broker/api.go"
+
+// maintenanceSourceDir is internal/modules/maintenance relative to this
+// package's directory, scanned by TestMaintenanceNeverReferencesZincati.
+const maintenanceSourceDir = "../../internal/modules/maintenance"
+
+// declaredBrokerID is one Action*/Query* constant as actually declared in
+// internal/broker/api.go: its Go identifier and its string value (the wire
+// ID). Both are captured because the spec's "no bootc/rpm-ostree mutation
+// action" constraint is a claim about each, not only about the identifier.
+type declaredBrokerID struct {
+	name  string
+	value string
+}
+
+// declaredBrokerIDs parses internal/broker/api.go and returns every declared
+// constant whose identifier begins with Action or Query, in declaration
+// order. Parsing the real file is the point: this is the "actual" side of
+// every completeness assertion below, so a constant added, removed, or
+// renamed in api.go changes this result immediately and without anyone
+// remembering to update a mirror.
+func declaredBrokerIDs(t *testing.T) []declaredBrokerID {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, brokerAPIPath, nil, 0)
+	require.NoErrorf(t, err, "parsing %s", brokerAPIPath)
+
+	var declared []declaredBrokerID
+	for _, decl := range parsed.Decls {
+		genDecl, isGen := decl.(*ast.GenDecl)
+		if !isGen || genDecl.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			valueSpec, isValue := spec.(*ast.ValueSpec)
+			if !isValue {
+				continue
+			}
+			for index, ident := range valueSpec.Names {
+				if !strings.HasPrefix(ident.Name, "Action") && !strings.HasPrefix(ident.Name, "Query") {
+					continue
+				}
+				require.Greaterf(t, len(valueSpec.Values), index, "%s: constant %s has no value expression", brokerAPIPath, ident.Name)
+				literal, isLiteral := valueSpec.Values[index].(*ast.BasicLit)
+				require.Truef(t, isLiteral && literal.Kind == token.STRING, "%s: constant %s is not a string literal", brokerAPIPath, ident.Name)
+				value, unquoteErr := strconv.Unquote(literal.Value)
+				require.NoErrorf(t, unquoteErr, "%s: constant %s has an unparsable string literal", brokerAPIPath, ident.Name)
+				declared = append(declared, declaredBrokerID{name: ident.Name, value: value})
+			}
+		}
+	}
+	return declared
+}
+
+// TestCapabilityTableMirrorsBrokerAPIConstants is the completeness check
+// capabilityTable's own length assertion cannot be: it diffs the table
+// against internal/broker/api.go's live Action*/Query* declarations in both
+// directions, so neither a new constant missing from the table nor a table
+// row naming an ID that no longer exists can survive. It also pins the
+// documented 35/17/52 totals to the parsed source rather than to the table,
+// and cross-checks that an Action* constant is filed in an action registry
+// and a Query* constant in a query registry.
+func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
+	declared := declaredBrokerIDs(t)
+
+	declaredActions, declaredQueries := 0, 0
+	declaredByValue := make(map[string]string, len(declared))
+	for _, entry := range declared {
+		assert.NotContainsf(t, declaredByValue, entry.value, "%s declares the wire ID %q more than once", brokerAPIPath, entry.value)
+		declaredByValue[entry.value] = entry.name
+		if strings.HasPrefix(entry.name, "Action") {
+			declaredActions++
+		} else {
+			declaredQueries++
+		}
+	}
+	assert.Equal(t, 35, declaredActions, "%s must declare 35 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Equal(t, 17, declaredQueries, "%s must declare 17 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Len(t, declared, 52, "%s must declare 52 broker IDs in total", brokerAPIPath)
+
+	tableIDs := make(map[string]capabilityRequirement, len(capabilityTable))
+	for _, row := range capabilityTable {
+		tableIDs[row.id] = row
+	}
+	for _, entry := range declared {
+		row, inTable := tableIDs[entry.value]
+		if !assert.Truef(t, inTable, "%s declares %s (%q) but capabilityTable has no row for it; add the row and the matching docs/capabilities.md entry", brokerAPIPath, entry.name, entry.value) {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(entry.name, "Action"):
+			assert.Containsf(t, []registryKind{inActions, inStreamActions}, row.registry, "%s is an Action* constant but capabilityTable files it in a query registry", entry.name)
+		default:
+			assert.Containsf(t, []registryKind{inQueries, inStreamQueries}, row.registry, "%s is a Query* constant but capabilityTable files it in an action registry", entry.name)
+		}
+	}
+	for id := range tableIDs {
+		assert.Containsf(t, declaredByValue, id, "capabilityTable has a row for %q, which %s no longer declares as an Action*/Query* constant", id, brokerAPIPath)
+	}
+}
+
+// TestNoHostImageMutationActionExists enforces the spec's "no bootc or
+// rpm-ostree image mutation action is exposed anywhere" acceptance criterion
+// as checkable behavior rather than prose: no Action* constant in
+// internal/broker/api.go may name bootc or rpm-ostree, in its Go identifier
+// or in its wire ID. Query* constants are deliberately exempt --
+// QueryHostImageStatus is exactly the read-only surface this phase adds --
+// so the check is scoped to the mutation half of the API by constant prefix,
+// which is also how the broker's own ActionRegistry/QueryRegistry split
+// works.
+func TestNoHostImageMutationActionExists(t *testing.T) {
+	forbidden := []string{"bootc", "ostree", "rpmostree", "rpm-ostree", "rpm_ostree"}
+	actionCount := 0
+	for _, entry := range declaredBrokerIDs(t) {
+		if !strings.HasPrefix(entry.name, "Action") {
+			continue
+		}
+		actionCount++
+		lowerName := strings.ToLower(entry.name)
+		lowerValue := strings.ToLower(entry.value)
+		for _, needle := range forbidden {
+			assert.NotContainsf(t, lowerName, needle, "%s declares mutation action %s, which names %q; #51 exposes no host-image mutation action", brokerAPIPath, entry.name, needle)
+			assert.NotContainsf(t, lowerValue, needle, "%s declares mutation action %s with wire ID %q, which names %q; #51 exposes no host-image mutation action", brokerAPIPath, entry.name, entry.value, needle)
+		}
+	}
+	require.Equal(t, 35, actionCount, "expected to have scanned all 35 Action* constants; a zero/short scan would make the assertions above vacuous")
+}
+
+// TestMaintenanceNeverReferencesZincati enforces the spec's "Maintenance does
+// not special-case Zincati" acceptance criterion as checkable behavior: no
+// non-comment source line under internal/modules/maintenance may mention
+// Zincati. Comments are excluded deliberately -- explaining *why* Zincati is
+// not consulted is legitimate documentation, while a token that reaches the
+// compiler (an identifier, a unit name, a string literal) is the
+// special-casing the spec forbids.
+//
+// Go files are tokenized with go/scanner in its comment-skipping mode, so
+// comment exclusion is exact rather than heuristic. Non-Go files (.templ)
+// have no such tokenizer available here, so they use the literal reading of
+// the criterion: a line whose first non-space characters begin a comment is
+// a comment line, everything else is a source line.
+func TestMaintenanceNeverReferencesZincati(t *testing.T) {
+	scanned := 0
+	err := filepath.WalkDir(maintenanceSourceDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		extension := filepath.Ext(path)
+		if extension != ".go" && extension != ".templ" {
+			return nil
+		}
+		source, readErr := os.ReadFile(path)
+		require.NoErrorf(t, readErr, "reading %s", path)
+		scanned++
+		mentions := nonCommentMentions(t, path, source, extension == ".go", "zincati")
+		assert.Emptyf(t, mentions, "%s mentions Zincati outside a comment (%s); Maintenance must not special-case Zincati", path, strings.Join(mentions, "; "))
+		return nil
+	})
+	require.NoErrorf(t, err, "walking %s", maintenanceSourceDir)
+	require.Positive(t, scanned, "expected to have scanned at least one source file under %s; a zero-file walk would make the assertion above vacuous", maintenanceSourceDir)
+}
+
+// nonCommentMentions returns a "path:line: text" description of every
+// non-comment occurrence of needle (matched case-insensitively) in source.
+// Go input is tokenized with go/scanner in its comment-skipping mode, so
+// comments are excluded exactly; other input drops whole lines whose first
+// non-space characters open a comment, which is the literal reading of the
+// acceptance criterion's "non-comment source line".
+func nonCommentMentions(t *testing.T, path string, source []byte, isGo bool, needle string) []string {
+	t.Helper()
+	var mentions []string
+	if isGo {
+		fileSet := token.NewFileSet()
+		file := fileSet.AddFile(path, fileSet.Base(), len(source))
+		var goScanner scanner.Scanner
+		goScanner.Init(file, source, func(position token.Position, message string) {
+			t.Fatalf("%s: scanning failed at %s: %s", path, position, message)
+		}, 0)
+		for {
+			pos, tok, literal := goScanner.Scan()
+			if tok == token.EOF {
+				break
+			}
+			text := literal
+			if text == "" {
+				text = tok.String()
+			}
+			if strings.Contains(strings.ToLower(text), needle) {
+				mentions = append(mentions, fileSet.Position(pos).String()+": "+text)
+			}
+		}
+		return mentions
+	}
+	for index, line := range strings.Split(string(source), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(line), needle) {
+			mentions = append(mentions, path+":"+strconv.Itoa(index+1)+": "+trimmed)
+		}
+	}
+	return mentions
 }
 
 func TestCapabilityTableHasExactlyFiftyTwoRows(t *testing.T) {
@@ -301,24 +564,116 @@ var allCapabilityIDs = []capability.ID{
 	capability.Incus,
 }
 
+// ucoreCapabilitySet is the spec's "uCore fixture": an image-based host that
+// has systemd (and journald), both host-image sources, and every container
+// engine, but no system-extension tooling. It is the fixture the acceptance
+// criterion "uCore fixture reports read-only bootc state with supplementary
+// rpm-ostree detail" names, and the one where every host-image surface in
+// this phase is simultaneously present.
+func ucoreCapabilitySet() capability.Set {
+	return capability.New(
+		capability.Systemd,
+		capability.Journald,
+		capability.Bootc,
+		capability.RPMOStree,
+		capability.Podman,
+		capability.Docker,
+		capability.Incus,
+	)
+}
+
+// snosiWithoutBootcCapabilitySet is the spec's "Snosi without bootc"
+// fixture: a systemd host with sysext/updex tooling and container engines,
+// but no bootc and no rpm-ostree. It is the fixture the acceptance criterion
+// "Snosi without bootc remains supported; host-image state is omitted rather
+// than failing" names -- QueryHostImageStatus is simply not registered here,
+// while every systemd-gated surface (QueryMaintenanceState,
+// ActionMaintenanceReboot, services, logs, backups, storage actions) keeps
+// working exactly as before this phase.
+func snosiWithoutBootcCapabilitySet() capability.Set {
+	return capability.New(
+		capability.Systemd,
+		capability.Journald,
+		capability.Updex,
+		capability.Sysext,
+		capability.Podman,
+		capability.Docker,
+		capability.Incus,
+	)
+}
+
+// TestCapabilityContractHostImageOnNamedHostFixtures asserts the two
+// spec-named host shapes against literal, hand-written true/false
+// expectations rather than against capabilityTable's satisfiedBy rule.
+//
+// The matrix walk below is already independent of the production HasAll/
+// HasAny predicates (satisfiedBy routes through this file's own allOfPresent/
+// anyOfPresent helpers), but it still reads each row's *required capability
+// list* from capabilityTable. That leaves one residual coupling this test
+// closes: a row whose requirement was silently edited -- QueryHostImageStatus
+// quietly regaining a Systemd requirement, say -- would shift the matrix's
+// expectation and its observed behavior together and keep passing. The
+// expectations here name the fixture, the ID, and the expected outcome
+// outright, transcribed from docs/capabilities.md's table and the spec's
+// acceptance criteria, so nothing about them can move with the code.
+func TestCapabilityContractHostImageOnNamedHostFixtures(t *testing.T) {
+	t.Run("ucore", func(t *testing.T) {
+		registries := registerEverythingForFixture(t, ucoreCapabilitySet())
+		assert.True(t, registries.queries.Registered(broker.QueryHostImageStatus),
+			"uCore advertises bootc and rpm-ostree, so the read-only host-image query must be registered")
+		assert.True(t, registries.queries.Registered(broker.QueryMaintenanceState),
+			"uCore advertises systemd, so reboot posture must stay registered")
+		assert.True(t, registries.actions.Registered(broker.ActionMaintenanceReboot),
+			"uCore advertises systemd, so the reboot action must stay registered")
+		assert.False(t, registries.actions.Registered(broker.ActionSysextUpdate),
+			"uCore advertises no updex, so sysext update actions must stay withheld")
+	})
+	t.Run("snosi-without-bootc", func(t *testing.T) {
+		registries := registerEverythingForFixture(t, snosiWithoutBootcCapabilitySet())
+		assert.False(t, registries.queries.Registered(broker.QueryHostImageStatus),
+			"Snosi without bootc advertises neither host-image source, so host-image state must be omitted rather than registered")
+		assert.True(t, registries.queries.Registered(broker.QueryMaintenanceState),
+			"Snosi without bootc still advertises systemd, so reboot posture must remain supported")
+		assert.True(t, registries.actions.Registered(broker.ActionMaintenanceReboot),
+			"Snosi without bootc still advertises systemd, so the reboot action must remain supported")
+		assert.True(t, registries.actions.Registered(broker.ActionSysextUpdate),
+			"Snosi without bootc advertises updex, so sysext update actions must remain supported")
+	})
+}
+
 // TestCapabilityContractAcrossFixtureMatrix is the binding contract test the
 // spec requires as the final chunk of this phase: for every fixture
 // capability.Set below, every one of the 52 registered broker IDs must be
 // present in its registry iff the fixture's Set satisfies that ID's
-// documented requirement from capabilityTable (kept as a Go-side mirror of
-// docs/capabilities.md, cross-checked by inspection, not parsed
-// automatically) -- under HasAll for an ordinary row and HasAny for an any-of
-// row, each evaluated by capability.Set's own predicate, the same one the
-// production guard calls. The all-on and minimal fixtures get additional
-// dedicated assertions below; every fixture (including the representative
-// partials) is walked against the full table.
+// documented requirement from capabilityTable (whose *set of IDs* is diffed
+// against internal/broker/api.go's live go/ast-parsed declarations by
+// TestCapabilityTableMirrorsBrokerAPIConstants, while each row's required
+// capability list stays a hand-transcribed mirror of docs/capabilities.md,
+// pinned for the host-image rows by
+// TestCapabilityContractHostImageOnNamedHostFixtures) -- under all-of
+// semantics for an ordinary row and any-of
+// semantics for an any-of row, each evaluated by this file's own
+// allOfPresent/anyOfPresent helpers rather than by the capability.Set.HasAll/
+// HasAny predicates the production guards call, so the expectation cannot
+// shift in lockstep with a regression in those predicates. The all-on and
+// minimal fixtures get additional dedicated assertions below; every fixture
+// (including the representative partials) is walked against the full table.
 //
-// The four host-image fixtures (bootc-only, rpm-ostree-only, both, and
-// neither-with-systemd) exist so QueryHostImageStatus's any-of row is
-// exercised in every direction the moment it lands: each source alone
-// registers it, both register it, neither withholds it, and none of that
-// changes with Systemd present or absent (bootc-only and rpm-ostree-only
-// carry no Systemd; neither-plus-systemd carries it without a source).
+// The four synthetic host-image fixtures (bootc-only, rpm-ostree-only, both,
+// and neither-with-systemd) exist so QueryHostImageStatus's any-of row is
+// exercised in every direction: each source alone registers it, both
+// register it, neither withholds it, and none of that changes with Systemd
+// present or absent (bootc-only and rpm-ostree-only carry no Systemd;
+// neither-plus-systemd carries it without a source).
+//
+// The last two fixtures are the spec's own named host shapes -- "ucore"
+// (systemd + journald + bootc + rpm-ostree + every engine) and
+// "snosi-without-bootc" (systemd + journald + updex/sysext + every engine,
+// with neither host-image source) -- walked here against the full 52-row
+// table so every row, not only the host-image ones, is proven on the two
+// real-world combinations the acceptance criteria name.
+// TestCapabilityContractHostImageOnNamedHostFixtures above additionally
+// pins their host-image rows to hand-written expectations.
 func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 	fixtures := []struct {
 		name string
@@ -337,6 +692,8 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 		{"rpm-ostree-only", capability.New(capability.RPMOStree)},
 		{"bootc-plus-rpm-ostree", capability.New(capability.Bootc, capability.RPMOStree)},
 		{"neither-host-image-source-plus-systemd", capability.New(capability.Systemd, capability.Updex, capability.Sysext)},
+		{"ucore", ucoreCapabilitySet()},
+		{"snosi-without-bootc", snosiWithoutBootcCapabilitySet()},
 	}
 
 	for _, fixture := range fixtures {

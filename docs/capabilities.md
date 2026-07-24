@@ -33,13 +33,25 @@ registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 via `StreamQueryRegistry`) — both are members of the 35/17 above, not IDs
 added on top. This table therefore has exactly 52 rows.
 
+Both grep commands above were re-run against this tree when the totals were
+last changed, and they are no longer only documentation:
+`cmd/pilothoused/capability_contract_test.go`'s
+`TestCapabilityTableMirrorsBrokerAPIConstants` parses `internal/broker/api.go`
+with `go/ast` and diffs the declared `Action*`/`Query*` constants against
+`capabilityTable` **in both directions**, so a constant added without a table
+row, a table row naming an ID that no longer exists, or a drift away from
+35/17/52 all fail the build. It additionally checks that an `Action*`
+constant is filed in an action registry and a `Query*` constant in a query
+registry.
+
 `QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`) landed
 during phase 1a alongside the engine conversions and is included in both the
 count above and the query table below — this document is updated in the same
 chunk that registers a new ID, per the "every currently registered broker ID"
 invariant stated above. `cmd/pilothoused/capability_contract_test.go`'s
-`capabilityTable` mirrors this document row for row and cross-checks its own
-ID count against it.
+`capabilityTable` mirrors this document row for row and, per the check just
+described, is compared against the live constant declarations rather than
+against a second hand-maintained list.
 
 `QueryHostImageStatus` (`org.frostyard.pilothouse.maintenance.host_image_status`)
 is the newest ID, added by phase 2 (#51) for read-only host-image reporting,
@@ -245,13 +257,21 @@ reboot-required posture, which remains `QueryMaintenanceState`'s alone.
 
 `cmd/pilothoused/capability_contract_test.go` mirrors the distinction with a
 `requireAny` column on its table rows and exercises this one across
-bootc-only, rpm-ostree-only, bootc-plus-rpm-ostree, and
-neither-plus-systemd fixtures. No web-side code calls this query yet: as of
-this commit it is a registered, capability-guarded daemon surface with no
-web consumer. (The maintenance module's nav, routes, and dashboard have
-since moved to a `HasAny(Systemd, Bootc, RPMOStree)` whole-module gate, but
-that gate reads no host-image data — it only records whether a host-image
-source exists.)
+bootc-only, rpm-ostree-only, bootc-plus-rpm-ostree, neither-plus-systemd,
+`ucore`, and `snosi-without-bootc` fixtures.
+
+The query now has a web consumer: `internal/modules/maintenance`'s
+`queryHostImage` calls it whenever the advertised set satisfies
+`HasAny(Bootc, RPMOStree)` and returns `nil` (omitting the page's whole
+"Host image" section) when it does not. Both sides are covered by
+`cmd/pilothouse/capability_contract_test.go`, whose
+`capabilityAnyRequirements` table carries this ID's any-of requirement,
+hand-transcribed from this document; its fake broker fails the test outright
+if the web process ever invokes a broker ID whose capability the fixture's
+host does not advertise. The maintenance module's nav, routes, and dashboard
+are gated separately, on `HasAny(Systemd, Bootc, RPMOStree)`; that gate
+reads no host-image data — it only records whether a host-image source
+exists.
 
 It does have one in-process consumer, and only one: `cmd/pilothoused` passes
 the same `maintenance.HostImageManager` instance it registers this query
@@ -391,3 +411,103 @@ those reads move behind the broker. The sysext *action* rows above
 (`ActionSysext*`) describe the daemon-side (`cmd/pilothoused`) per-action guard
 from phase 1a (#50); they are the broker's registration guard, not a web-side
 gate, and #54 does not touch them.
+
+Because the sysext web controls render unconditionally, a fixture whose host
+advertises neither `updex` nor `sysext` can still reach an `ActionSysext*`
+call from a rendered control. `cmd/pilothouse/capability_contract_test.go`
+records this as `webSideUngatedBrokerIDs`, a closed four-entry exemption from
+its fake broker's "never invoke a gated-off broker ID" check, and
+`TestWebSideUngatedExemptionExcludesHostImageSurfaces` pins it so it cannot
+grow to cover any maintenance or host-image ID. The privilege boundary is not
+affected: the *daemon* does not register those actions at all without
+`updex`/`sysext`, which
+`cmd/pilothoused/capability_contract_test.go`'s matrix proves for every
+fixture, so such a call fails at the broker rather than executing. Deleting
+the four entries is what re-arms the web-side check once #52 lands the gate.
+
+## Phase 2 (#51) — host-image contract parity (daemon + web)
+
+Phase 2 adds exactly one broker ID, `QueryHostImageStatus`, and no mutation
+action. Both contract-test harnesses are now driven by the same fixture
+vocabulary, so the daemon's registration guards and the web process's gates
+are proven to agree on every host shape this phase cares about.
+
+**Named fixtures.** Two fixtures are named directly after the spec's
+acceptance criteria and exist in both harnesses:
+
+| Fixture | Capabilities | What it proves |
+|---|---|---|
+| `ucore` | `systemd`, `journald`, `bootc`, `rpm-ostree`, `podman`, `docker`, `incus` | Read-only bootc state with supplementary rpm-ostree detail: `QueryHostImageStatus` and `QueryMaintenanceState` are both registered and both called, and the Maintenance page renders the booted/staged/rollback deployments together with the reboot-required card. |
+| `snosi-without-bootc` | `systemd`, `journald`, `updex`, `sysext`, `podman`, `docker`, `incus` | Snosi without bootc remains supported: `QueryHostImageStatus` is not registered, the web side never calls it, and the page omits the "Host image" section entirely rather than erroring — while every systemd-gated surface keeps working unchanged. |
+
+The web harness adds a third, `bootc-only` (`bootc` and nothing else), which
+is what proves maintenance's whole-module gate is a genuine OR rather than a
+disguised systemd gate: the nav entry and `GET /maintenance` are present,
+`POST /maintenance/reboot` 404s, and `QueryMaintenanceState` is never called.
+Two further runs replay the `ucore` fixture with one source failing, so the
+symmetric `bootc_available`/`bootc_error` and
+`rpm_ostree_available`/`rpm_ostree_error` pairs are each exercised in *both*
+directions rather than only where the source works:
+
+- **`ucore-rpm-ostree-read-failure`** (`rpm_ostree_available: false` plus
+  `rpm_ostree_error`). bootc still answered, so all three deployment rows and
+  their image references and digests still render; what goes away is
+  rpm-ostree's supplementary version/checksum detail, replaced by a named
+  `data-source-error="rpm-ostree"` indicator.
+- **`ucore-bootc-read-failure`** (`bootc_available: false` plus `bootc_error`,
+  with rpm-ostree answering). This is what `HostImageManager.Status` actually
+  produces in that case: bootc is authoritative for deployment *presence*, so
+  no deployment row renders at all and soft-reboot eligibility is unknown,
+  while a named `data-source-error="bootc"` indicator appears and every
+  systemd-gated surface — including `QueryMaintenanceState` and the reboot
+  form — is undisturbed.
+
+Because each source's failure is asserted alongside the other source's
+success, neither failure run can degenerate into a second copy of the success
+run.
+
+**Populated fixture data.** The web harness's canned broker responses for
+`QueryHostImageStatus` and `QueryMaintenanceState` carry representative data —
+all three deployment slots, bootc-authoritative image references and digests,
+rpm-ostree-supplementary version and checksum, soft-reboot eligibility, and a
+reboot-required posture with a reason — so that assertions about a rendered
+element being *absent* under a degraded fixture are meaningful rather than
+vacuously true against an empty response. Because the per-element assertions
+are driven from each fixture's own response (which is what lets the two
+failure runs share one assertion helper), `TestCannedHostImageFixtureIsPopulated`
+pins that default response's shape directly: if it quietly lost its staged
+slot, its rollback slot, its rpm-ostree detail, or its soft-reboot flag, every
+fixture would simply agree the corresponding markup is expectedly absent and
+the matrix would keep passing while proving nothing.
+
+**Independent oracles.** Both harnesses decide what a fixture *should* see
+using local `allOfPresent` / `anyOfPresent` helpers that combine
+single-membership `capability.Set.Has` checks with Go's own `&&` / `||` —
+never by calling `capability.Set.HasAll` / `HasAny`, `platform.Available`, or
+`platform.AvailableAny`. That matters specifically because this phase's gates
+*are* those aggregation predicates (`platform.CapabilityGateAny` →
+`AvailableAny` → `HasAny(Systemd, Bootc, RPMOStree)` for the module,
+`HasAny(Bootc, RPMOStree)` for `queryHostImage` and `registerHostImage`).
+Evaluating the expectation with the predicate under test would be
+tautological: if `HasAny` silently degraded into `HasAll`, expectation and
+behavior would move together and every any-of fixture would keep passing.
+With the split in place, that mutation fails the `bootc-only` and
+`snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
+daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
+pins the two any-of tables literally, checks the two web-side broker-ID tables
+are disjoint and together cover all 52 IDs, and asserts the two helpers do not
+collapse into each other.
+
+**Static guarantees.** Two of the spec's constraints are enforced as
+executable checks in `cmd/pilothoused/capability_contract_test.go` rather than
+as prose only:
+
+- `TestNoHostImageMutationActionExists` parses `internal/broker/api.go` and
+  fails if any `Action*` constant's identifier or wire ID names `bootc` or
+  `rpm-ostree`/`ostree`. `Query*` constants are exempt by design —
+  `QueryHostImageStatus` is precisely the read-only surface this phase adds.
+- `TestMaintenanceNeverReferencesZincati` walks `internal/modules/maintenance`
+  and fails if any **non-comment** source line mentions Zincati (Go files are
+  tokenized with `go/scanner` so comment exclusion is exact). Explaining in a
+  comment why Zincati is not consulted stays allowed; a token that reaches the
+  compiler does not.
