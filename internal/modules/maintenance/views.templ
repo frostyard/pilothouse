@@ -18,7 +18,6 @@ templ Summary(state State) {
 			</a>
 		</div>
 		<div class="mini-list">
-			<div class="mini-row"><div><strong>Updates</strong><small>Enabled system extensions</small></div><span class="badge">{ fmt.Sprint(len(state.Updates)) }</span></div>
 			<div class="mini-row"><div><strong>Reboot</strong><small>{ rebootSummary(state) }</small></div><span class={ "badge", templ.KV("active", !state.RebootRequired) }>{ rebootLabel(state) }</span></div>
 		</div>
 	</article>
@@ -50,8 +49,8 @@ templ Summary(state State) {
 // configuration in any way.
 templ Page(state State, hostImage *HostImageStatus, autoUpdate *AutoUpdateStatus, csrf string, admin bool) {
 	<div class="page-stack">
-		<div class="page-intro"><p>Update availability, durable maintenance jobs, and host reboot posture.</p></div>
-		<section class="engine-stats" aria-label="Maintenance summary"><div class="engine-stat"><span>System</span><strong class="version">{ state.OSVersion }</strong><small>running image</small></div><div class="engine-stat"><span>Updates</span><strong>{ fmt.Sprint(len(state.Updates)) }</strong><small>available components</small></div><div class="engine-stat"><span>Jobs</span><strong>{ fmt.Sprint(activeJobs(state)) }</strong><small>queued or running</small></div></section>
+		<div class="page-intro"><p>Durable maintenance jobs and host reboot posture.</p></div>
+		<section class="engine-stats" aria-label="Maintenance summary"><div class="engine-stat"><span>System</span><strong class="version">{ state.OSVersion }</strong><small>running image</small></div><div class="engine-stat"><span>Jobs</span><strong>{ fmt.Sprint(activeJobs(state)) }</strong><small>queued or running</small></div></section>
 		if hostImage != nil {
 			@hostImageSection(*hostImage)
 		}
@@ -71,21 +70,6 @@ templ Page(state State, hostImage *HostImageStatus, autoUpdate *AutoUpdateStatus
 				}
 			</article>
 		}
-		<article class="card table-card">
-			<div class="table-toolbar"><h2>Available updates</h2><a class="card-link" href="/sysext">
-				Manage updates
-				@web.Icon("chevron")
-			</a></div>
-			if len(state.Updates) == 0 {
-				<div class="empty-state"><span class="card-icon green">@web.Icon("check")</span>Enabled extensions are up to date.</div>
-			} else {
-				<table class="data-table"><thead><tr><th>Feature</th><th>Component</th><th>Current</th><th>Newest</th></tr></thead><tbody>
-					for _, update := range state.Updates {
-						<tr><td><strong>{ update.Feature }</strong></td><td>{ update.Component }</td><td>{ update.Current }</td><td>{ update.Newest }</td></tr>
-					}
-				</tbody></table>
-			}
-		</article>
 		<article class="card table-card">
 			<div class="table-toolbar"><h2>Recent maintenance jobs</h2><a class="card-link" href="/activity">View activity</a></div>
 			if len(state.Jobs) == 0 {
@@ -412,12 +396,12 @@ func softRebootState(capable *bool) string {
 	return "required"
 }
 
+// maintenanceSummary is the dashboard card's one-line posture. It reports
+// reboot posture only: extension update availability belongs to the Extensions
+// module's own surface, not to this card.
 func maintenanceSummary(state State) string {
 	if state.RebootRequired {
 		return "Reboot required"
-	}
-	if len(state.Updates) > 0 {
-		return plural(len(state.Updates), "update") + " available"
 	}
 	return "Up to date"
 }

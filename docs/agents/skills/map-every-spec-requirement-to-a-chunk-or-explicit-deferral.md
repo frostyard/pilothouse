@@ -27,6 +27,25 @@ whole-module availability, confirm some chunk in the series updates every
 place that currently special-cases the old mechanism (e.g. a web shell's
 central availability helper), not just the module's own routes.
 
+**A spec clause that says a capability "remains owned by module Y" after
+being removed from module X needs a chunk with acceptance criteria that
+actually add Y's rendered replacement, not just a chunk that deletes X's
+copy.** Recurred in mill run for issue #52, plan review round 2 (splitting
+Extensions from Maintenance). The spec required "extension inventory,
+update availability, and extension jobs remain owned by Extensions" — a
+relocation, not a deletion — but the plan's Maintenance-removal chunk
+dropped `State.Updates`, the Health finding, dashboard rendering, and
+README wording, while the Extensions-module chunk's acceptance criteria
+covered only inventory, source errors, and action gating — no criterion
+required update availability to render anywhere. Every listed acceptance
+criterion could pass while the user-visible feature vanished from the app
+between the two chunks. When a plan relocates a feature's ownership from
+one module to another, write the destination module's acceptance criteria
+first and check they name the specific rendered output (a field on a page,
+a section, a table) — not just "consumes the shared aggregate" or "the data
+is available via the query" — before treating the source module's removal
+chunk as complete.
+
 **Learned from:** mill run for issue #51 (Maintenance host-image status).
 Plan review rejected the plan on reject-severity grounds across three
 consecutive rounds because discrete spec requirements had no implementing

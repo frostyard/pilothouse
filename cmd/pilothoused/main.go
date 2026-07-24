@@ -39,6 +39,7 @@ import (
 	servicejournal "github.com/frostyard/pilothouse/internal/modules/services/journal"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
+	"github.com/frostyard/pilothouse/internal/modules/sysext/extctl"
 	dockerclient "github.com/moby/moby/client"
 )
 
@@ -153,8 +154,20 @@ func run() error {
 	if err := registerLogs(queries, managers.logsManager, caps); err != nil {
 		return err
 	}
-	sysextManager := sysext.NewSystemManager(sysext.ExecRunner{}, *definitionsRoot, *updex)
+	sysextManager := extctl.NewSystemManager(extctl.ExecRunner{}, *definitionsRoot, *updex)
 	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
+		return err
+	}
+	// The same sysext manager also serves the read-only extensions aggregate:
+	// it is constructed unconditionally above (it runs nothing until called),
+	// and registerExtensions' own guard decides whether the query is exposed
+	// at all, exactly as registerHostImage does for the host-image reporter.
+	// The maintenance manager below consumes this same instance through the
+	// same sysext.ExtensionsSource interface, to derive its merged-but-disabled
+	// reboot reasons. One reader, two consumers — never a second path to
+	// updex/systemd-sysext. They share the instance, not a result: the
+	// aggregate read is not memoized, so each consumer's call runs its own.
+	if err := registerExtensions(queries, sysextManager, caps); err != nil {
 		return err
 	}
 	// The host-image reporter is constructed unconditionally (it runs nothing
@@ -165,7 +178,7 @@ func run() error {
 	// deployment it reports is one input to reboot-required posture, and its
 	// soft-reboot eligibility is copied onto maintenance state. One reader,
 	// two consumers — never a second path to bootc.
-	hostImageManager := maintenance.NewHostImageManager(sysext.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
+	hostImageManager := maintenance.NewHostImageManager(extctl.ExecRunner{}, caps.Has(capability.Bootc), caps.Has(capability.RPMOStree))
 	if err := registerHostImage(queries, hostImageManager, caps); err != nil {
 		return err
 	}
@@ -185,7 +198,7 @@ func run() error {
 	if err := registerAutoUpdate(queries, autoUpdateManager, caps); err != nil {
 		return err
 	}
-	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, sysext.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
+	maintenanceManager := maintenance.NewSystemManager(sysextManager, jobStore, hostImageManager, extctl.ExecRunner{}, "/", caps.Has(capability.Updex), caps.Has(capability.Sysext), caps.Has(capability.Bootc))
 	if err := registerMaintenance(actions, queries, maintenanceManager, caps); err != nil {
 		return err
 	}
@@ -726,12 +739,13 @@ const maintenanceLockResource = "maintenance/global"
 // the sysext manager, job store, and command runner), so unlike
 // backups/services/logs/storage there is no nil-manager backstop here: the
 // manager is always non-nil regardless of systemd's presence, and this
-// guard is the only thing withholding registration. Extension-derived
-// fields (Updates, Feature/merged-derived reboot reasons) and the
-// host-image-derived ones (the staged-deployment reboot reason,
-// SoftRebootCapable) all degrade inside SystemManager.State itself based on
-// the probed updex/sysext/bootc capabilities passed into NewSystemManager,
-// independent of this systemd guard.
+// guard is the only thing withholding registration. The extension-derived
+// reboot reasons (merged-but-disabled extensions) and the host-image-derived
+// ones (the staged-deployment reboot reason, SoftRebootCapable) all degrade
+// inside SystemManager.State itself based on the probed updex/sysext/bootc
+// capabilities passed into NewSystemManager, independent of this systemd
+// guard -- an extension source that cannot answer costs those reasons, never
+// the query's 200.
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
 	if !caps.Has(capability.Systemd) {
 		return nil
@@ -975,6 +989,37 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 		}
 	}
 	return nil
+}
+
+// registerExtensions registers QueryExtensionsState iff the host advertises at
+// least one extension source -- caps.HasAny(capability.Updex,
+// capability.Sysext) -- mirroring registerHostImage's shape exactly. The guard
+// is deliberately an any-of, not an all-of: either tool alone yields a usable
+// (if partial) inventory, and the handler itself only ever runs the sources
+// whose capability was probed present, so the flags threaded into State are
+// the same facts this guard is built from.
+//
+// The any-of is also what keeps the empty *success* state reachable: a host
+// with updex or systemd-sysext but no definitions, no installed images, and
+// nothing merged must be able to answer "nothing here" rather than 404 the
+// query. A host with neither tool registers nothing at all, and the web side
+// exposes no Extensions surface to call it with.
+//
+// It is read-only in the strongest sense available here: it is served by a
+// sysext.ExtensionsSource, an interface with no mutating method, so the four
+// ActionSysext* lifecycle actions registered above (each with its own,
+// narrower guard) stay the only way to change anything. Like
+// QueryHostImageStatus it is available to any authenticated identity (admin is
+// not required), since it reports facts about the host's extensions rather
+// than privileged content, and it is independent of registerMaintenance's
+// Systemd guard: reading the extension inventory needs no reboot machinery.
+func registerExtensions(queries *broker.QueryRegistry, source sysext.ExtensionsSource, caps capability.Set) error {
+	if !caps.HasAny(capability.Updex, capability.Sysext) {
+		return nil
+	}
+	return queries.Register(broker.QueryExtensionsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return source.State(ctx, caps.Has(capability.Updex), caps.Has(capability.Sysext))
+	})
 }
 
 // registerServices registers Services queries/actions guarded by the

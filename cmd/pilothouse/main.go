@@ -42,16 +42,14 @@ func main() {
 func run() error {
 	listen := flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
 	brokerSocket := flag.String("broker-socket", "/run/pilothouse/broker.sock", "privileged broker Unix socket")
-	definitionsRoot := flag.String("definitions-root", "", "custom root containing sysupdate definition directories")
 	var allowedOrigins stringListFlag
 	flag.Var(&allowedOrigins, "allowed-origin", "trusted public HTTP(S) origin when behind a reverse proxy; repeatable")
 	secureCookie := flag.Bool("secure-cookie", false, "require HTTPS when sending the session cookie")
-	updex := flag.String("updex", "updex", "path to the updex executable")
 	flag.Parse()
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	registry, err := newRegistry(*definitionsRoot, *updex)
+	registry, err := newRegistry()
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
@@ -89,7 +87,17 @@ func run() error {
 // behavior change) so cmd/pilothouse/capability_contract_test.go can build
 // the real, production-wired registry directly instead of maintaining a
 // second, hand-duplicated module list.
-func newRegistry(definitionsRoot, updex string) (*platform.Registry, error) {
+//
+// It takes no arguments: every module here is now either self-contained or
+// broker-backed. sysext was the last holdout — it used to be handed an
+// exec-backed extension manager built from the web process's own
+// --definitions-root/--updex flags, and now reads through
+// broker.QueryExtensionsState like every other read-only module, so those
+// two flags no longer exist on the web binary. The exec-backed manager
+// itself moved to internal/modules/sysext/extctl, which this binary does
+// not import at all. (cmd/pilothoused keeps its own definitions-root/updex
+// flags; it is the process that actually runs the tools.)
+func newRegistry() (*platform.Registry, error) {
 	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
 	serviceModule := services.New()
 	backupModule := backups.New()
@@ -101,7 +109,7 @@ func newRegistry(definitionsRoot, updex string) (*platform.Registry, error) {
 		activity.New(),
 		system,
 		storageModule,
-		sysext.New(sysext.NewSystemManager(sysext.ExecRunner{}, definitionsRoot, updex)),
+		sysext.New(),
 		podman.New(),
 		docker.New(),
 		incus.New(),

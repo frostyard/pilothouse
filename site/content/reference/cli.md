@@ -13,10 +13,13 @@ pilothouse ships two binaries. `pilothouse` is the unprivileged web process; `pi
 | --- | --- | --- |
 | `--listen` | `127.0.0.1:8888` | HTTP listen address |
 | `--broker-socket` | `/run/pilothouse/broker.sock` | Privileged broker Unix socket |
-| `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
 | `--allowed-origin` | — | Trusted public HTTP(S) origin when behind a reverse proxy; repeatable |
 | `--secure-cookie` | `false` | Require HTTPS when sending the session cookie |
-| `--updex` | `updex` | Path to the updex executable |
+
+The web process reads extension state through the broker rather than running
+`updex` or `systemd-sysext` itself, so it has no `--definitions-root` or
+`--updex` flag. Those belong to `pilothoused` below, which is the process that
+actually invokes the tools.
 
 ## pilothoused
 

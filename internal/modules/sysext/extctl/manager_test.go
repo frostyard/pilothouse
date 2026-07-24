@@ -1,4 +1,4 @@
-package sysext
+package extctl
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,7 @@ func TestParseUpdexCheckAcceptsMessageAndArrayStream(t *testing.T) {
 	updates, err := parseUpdexCheck(output)
 
 	require.NoError(t, err)
-	assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "rootfs", Current: "1", Newest: "2"}}, updates)
+	assert.Equal(t, []sysext.AvailableUpdate{{Extension: "docker", Component: "rootfs", Current: "1", Newest: "2"}}, updates)
 }
 
 func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
@@ -44,7 +45,7 @@ func TestParseUpdexCheckReturnsOnlyAvailableEntries(t *testing.T) {
 	updates, err := parseUpdexCheck(output)
 
 	require.NoError(t, err)
-	assert.Equal(t, []AvailableUpdate{{Feature: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
+	assert.Equal(t, []sysext.AvailableUpdate{{Extension: "docker", Component: "engine", Current: "1", Newest: "2"}}, updates)
 }
 
 func TestParseUpdexCheckAcceptsNullAsNoUpdates(t *testing.T) {
@@ -84,9 +85,9 @@ func TestSystemManagerCheckCombinesDirectoriesAndSortsUpdates(t *testing.T) {
 	updates, err := NewSystemManager(runner, root, "updex").Check(context.Background())
 
 	require.NoError(t, err)
-	assert.Equal(t, []AvailableUpdate{
-		{Feature: "docker", Component: "engine", Current: "3", Newest: "4"},
-		{Feature: "zinc", Component: "base", Current: "1", Newest: "2"},
+	assert.Equal(t, []sysext.AvailableUpdate{
+		{Extension: "docker", Component: "engine", Current: "3", Newest: "4"},
+		{Extension: "zinc", Component: "base", Current: "1", Newest: "2"},
 	}, updates)
 	assert.Equal(t, [][]string{
 		{"updex", "-C", shared, "--json", "features", "check"},
@@ -115,12 +116,12 @@ func TestSystemManagerUsesUpdexStandardSearchPathsByDefault(t *testing.T) {
 		"systemd-sysext status --json=short --no-pager": []byte(`[{"hierarchy":"/usr","extensions":["docker"]}]`),
 	}}
 
-	features, err := NewSystemManager(runner, "", "updex").List(context.Background())
+	extensions, err := NewSystemManager(runner, "", "updex").list(context.Background())
 
 	require.NoError(t, err)
-	require.Len(t, features, 1)
-	assert.True(t, features[0].Enabled)
-	assert.True(t, features[0].Merged)
+	require.Len(t, extensions, 1)
+	assert.True(t, extensions[0].Enabled)
+	assert.True(t, extensions[0].Merged)
 	assert.Equal(t, []string{"updex", "--json", "features", "list"}, runner.calls[0])
 }
 
@@ -149,12 +150,6 @@ func TestSystemManagerDiscoversSharedAndComponentDefinitions(t *testing.T) {
 func TestExtensionVersion(t *testing.T) {
 	assert.Equal(t, "5+29.6.1-1~debian.13~trixie", extensionVersion("docker", "/var/lib/extensions.d/docker_5+29.6.1-1~debian.13~trixie_13_x86-64.raw"))
 	assert.Equal(t, "installed", extensionVersion("docker", "/not-present/docker.raw"))
-}
-
-func TestActiveFirst(t *testing.T) {
-	features := []Feature{{Name: "available"}, {Enabled: true, Name: "enabled"}, {Merged: true, Name: "merged"}}
-	sorted := activeFirst(features)
-	assert.Equal(t, []string{"merged", "enabled", "available"}, []string{sorted[0].Name, sorted[1].Name, sorted[2].Name})
 }
 
 func TestDisableForcesRemovalOfMergedExtension(t *testing.T) {

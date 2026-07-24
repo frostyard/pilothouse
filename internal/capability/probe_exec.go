@@ -18,7 +18,7 @@ const execProbeTimeout = 5 * time.Second
 const defaultUpdex = "updex"
 
 // CommandRunner runs an external command and returns its combined output.
-// It mirrors internal/modules/sysext.CommandRunner's shape but is kept
+// It mirrors internal/modules/sysext/extctl.CommandRunner's shape but is kept
 // local to this package: internal/capability is foundational and must not
 // depend on a feature module.
 type CommandRunner interface {

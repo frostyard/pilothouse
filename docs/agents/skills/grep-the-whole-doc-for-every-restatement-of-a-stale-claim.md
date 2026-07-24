@@ -72,6 +72,21 @@ Each round's fix was correct but scoped to only the line quoted in that
 round's objection, never a proactive whole-file sweep for every sibling
 claim before resubmitting.
 
+**A sweep scoped to `docs/`, `yeti/`, and README also misses this repo's
+user-facing pages under `site/content/**`.** Recurred in mill run for issue
+#52, chunk 1 (Maintenance drops the only rendered extension-update-
+availability surface, relocating it to a later Extensions chunk). After two
+rounds fixing `yeti/OVERVIEW.md`'s capability-table wording, a further
+review round — after the run was paused and resumed — flagged
+`site/content/getting-started/overview.md:20`, a Hugo-rendered
+getting-started page that still advertised "Extension update availability"
+as a landed feature. That page is neither an AI-context doc
+(`yeti/`, `docs/`) nor the README, so a sweep limited to those locations
+missed it even though the underlying claim was exactly the kind this skill
+already warns about. When a chunk removes or relocates a user-visible
+feature, also grep `site/content/` (or whatever human-facing docs tree a
+repo has, distinct from its AI-context docs) for the feature's name/phrase.
+
 **"The whole doc" is too narrow a search boundary — search the whole repo,
 including non-`.md` source files in packages you have not otherwise
 touched.** The same mill run for #58 resumed and hit chunk 3 a second time
@@ -95,3 +110,28 @@ test names before considering the chunk done — the hardcoded literal lives
 in test code and doc prose alike, in packages far from the one being
 edited, and a search scoped to ".md files near this feature" will miss it
 every time.
+
+**A literal-string acceptance-criteria grep is a floor, not the actual
+target — it can pass while the doc is still stale, because the same fact
+gets phrased differently each time a new capability lands.** Recurred a
+third time in mill run for issue #52, chunk 4 (`docs/capabilities.md`,
+final repo-wide sweep chunk, whose own plan text explicitly named this
+skill file). `docs/capabilities.md` narrates each capability addition as
+history: "`QueryHostImageStatus` ... raised the totals from the 16/51
+phase 1a ended with to 17/52", "`QueryAutoUpdateStatus` ... raising the
+totals to 18/53" — one such sentence per prior phase, left in place as
+each new phase appends its own paragraph below it. The chunk's own
+acceptance criterion was a literal grep — `'53 declared broker IDs\|18
+\`Query\*\|17 queries\|53 IDs'` — copied forward from the #58 recurrence
+above. That pattern matches none of the actual stale phrasing ("raising
+the totals to 18/53" contains neither "53 IDs" nor "18 \`Query*\`" nor "17
+queries"), so running exactly the acceptance-criterion command reports
+clean while round 3 still flagged line 65 as unfixed, and the run failed
+with `review_rounds` exhausted. When a doc keeps a running "raised the
+totals to A/B" history — one sentence per past phase, not just a single
+current-state sentence — a new phase's stale-count sweep must re-read
+*every* such historical sentence (not just add its own), and the sweep
+grep must search for the bare old number pair itself (e.g. `grep -n
+'18/53\|17/52\|16/51'`), not only the specific phrase alternation an
+earlier round's objection happened to quote — prose phrasing of "the
+totals are now X" varies every time a different agent writes it.

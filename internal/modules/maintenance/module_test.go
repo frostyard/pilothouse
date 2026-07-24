@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -17,7 +19,6 @@ import (
 	"github.com/frostyard/pilothouse/internal/broker"
 	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
-	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/frostyard/pilothouse/internal/web"
 	"github.com/stretchr/testify/assert"
@@ -128,11 +129,45 @@ func TestRebootRouteRequiresCanonicalConfirmation(t *testing.T) {
 	assert.Equal(t, broker.ActionMaintenanceReboot, host.action)
 }
 
-func TestHealthReportsUpdatesRebootAndLatestFailedJob(t *testing.T) {
-	host := &moduleHost{state: State{Updates: []sysext.AvailableUpdate{{Feature: "docker"}}, RebootRequired: true, RebootReasons: []string{"update activation"}, Jobs: []Job{{Action: "update", Status: jobs.StatusFailed}}}}
+func TestHealthReportsRebootAndLatestFailedJob(t *testing.T) {
+	host := &moduleHost{state: State{RebootRequired: true, RebootReasons: []string{"update activation"}, Jobs: []Job{{Action: "update", Status: jobs.StatusFailed}}}}
 	findings, err := New().Health(context.Background(), host)
 	assert.NoError(t, err)
-	assert.Len(t, findings, 3)
+	require.Len(t, findings, 2)
+	assert.Equal(t, "maintenance.reboot", findings[0].ID)
+	assert.Equal(t, "maintenance.job.update", findings[1].ID)
+}
+
+// TestHealthNeverReportsExtensionUpdateAvailability pins the ownership
+// narrowing: extension update availability belongs to the Extensions module,
+// so Maintenance emits no "maintenance.updates" finding even when the aggregate
+// its manager reads reports pending updates. The manager is driven end to end
+// here -- an ExtensionsSource with a real pending update, through
+// SystemManager.State, through the module's Health -- so the assertion cannot
+// pass merely because a hand-written State fixture omitted the data.
+func TestHealthNeverReportsExtensionUpdateAvailability(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "proc"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "run"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "proc/uptime"), []byte("60\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "run/reboot-required"), nil, 0o644))
+	manager := NewSystemManager(
+		&callCountingExtensions{state: mergedButDisabledState()},
+		fakeJobs{}, nil, &fakeRunner{}, root, true, true, false,
+	)
+	state, err := manager.State(context.Background())
+	require.NoError(t, err)
+
+	findings, err := New().Health(context.Background(), &moduleHost{state: state})
+
+	require.NoError(t, err)
+	for _, finding := range findings {
+		assert.NotEqual(t, "maintenance.updates", finding.ID)
+		assert.NotEqual(t, "Extension updates are available", finding.Title)
+	}
+	// The reboot finding is still emitted, so this is not vacuously true.
+	require.Len(t, findings, 1)
+	assert.Equal(t, "maintenance.reboot", findings[0].ID)
 }
 
 // TestModuleGateTypeIsAnyOfNotAllOf pins the interface switch this module
@@ -302,7 +337,7 @@ func TestPageRendersNoRebootControlWithoutSystemd(t *testing.T) {
 // host both report "nothing to report" instead of erroring or panicking,
 // and neither reaches QueryMaintenanceState.
 func TestDashboardAndHealthDegradeWithoutSystemd(t *testing.T) {
-	host := &moduleHost{caps: capability.New(capability.Bootc), capsSet: true, state: State{RebootRequired: true, Updates: []sysext.AvailableUpdate{{Feature: "docker"}}}}
+	host := &moduleHost{caps: capability.New(capability.Bootc), capsSet: true, state: State{RebootRequired: true, RebootReasons: []string{"update activation"}}}
 
 	cards, err := New().Dashboard(context.Background(), host)
 	require.NoError(t, err)
@@ -321,7 +356,7 @@ func TestDashboardAndHealthDegradeWithoutSystemd(t *testing.T) {
 // default) both routes behave exactly as they did before this chunk,
 // including rendering the same page body from the same queried State.
 func TestRoutesServeWhenSystemdPresent(t *testing.T) {
-	state := State{OSVersion: "42.20260101", Updates: []sysext.AvailableUpdate{{Feature: "docker", Component: "docker", Current: "1", Newest: "2"}}, RebootRequired: true, RebootReasons: []string{"update activation"}, Jobs: []Job{{ID: 7, Action: "update", Resource: "docker", Status: jobs.StatusSucceeded}}}
+	state := State{OSVersion: "42.20260101", RebootRequired: true, RebootReasons: []string{"update activation"}, Jobs: []Job{{ID: 7, Action: "update", Resource: "docker", Status: jobs.StatusSucceeded}}}
 	host := &moduleHost{state: state}
 	mux := http.NewServeMux()
 	New().Mount(mux, host)
@@ -346,7 +381,7 @@ func TestRoutesServeWhenSystemdPresent(t *testing.T) {
 // behavior of the two non-route call paths against the same expectations
 // they had before the gate rework.
 func TestDashboardAndHealthUnchangedWhenSystemdPresent(t *testing.T) {
-	state := State{Updates: []sysext.AvailableUpdate{{Feature: "docker"}}, RebootRequired: true, RebootReasons: []string{"update activation"}}
+	state := State{RebootRequired: true, RebootReasons: []string{"update activation"}}
 	host := &moduleHost{state: state}
 
 	cards, err := New().Dashboard(context.Background(), host)
@@ -358,9 +393,8 @@ func TestDashboardAndHealthUnchangedWhenSystemdPresent(t *testing.T) {
 
 	findings, err := New().Health(context.Background(), host)
 	require.NoError(t, err)
-	require.Len(t, findings, 2)
-	assert.Equal(t, "maintenance.updates", findings[0].ID)
-	assert.Equal(t, "maintenance.reboot", findings[1].ID)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "maintenance.reboot", findings[0].ID)
 }
 
 // TestCollectPageFetchesHostImageOnlyWhenASourceIsAdvertised pins the second
@@ -607,7 +641,7 @@ func TestModuleSurfacesFollowHasAnyGateEndToEnd(t *testing.T) {
 				assert.Contains(t, cards, "<h2>Maintenance</h2>")
 				assert.NotContains(t, cards, "Module unavailable", "the dashboard card must render, not degrade to an error card")
 				assert.Equal(t, http.StatusOK, page.Code)
-				assert.Contains(t, page.Body.String(), "Update availability, durable maintenance jobs, and host reboot posture.")
+				assert.Contains(t, page.Body.String(), "Durable maintenance jobs and host reboot posture.")
 			} else {
 				assert.NotContains(t, nav, `href="/maintenance"`)
 				assert.NotContains(t, nav, "<span>Maintenance</span>")

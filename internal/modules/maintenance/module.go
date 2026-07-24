@@ -2,7 +2,6 @@ package maintenance
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -30,10 +29,11 @@ func (*Module) Health(ctx context.Context, host platform.Host) ([]platform.Findi
 	if err != nil {
 		return nil, err
 	}
+	// Extension update availability is deliberately not reported here: it
+	// belongs to the Extensions module, which owns both the inventory and the
+	// actions that resolve it. Maintenance reports only reboot posture and
+	// maintenance-job outcomes.
 	findings := make([]platform.Finding, 0)
-	if len(state.Updates) > 0 {
-		findings = append(findings, platform.Finding{ID: "maintenance.updates", Source: "Maintenance", Severity: platform.SeverityWarning, Title: "Extension updates are available", Detail: plural(len(state.Updates), "update"), Path: "/maintenance"})
-	}
 	if state.RebootRequired {
 		detail := "Installed changes require activation."
 		if len(state.RebootReasons) > 0 {
@@ -59,15 +59,15 @@ func (*Module) Health(ctx context.Context, host platform.Host) ([]platform.Findi
 }
 
 func (*Module) Manifest() platform.Manifest {
-	return platform.Manifest{ID: "maintenance", Name: "Maintenance", Description: "Updates, jobs, and reboot posture", Icon: "refresh", Order: 34, Path: "/maintenance"}
+	return platform.Manifest{ID: "maintenance", Name: "Maintenance", Description: "Host image, jobs, and reboot posture", Icon: "refresh", Order: 34, Path: "/maintenance"}
 }
 
 // RequiredAnyCapabilities makes the whole module — its nav entry, dashboard
 // card, and GET /maintenance below — available on a host that advertises
 // *any* of systemd, bootc, or rpm-ostree (platform.CapabilityGateAny's
 // HasAny semantics), rather than requiring systemd specifically. Maintenance
-// reports on two independent sources: reboot posture, update availability,
-// and maintenance jobs come from the systemd-gated QueryMaintenanceState,
+// reports on two independent sources: reboot posture and maintenance jobs
+// come from the systemd-gated QueryMaintenanceState,
 // while host-image status comes from the separately-gated
 // QueryHostImageStatus (bootc OR rpm-ostree, per docs/capabilities.md). A
 // bootc-only host with no systemd therefore still has something to show, so
@@ -205,10 +205,10 @@ func queryAutoUpdate(ctx context.Context, host platform.Host, caps capability.Se
 // queryHostImage returns QueryHostImageStatus's response when caps advertises
 // at least one host-image source, and nil when it advertises neither. The
 // daemon registers that query only under HasAny(Bootc, RPMOStree)
-// (docs/capabilities.md's one any-of row), so on a systemd-only host it is
-// absent rather than empty: calling it there would fail. Returning nil instead
-// is what makes the page omit the host-image section on such a host rather
-// than 503 or render an error placeholder.
+// (docs/capabilities.md's exception #4, the first of its three any-of rows),
+// so on a systemd-only host it is absent rather than empty: calling it there
+// would fail. Returning nil instead is what makes the page omit the host-image
+// section on such a host rather than 503 or render an error placeholder.
 //
 // The gate is HasAny(Bootc, RPMOStree) and deliberately says nothing about
 // Systemd, so everything the section renders — including soft-reboot
@@ -247,11 +247,4 @@ func queryState(ctx context.Context, host platform.Host, caps capability.Set) (S
 	}
 	err := host.Query(ctx, broker.QueryMaintenanceState, nil, &state)
 	return state, err
-}
-
-func plural(count int, noun string) string {
-	if count == 1 {
-		return "1 " + noun
-	}
-	return fmt.Sprintf("%d %ss", count, noun)
 }

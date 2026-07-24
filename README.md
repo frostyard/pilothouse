@@ -14,6 +14,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
 - Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` Snosi definitions through updex
 - Installed and merged state from `systemd-sysext`
+- Extension update availability on the Extensions page — the pending component updates for each extension, an "Update available" badge on every affected extension row, and the aggregate count on the dashboard card
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - System Podman inventory for containers, pods, images, engine version, reported image storage, and bounded log viewing
 - Administrator-only container start, stop, restart, and safe removal actions
@@ -26,7 +27,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
 - Durable privileged-action history, destructive confirmations, and per-resource action serialization
 - Durable background jobs for extension update and refresh operations
-- Extension update availability, reboot-required posture, confirmed host reboot, and read-only host-image status — booted, staged, and rollback deployments with the image references and manifest digests `bootc` reports as the authoritative source, supplemented but never overridden by `rpm-ostree` version and checksum detail where it is present, plus soft-reboot eligibility when bootc exposes it
+- Reboot-required posture, confirmed host reboot, and read-only host-image status — booted, staged, and rollback deployments with the image references and manifest digests `bootc` reports as the authoritative source, supplemented but never overridden by `rpm-ostree` version and checksum detail where it is present, plus soft-reboot eligibility when bootc exposes it
 - Read-only automatic-update reporting on the Maintenance page for `bootc` and `rpm-ostree` — each updater's timer enablement and active state, next scheduled run, service state and last result, normalized policy, and whether local drop-ins customize its service or timer, or an explicit "not configured" statement when that updater is not set up; the section appears on any host reporting `bootc` or `rpm-ostree` and is omitted entirely on a host with neither, and Pilothouse never enables, disables, triggers, or reconfigures either updater
 - Exact systemd backup timer monitoring with freshness and last-result health
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`

@@ -242,9 +242,12 @@ for the failure mode this avoids.
 
 `CapabilityGate`/`Available` above always require *every* listed capability
 (`capability.Set.HasAll` semantics). Some modules instead need *any one* of
-several capabilities — `maintenance` is the real example: it reports host-image
-status from bootc or rpm-ostree *and* reboot posture from systemd, so its
-surface is worth showing as soon as any one of the three is present. For that
+several capabilities — `maintenance` and `sysext` are the real examples.
+`maintenance` reports host-image status from bootc or rpm-ostree *and* reboot
+posture from systemd, so its surface is worth showing as soon as any one of the
+three is present; `sysext` builds its inventory as a union of `updex`
+definitions and `systemd-sysext` installed/merged state, so either tool alone
+is enough (both are worked through below). For that
 shape, `internal/capability`'s `Set` gained a sibling predicate,
 `HasAny(ids ...ID) bool`, that reports true iff at least one given id is
 present; unlike `HasAll`'s zero-ids case (vacuously true), `HasAny()` with
@@ -288,10 +291,11 @@ capabilities is present, rather than requiring all of them together.
 
 #### Worked example: `maintenance`'s per-surface split
 
-`maintenance` is the only production `CapabilityGateAny` adopter, and it is the
-one module in the tree where module presence, an individual route, and each
-individual broker call are gated on *different* capability expressions. Copy its
-shape when a module aggregates independently-sourced reports:
+`maintenance` was the first production `CapabilityGateAny` adopter (`sysext`
+is the second — see below), and it is the module where module presence, an
+individual route, and each individual broker call are gated on *different*
+capability expressions. Copy its shape when a module aggregates
+independently-sourced reports:
 
 | Surface | Predicate | Where it is enforced |
 |---|---|---|
@@ -308,6 +312,56 @@ shape when a module aggregates independently-sourced reports:
 `CapabilityGate` — the two whole-module gates are alternatives, not layers. So a
 bootc-only host with no systemd keeps the module's nav entry, dashboard card, and
 `GET /maintenance`, while `POST /maintenance/reboot` 404s there.
+
+#### Worked example: `sysext`'s per-action split
+
+`sysext` (the Extensions module) is the second `CapabilityGateAny` adopter,
+added by #52, and it is the clearest instance of the "guard each logical
+group individually" guidance above: one route pattern,
+`POST /sysext/actions/{action}`, carries two actions with *different*
+requirements, so the route-level gate cannot express either of them alone.
+
+| Surface | Predicate | Where it is enforced |
+|---|---|---|
+| Nav entry, dashboard card | `HasAny(Updex, Sysext)` | `Module.RequiredAnyCapabilities` → `platform.AvailableAny` via `moduleAvailable` |
+| `GET /sysext` | `HasAny(Updex, Sysext)` | `platform.GateAny(host, m.RequiredAnyCapabilities(), ...)` in `Mount` |
+| `POST /sysext/{name}/{action}` (enable, disable) | `HasAll(Updex, Sysext)` | a separate, plain `platform.Gate(host, []capability.ID{capability.Updex, capability.Sysext}, ...)` in the same `Mount` |
+| `POST /sysext/actions/refresh` | `Has(Sysext)` | `platform.GateAny` at the route, plus an in-handler `caps.Has(capability.Sysext)` check that 404s |
+| `POST /sysext/actions/update` | `Has(Updex)` | `platform.GateAny` at the route, plus an in-handler `caps.Has(capability.Updex)` check that 404s |
+| `broker.QueryExtensionsState` | `HasAny(Updex, Sysext)` | web side: reached only from `Dashboard` and `GET /sysext`, both already behind the module's any-of gate, so `queryState` needs no check of its own; daemon side: `registerExtensions` |
+| `broker.ActionSysext{Enable,Disable}` | `HasAll(Updex, Sysext)` | `registerSysextActions` (daemon) |
+| `broker.ActionSysextRefresh` | `Has(Sysext)` | `registerSysextActions` (daemon) |
+| `broker.ActionSysextUpdate` | `Has(Updex)` | `registerSysextActions` (daemon) |
+
+Like `maintenance.Module`, `sysext.Module` implements `CapabilityGateAny`
+only, never both gates. The module gate is the *union* condition because the
+inventory is a union: updex contributes managed definitions, enabled state,
+and pending updates, while `systemd-sysext` contributes installed and merged
+state, so either tool alone yields a page worth rendering.
+
+Because the two global actions share one route pattern, the per-action
+requirement is re-checked inside the handler rather than at the mux — a
+404 there is indistinguishable from an unknown action, so the narrower
+requirement is enforced without leaking which tool is missing. Every rendered
+control follows the same three predicates: `Page` takes
+`enableDisableAvailable`, `refreshAvailable`, and `updateAvailable`, computed
+once in the `GET /sysext` handler from a single `host.Capabilities` read. Note
+that `enableDisableAvailable` collapses *both* the per-row enable form and the
+per-row disable form as one unit — they target the same gated route family —
+and that an extension with `Managed: false` renders no enable/disable control
+regardless of the flag, since an extension with no updex definition is
+read-only even where both tools are present.
+
+`sysext` is also the second module (after `services`, whose `journal`
+subpackage holds the cgo journal reader) to keep its privileged half in a
+subpackage the web binary never links. `internal/modules/sysext` holds the
+web module, the `Manager`/`ExtensionsSource` interfaces, and the types they
+exchange, and imports neither `os/exec` nor any `CommandRunner`;
+`internal/modules/sysext/extctl` holds `NewSystemManager`, `ExecRunner`, and
+every `updex`/`systemd-sysext` invocation, and is imported only by
+`cmd/pilothoused`. Copy that split when a module's manager shells out to a
+host tool: it turns "the web process must not run this" from a review
+convention into a property of the package graph.
 
 Each broker call is skipped rather than failed when its own capability is absent,
 so no capability combination can turn an available module into a 503:
