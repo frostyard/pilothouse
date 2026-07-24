@@ -393,54 +393,79 @@ component updates updex's feature check reported for that extension. `Updates`
 is empty for an unmanaged extension in every case, since the check only ever
 reports on definitions updex itself enumerated. No web-side caller exists yet;
 this is a registered, capability-guarded daemon surface with no web consumer
-until the Extensions module is converted to read through it.
+until the Extensions module is converted to read through it. The
+`sysext.ExtensionsSource` behind it does have a second *daemon-internal*
+consumer: `maintenance.SystemManager` calls the same interface (on the same
+instance) to derive its merged-but-disabled reboot reason — see the
+extension-read note below.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
 `.mill/spec.md` says sysext reads are "updex OR sysext". As of #52 that
 requirement has its own standalone read query, `QueryExtensionsState`
-(exception #6 above); the paragraphs below describe the *separate*
-extension-read subpath still living inside `QueryMaintenanceState`, which
-performs daemon-side extension reads of its own today (maintenance's update
-source invokes updex). The *registration* of `QueryMaintenanceState` (and
+(exception #6 above); the paragraphs below describe how the *other*
+extension-touching query, `QueryMaintenanceState`, consumes that same
+aggregate. The *registration* of `QueryMaintenanceState` (and
 `ActionMaintenanceReboot`) is guarded on `systemd` (the module-level default
 for maintenance, matching the rows above) by `registerMaintenance`, which
 takes the probed `capability.Set` and no-ops entirely when `systemd` is
 absent, exactly like `registerBackups`/`registerStorageActions`.
 `maintenance.NewSystemManager` has no D-Bus dependency of its own (it
-depends only on the sysext manager, job store, and command runner), so
-unlike backups/services/logs there is no construction-level non-fatal-
-startup fix needed here — the manager is always constructed, and this
-registration guard is the only thing withholding it.
+depends only on the sysext extensions source, job store, and command
+runner), so unlike backups/services/logs there is no construction-level
+non-fatal-startup fix needed here — the manager is always constructed, and
+this registration guard is the only thing withholding it.
 
-Separately, as of c10, `maintenance.SystemManager`'s `extensionState` method
-degrades its extension-read subpath gracefully based on the probed
-`updex`/`sysext` capabilities threaded into `NewSystemManager`'s new
-`updexAvailable`/`sysextAvailable` parameters, rather than erroring:
-`sysext.SystemManager.Check()` (which produces `Updates`) only ever invokes
-`updex`, while `List()` (which produces `Features`, driving "disabled but
-merged, reboot required" reasons) invokes `updex` to enumerate feature
-definitions and additionally `systemd-sysext` to attach installed/merged
-status.
+**Mechanism.** `maintenance.SystemManager`'s `extensionState` method makes
+exactly one call: `sysext.ExtensionsSource.State(ctx, updexAvailable,
+sysextAvailable)`, with the two probed capability facts threaded in from
+`NewSystemManager`'s `updexAvailable`/`sysextAvailable` parameters. That is
+the same interface — and, in `cmd/pilothoused`, the same concrete
+`*sysext.SystemManager` instance — `registerExtensions` serves
+`QueryExtensionsState` from, so this is daemon-internal instance reuse
+(exactly like `HostImageManager` in the host-image note below), not a second
+broker round trip. It is instance reuse, not result reuse:
+`sysext.SystemManager.State` has no cache of its own, so a
+`QueryExtensionsState` and a `QueryMaintenanceState` in the same moment each
+run their own read. The only cache in play is maintenance's own pre-existing
+1-minute `extensionState` cache, which belongs to the maintenance manager
+alone.
 
-- updex and sysext both present: unchanged pre-chunk behavior — `Updates`
-  and `Features`/merged-derived reboot reasons both populate.
-- updex present, sysext absent: `Check()` still runs (`Updates` populates,
-  since `Check` never touches `systemd-sysext`); `List()` is skipped
-  entirely (merged-but-disabled reboot reasons omitted, no attempt, no
-  error), since installed/merged status is meaningless without
-  `systemd-sysext`.
-- updex absent (sysext present or absent): neither `Check()` nor `List()`
-  runs — both require `updex` to enumerate feature definitions in the first
-  place — so `Updates` and feature-derived reboot reasons are both omitted.
-  Recorded as an honest limitation of today's `sysext.SystemManager`
-  (enumeration is updex-only by construction), not a phase-1a shortfall.
+**Degrade guarantee — unconditional, and about failure as well as absence.**
+`ExtensionsSource.State` owns the never-attempt rule for both sources (a tool
+whose capability flag is false is never invoked) *and* the never-hard-error
+rule: a source that is invoked and whose command fails sets only its own
+`UpdexAvailable`/`UpdexError` or `SysextAvailable`/`SysextError` pair in the
+returned `ExtensionsState` and leaves the other source's data intact,
+returning no error of its own. `extensionState` therefore inherits the
+guarantee rather than restating it, and handles the (contractually unused)
+error result the same way `hostImageState` handles a failed host-image read:
+drop this call's extension contribution, cache nothing, and carry on.
 
-In no combination does `State()` return an error because of missing
-updex/sysext, and non-extension fields (`Jobs`, `OSVersion`, reboot-marker-
-derived reasons) are unaffected in every combination.
-`internal/modules/maintenance/manager_test.go` has one dedicated test case
-per combination.
+The consequence is the one spec resolution 3 requires: in **no** combination
+— tool absent, tool present but its command failing, both failing, or the
+source erroring outright — does `SystemManager.State` return an error because
+of extensions, so `QueryMaintenanceState` stays a 200. What is lost on a
+failed read is only the extension-derived reboot reasons; the OS-marker,
+completed-job, and staged-host-image reasons, plus `Jobs` and `OSVersion`,
+are computed exactly as before.
+`internal/modules/maintenance/manager_test.go` has a dedicated test case per
+combination, including one that drives the real `*sysext.SystemManager` with
+a failing command runner.
+
+**What maintenance derives, and what it no longer owns.** From the returned
+`Extensions` slice, maintenance takes exactly one fact: an entry that is
+`Merged && !Enabled` becomes the reboot reason "<name> is disabled but
+remains active until reboot." Nothing else. `maintenance.State` no longer
+carries an `Updates` field, the Maintenance page no longer renders an
+"Available updates" table or an update count, the dashboard Summary card no
+longer carries an "Updates" mini-row, and `Module.Health` no longer emits the
+`maintenance.updates` finding. Ownership of extension inventory and
+per-extension/aggregate update availability has moved to Extensions, whose
+`QueryExtensionsState` response already carries it per extension in
+`Extension.Updates`; the Extensions web surface that renders it lands with
+the rest of that module's conversion to query-based reads, and is not
+described here yet.
 
 ### Host-image read note (`QueryMaintenanceState` / bootc)
 

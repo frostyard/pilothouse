@@ -19,19 +19,21 @@ type Runner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 }
 
-type UpdateSource interface {
-	Check(context.Context) ([]sysext.AvailableUpdate, error)
-	List(context.Context) ([]sysext.Feature, error)
-}
-
 type JobSource interface {
 	List(context.Context, jobs.Filter) ([]jobs.Job, error)
 	RebootRequiredSince(context.Context, time.Time) (bool, error)
 }
 
 // State is the aggregated maintenance posture: recent jobs, the OS version,
-// available extension updates, and — the part this package alone owns — the
-// reboot-required posture with its structured reasons.
+// and — the part this package alone owns — the reboot-required posture with
+// its structured reasons.
+//
+// Extension inventory and extension update availability are deliberately not
+// here. They belong to the Extensions module (broker.QueryExtensionsState,
+// served from sysext.ExtensionsSource), which owns both reporting them and
+// acting on them; maintenance consumes the same aggregate only to derive one
+// reboot reason from it (a merged-but-disabled extension stays active until
+// reboot).
 //
 // SoftRebootCapable is the exception to that ownership: it is not computed
 // here at all, only copied verbatim from the host-image source's
@@ -42,12 +44,11 @@ type JobSource interface {
 // makes RebootRequired true on its own, and Pilothouse still exposes only the
 // existing full reboot action.
 type State struct {
-	Jobs              []Job                    `json:"jobs"`
-	OSVersion         string                   `json:"os_version"`
-	RebootReasons     []string                 `json:"reboot_reasons"`
-	RebootRequired    bool                     `json:"reboot_required"`
-	SoftRebootCapable *bool                    `json:"soft_reboot_capable,omitempty"`
-	Updates           []sysext.AvailableUpdate `json:"updates"`
+	Jobs              []Job    `json:"jobs"`
+	OSVersion         string   `json:"os_version"`
+	RebootReasons     []string `json:"reboot_reasons"`
+	RebootRequired    bool     `json:"reboot_required"`
+	SoftRebootCapable *bool    `json:"soft_reboot_capable,omitempty"`
 }
 
 // stagedHostImageReason is the reboot reason a staged host-image deployment
@@ -73,9 +74,9 @@ type Manager interface {
 
 type SystemManager struct {
 	bootcAvailable  bool
-	cacheFeatures   []sysext.Feature
-	cacheUpdates    []sysext.AvailableUpdate
 	cacheAt         time.Time
+	cacheExtensions []sysext.Extension
+	extensions      sysext.ExtensionsSource
 	hostImage       HostImageSource
 	jobs            JobSource
 	mu              sync.Mutex
@@ -83,7 +84,6 @@ type SystemManager struct {
 	root            string
 	runner          Runner
 	sysextAvailable bool
-	updates         UpdateSource
 	updexAvailable  bool
 }
 
@@ -92,9 +92,26 @@ type SystemManager struct {
 // updexAvailable, sysextAvailable, and bootcAvailable report whether the updex
 // executable, systemd-sysext, and bootc are present on this host (as probed by
 // internal/capability). All three follow one convention: a source whose flag is
-// false is never called at all, and State degrades by omitting that source's
-// contribution rather than returning an error. They are independent of the
-// systemd capability that gates registerMaintenance's registration entirely.
+// false is never invoked, and State degrades by omitting that source's
+// contribution rather than returning an error. bootcAvailable is enforced here
+// (hostImageState skips the read outright); updexAvailable and sysextAvailable
+// are threaded verbatim into sysext.ExtensionsSource.State, which enforces the
+// same rule per source on this manager's behalf. All three are independent of
+// the systemd capability that gates registerMaintenance's registration entirely.
+//
+// extensions is the read-only extensions seam (the same sysext manager
+// cmd/pilothoused serves broker.QueryExtensionsState from, as one daemon-
+// internal instance rather than a second broker round trip). State consults it
+// for exactly one fact: which extensions are merged but disabled, and thus
+// remain active until reboot. It is never used to mutate anything — the
+// interface has no mutating method — and may be nil, which State treats as
+// "no extension-derived reboot reasons".
+//
+// The two consumers share the interface and the instance, not a result:
+// sysext.SystemManager.State has no cache of its own, so a QueryExtensionsState
+// and a QueryMaintenanceState in the same minute may run it twice (only the
+// 1-minute cache in extensionState below is a real cache, and it is this
+// manager's alone).
 //
 // hostImage is the read-only host-image seam (the same HostImageManager
 // cmd/pilothoused serves QueryHostImageStatus from). State consults it only
@@ -103,30 +120,23 @@ type SystemManager struct {
 // eligibility (informational). It is never used to mutate anything — the
 // interface has no mutating method — and may be nil, which State treats
 // exactly like bootcAvailable being false.
-func NewSystemManager(updates UpdateSource, jobSource JobSource, hostImage HostImageSource, runner Runner, root string, updexAvailable, sysextAvailable, bootcAvailable bool) *SystemManager {
+func NewSystemManager(extensions sysext.ExtensionsSource, jobSource JobSource, hostImage HostImageSource, runner Runner, root string, updexAvailable, sysextAvailable, bootcAvailable bool) *SystemManager {
 	if root == "" {
 		root = "/"
 	}
-	return &SystemManager{bootcAvailable: bootcAvailable, hostImage: hostImage, jobs: jobSource, now: time.Now, root: root, runner: runner, sysextAvailable: sysextAvailable, updates: updates, updexAvailable: updexAvailable}
+	return &SystemManager{bootcAvailable: bootcAvailable, extensions: extensions, hostImage: hostImage, jobs: jobSource, now: time.Now, root: root, runner: runner, sysextAvailable: sysextAvailable, updexAvailable: updexAvailable}
 }
 
 func (m *SystemManager) State(ctx context.Context) (State, error) {
-	available, features, err := m.extensionState(ctx)
-	if err != nil {
-		return State{}, err
-	}
+	extensions := m.extensionState(ctx)
 	jobRecords, err := m.jobs.List(ctx, jobs.Filter{Limit: 20})
 	if err != nil {
 		return State{}, fmt.Errorf("list maintenance jobs: %w", err)
 	}
 	// Normalize slice fields to non-nil so they serialize as JSON `[]` rather
 	// than `null` over the broker protocol. Downstream JSON consumers should
-	// not have to special-case null vs empty array (the same contract updex's
-	// feature output now follows).
-	if available == nil {
-		available = []sysext.AvailableUpdate{}
-	}
-	state := State{Jobs: make([]Job, 0, len(jobRecords)), OSVersion: m.osVersion(), Updates: available, RebootReasons: []string{}}
+	// not have to special-case null vs empty array.
+	state := State{Jobs: make([]Job, 0, len(jobRecords)), OSVersion: m.osVersion(), RebootReasons: []string{}}
 	for _, job := range jobRecords {
 		state.Jobs = append(state.Jobs, Job{ID: job.ID, Action: job.Action, Resource: job.Resource, Status: job.Status, ErrorCategory: job.ErrorCategory, RebootRequired: job.RebootRequired})
 	}
@@ -144,9 +154,9 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	if staged {
 		state.RebootReasons = append(state.RebootReasons, stagedHostImageReason)
 	}
-	for _, feature := range features {
-		if feature.Merged && !feature.Enabled {
-			state.RebootReasons = append(state.RebootReasons, feature.Name+" is disabled but remains active until reboot.")
+	for _, extension := range extensions {
+		if extension.Merged && !extension.Enabled {
+			state.RebootReasons = append(state.RebootReasons, extension.Name+" is disabled but remains active until reboot.")
 		}
 	}
 	bootedAt, err := m.bootedAt()
@@ -164,47 +174,47 @@ func (m *SystemManager) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
-// extensionState reads updex/sysext-derived data, degrading gracefully when
-// either dependency is absent rather than returning an error:
+// extensionState reads the shared extensions aggregate and returns the union
+// inventory State derives its merged-but-disabled reboot reasons from. It
+// cannot fail: every extension failure mode degrades to "no extension-derived
+// reboot reasons" rather than to an error, which is what keeps
+// QueryMaintenanceState a 200 on a host whose updex or systemd-sysext cannot
+// answer.
 //
-//   - updex and sysext both present: unchanged behavior -- Check() populates
-//     Updates and List() populates Features (which drives merged-but-disabled
-//     reboot reasons in State).
-//   - updex present, sysext absent: Check() still runs (it never touches
-//     systemd-sysext) so Updates still populates; List()'s installed/merged
-//     status is meaningless without systemd-sysext, so it is skipped entirely
-//     and Features is omitted.
-//   - updex absent (sysext present or absent): neither Check() nor List() can
-//     enumerate feature definitions without updex, so both are skipped and
-//     Updates/Features are both omitted. This is a known limitation of
-//     today's sysext.SystemManager (enumeration is updex-only), not an error.
+// There is no per-capability branching here on purpose. The probed
+// updexAvailable/sysextAvailable flags are threaded straight into
+// sysext.ExtensionsSource.State, which owns the never-attempt rule for both
+// sources: a source whose tool the host does not have is never invoked, and a
+// source that is invoked and fails sets only its own *Available/*Error pair in
+// the returned ExtensionsState, leaving the other source's data intact. That
+// contract is why State returns no error for a source-level failure, and
+// extensionState inherits the guarantee rather than restating it.
 //
-// In no combination does extensionState return an error because of a missing
-// updex/sysext capability.
-func (m *SystemManager) extensionState(ctx context.Context) ([]sysext.AvailableUpdate, []sysext.Feature, error) {
+// The err result is still checked, not ignored: sysext's contract reserves it
+// for conditions outside per-source reporting, and the honest handling of one
+// here is the same degrade — drop the extension contribution for this call,
+// exactly as hostImageState does for a failed host-image read. Nothing is
+// cached in that case, so the next call retries.
+//
+// The 1-minute cache is unchanged in behavior and is this manager's alone: the
+// sysext source it wraps has no cache, so a concurrent QueryExtensionsState
+// runs its own independent read.
+func (m *SystemManager) extensionState(ctx context.Context) []sysext.Extension {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.updexAvailable {
-		return nil, nil, nil
+	if m.extensions == nil {
+		return nil
 	}
 	if !m.cacheAt.IsZero() && m.now().Sub(m.cacheAt) < time.Minute {
-		return slices.Clone(m.cacheUpdates), slices.Clone(m.cacheFeatures), nil
+		return slices.Clone(m.cacheExtensions)
 	}
-	available, err := m.updates.Check(ctx)
+	state, err := m.extensions.State(ctx, m.updexAvailable, m.sysextAvailable)
 	if err != nil {
-		return nil, nil, fmt.Errorf("check extension updates: %w", err)
+		return nil
 	}
-	var features []sysext.Feature
-	if m.sysextAvailable {
-		features, err = m.updates.List(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("inspect extension state: %w", err)
-		}
-	}
-	m.cacheUpdates = slices.Clone(available)
-	m.cacheFeatures = slices.Clone(features)
+	m.cacheExtensions = slices.Clone(state.Extensions)
 	m.cacheAt = m.now()
-	return available, features, nil
+	return state.Extensions
 }
 
 // hostImageState reads the host-image source at most once per State call and
@@ -224,8 +234,8 @@ func (m *SystemManager) extensionState(ctx context.Context) ([]sysext.AvailableU
 //     QueryHostImageStatus's to report (HostImageStatus carries a
 //     BootcAvailable/BootcError pair for exactly that); the aggregate
 //     maintenance posture must stay answerable when one of its inputs cannot
-//     be read, the same way a missing updex omits Updates rather than failing
-//     State.
+//     be read, the same way an unreadable extension source omits the
+//     merged-but-disabled reboot reasons rather than failing State.
 //   - bootcAvailable true and Status succeeds: a non-nil Staged deployment
 //     means a staged host image is waiting for activation, and
 //     SoftRebootCapable is copied through byte-for-byte — including nil, which

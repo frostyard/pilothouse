@@ -20,7 +20,6 @@ import (
 	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
-	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/frostyard/pilothouse/internal/platform"
 	"github.com/frostyard/pilothouse/internal/web"
 	"github.com/stretchr/testify/assert"
@@ -876,9 +875,6 @@ func cannedMaintenanceState() maintenance.State {
 		RebootRequired: true,
 		RebootReasons: []string{
 			"A staged host image deployment requires activation by reboot.",
-		},
-		Updates: []sysext.AvailableUpdate{
-			{Feature: "contract", Component: "contract-ext", Current: "1.0.0", Newest: "1.1.0"},
 		},
 		Jobs: []maintenance.Job{
 			{ID: 1, Action: "maintenance/reboot", Resource: "host", Status: "succeeded", RebootRequired: true},

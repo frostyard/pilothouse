@@ -12,13 +12,12 @@ import (
 
 	"github.com/frostyard/pilothouse/internal/capability"
 	"github.com/frostyard/pilothouse/internal/jobs"
-	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPageRendersMaintenanceStateAndComponents(t *testing.T) {
-	state := State{OSVersion: "Snosi", RebootRequired: true, RebootReasons: []string{"Update requires reboot"}, Updates: []sysext.AvailableUpdate{{Feature: "docker", Component: "root", Current: "1", Newest: "2"}}, Jobs: []Job{{ID: 1, Status: jobs.StatusSucceeded}}}
+	state := State{OSVersion: "Snosi", RebootRequired: true, RebootReasons: []string{"Update requires reboot"}, Jobs: []Job{{ID: 1, Status: jobs.StatusSucceeded}}}
 	var output bytes.Buffer
 	require.NoError(t, Page(state, nil, nil, "csrf", true).Render(context.Background(), &output))
 	html := output.String()
@@ -26,6 +25,79 @@ func TestPageRendersMaintenanceStateAndComponents(t *testing.T) {
 	assert.Contains(t, html, "Reboot host")
 	assert.Contains(t, html, "<svg")
 	assert.NotContains(t, html, "@web.")
+}
+
+// engineStatsOpenTag is the opening tag of the Maintenance page's stat-tile
+// strip. The update-availability assertions below are scoped to it (and to the
+// Summary card, and to the page as a whole for the removed table) rather than
+// run page-wide, per
+// docs/agents/skills/scope-html-assertions-to-the-region-under-test.md: the
+// page legitimately talks about updates in the read-only "Automatic updates"
+// section, so a bare page-wide search for "updates" could not tell the removed
+// extension-update surfaces apart from the section that must stay.
+const engineStatsOpenTag = `<section class="engine-stats"`
+
+// TestPageOmitsExtensionUpdateAvailability pins this chunk's ownership
+// narrowing on the Maintenance page: the "Available updates" table, its
+// "Manage updates" link, and the "Updates" stat tile are gone, while every
+// other section — host image, automatic updates, reboot posture, maintenance
+// jobs — renders exactly as before. Extension update availability is the
+// Extensions module's to report.
+func TestPageOmitsExtensionUpdateAvailability(t *testing.T) {
+	caps := capability.New(capability.Systemd, capability.Bootc, capability.RPMOStree, capability.AutoupdateBootc, capability.AutoupdateRPMOStree)
+	html := renderMaintenancePageWithAutoUpdate(t, caps, stagedBootcState(), fullHostImageStatus(boolPtr(true)), bothConfiguredAutoUpdate())
+
+	// The removed page section, by heading, by its empty-state copy, by its
+	// column headers, and by the link it carried to the Extensions module.
+	assert.NotContains(t, html, "Available updates")
+	assert.NotContains(t, html, "Manage updates")
+	assert.NotContains(t, html, "Enabled extensions are up to date.")
+	assert.NotContains(t, html, `href="/sysext"`)
+	assert.NotContains(t, html, "<th>Feature</th>")
+	assert.NotContains(t, html, "<th>Newest</th>")
+
+	// The removed stat tile, scoped to the strip that used to carry it. The
+	// two surviving tiles are asserted present so this is not vacuous.
+	stats := fragment(t, html, engineStatsOpenTag, "</section>")
+	assert.NotContains(t, stats, "<span>Updates</span>")
+	assert.NotContains(t, stats, "available components")
+	assert.Contains(t, stats, "<span>System</span>")
+	assert.Contains(t, stats, "<span>Jobs</span>")
+
+	// Everything else the page owns is untouched.
+	assert.Contains(t, html, "<h2>Host image</h2>")
+	assert.Contains(t, html, "<h2>Automatic updates</h2>")
+	assert.Contains(t, html, "<h2>Reboot required</h2>")
+	assert.Contains(t, html, "<h2>Recent maintenance jobs</h2>")
+	assert.Contains(t, html, "Durable maintenance jobs and host reboot posture.")
+}
+
+// TestSummaryOmitsExtensionUpdateAvailability is the dashboard half of the same
+// claim: the Summary card's "Updates" mini-row is gone, its one-line posture no
+// longer reports an update count, and the reboot mini-row it always carried is
+// still there.
+func TestSummaryOmitsExtensionUpdateAvailability(t *testing.T) {
+	for _, fixture := range []struct {
+		name  string
+		state State
+		want  string
+	}{
+		{name: "reboot required", state: State{RebootRequired: true, RebootReasons: []string{"docker is disabled but remains active until reboot."}}, want: "Reboot required"},
+		{name: "nothing pending", state: State{}, want: "Up to date"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			card := renderComponent(t, Summary(fixture.state))
+
+			assert.NotContains(t, card, "<strong>Updates</strong>")
+			assert.NotContains(t, card, "Enabled system extensions")
+			assert.NotContains(t, card, "update available")
+			assert.NotContains(t, card, "updates available")
+			// The reboot mini-row and the card's own posture line survive.
+			assert.Contains(t, card, "<strong>Reboot</strong>")
+			assert.Contains(t, card, fixture.want)
+			assert.NotContains(t, card, "@web.")
+		})
+	}
 }
 
 // hostImageOpenTag is the opening tag of the host-image section's own
@@ -355,7 +427,7 @@ func TestPageOmitsHostImageSectionWithoutAnySource(t *testing.T) {
 	assert.NotContains(t, html, softRebootMarker)
 	assert.NotContains(t, html, "soft reboot")
 	// The rest of the module has not disappeared with it.
-	assert.Contains(t, html, "Update availability, durable maintenance jobs, and host reboot posture.")
+	assert.Contains(t, html, "Durable maintenance jobs and host reboot posture.")
 	assert.Contains(t, html, "<h2>Recent maintenance jobs</h2>")
 	assert.Contains(t, html, rebootCardOpenTag)
 }
@@ -750,7 +822,7 @@ func TestPageOmitsAutoUpdateSectionWithoutAnySource(t *testing.T) {
 	assert.NotContains(t, html, BootcPolicyCustomUnknown)
 	assert.NotContains(t, html, "Local drop-in present")
 	// The rest of the module has not disappeared with it.
-	assert.Contains(t, html, "Update availability, durable maintenance jobs, and host reboot posture.")
+	assert.Contains(t, html, "Durable maintenance jobs and host reboot posture.")
 	assert.Contains(t, html, rebootCardOpenTag)
 }
 

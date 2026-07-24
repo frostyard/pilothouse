@@ -161,7 +161,11 @@ func run() error {
 	// it is constructed unconditionally above (it runs nothing until called),
 	// and registerExtensions' own guard decides whether the query is exposed
 	// at all, exactly as registerHostImage does for the host-image reporter.
-	// One reader, two surfaces — never a second path to updex/systemd-sysext.
+	// The maintenance manager below consumes this same instance through the
+	// same sysext.ExtensionsSource interface, to derive its merged-but-disabled
+	// reboot reasons. One reader, two consumers — never a second path to
+	// updex/systemd-sysext. They share the instance, not a result: the
+	// aggregate read is not memoized, so each consumer's call runs its own.
 	if err := registerExtensions(queries, sysextManager, caps); err != nil {
 		return err
 	}
@@ -734,12 +738,13 @@ const maintenanceLockResource = "maintenance/global"
 // the sysext manager, job store, and command runner), so unlike
 // backups/services/logs/storage there is no nil-manager backstop here: the
 // manager is always non-nil regardless of systemd's presence, and this
-// guard is the only thing withholding registration. Extension-derived
-// fields (Updates, Feature/merged-derived reboot reasons) and the
-// host-image-derived ones (the staged-deployment reboot reason,
-// SoftRebootCapable) all degrade inside SystemManager.State itself based on
-// the probed updex/sysext/bootc capabilities passed into NewSystemManager,
-// independent of this systemd guard.
+// guard is the only thing withholding registration. The extension-derived
+// reboot reasons (merged-but-disabled extensions) and the host-image-derived
+// ones (the staged-deployment reboot reason, SoftRebootCapable) all degrade
+// inside SystemManager.State itself based on the probed updex/sysext/bootc
+// capabilities passed into NewSystemManager, independent of this systemd
+// guard -- an extension source that cannot answer costs those reasons, never
+// the query's 200.
 func registerMaintenance(actions *broker.ActionRegistry, queries *broker.QueryRegistry, manager maintenance.Manager, caps capability.Set) error {
 	if !caps.Has(capability.Systemd) {
 		return nil
