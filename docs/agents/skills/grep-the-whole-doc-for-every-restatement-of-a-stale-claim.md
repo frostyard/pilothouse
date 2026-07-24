@@ -71,3 +71,27 @@ a "Host-image status (#51) — landed end state" recap section for the
 Each round's fix was correct but scoped to only the line quoted in that
 round's objection, never a proactive whole-file sweep for every sibling
 claim before resubmitting.
+
+**"The whole doc" is too narrow a search boundary — search the whole repo,
+including non-`.md` source files in packages you have not otherwise
+touched.** The same mill run for #58 resumed and hit chunk 3 a second time
+after this skill's advice above was already available to read. Round 1 and
+round 2 of the second attempt fixed the same `yeti/OVERVIEW.md`/
+`docs/modules.md` sibling-count pattern again (lines 120-121, 291-293).
+Round 2 also flagged `docs/capabilities.md:548`'s "52 IDs" total; the
+round-3 objection quoted the *identical* file and line, unchanged — the
+byte-for-byte-identical-across-rounds signal this skill already names,
+which should have triggered a targeted diff of that exact line and did not.
+Round 3's *other* objection was the one a doc-scoped search habit will
+never find: `cmd/pilothouse/capability_contract_test.go:1651`, a Go test
+file in a package the chunk's own diff never touched, hardcodes
+`require.Len(t, capabilityRequirements)`-style totals and an explicit
+"52 declared broker IDs (35 Action* + 17 Query*)" comment that go stale the
+same way a markdown sentence does. When a chunk adds a new
+`Action*`/`Query*` broker constant, `grep -rn` the *entire repository* (not
+just the doc you edited or its named siblings) for the old total pair (old
+ID count, old query count) and for `FiftyTwoRows`/`FiftySomethingRows`-style
+test names before considering the chunk done — the hardcoded literal lives
+in test code and doc prose alike, in packages far from the one being
+edited, and a search scoped to ".md files near this feature" will miss it
+every time.

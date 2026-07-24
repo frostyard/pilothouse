@@ -78,7 +78,7 @@ directory. Current modules:
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
-| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation and no automatic-update reporting. |
+| `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), extension update availability, maintenance-job state, reboot posture, confirmed reboot. No host-image mutation. Read-only automatic-update (updater policy/timer) status is reported daemon-side through `QueryAutoUpdateStatus`; the module page has no web consumer for it yet. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
 | `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
 
@@ -97,12 +97,23 @@ action exists, and `cmd/pilothoused/capability_contract_test.go`'s
 `internal/broker/api.go`'s 35 `Action*` constants names bootc, ostree, or
 rpm-ostree in either its Go identifier or its wire ID (`Query*` constants are
 deliberately exempt — `QueryHostImageStatus` is the read-only surface this phase
-adds) — and it does no automatic-update reporting: normalized updater
-policy/timer reporting was split out of #51 into #58 and has not landed. The
-`autoupdate-bootc`/`autoupdate-rpm-ostree` capabilities #50 probes are advertised
-over `QueryCapabilities`, but no production code path in `cmd/pilothoused` or any
-module gates on or reports them — outside `internal/capability` they appear only
-in tests' full-capability fixtures. Zincati is neither queried nor special-cased:
+adds) — and #51 itself does no automatic-update reporting: normalized updater
+policy/timer reporting was split out of #51 into #58. That reporting has since
+begun landing daemon-side: `cmd/pilothoused`'s `run()` now registers
+`broker.QueryAutoUpdateStatus`
+(`org.frostyard.pilothouse.maintenance.autoupdate_status`) via `registerAutoUpdate`,
+guarded by `caps.HasAny(capability.Bootc, capability.RPMOStree)` exactly like
+`registerHostImage` and independent of both `registerMaintenance`'s and
+`registerHostImage`'s own guards. It constructs one `maintenance.AutoUpdateManager`
+whose per-updater configured/not-configured split is driven by the probed
+`capability.AutoupdateBootc`/`capability.AutoupdateRPMOStree` flags — so the
+`autoupdate-bootc`/`autoupdate-rpm-ostree` capabilities #50 probes and advertises
+over `QueryCapabilities` now have a production consumer that gates on and reports
+them, not only tests' full-capability fixtures. The manager reuses the same probed
+systemd `*dbus.Conn` `cmd/pilothoused` already opens for backups/services/logs (no
+second D-Bus dial), passing it through only when non-nil so a typed-nil never
+reaches the manager's own nil-client guard. The query is registered daemon-side
+with no web consumer yet. Zincati is neither queried nor special-cased:
 `TestMaintenanceNeverReferencesZincati` fails on any non-comment mention of it in
 any `.go` or `.templ` file under `internal/modules/maintenance`.
 
@@ -234,8 +245,9 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (52 IDs,
-  17 queries) and `cmd/pilothoused/capability_contract_test.go` exercises it
+  withheld. `docs/capabilities.md`'s binding table carries the row (53 IDs,
+  18 queries, the 18th being #58's `QueryAutoUpdateStatus`) and
+  `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
 - `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
   where reboot-required posture is assembled and, per the spec's
