@@ -7,25 +7,26 @@ to change any of it.
 
 ## What exists today
 
-This document currently covers exactly what these two files contain:
+This document currently covers exactly what these three files contain:
 
 - `internal/modules/maintenance/autoupdate.go` — the response domain types
   `AutoUpdateStatus`, `BootcAutoUpdate`, and `RPMOStreeAutoUpdate`, plus
   `NormalizeBootcAutoUpdatePolicy`, a pure, zero-I/O classifier for bootc's
-  automatic-update policy; and
+  automatic-update policy;
 - `internal/modules/maintenance/autoupdate_rpmostree.go` — the `RPMOStreePolicy*`
   vocabulary and `ParseRPMOStreeAutomaticUpdatePolicy`, a pure, zero-I/O parser
   that maps the *content* of rpm-ostree's daemon configuration file to a
-  normalized policy string.
+  normalized policy string; and
+- `internal/modules/maintenance/autoupdate_manager.go` — `AutoUpdateManager`,
+  the daemon-side reader that gives those two pure functions their real inputs
+  (see [The daemon-side manager](#the-daemon-side-manager) below).
 
-There is no broker query, no daemon-side manager, and no web surface for
-automatic-update status yet. Neither normalizer has a production caller in the
-tree at this commit: the code that reads live systemd state and feeds
-`NormalizeBootcAutoUpdatePolicy` its drop-in path lists, and the code that reads
-`/etc/rpm-ostreed.conf` off disk and hands the bytes to
-`ParseRPMOStreeAutomaticUpdatePolicy`, both land in a later change. Nothing
-populates `BootcAutoUpdate.Policy` or `RPMOStreeAutoUpdate.Policy` on a real
-host yet — both normalizers are reachable only from their tests.
+There is no broker query and no web surface for automatic-update status yet:
+`AutoUpdateManager` has no production caller in the tree at this commit. It is
+constructed and its `Status` is served over the broker only in a later change
+(the `QueryAutoUpdateStatus` registration in `cmd/pilothoused`), and the
+Maintenance-page rendering lands after that. Both normalizers, and the manager
+that drives them, are reachable only from their tests at this commit.
 
 ## Response schema
 
@@ -254,10 +255,80 @@ loaded — the daemon reads the file once at its own startup, and a report of
 tell." Reporting `custom/unknown` says the weaker, true thing.
 
 Because empty and nil input map to `custom/unknown` like any other unreadable
-state, the caller that lands in a later change can pass the result of a failed
-read straight through without a special case.
+state, `AutoUpdateManager` passes the result of a failed read straight through
+without a special case (see below).
+
+## The daemon-side manager
+
+`AutoUpdateManager` (`internal/modules/maintenance/autoupdate_manager.go`) is
+the one place in the tree that reads live systemd state and rpm-ostree's
+configuration file for automatic-update reporting. It turns the two probed
+`Autoupdate*` capability booleans, four systemd unit-property reads, and one
+`/etc/rpm-ostreed.conf` read into an `AutoUpdateStatus`, delegating the
+classification math to the two pure functions above.
+
+`NewAutoUpdateManager(client, bootcConfigured, rpmOStreeConfigured, root)`
+touches neither disk nor D-Bus: every read is deferred to `Status`. The
+`client` is a narrow, unexported `systemdClient` interface exposing only
+`GetUnitPropertiesContext` and `GetUnitTypePropertiesContext` — structurally
+identical to `internal/modules/backups`'s own `systemdClient`, so both a real
+`*dbus.Conn` and a test fake satisfy it without either package importing the
+other's type. There is no start/stop/enable/disable method on that interface,
+so the manager is read-only by construction, not by convention. `root` mirrors
+`SystemManager`'s `root`/`path()` pattern and defaults to `/` when empty, so a
+test can point the configuration read at a temporary directory.
+
+`BootcConfigured` and `RPMOStreeConfigured` come straight from the two
+`Autoupdate*` capabilities (`#50`), never from a live re-check: per the spec,
+per-updater gating is capability-driven. When an updater's flag is true its
+payload pointer is always non-nil, even when every read behind it fails; when
+false, the manager makes no D-Bus call naming that updater's units and leaves
+the pointer nil. So the zero `AutoUpdateStatus` is the honest report for a host
+with no updater configured, and "configured but unreadable" stays distinct from
+"not configured" — the same "never attempted vs. attempted and failed"
+discipline `HostImageManager.Status` keeps.
+
+Failure handling is per-field. Any single D-Bus or file read that fails
+degrades exactly the field(s) it feeds to their zero value; it never drops the
+whole payload and never becomes `Status`'s own error. `Policy` falls back to
+`custom/unknown` whenever the properties needed to classify it could not be read
+— for bootc, that includes not being able to read *either* unit's drop-in list,
+since the "no drop-ins anywhere means the shipped `apply` default" inference is
+only sound when the absence was actually observed. A nil `client` behaves
+exactly as though every systemd read failed — all systemd-sourced fields zero,
+`Policy` `custom/unknown` — and panics nowhere. `Status` therefore never returns
+a non-nil error today; like `HostImageManager.Status`, the error result exists
+for conditions outside per-updater reporting, of which this design has none, and
+callers must still check it.
+
+Both updaters share one unexported helper that reads a timer+service pair's
+`ActiveState`/`UnitFileState`/`NextElapseUSecRealtime`/`Result`/`DropInPaths`,
+reusing the same microsecond-to-`time.Time` conversion (including the `MaxInt64`
+guard and the "zero microseconds means no time at all" rule) that
+`internal/modules/backups` already uses, so the bootc and rpm-ostree halves do
+not duplicate the D-Bus plumbing.
+
+**No caching.** `Status` re-reads systemd and `/etc/rpm-ostreed.conf` on *every*
+call. There is no cached field, no `sync.Once`, and no TTL anywhere in the
+manager. Two callers holding the same `*AutoUpdateManager` each trigger an
+independent set of reads, and their two results are neither guaranteed identical
+nor atomic with each other — documentation must not describe them as sharing a
+single parse.
 
 ## Testing
+
+`AutoUpdateManager` is exercised end-to-end through its real `Status(ctx)` in
+`internal/modules/maintenance/autoupdate_manager_test.go`, never through a
+test-only helper that takes pre-computed properties as a plain parameter. The
+dbus fake implements the manager's whole `systemdClient` interface — both
+property getters, each independently failable — so the full success path and
+every single-read-failure branch are all reachable through the production call.
+The tests walk the present/absent/nil-client/read-failure matrix for both
+updaters, plus bootc's drop-in policy matrix, rpm-ostree's config-file policy
+mapping (including an `os.IsNotExist` file → `custom/unknown`), the
+both-configured case, the no-caching re-read on every call, and mechanical
+guards pinning the import allowlist, the single fixed configuration path, and
+the source-text ban on any lifecycle-mutating subcommand.
 
 Both normalizers are pure, so they are tested with Go literals — no fixture
 images, no systemd session, and no `/etc` on the test host are involved.
