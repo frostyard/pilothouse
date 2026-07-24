@@ -205,10 +205,10 @@ func queryAutoUpdate(ctx context.Context, host platform.Host, caps capability.Se
 // queryHostImage returns QueryHostImageStatus's response when caps advertises
 // at least one host-image source, and nil when it advertises neither. The
 // daemon registers that query only under HasAny(Bootc, RPMOStree)
-// (docs/capabilities.md's one any-of row), so on a systemd-only host it is
-// absent rather than empty: calling it there would fail. Returning nil instead
-// is what makes the page omit the host-image section on such a host rather
-// than 503 or render an error placeholder.
+// (docs/capabilities.md's exception #4, the first of its three any-of rows),
+// so on a systemd-only host it is absent rather than empty: calling it there
+// would fail. Returning nil instead is what makes the page omit the host-image
+// section on such a host rather than 503 or render an error placeholder.
 //
 // The gate is HasAny(Bootc, RPMOStree) and deliberately says nothing about
 // Systemd, so everything the section renders — including soft-reboot

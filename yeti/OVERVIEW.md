@@ -130,9 +130,10 @@ gating narrative below. Zincati is neither queried nor special-cased:
 `TestMaintenanceNeverReferencesZincati` fails on any non-comment mention of it in
 any `.go` or `.templ` file under `internal/modules/maintenance`.
 
-The per-surface capability split is the thing to hold in mind — Maintenance is
-the one module where module presence, one route, and each individual broker call
-are gated on *different* capability expressions:
+The per-surface capability split is the thing to hold in mind — Maintenance was
+the first module where module presence, one route, and each individual broker
+call are gated on *different* capability expressions (Extensions/`sysext` is the
+other, since #52; see the sysext bullet in the web-side gating narrative below):
 
 | Surface | Gate | Where |
 |---|---|---|
@@ -635,10 +636,11 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   through a fake `Host`'s real `Capabilities()`) and a synthetic fake module
   registered into a real `*web.Server` in `internal/web/server_test.go`
   proving nav/dashboard/route behavior through a real registry and HTTP
-  round trip. #51 then made `maintenance` the first — and still the only —
-  production adopter, with `RequiredAnyCapabilities()` returning
-  `{Systemd, Bootc, RPMOStree}`; see the Maintenance bullet below for the
-  per-surface split that adoption produced.
+  round trip. #51 then made `maintenance` the first production adopter, with
+  `RequiredAnyCapabilities()` returning `{Systemd, Bootc, RPMOStree}`; see the
+  Maintenance bullet below for the per-surface split that adoption produced.
+  #52 added the second, `sysext` → `{Updex, Sysext}`; see the sysext bullet
+  below.
 - **Services module: the first real `CapabilityGate` adopter.**
   `internal/modules/services.Module` now implements
   `RequiredCapabilities() []capability.ID`, returning
@@ -1067,7 +1069,7 @@ optional tooling never shows a dead link or a button that always fails.
   reflected in nav/dashboard by `moduleAvailable` (per render), so a gated-off
   surface is indistinguishable from a route that does not exist, both in the
   UI and at the URL.
-- **sysext was out of scope for #54; #52 landed its web-side gate.**
+- **sysext, which #54 did not cover, got its web-side gate in #52.**
   `cmd/pilothouse`'s `newRegistry` now calls `sysext.New()` with no arguments
   — the web process constructs no extension manager and has no
   `--definitions-root`/`--updex` flags — and reads the inventory through

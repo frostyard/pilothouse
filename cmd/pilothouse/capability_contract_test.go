@@ -350,7 +350,7 @@ var capabilityAnyRequirements = map[string][]capability.ID{
 
 // The web-side gating exemption that used to live here
 // (webSideUngatedBrokerIDs — the four ActionSysext* IDs deliberately skipped
-// by requireAvailable's capability check, "deferred to #52") is gone. #52
+// by requireAvailable's capability check until this phase landed) is gone. #52
 // landed the sysext web-side gate, so those four IDs are now subject to the
 // ordinary check like every other broker ID: sysext.Module implements
 // platform.CapabilityGateAny{Updex, Sysext} for its nav entry, dashboard
