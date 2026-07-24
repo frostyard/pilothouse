@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frostyard/pilothouse/internal/auth"
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -47,6 +48,19 @@ import (
 // halves (assertMaintenanceSurfaces). It also records every broker ID the
 // web side invokes, so a fixture can assert a call was never made rather
 // than only that the page around it 404s.
+//
+// Issue #60's second chunk extends that same harness to the Maintenance
+// page's third gated half — the "Automatic updates" section, whose
+// QueryAutoUpdateStatus response c1 taught internal/modules/maintenance to
+// consume. The query rides the *same* any-of registration gate as
+// QueryHostImageStatus (HasAny(Bootc, RPMOStree)), but the response's
+// per-updater configured/not-configured split is driven by the two
+// AutoupdateBootc/AutoupdateRPMOStree capabilities instead. Those two facts
+// are independent, so the fake broker's canned AutoUpdateStatus is calibrated
+// per fixture (calibratedAutoUpdateStatus) rather than shared: a fixture
+// advertising bootc/rpm-ostree but neither Autoupdate* capability gets the
+// zero-value response the real AutoUpdateManager would produce for it, never
+// the populated one.
 
 // contractIdentity is the authenticated identity used by every contract
 // test: an administrator, so every module's admin-gated view (activity,
@@ -443,14 +457,18 @@ func expectModuleAvailable(t *testing.T, manifestID string, caps capability.Set)
 // active fixture — proving the web side never attempts a gated-off broker
 // call, not merely that the page around it 404s.
 //
-// Two broker IDs answer with representative, populated fixture data rather
-// than the generic zero-value canned response: QueryMaintenanceState (see
-// cannedMaintenanceState) and QueryHostImageStatus (see hostImage below).
-// Both are conditionally rendered surfaces whose per-field markup this
-// chunk asserts present-or-absent per fixture, and an empty response would
-// make every one of those "absent" assertions vacuously true — the failure
-// mode docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md records.
+// Three broker IDs answer with representative, per-fixture data rather than
+// the generic zero-value canned response: QueryMaintenanceState (see
+// cannedMaintenanceState), QueryHostImageStatus (see hostImage below), and
+// QueryAutoUpdateStatus (see autoUpdate below). All three are conditionally
+// rendered surfaces whose per-field markup this harness asserts
+// present-or-absent per fixture, and an empty response would make every one of
+// those "absent" assertions vacuously true — the failure mode
+// docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
+// assert.md records. QueryAutoUpdateStatus in particular must *not* fall
+// through to cannedQueryResponse's generic `{}`: that default is
+// indistinguishable from a genuine "no updater is configured" response, so a
+// configured-state assertion against it could never fail.
 //
 // calls records every broker ID the web side actually invoked, so a fixture
 // can assert a *negative* directly ("QueryMaintenanceState was never called
@@ -459,18 +477,25 @@ func expectModuleAvailable(t *testing.T, manifestID string, caps capability.Set)
 // the check ran at all.
 type fakeCapabilityBroker struct {
 	t            *testing.T
+	autoUpdate   maintenance.AutoUpdateStatus
 	capabilities capability.Set
 	hostImage    maintenance.HostImageStatus
 	calls        map[string]int
 }
 
-// newFakeCapabilityBroker builds the fake for a fixture. hostImage is passed
-// in explicitly rather than defaulted so a fixture can exercise the
-// rpm-ostree read-failure shape (RPMOStreeAvailable=false + RPMOStreeError
-// set) as well as the fully-successful one; runCapabilityContractFixture
-// supplies cannedHostImageStatus() for the ordinary case.
-func newFakeCapabilityBroker(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus) *fakeCapabilityBroker {
-	return &fakeCapabilityBroker{t: t, capabilities: caps, hostImage: hostImage, calls: map[string]int{}}
+// newFakeCapabilityBroker builds the fake for a fixture. hostImage and
+// autoUpdate are both passed in explicitly rather than defaulted so each
+// fixture can carry the response its own capability set could actually
+// produce: hostImage so a fixture can exercise the per-source read-failure
+// shapes as well as the fully-successful one, and autoUpdate so a fixture
+// whose capability set lacks the Autoupdate* capabilities gets the zero-value
+// AutoUpdateStatus the daemon would really return for it rather than a
+// populated payload that host can never emit (docs/agents/skills/calibrate-
+// canned-fixture-data-per-capability-set.md). runCapabilityContractFixture
+// supplies cannedHostImageStatus() and calibratedAutoUpdateStatus(caps) for
+// the ordinary case.
+func newFakeCapabilityBroker(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus, autoUpdate maintenance.AutoUpdateStatus) *fakeCapabilityBroker {
+	return &fakeCapabilityBroker{t: t, autoUpdate: autoUpdate, capabilities: caps, hostImage: hostImage, calls: map[string]int{}}
 }
 
 // called reports how many times the web side invoked the given broker ID
@@ -558,6 +583,16 @@ func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[stri
 		return json.Unmarshal(encoded, target)
 	case broker.QueryHostImageStatus:
 		encoded, err := json.Marshal(b.hostImage)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(encoded, target)
+	case broker.QueryAutoUpdateStatus:
+		// Marshalled and unmarshalled through JSON exactly as the other
+		// populated responses are, so the fixture travels the same wire form
+		// the real broker would use — including AutoUpdateStatus's omitempty
+		// payload pointers, whose absence is what spells "not configured".
+		encoded, err := json.Marshal(b.autoUpdate)
 		if err != nil {
 			return err
 		}
@@ -700,6 +735,122 @@ func cannedHostImageStatusBootcFailed() maintenance.HostImageStatus {
 		BootcError:         contractBootcError,
 		RPMOStreeAvailable: true,
 	}
+}
+
+// The representative automatic-update fixture values every per-field
+// assertion in this harness is checked against. Each updater gets its own
+// distinct value for every field so an assertion scoped to one updater's block
+// can never be satisfied by the other's data, and the two drop-in booleans
+// differ within each payload so neither row's rendering can pass by matching
+// the other's.
+//
+// The policy strings are real members of each updater's own closed vocabulary
+// (autoupdate.go's Bootc* constants, autoupdate_rpmostree.go's RPMOStree*
+// ones), never a value borrowed from the other's enum. The systemd state
+// strings are systemd's own ActiveState / UnitFileState / Result spellings,
+// which is what AutoUpdateManager reports verbatim.
+const (
+	contractBootcTimerActiveState       = "active"
+	contractBootcTimerUnitFileState     = "enabled"
+	contractBootcServiceActiveState     = "inactive"
+	contractBootcServiceResult          = "success"
+	contractRPMOStreeTimerActiveState   = "failed"
+	contractRPMOStreeTimerUnitFileState = "disabled"
+	contractRPMOStreeServiceActiveState = "activating"
+	contractRPMOStreeServiceResult      = "exit-code"
+)
+
+// The two next-trigger instants. They are distinct so a bootc/rpm-ostree mixup
+// in either direction is visible, and both are non-zero so the rendered value
+// is a real timestamp rather than the "No next run is scheduled" placeholder
+// (which a zero time would produce under *every* fixture, making the
+// configured-state assertion vacuous).
+var (
+	contractBootcNextTrigger     = time.Date(2026, 8, 2, 3, 30, 0, 0, time.UTC)
+	contractRPMOStreeNextTrigger = time.Date(2026, 8, 3, 4, 15, 0, 0, time.UTC)
+)
+
+// cannedAutoUpdateStatus is the "both updaters configured" QueryAutoUpdateStatus
+// response: both *Configured flags true and both payload pointers non-nil, with
+// every field the Maintenance page's automatic-update section renders carrying a
+// representative value.
+//
+// It is calibrated to exactly one kind of capability set and must never be
+// served to any other. The daemon's AutoUpdateManager sets BootcConfigured from
+// capability.AutoupdateBootc and RPMOStreeConfigured from
+// capability.AutoupdateRPMOStree (autoupdate_manager.go's Status), attaching a
+// payload only for a configured updater — so this response is producible only
+// on a host advertising *both* Autoupdate* capabilities. fullCapabilitySet()
+// (and the three degraded sets derived from it, which drop unrelated
+// capabilities) is the only such fixture in this file.
+//
+// Pairing it with ucoreCapabilitySet() or bootcOnlyCapabilitySet() would be the
+// exact miscalibration docs/agents/skills/calibrate-canned-fixture-data-per-
+// capability-set.md records: those two advertise bootc/rpm-ostree — enough for
+// the query itself to be registered — but neither Autoupdate* capability, so
+// their only possible response is the zero-value AutoUpdateStatus. Serving them
+// this one would assert a daemon state the real manager cannot produce, and
+// would destroy the assertion those fixtures exist for: that an image host with
+// no configured updater renders the explicit not-configured state. Access is
+// therefore routed through calibratedAutoUpdateStatus rather than by calling
+// this function from a fixture directly.
+func cannedAutoUpdateStatus() maintenance.AutoUpdateStatus {
+	return maintenance.AutoUpdateStatus{
+		Bootc: &maintenance.BootcAutoUpdate{
+			NextTrigger:           contractBootcNextTrigger,
+			Policy:                maintenance.BootcPolicyApply,
+			ServiceActiveState:    contractBootcServiceActiveState,
+			ServiceDropinsPresent: false,
+			ServiceResult:         contractBootcServiceResult,
+			TimerActiveState:      contractBootcTimerActiveState,
+			TimerDropinsPresent:   true,
+			TimerUnitFileState:    contractBootcTimerUnitFileState,
+		},
+		BootcConfigured: true,
+		RPMOStree: &maintenance.RPMOStreeAutoUpdate{
+			NextTrigger:           contractRPMOStreeNextTrigger,
+			Policy:                maintenance.RPMOStreePolicyStage,
+			ServiceActiveState:    contractRPMOStreeServiceActiveState,
+			ServiceDropinsPresent: true,
+			ServiceResult:         contractRPMOStreeServiceResult,
+			TimerActiveState:      contractRPMOStreeTimerActiveState,
+			TimerDropinsPresent:   false,
+			TimerUnitFileState:    contractRPMOStreeTimerUnitFileState,
+		},
+		RPMOStreeConfigured: true,
+	}
+}
+
+// calibratedAutoUpdateStatus is the single place a fixture's canned
+// QueryAutoUpdateStatus response is chosen, so no fixture can accidentally be
+// handed a response its capability set could not produce.
+//
+// It reproduces, by hand, the one rule AutoUpdateManager.Status applies: a
+// payload accompanies its own Autoupdate* capability and nothing else. The rule
+// is spelled out per capability with capability.Set.Has rather than delegated to
+// HasAny/HasAll or to any production helper, per docs/agents/skills/dont-use-
+// the-gate-under-test-as-the-test-oracle.md — the fixture data must be an
+// independent statement of what the daemon would return, not a re-derivation
+// through the code the harness is verifying.
+//
+// The Bootc/RPMOStree capabilities deliberately play no part here: they decide
+// whether the *query* is registered at all (and so whether the web side calls
+// it), never whether an updater is configured. That separation is precisely
+// what makes ucoreCapabilitySet() and bootcOnlyCapabilitySet() — bootc and/or
+// rpm-ostree present, neither Autoupdate* capability — land on the zero-value
+// AutoUpdateStatus{} with both *_configured false and both payload pointers nil.
+func calibratedAutoUpdateStatus(caps capability.Set) maintenance.AutoUpdateStatus {
+	canned := cannedAutoUpdateStatus()
+	status := maintenance.AutoUpdateStatus{}
+	if caps.Has(capability.AutoupdateBootc) {
+		status.Bootc = canned.Bootc
+		status.BootcConfigured = true
+	}
+	if caps.Has(capability.AutoupdateRPMOStree) {
+		status.RPMOStree = canned.RPMOStree
+		status.RPMOStreeConfigured = true
+	}
+	return status
 }
 
 // cannedMaintenanceState is the QueryMaintenanceState response the contract
@@ -1164,6 +1315,209 @@ func contractDeploymentSlots(hostImage maintenance.HostImageStatus) []contractDe
 	}
 }
 
+// --- maintenance automatic-update surface --------------------------------
+
+// autoUpdateSectionPattern locates the Maintenance page's "Automatic updates"
+// card (internal/modules/maintenance/views.templ's autoUpdateSection), and
+// autoUpdaterBlockPattern locates one updater's subsection *inside* it. Every
+// automatic-update assertion below is scoped through these two rather than run
+// against the whole page, per docs/agents/skills/scope-html-assertions-to-the-
+// region-under-test.md: the Maintenance page already talks about updates,
+// timers, and policy in three other regions (the summary stats, the
+// reboot-required card, and the host-image section), so a page-wide Contains
+// could not tell "rendered in the automatic-update section" apart from
+// "rendered somewhere else", and the per-updater scoping is what stops bootc's
+// data from satisfying an assertion about rpm-ostree's block.
+var autoUpdateSectionPattern = regexp.MustCompile(`(?s)<article\b[^>]*\bid="auto-update"[^>]*>(.*?)</article>`)
+
+// The capture group deliberately spans the opening <section> tag as well as
+// the block's contents: data-configured — the machine-readable form of the
+// updater's configured-ness, and the primary thing the per-updater assertions
+// key on — is an attribute of that tag, so a capture that started after it
+// could never see the fact under test.
+func autoUpdaterBlockPattern(slug string) *regexp.Regexp {
+	return regexp.MustCompile(`(?s)(<section\b[^>]*\bdata-updater="` + regexp.QuoteMeta(slug) + `"[^>]*>.*?</section>)`)
+}
+
+// autoUpdateFieldRowPattern locates one labelled field row inside an
+// already-isolated updater block, and autoUpdateValuePattern extracts that
+// row's rendered value. Reading the value out and comparing it for equality
+// (rather than running Contains against the whole block) is what makes the
+// per-field assertions strict: several of the fixture's systemd state strings
+// are substrings of each other ("active" of "inactive", "enabled" of
+// "disabled"), so a regression that swapped the timer and service rows would
+// still satisfy a Contains check.
+func autoUpdateFieldRowPattern(field string) *regexp.Regexp {
+	return regexp.MustCompile(`(?s)<div\b[^>]*\bdata-field="` + regexp.QuoteMeta(field) + `"[^>]*>(.*?)</div>`)
+}
+
+var (
+	autoUpdateValuePattern = regexp.MustCompile(`(?s)<small\b[^>]*>(.*?)</small>`)
+	autoUpdateBadgePattern = regexp.MustCompile(`(?s)<span\b[^>]*\bclass="[^"]*\bbadge\b[^"]*"[^>]*>(.*?)</span>`)
+)
+
+// autoUpdateMarkers is every structural marker the automatic-update section
+// emits and nothing else on the page does. A fixture advertising neither bootc
+// nor rpm-ostree must show none of them: the section is omitted entirely
+// rather than rendered empty. Only the section's own container/attribute
+// markers appear here — never a bare fixture value such as "active" or
+// "enabled", which the rest of the page may legitimately contain.
+func autoUpdateMarkers() []string {
+	return []string{
+		`id="auto-update"`,
+		`data-updater="bootc"`,
+		`data-updater="rpm-ostree"`,
+		`data-configured=`,
+	}
+}
+
+// autoUpdateConfiguredFields is every field row a configured updater renders.
+// It doubles as the not-configured assertion's list of rows that must not be
+// there.
+var autoUpdateConfiguredFields = []string{
+	"timer-active-state",
+	"timer-unit-file-state",
+	"next-trigger",
+	"service-active-state",
+	"service-result",
+	"policy",
+	"service-dropins",
+	"timer-dropins",
+}
+
+// autoUpdaterBlock isolates one updater's subsection from an already-isolated
+// automatic-update section.
+func autoUpdaterBlock(t *testing.T, section, slug string) string {
+	t.Helper()
+	return extractRequiredSection(t, autoUpdaterBlockPattern(slug), section, "GET /maintenance", "automatic-update "+slug+" block")
+}
+
+// autoUpdateFieldValue reads one field row's rendered value out of an
+// already-isolated updater block, unescaped so it can be compared against the
+// fixture's own plain string.
+func autoUpdateFieldValue(t *testing.T, block, field string) string {
+	t.Helper()
+	row := extractRequiredSection(t, autoUpdateFieldRowPattern(field), block, "GET /maintenance", "automatic-update "+field+" row")
+	return html.UnescapeString(extractRequiredSection(t, autoUpdateValuePattern, row, "GET /maintenance", "automatic-update "+field+" value"))
+}
+
+// autoUpdateDropinLabel is the harness's own hand-written spelling of the two
+// drop-in-presence renderings, transcribed from views.templ rather than called
+// out of it, so a change to either wording has to be made deliberately in both
+// places instead of silently agreeing with itself.
+func autoUpdateDropinLabel(present bool) string {
+	if present {
+		return "Local drop-in present"
+	}
+	return "No local drop-in"
+}
+
+// assertAutoUpdaterConfigured asserts, inside one updater's block alone, every
+// field AutoUpdateStatus carries for a configured updater: both timer states,
+// the next trigger, both service fields, the normalized policy, and both
+// drop-in booleans. The expected values come from the caller's own fixture
+// payload, so a fixture that quietly lost a field fails here rather than
+// agreeing with an emptier render.
+func assertAutoUpdaterConfigured(t *testing.T, block, slug, policy, serviceActiveState, serviceResult, timerActiveState, timerUnitFileState string, nextTrigger time.Time, serviceDropins, timerDropins bool) {
+	t.Helper()
+	assert.Containsf(t, block, `data-configured="true"`, "the %s updater is configured in this fixture, so its block must say so", slug)
+	assert.Equalf(t, "Configured", html.UnescapeString(extractRequiredSection(t, autoUpdateBadgePattern, block, "GET /maintenance", "automatic-update "+slug+" badge")),
+		"the %s updater's badge must read Configured", slug)
+	assert.Equalf(t, timerActiveState, autoUpdateFieldValue(t, block, "timer-active-state"), "the %s timer's active state must render", slug)
+	assert.Equalf(t, timerUnitFileState, autoUpdateFieldValue(t, block, "timer-unit-file-state"), "the %s timer's unit-file state must render", slug)
+	assert.Equalf(t, nextTrigger.Local().Format("2006-01-02 15:04 MST"), autoUpdateFieldValue(t, block, "next-trigger"),
+		"the %s timer's next trigger must render as a real timestamp", slug)
+	assert.Equalf(t, serviceActiveState, autoUpdateFieldValue(t, block, "service-active-state"), "the %s service's active state must render", slug)
+	assert.Equalf(t, serviceResult, autoUpdateFieldValue(t, block, "service-result"), "the %s service's last result must render", slug)
+	assert.Equalf(t, policy, autoUpdateFieldValue(t, block, "policy"), "the %s updater's normalized policy must render", slug)
+	assert.Equalf(t, autoUpdateDropinLabel(serviceDropins), autoUpdateFieldValue(t, block, "service-dropins"),
+		"the %s service's own drop-in-presence boolean must render", slug)
+	assert.Equalf(t, autoUpdateDropinLabel(timerDropins), autoUpdateFieldValue(t, block, "timer-dropins"),
+		"the %s timer's own drop-in-presence boolean must render", slug)
+	assert.NotContainsf(t, block, `data-field="not-configured"`,
+		"a configured %s updater must not also render the not-configured statement", slug)
+}
+
+// assertAutoUpdaterNotConfigured is the other half: an updater whose payload is
+// nil renders an explicit, visible statement naming it — never an empty block,
+// never a hidden one — and none of the configured field rows.
+func assertAutoUpdaterNotConfigured(t *testing.T, block, slug string) {
+	t.Helper()
+	assert.Containsf(t, block, `data-configured="false"`, "the %s updater is not configured in this fixture, so its block must say so", slug)
+	assert.Equalf(t, "Not configured", html.UnescapeString(extractRequiredSection(t, autoUpdateBadgePattern, block, "GET /maintenance", "automatic-update "+slug+" badge")),
+		"the %s updater's badge must read Not configured", slug)
+	assert.Equalf(t, slug+" automatic updates are not configured on this host.", autoUpdateFieldValue(t, block, "not-configured"),
+		"an unconfigured %s updater must state so explicitly, naming itself", slug)
+	for _, field := range autoUpdateConfiguredFields {
+		assert.NotContainsf(t, block, `data-field="`+field+`"`,
+			"an unconfigured %s updater must render no configured field row (%s)", slug, field)
+	}
+}
+
+// assertAutoUpdateSurfaces is the automatic-update counterpart of the
+// host-image audit in assertMaintenanceSurfaces: it checks the section's
+// presence and every per-updater field against expectations derived by hand
+// from docs/capabilities.md and from the fixture's own canned response, never
+// from platform.Available, the module's gate, or capability.Set.HasAny
+// (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md).
+//
+// Two independent facts are asserted, because the production code keeps them
+// independent:
+//
+//   - whether the section renders at all, and whether QueryAutoUpdateStatus is
+//     called, follows bootc OR rpm-ostree — the query's registration gate;
+//   - whether each updater's block is configured or not-configured follows that
+//     updater's own payload, which the daemon populates from
+//     AutoupdateBootc/AutoupdateRPMOStree.
+func assertAutoUpdateSurfaces(t *testing.T, run contractFixtureRun, caps capability.Set, body string, autoUpdate maintenance.AutoUpdateStatus) {
+	t.Helper()
+
+	// Hand-derived from docs/capabilities.md's any-of row for
+	// QueryAutoUpdateStatus, spelled out per capability so this expectation
+	// cannot move with a change to the any-of predicate the production gate
+	// calls.
+	autoUpdateAvailable := caps.Has(capability.Bootc) || caps.Has(capability.RPMOStree)
+
+	if !autoUpdateAvailable {
+		assert.Zero(t, run.brokerClient.called(broker.QueryAutoUpdateStatus),
+			"the web side must never call QueryAutoUpdateStatus on a host advertising neither bootc nor rpm-ostree")
+		for _, marker := range autoUpdateMarkers() {
+			assert.NotContainsf(t, body, marker,
+				"GET /maintenance rendered automatic-update markup (%s) on a host advertising neither bootc nor rpm-ostree", marker)
+		}
+		return
+	}
+
+	assert.Positive(t, run.brokerClient.called(broker.QueryAutoUpdateStatus),
+		"a host advertising bootc or rpm-ostree must actually fetch automatic-update status")
+	section := extractRequiredSection(t, autoUpdateSectionPattern, body, "GET /maintenance", "automatic updates")
+
+	bootcBlock := autoUpdaterBlock(t, section, "bootc")
+	if autoUpdate.BootcConfigured && autoUpdate.Bootc != nil {
+		payload := autoUpdate.Bootc
+		assertAutoUpdaterConfigured(t, bootcBlock, "bootc", payload.Policy, payload.ServiceActiveState, payload.ServiceResult,
+			payload.TimerActiveState, payload.TimerUnitFileState, payload.NextTrigger, payload.ServiceDropinsPresent, payload.TimerDropinsPresent)
+	} else {
+		assertAutoUpdaterNotConfigured(t, bootcBlock, "bootc")
+	}
+
+	rpmOStreeBlock := autoUpdaterBlock(t, section, "rpm-ostree")
+	if autoUpdate.RPMOStreeConfigured && autoUpdate.RPMOStree != nil {
+		payload := autoUpdate.RPMOStree
+		assertAutoUpdaterConfigured(t, rpmOStreeBlock, "rpm-ostree", payload.Policy, payload.ServiceActiveState, payload.ServiceResult,
+			payload.TimerActiveState, payload.TimerUnitFileState, payload.NextTrigger, payload.ServiceDropinsPresent, payload.TimerDropinsPresent)
+	} else {
+		assertAutoUpdaterNotConfigured(t, rpmOStreeBlock, "rpm-ostree")
+	}
+
+	// The spec forbids any mutation or reconfiguration surface for either
+	// updater, so the section itself is audited for one — scoped to the
+	// section, since the page legitimately carries the reboot form elsewhere.
+	assert.NotContains(t, section, "<form", "the automatic-update section must expose no mutation control")
+	assert.NotContains(t, section, "<button", "the automatic-update section must expose no mutation control")
+	assert.NotContains(t, section, "hx-post=", "the automatic-update section must expose no mutation control")
+}
+
 // assertMaintenanceSurfaces drives GET /maintenance and checks the module's
 // two independently-gated halves against expectations written out by hand
 // from docs/capabilities.md, never from platform.Available/AvailableAny or
@@ -1175,13 +1529,17 @@ func contractDeploymentSlots(hostImage maintenance.HostImageStatus) []contractDe
 //   - the reboot-required card and its POST /maintenance/reboot form come
 //     from QueryMaintenanceState and require systemd;
 //   - the "Host image" section comes from QueryHostImageStatus and requires
-//     bootc OR rpm-ostree (the first of the table's two any-of rows, exception #4).
+//     bootc OR rpm-ostree (the first of the table's two any-of rows, exception #4);
+//   - the "Automatic updates" section comes from QueryAutoUpdateStatus and
+//     requires bootc OR rpm-ostree too (the table's second any-of row), while
+//     each updater's configured-or-not state inside it follows that updater's
+//     own Autoupdate* capability — see assertAutoUpdateSurfaces.
 //
 // It also asserts the *calls*, not only the markup: the web side must never
 // invoke a broker ID the fixture's host does not advertise, and — the
 // converse, which requireAvailable alone cannot show — must actually invoke
 // the ones it does.
-func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capability.Set, hostImage maintenance.HostImageStatus) {
+func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capability.Set, hostImage maintenance.HostImageStatus, autoUpdate maintenance.AutoUpdateStatus) {
 	t.Helper()
 
 	// Hand-derived from docs/capabilities.md. Spelled out with Has() per
@@ -1201,6 +1559,7 @@ func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capabi
 			"fixture advertises none of systemd/bootc/rpm-ostree, so GET /maintenance must 404")
 		assert.Zero(t, run.brokerClient.called(broker.QueryMaintenanceState))
 		assert.Zero(t, run.brokerClient.called(broker.QueryHostImageStatus))
+		assert.Zero(t, run.brokerClient.called(broker.QueryAutoUpdateStatus))
 		return
 	}
 	require.Equal(t, http.StatusOK, recorder.Code,
@@ -1218,6 +1577,12 @@ func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capabi
 		assert.NotContains(t, body, maintenanceRebootFormAction,
 			"a host without systemd must not render the reboot form")
 	}
+
+	// The automatic-update section is audited before the host-image early
+	// return below, so it is checked under every fixture — including the ones
+	// with no host-image source, where its own "never called, never rendered"
+	// assertion is exactly the point.
+	assertAutoUpdateSurfaces(t, run, caps, body, autoUpdate)
 
 	if !hostImageAvailable {
 		assert.Zero(t, run.brokerClient.called(broker.QueryHostImageStatus),
@@ -1450,9 +1815,18 @@ func runCapabilityContractFixture(t *testing.T, caps capability.Set) contractFix
 // runCapabilityContractFixtureWithHostImage is runCapabilityContractFixture
 // with an explicit QueryHostImageStatus response, so the same assertions can
 // be replayed against the rpm-ostree read-failure shape.
+//
+// The QueryAutoUpdateStatus response stays calibrated to caps
+// (calibratedAutoUpdateStatus) rather than being a second parameter here: the
+// two responses vary along different axes, and every host-image fixture in this
+// file is a host-image variation, not an automatic-update one. Routing it
+// through the calibration helper is also what makes it structurally impossible
+// for a fixture to be handed a populated payload its capability set could not
+// produce — a caller cannot forget, because there is nothing to pass.
 func runCapabilityContractFixtureWithHostImage(t *testing.T, caps capability.Set, hostImage maintenance.HostImageStatus) contractFixtureRun {
 	t.Helper()
-	brokerClient := newFakeCapabilityBroker(t, caps, hostImage)
+	autoUpdate := calibratedAutoUpdateStatus(caps)
+	brokerClient := newFakeCapabilityBroker(t, caps, hostImage, autoUpdate)
 	registry, handler := newCapabilityContractServer(t, brokerClient)
 	cookie := loginSession(t, handler)
 	run := contractFixtureRun{brokerClient: brokerClient, cookie: cookie, handler: handler}
@@ -1590,7 +1964,7 @@ func runCapabilityContractFixtureWithHostImage(t *testing.T, caps capability.Set
 	// per-element audit rather than only the generic module-level checks
 	// above (docs/agents/skills/partial-gate-modules-need-full-view-element-
 	// audit.md).
-	assertMaintenanceSurfaces(t, run, caps, hostImage)
+	assertMaintenanceSurfaces(t, run, caps, hostImage, autoUpdate)
 
 	return run
 }
@@ -1780,6 +2154,211 @@ func TestCapabilityContractHostImageFixtures(t *testing.T) {
 		assert.Positive(t, run.brokerClient.called(broker.QueryMaintenanceState),
 			"a bootc read failure must not disturb the systemd-gated reboot posture")
 	})
+}
+
+// TestCapabilityContractAutoUpdateFixtures closes issue #60's web-side matrix
+// the same way TestCapabilityContractHostImageFixtures closed #51's: every
+// assertion here goes through a real newRegistry + web.NewServer + GET
+// /maintenance round trip against the fake broker, never through a direct call
+// to platform.Available/AvailableAny, capability.Set.HasAny, or any other
+// gating helper (docs/agents/skills/exercise-the-actual-boundary-not-a-
+// precomputed-shim.md). What is being proven is that internal/web's real wiring
+// asks the module, which asks the capability set, before deciding to fetch and
+// render — not that a pure predicate agrees with itself.
+//
+// The four fixtures are the ones the spec's fixture-calibration paragraph
+// names, and together they separate the two independent facts the section
+// depends on:
+//
+//   - fullCapabilitySet() advertises both Autoupdate* capabilities, so both
+//     updaters report configured detail;
+//   - ucoreCapabilitySet() and bootcOnlyCapabilitySet() advertise bootc and/or
+//     rpm-ostree but *neither* Autoupdate* capability, so the section still
+//     renders (the query's gate is satisfied) with both updaters in the
+//     explicit not-configured state. These two are what prove the split is
+//     driven by the Autoupdate*-derived *_configured flags rather than by
+//     host-image-source presence: their host-image section is fully populated
+//     in the very same render;
+//   - snosiWithoutBootcCapabilitySet() advertises neither source, so the query
+//     is never called at all.
+func TestCapabilityContractAutoUpdateFixtures(t *testing.T) {
+	// Both updaters configured. This is the only capability set in the file
+	// that can produce cannedAutoUpdateStatus, and calibratedAutoUpdateStatus
+	// is what hands it over.
+	t.Run("full-capability-both-updaters-configured", func(t *testing.T) {
+		caps := fullCapabilitySet()
+		require.True(t, caps.Has(capability.AutoupdateBootc) && caps.Has(capability.AutoupdateRPMOStree),
+			"this subtest's premise is that the full fixture advertises both Autoupdate* capabilities")
+		run := runCapabilityContractFixture(t, caps)
+		assert.Positive(t, run.brokerClient.called(broker.QueryAutoUpdateStatus),
+			"a host advertising bootc and rpm-ostree must fetch automatic-update status")
+
+		section := autoUpdateSectionFor(t, run)
+		canned := cannedAutoUpdateStatus()
+		assertAutoUpdaterConfigured(t, autoUpdaterBlock(t, section, "bootc"), "bootc",
+			canned.Bootc.Policy, canned.Bootc.ServiceActiveState, canned.Bootc.ServiceResult,
+			canned.Bootc.TimerActiveState, canned.Bootc.TimerUnitFileState, canned.Bootc.NextTrigger,
+			canned.Bootc.ServiceDropinsPresent, canned.Bootc.TimerDropinsPresent)
+		assertAutoUpdaterConfigured(t, autoUpdaterBlock(t, section, "rpm-ostree"), "rpm-ostree",
+			canned.RPMOStree.Policy, canned.RPMOStree.ServiceActiveState, canned.RPMOStree.ServiceResult,
+			canned.RPMOStree.TimerActiveState, canned.RPMOStree.TimerUnitFileState, canned.RPMOStree.NextTrigger,
+			canned.RPMOStree.ServiceDropinsPresent, canned.RPMOStree.TimerDropinsPresent)
+	})
+
+	// Both image sources, neither Autoupdate* capability: the section renders,
+	// and states plainly that neither updater is configured. Asserting the
+	// host-image section is populated in the same render is what makes this a
+	// test of the *_configured flags rather than of host-image presence — the
+	// two surfaces share a registration gate and disagree here.
+	//
+	// Each carries its own calibrated host-image response for the same reason
+	// it carries a calibrated automatic-update one: a bootc-only host cannot
+	// produce rpm-ostree host-image detail.
+	for _, fixture := range []struct {
+		name      string
+		caps      capability.Set
+		hostImage maintenance.HostImageStatus
+	}{
+		{"ucore", ucoreCapabilitySet(), cannedHostImageStatus()},
+		{"bootc-only", bootcOnlyCapabilitySet(), cannedHostImageStatusBootcOnly()},
+	} {
+		t.Run(fixture.name+"-neither-updater-configured", func(t *testing.T) {
+			require.False(t, fixture.caps.Has(capability.AutoupdateBootc),
+				"this subtest's premise is that %s advertises no bootc automatic updater", fixture.name)
+			require.False(t, fixture.caps.Has(capability.AutoupdateRPMOStree),
+				"this subtest's premise is that %s advertises no rpm-ostree automatic updater", fixture.name)
+			require.True(t, fixture.caps.Has(capability.Bootc) || fixture.caps.Has(capability.RPMOStree),
+				"this subtest's premise is that %s still advertises an image source, so the query stays registered", fixture.name)
+
+			run := runCapabilityContractFixtureWithHostImage(t, fixture.caps, fixture.hostImage)
+			assert.Positive(t, run.brokerClient.called(broker.QueryAutoUpdateStatus),
+				"an image host must fetch automatic-update status even with no updater configured; 'not configured' is a reportable answer, not a reason to skip the query")
+
+			body := maintenancePageBody(t, run)
+			section := extractRequiredSection(t, autoUpdateSectionPattern, body, "GET /maintenance", "automatic updates")
+			assertAutoUpdaterNotConfigured(t, autoUpdaterBlock(t, section, "bootc"), "bootc")
+			assertAutoUpdaterNotConfigured(t, autoUpdaterBlock(t, section, "rpm-ostree"), "rpm-ostree")
+
+			// The same render's host-image section is populated, so "not
+			// configured" here demonstrably is not a symptom of the page
+			// having no image data at all.
+			hostImageSection := extractRequiredSection(t, hostImageSectionPattern, body, "GET /maintenance", "host image")
+			assert.Contains(t, hostImageSection, contractBootedImage,
+				"the host-image section must be populated in the same render, so the not-configured automatic-update state cannot be blamed on a missing image source")
+		})
+	}
+
+	// Neither bootc nor rpm-ostree: the query is never called, and none of the
+	// section's own markers reach the page. This mirrors the negative-call-count
+	// assertion TestCapabilityContractHostImageFixtures already makes for
+	// QueryHostImageStatus on the same fixture.
+	t.Run("snosi-without-bootc-query-never-called", func(t *testing.T) {
+		caps := snosiWithoutBootcCapabilitySet()
+		require.False(t, caps.Has(capability.Bootc), "this subtest's premise is that Snosi-without-bootc advertises no bootc")
+		require.False(t, caps.Has(capability.RPMOStree), "this subtest's premise is that Snosi-without-bootc advertises no rpm-ostree")
+		run := runCapabilityContractFixture(t, caps)
+		assert.Zero(t, run.brokerClient.called(broker.QueryAutoUpdateStatus),
+			"Snosi without bootc advertises no image source, so QueryAutoUpdateStatus must never be called")
+
+		body := maintenancePageBody(t, run)
+		for _, marker := range autoUpdateMarkers() {
+			assert.NotContainsf(t, body, marker,
+				"the automatic-update section must be omitted (%s), not rendered empty or errored", marker)
+		}
+	})
+}
+
+// maintenancePageBody drives one more GET /maintenance through the fixture's
+// already-assembled real server and returns the rendered page, so a subtest can
+// scope its own assertions to a region of the very same handler the runner just
+// exercised.
+func maintenancePageBody(t *testing.T, run contractFixtureRun) string {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/maintenance", nil)
+	request.AddCookie(run.cookie)
+	recorder := httptest.NewRecorder()
+	run.handler.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, "GET /maintenance must render for this fixture")
+	return recorder.Body.String()
+}
+
+// autoUpdateSectionFor is maintenancePageBody narrowed to the automatic-update
+// section.
+func autoUpdateSectionFor(t *testing.T, run contractFixtureRun) string {
+	t.Helper()
+	return extractRequiredSection(t, autoUpdateSectionPattern, maintenancePageBody(t, run), "GET /maintenance", "automatic updates")
+}
+
+// TestCannedAutoUpdateFixtureIsCalibratedAndPopulated pins both halves of the
+// fixture-calibration requirement at the data level, so a regression in the
+// fixtures themselves fails here loudly instead of quietly making every
+// rendering assertion above agree with an emptier or an impossible response
+// (docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
+// assert.md and calibrate-canned-fixture-data-per-capability-set.md).
+func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
+	// Populated: every field the section renders carries a value, so no
+	// "renders this field" assertion can pass against a blank.
+	canned := cannedAutoUpdateStatus()
+	require.True(t, canned.BootcConfigured)
+	require.True(t, canned.RPMOStreeConfigured)
+	require.NotNil(t, canned.Bootc, "the configured fixture must carry a bootc payload")
+	require.NotNil(t, canned.RPMOStree, "the configured fixture must carry an rpm-ostree payload")
+	require.NotEmpty(t, canned.Bootc.Policy)
+	require.NotEmpty(t, canned.Bootc.ServiceActiveState)
+	require.NotEmpty(t, canned.Bootc.ServiceResult)
+	require.NotEmpty(t, canned.Bootc.TimerActiveState)
+	require.NotEmpty(t, canned.Bootc.TimerUnitFileState)
+	require.False(t, canned.Bootc.NextTrigger.IsZero(), "a zero next trigger would render the no-next-run placeholder under every fixture")
+	require.NotEmpty(t, canned.RPMOStree.Policy)
+	require.NotEmpty(t, canned.RPMOStree.ServiceActiveState)
+	require.NotEmpty(t, canned.RPMOStree.ServiceResult)
+	require.NotEmpty(t, canned.RPMOStree.TimerActiveState)
+	require.NotEmpty(t, canned.RPMOStree.TimerUnitFileState)
+	require.False(t, canned.RPMOStree.NextTrigger.IsZero(), "a zero next trigger would render the no-next-run placeholder under every fixture")
+
+	// Both drop-in booleans are exercised in both directions across the two
+	// payloads, and the two payloads share no field value — so no per-updater
+	// or per-row assertion can pass by matching the other's data.
+	require.NotEqual(t, canned.Bootc.ServiceDropinsPresent, canned.Bootc.TimerDropinsPresent,
+		"bootc's service and timer drop-in booleans must differ so neither row can pass by matching the other's rendering")
+	require.NotEqual(t, canned.RPMOStree.ServiceDropinsPresent, canned.RPMOStree.TimerDropinsPresent,
+		"rpm-ostree's service and timer drop-in booleans must differ so neither row can pass by matching the other's rendering")
+	require.NotEqual(t, canned.Bootc.Policy, canned.RPMOStree.Policy)
+	require.NotEqual(t, canned.Bootc.ServiceActiveState, canned.RPMOStree.ServiceActiveState)
+	require.NotEqual(t, canned.Bootc.ServiceResult, canned.RPMOStree.ServiceResult)
+	require.NotEqual(t, canned.Bootc.TimerActiveState, canned.RPMOStree.TimerActiveState)
+	require.NotEqual(t, canned.Bootc.TimerUnitFileState, canned.RPMOStree.TimerUnitFileState)
+	require.NotEqual(t, canned.Bootc.NextTrigger, canned.RPMOStree.NextTrigger)
+
+	// Calibrated: the populated fixture reaches exactly the capability sets
+	// that advertise both Autoupdate* capabilities, and every other named
+	// fixture gets the zero value — both *_configured false, both payload
+	// pointers nil.
+	for _, fixture := range []struct {
+		name       string
+		caps       capability.Set
+		configured bool
+	}{
+		{"full", fullCapabilitySet(), true},
+		{"no-journald", noJournaldCapabilitySet(), true},
+		{"no-systemd", noSystemdCapabilitySet(), true},
+		{"no-engines", noEnginesCapabilitySet(), true},
+		{"ucore", ucoreCapabilitySet(), false},
+		{"bootc-only", bootcOnlyCapabilitySet(), false},
+		{"snosi-without-bootc", snosiWithoutBootcCapabilitySet(), false},
+	} {
+		status := calibratedAutoUpdateStatus(fixture.caps)
+		if fixture.configured {
+			require.Equalf(t, canned, status, "fixture %q advertises both Autoupdate* capabilities, so it must get the populated response", fixture.name)
+			continue
+		}
+		require.Equalf(t, maintenance.AutoUpdateStatus{}, status,
+			"fixture %q lacks at least one Autoupdate* capability, so its only producible response is the zero value", fixture.name)
+		require.Falsef(t, status.BootcConfigured, "fixture %q must report bootc as not configured", fixture.name)
+		require.Falsef(t, status.RPMOStreeConfigured, "fixture %q must report rpm-ostree as not configured", fixture.name)
+		require.Nilf(t, status.Bootc, "fixture %q must carry no bootc payload", fixture.name)
+		require.Nilf(t, status.RPMOStree, "fixture %q must carry no rpm-ostree payload", fixture.name)
+	}
 }
 
 // TestCapabilityContractDegradedFixtures exercises the three degraded
