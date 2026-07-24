@@ -73,9 +73,10 @@ type BootcAutoUpdate struct {
 // impossible to hand a bootc policy string to an rpm-ostree payload by
 // accident.
 //
-// This chunk defines the type and its wire shape only. The normalizer that
-// fills Policy for rpm-ostree, and the manager that reads the live host, are
-// not part of this change.
+// Policy holds one of the RPMOStreePolicy* constants, whose vocabulary and
+// normalizer (ParseRPMOStreeAutomaticUpdatePolicy) live in
+// autoupdate_rpmostree.go. The manager that reads the live host and populates
+// this type is not part of this change.
 type RPMOStreeAutoUpdate struct {
 	NextTrigger           time.Time `json:"next_trigger"`
 	Policy                string    `json:"policy"`
