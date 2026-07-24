@@ -157,6 +157,14 @@ func run() error {
 	if err := registerSysextActions(actions, sysextManager, caps); err != nil {
 		return err
 	}
+	// The same sysext manager also serves the read-only extensions aggregate:
+	// it is constructed unconditionally above (it runs nothing until called),
+	// and registerExtensions' own guard decides whether the query is exposed
+	// at all, exactly as registerHostImage does for the host-image reporter.
+	// One reader, two surfaces — never a second path to updex/systemd-sysext.
+	if err := registerExtensions(queries, sysextManager, caps); err != nil {
+		return err
+	}
 	// The host-image reporter is constructed unconditionally (it runs nothing
 	// until queried) and told which of its two sources the probe actually
 	// found; registerHostImage's own guard decides whether the query is
@@ -975,6 +983,37 @@ func registerSysextActions(registry *broker.ActionRegistry, manager sysext.Manag
 		}
 	}
 	return nil
+}
+
+// registerExtensions registers QueryExtensionsState iff the host advertises at
+// least one extension source -- caps.HasAny(capability.Updex,
+// capability.Sysext) -- mirroring registerHostImage's shape exactly. The guard
+// is deliberately an any-of, not an all-of: either tool alone yields a usable
+// (if partial) inventory, and the handler itself only ever runs the sources
+// whose capability was probed present, so the flags threaded into State are
+// the same facts this guard is built from.
+//
+// The any-of is also what keeps the empty *success* state reachable: a host
+// with updex or systemd-sysext but no definitions, no installed images, and
+// nothing merged must be able to answer "nothing here" rather than 404 the
+// query. A host with neither tool registers nothing at all, and the web side
+// exposes no Extensions surface to call it with.
+//
+// It is read-only in the strongest sense available here: it is served by a
+// sysext.ExtensionsSource, an interface with no mutating method, so the four
+// ActionSysext* lifecycle actions registered above (each with its own,
+// narrower guard) stay the only way to change anything. Like
+// QueryHostImageStatus it is available to any authenticated identity (admin is
+// not required), since it reports facts about the host's extensions rather
+// than privileged content, and it is independent of registerMaintenance's
+// Systemd guard: reading the extension inventory needs no reboot machinery.
+func registerExtensions(queries *broker.QueryRegistry, source sysext.ExtensionsSource, caps capability.Set) error {
+	if !caps.HasAny(capability.Updex, capability.Sysext) {
+		return nil
+	}
+	return queries.Register(broker.QueryExtensionsState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return source.State(ctx, caps.Has(capability.Updex), caps.Has(capability.Sysext))
+	})
 }
 
 // registerServices registers Services queries/actions guarded by the

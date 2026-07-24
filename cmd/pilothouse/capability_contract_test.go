@@ -248,9 +248,9 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.ActionStorageMount:                     {capability.Systemd},
 	broker.ActionStorageUnmount:                   {capability.Systemd},
 	broker.ActionStorageDelete:                    {capability.Systemd},
-	// Queries (16 of the 18 declared; QueryHostImageStatus and
-	// QueryAutoUpdateStatus are the two any-of queries and live in
-	// capabilityAnyRequirements below)
+	// Queries (16 of the 19 declared; QueryHostImageStatus,
+	// QueryAutoUpdateStatus, and QueryExtensionsState are the three any-of
+	// queries and live in capabilityAnyRequirements below)
 	broker.QueryActivity:         nil,
 	broker.QueryBackupsState:     {capability.Systemd},
 	broker.QueryCapabilities:     nil,
@@ -273,9 +273,10 @@ var capabilityRequirements = map[string][]capability.ID{
 // capabilityRequirements, for broker IDs whose daemon-side registration guard
 // is HasAny rather than HasAll. It is likewise transcribed by hand from
 // docs/capabilities.md, which documents QueryHostImageStatus and
-// QueryAutoUpdateStatus as the table's two any-of rows (`bootc OR
-// rpm-ostree`) — calls the web side may make whenever *either* source is
-// advertised, so checking them with HasAll would wrongly demand both.
+// QueryAutoUpdateStatus as any-of rows (`bootc OR rpm-ostree`) and
+// QueryExtensionsState as a third (`updex OR sysext`) — calls the web side may
+// make whenever *either* source is advertised, so checking them with HasAll
+// would wrongly demand both.
 //
 // A broker ID must appear in exactly one of the two maps; appearing in both
 // fails the test, as does appearing in neither (see requireAvailable). This
@@ -284,6 +285,7 @@ var capabilityRequirements = map[string][]capability.ID{
 var capabilityAnyRequirements = map[string][]capability.ID{
 	broker.QueryHostImageStatus:  {capability.Bootc, capability.RPMOStree},
 	broker.QueryAutoUpdateStatus: {capability.Bootc, capability.RPMOStree},
+	broker.QueryExtensionsState:  {capability.Updex, capability.Sysext},
 }
 
 // webSideUngatedBrokerIDs is the exact, closed set of broker IDs whose
@@ -1529,7 +1531,7 @@ func assertAutoUpdateSurfaces(t *testing.T, run contractFixtureRun, caps capabil
 //   - the reboot-required card and its POST /maintenance/reboot form come
 //     from QueryMaintenanceState and require systemd;
 //   - the "Host image" section comes from QueryHostImageStatus and requires
-//     bootc OR rpm-ostree (the first of the table's two any-of rows, exception #4);
+//     bootc OR rpm-ostree (the first of the table's three any-of rows, exception #4);
 //   - the "Automatic updates" section comes from QueryAutoUpdateStatus and
 //     requires bootc OR rpm-ostree too (the table's second any-of row), while
 //     each updater's configured-or-not state inside it follows that updater's
@@ -2005,12 +2007,12 @@ func TestWebSideUngatedExemptionExcludesHostImageSurfaces(t *testing.T) {
 // implied by the fixture runs above, which only exercise the broker IDs the
 // web side happens to call:
 //
-//   - Completeness. Together the tables must carry all 53 declared broker IDs
-//     (35 Action* + 18 Query*), the same totals cmd/pilothoused's
+//   - Completeness. Together the tables must carry all 54 declared broker IDs
+//     (35 Action* + 19 Query*), the same totals cmd/pilothoused's
 //     TestCapabilityTableMirrorsBrokerAPIConstants pins against
 //     internal/broker/api.go's live go/ast-parsed declarations. Every key here
 //     is a broker.Action*/Query* constant reference, so a renamed constant is
-//     a compile error and 53 distinct keys can only mean full coverage — which
+//     a compile error and 54 distinct keys can only mean full coverage — which
 //     is what makes requireAvailable's "not in either table" branch a genuine
 //     tripwire for a newly added ID rather than a formality.
 //   - Disjointness. An ID carries at most one registration guard, so appearing
@@ -2024,19 +2026,21 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 		assert.NotContainsf(t, capabilityRequirements, id,
 			"broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
 	}
-	assert.Equal(t, 53, len(capabilityRequirements)+len(capabilityAnyRequirements),
-		"the two web-side broker-ID tables must together cover all 53 declared broker IDs (35 Action* + 18 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
+	assert.Equal(t, 54, len(capabilityRequirements)+len(capabilityAnyRequirements),
+		"the two web-side broker-ID tables must together cover all 54 declared broker IDs (35 Action* + 19 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
 
 	// Hand-written from docs/capabilities.md, not read back from the
-	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are the
-	// API's two any-of IDs (bootc OR rpm-ostree, exception #4), and maintenance
-	// is the one module whose whole-module gate is any-of (systemd OR bootc OR
-	// rpm-ostree).
+	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are two
+	// of the API's three any-of IDs (bootc OR rpm-ostree, exception #4), the
+	// third being QueryExtensionsState (updex OR sysext, exception #6), and
+	// maintenance is the one module whose whole-module gate is any-of (systemd
+	// OR bootc OR rpm-ostree).
 	assert.Equal(t, map[string][]capability.ID{
 		broker.QueryHostImageStatus:  {capability.Bootc, capability.RPMOStree},
 		broker.QueryAutoUpdateStatus: {capability.Bootc, capability.RPMOStree},
+		broker.QueryExtensionsState:  {capability.Updex, capability.Sysext},
 	}, capabilityAnyRequirements,
-		"QueryHostImageStatus and QueryAutoUpdateStatus must be the two any-of broker IDs, each requiring bootc OR rpm-ostree")
+		"QueryHostImageStatus, QueryAutoUpdateStatus, and QueryExtensionsState must be the three any-of broker IDs — the first two requiring bootc OR rpm-ostree, the third updex OR sysext")
 	assert.Equal(t, map[string][]capability.ID{
 		"maintenance": {capability.Systemd, capability.Bootc, capability.RPMOStree},
 	}, moduleRequiredAnyCapabilities,

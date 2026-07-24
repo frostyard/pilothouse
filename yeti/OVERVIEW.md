@@ -256,8 +256,8 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (53 IDs,
-  18 queries, the 18th being #58's `QueryAutoUpdateStatus`) and
+  withheld. `docs/capabilities.md`'s binding table carries the row (54 IDs,
+  19 queries, the 19th being #52's `QueryExtensionsState`) and
   `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
 - `maintenance.SystemManager` consumes the staged-deployment fact. `State` is

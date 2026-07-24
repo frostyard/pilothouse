@@ -15,11 +15,11 @@ landed behavior, not a future guarantee, and
 a fixture matrix of capability sets.
 
 **Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
-constants and 18 `Query*` constants today — 53 IDs total, reproducible with:
+constants and 19 `Query*` constants today — 54 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 35
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 18
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 19
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -27,11 +27,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 53 IDs is registered exactly once across the four
+Every one of the 54 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 35/18 above, not IDs
-added on top. This table therefore has exactly 53 rows.
+via `StreamQueryRegistry`) — both are members of the 35/19 above, not IDs
+added on top. This table therefore has exactly 54 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +40,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-35/18/53 all fail the build. It additionally checks that an `Action*`
+35/19/54 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -61,12 +61,19 @@ totals from the 16/51 phase 1a ended with to 17/52. It is the table's first
 source alone is enough (see exception #4 below).
 
 `QueryAutoUpdateStatus` (`org.frostyard.pilothouse.maintenance.autoupdate_status`)
-is the newest ID, added by #58 for read-only automatic-update reporting, and is
-why the totals above now read 18/53. Like `QueryHostImageStatus` it is an
+was added by #58 for read-only automatic-update reporting, raising the totals
+to 18/53. Like `QueryHostImageStatus` it is an
 **any-of** row: `registerAutoUpdate` guards it with the same
 `caps.HasAny(capability.Bootc, capability.RPMOStree)` gate, and for the same
 reason — a no-updater image host must still be able to report the "not
 configured" empty state (see exception #5 below).
+
+`QueryExtensionsState` (`org.frostyard.pilothouse.sysext.state`) is the newest
+ID, added by #52 for the read-only extension inventory, and is why the totals
+above now read 19/54. It belongs to the `sysext` (Extensions) module, not
+maintenance, and is the table's third **any-of** row: `registerExtensions`
+guards it with `caps.HasAny(capability.Updex, capability.Sysext)` — either tool
+alone yields a usable inventory (see exception #6 below).
 
 Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
@@ -112,7 +119,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionStorageUnmount` | storage (remote-mount) | systemd |
 | `ActionStorageDelete` | storage (remote-mount) | systemd |
 
-## Queries (18)
+## Queries (19)
 
 | Broker ID | Module | Capability |
 |---|---|---|
@@ -122,6 +129,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `QueryCapabilities` | capability | none *(unconditional — see below)* |
 | `QueryDockerLogs` | docker | docker |
 | `QueryDockerState` | docker | docker |
+| `QueryExtensionsState` | sysext (extensions) | updex OR sysext *(exception — see below)* |
 | `QueryHostImageStatus` | maintenance (host image) | bootc OR rpm-ostree *(exception — see below)* |
 | `QueryIncusState` | incus | incus |
 | `QueryJobs` | jobs | none |
@@ -171,13 +179,15 @@ are:
 - `ActionSysextUpdate` → `updex`
 - `ActionSysextDisable` / `ActionSysextEnable` → `updex AND sysext`
 
-There is no standalone sysext read query in the registry today (no
-`QuerySysext*` constant exists); the sysext module's data reaches the web
-page through `QueryMaintenanceState` (see the extension-read note below).
+The sysext module also has a standalone read query as of #52:
+`QueryExtensionsState` (`org.frostyard.pilothouse.sysext.state`), guarded
+`updex OR sysext` by `registerExtensions` — see exception #6 below. The
+extension data `QueryMaintenanceState` still derives its reboot reasons from
+is described in the extension-read note further down.
 
 ## Exceptions to the module-level defaults
 
-Five rows in this table deviate from the spec's literal module-default
+Six rows in this table deviate from the spec's literal module-default
 prose. Each is grounded in the actual manager code, not just spec wording —
 the module defaults describe steady-state intent; these are the exceptions
 section is precisely where actual code dependencies that exceed that intent
@@ -245,7 +255,7 @@ capability.Journald)` before registering `QueryLogs` at all. Documented
 here as the exceptions section's job: recording a real code dependency that
 exceeds the module default's literal wording.
 
-### 4. `QueryHostImageStatus` is `bootc OR rpm-ostree`, the first of the table's two any-of rows
+### 4. `QueryHostImageStatus` is `bootc OR rpm-ostree`, the first of the table's three any-of rows
 
 Every ordinary row is an AND: the ID registers iff
 `caps.HasAll(required...)`. `QueryHostImageStatus` is the first row whose
@@ -348,13 +358,51 @@ is served the zero-value, both-updaters-not-configured response rather than an
 impossible populated one — the distinction the paragraph above turns on, pinned
 in test code.
 
+### 6. `QueryExtensionsState` is `updex OR sysext`, the table's third any-of row
+
+`QueryExtensionsState` (`org.frostyard.pilothouse.sysext.state`, module
+`sysext`) is the standalone extension-inventory read #52 adds.
+`registerExtensions` (`cmd/pilothoused/main.go`) registers it iff
+`caps.HasAny(capability.Updex, capability.Sysext)` — an any-of for the same
+reason as exceptions #4 and #5: either tool alone yields a usable inventory
+(updex knows which feature definitions are managed and what updates are
+pending; `systemd-sysext` knows what is installed and merged), while a host
+with neither has nothing to report and registers no query at all. The four
+`ActionSysext*` rows keep their own, narrower per-action guards; this query
+adds no mutation of any kind, being served by a `sysext.ExtensionsSource`
+whose only method is a read.
+
+The response follows `QueryHostImageStatus`'s **flat per-source
+availability/error** convention rather than `QueryAutoUpdateStatus`'s
+`*_configured` one: `sysext.ExtensionsState` carries
+`UpdexAvailable`/`UpdexError` and `SysextAvailable`/`SysextError` at the top
+level, so a source whose command fails sets its own pair and leaves the other
+source's data intact, and the query itself returns no error for a source-level
+failure. A source whose capability is absent is never attempted at all —
+`Available` stays false and `Error` stays empty, keeping "never attempted"
+distinguishable from "attempted and failed". A host whose tools are present but
+which has no definitions, nothing installed, and nothing merged reports both
+sources available and an empty `Extensions` slice: the empty *success* state,
+which is a different fact from the no-tools host that registers no query.
+
+`Extensions []Extension` is the union inventory, one entry per extension name,
+each carrying `Managed` (updex enumerated a definition, so the extension keeps
+enable/disable/update/refresh), `Installed`, and `Merged`, plus the fields the
+surface renders — and an `Updates []AvailableUpdate` field holding the pending
+component updates updex's feature check reported for that extension. `Updates`
+is empty for an unmanaged extension in every case, since the check only ever
+reports on definitions updex itself enumerated. No web-side caller exists yet;
+this is a registered, capability-guarded daemon surface with no web consumer
+until the Extensions module is converted to read through it.
+
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
-`.mill/spec.md` says sysext reads are "updex OR sysext" — there is no
-standalone sysext read query; that describes the extension-read subpath
-inside `QueryMaintenanceState`, which the spec notes already performs
-daemon-side extension reads today (maintenance's update source invokes
-updex). The *registration* of `QueryMaintenanceState` (and
+`.mill/spec.md` says sysext reads are "updex OR sysext". As of #52 that
+requirement has its own standalone read query, `QueryExtensionsState`
+(exception #6 above); the paragraphs below describe the *separate*
+extension-read subpath still living inside `QueryMaintenanceState`, which
+performs daemon-side extension reads of its own today (maintenance's update
+source invokes updex). The *registration* of `QueryMaintenanceState` (and
 `ActionMaintenanceReboot`) is guarded on `systemd` (the module-level default
 for maintenance, matching the rows above) by `registerMaintenance`, which
 takes the probed `capability.Set` and no-ops entirely when `systemd` is
@@ -564,7 +612,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 53 IDs, and asserts the two helpers do not
+are disjoint and together cover all 54 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as
