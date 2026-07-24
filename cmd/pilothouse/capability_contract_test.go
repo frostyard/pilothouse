@@ -629,6 +629,35 @@ func cannedHostImageStatus() maintenance.HostImageStatus {
 	}
 }
 
+// cannedHostImageStatusBootcOnly is the bootc-only fixture's own canned
+// response, calibrated to what a host advertising bootc and nothing else can
+// actually produce, per docs/agents/skills/calibrate-canned-fixture-data-per-
+// capability-set.md. Serving that fixture the default response would hand it
+// RPMOStreeAvailable true plus populated rpm-ostree Version/Checksum detail,
+// which HostImageManager.Status cannot emit on a host whose rpm-ostree
+// capability was never advertised: its rpmOstreeAvailable branch is not
+// entered at all, so the supplement stays empty and the pair stays zeroed.
+// The assertion the miscalibration would destroy is this file's own "no
+// rpm-ostree supplementary detail renders when the response carries none" —
+// against impossible data it would have to be skipped or, worse, inverted
+// into asserting that unreachable data renders.
+//
+// Note RPMOStreeError stays empty rather than carrying a failure message:
+// "never attempted" and "attempted and failed" are different facts and
+// HostImageManager.Status keeps them distinguishable, so this fixture must
+// too. That is what makes the bootc-only run assert the *absence* of the
+// `data-source-error="rpm-ostree"` indicator, distinct from
+// cannedHostImageStatusRPMOStreeFailed's assertion of its presence.
+func cannedHostImageStatusBootcOnly() maintenance.HostImageStatus {
+	status := cannedHostImageStatus()
+	status.RPMOStreeAvailable = false
+	// Safe to mutate in place: cannedHostImageStatus allocates fresh
+	// Deployment values on every call, so nothing else aliases this pointer.
+	status.Booted.Version = ""
+	status.Booted.Checksum = ""
+	return status
+}
+
 // cannedHostImageStatusRPMOStreeFailed is the symmetric failure fixture: the
 // same bootc-authoritative deployments, but rpm-ostree was advertised and
 // did not answer, so its own availability/error pair carries the failure and
@@ -1323,6 +1352,23 @@ func TestCannedHostImageFixtureIsPopulated(t *testing.T) {
 	require.NotNil(t, rpmFailed.Staged, "bootc still answered, so its deployment slots must survive")
 	require.Empty(t, rpmFailed.Booted.Version, "rpm-ostree did not answer, so its supplementary detail must be gone")
 
+	// The bootc-only fixture is calibrated, not degraded: bootc answered in
+	// full, and rpm-ostree is absent rather than failed. Pinning both halves
+	// keeps it from collapsing into either the success fixture (which would
+	// re-introduce impossible rpm-ostree data on a host that never advertised
+	// the source) or the rpm-ostree-failure fixture (which asserts the
+	// opposite indicator).
+	bootcOnly := cannedHostImageStatusBootcOnly()
+	require.True(t, bootcOnly.BootcAvailable, "bootc answered for the bootc-only fixture")
+	require.NotNil(t, bootcOnly.Staged, "bootc answered, so its deployment slots must survive")
+	require.NotNil(t, bootcOnly.Rollback, "bootc answered, so its deployment slots must survive")
+	require.NotNil(t, bootcOnly.SoftRebootCapable, "soft-reboot eligibility is bootc's, and bootc answered")
+	require.False(t, bootcOnly.RPMOStreeAvailable, "rpm-ostree is not advertised on a bootc-only host")
+	require.Empty(t, bootcOnly.RPMOStreeError,
+		"rpm-ostree was never attempted on a bootc-only host, which is a different fact from having failed")
+	require.Empty(t, bootcOnly.Booted.Version, "a bootc-only host has no rpm-ostree supplementary detail")
+	require.Empty(t, bootcOnly.Booted.Checksum, "a bootc-only host has no rpm-ostree supplementary detail")
+
 	bootcFailed := cannedHostImageStatusBootcFailed()
 	require.False(t, bootcFailed.BootcAvailable)
 	require.Equal(t, contractBootcError, bootcFailed.BootcError)
@@ -1671,7 +1717,12 @@ func TestCapabilityContractHostImageFixtures(t *testing.T) {
 	// fixture that proves maintenance's whole-module gate is a real OR.
 	t.Run("bootc-only", func(t *testing.T) {
 		caps := bootcOnlyCapabilitySet()
-		run := runCapabilityContractFixture(t, caps)
+		// This fixture gets its own calibrated response rather than the
+		// default one: a host advertising bootc alone cannot produce
+		// rpm-ostree detail, and assertMaintenanceSurfaces below turns that
+		// into a real "rpm-ostree's supplementary detail and its unavailable
+		// indicator are both absent" assertion.
+		run := runCapabilityContractFixtureWithHostImage(t, caps, cannedHostImageStatusBootcOnly())
 
 		assert.Zero(t, run.brokerClient.called(broker.QueryMaintenanceState),
 			"a bootc-only host has no systemd, so the web side must never call QueryMaintenanceState")

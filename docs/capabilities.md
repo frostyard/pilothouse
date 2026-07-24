@@ -146,8 +146,17 @@ implements `platform.CapabilityGateAny` with
 `HasAny(Systemd, Bootc, RPMOStree)`, so the nav entry, dashboard card, and
 `GET /maintenance` survive on a bootc-only host while `POST
 /maintenance/reboot` stays behind its own `Systemd`-only gate (see
-`docs/modules.md`). The web-side rendering of host-image status is not yet
-landed and is not described here. The sysext per-action rows are:
+`docs/modules.md`). The web-side rendering of host-image status has landed
+and is described here: `GET /maintenance` is wrapped in `platform.GateAny`
+on that same `HasAny(Systemd, Bootc, RPMOStree)` set, its handler calls
+`QueryHostImageStatus` only when the advertised set satisfies
+`HasAny(Bootc, RPMOStree)` (`queryHostImage`), and the page's "Host image"
+section — booted/staged/rollback deployments, the per-source
+`data-source-error` indicators, and the soft-reboot-eligibility indicator —
+is omitted entirely, rather than rendered empty or errored, when it does
+not. See "Phase 2 (#51) — host-image contract parity" at the end of this
+document for the fixtures that pin both sides. The sysext per-action rows
+are:
 
 - `ActionSysextRefresh` → `sysext`
 - `ActionSysextUpdate` → `updex`
@@ -444,6 +453,14 @@ The web harness adds a third, `bootc-only` (`bootc` and nothing else), which
 is what proves maintenance's whole-module gate is a genuine OR rather than a
 disguised systemd gate: the nav entry and `GET /maintenance` are present,
 `POST /maintenance/reboot` 404s, and `QueryMaintenanceState` is never called.
+That fixture is served its own canned response rather than the shared one,
+calibrated to what a host advertising bootc alone can actually produce:
+`rpm_ostree_available: false` with an *empty* `rpm_ostree_error` (never
+attempted, as distinct from attempted and failed) and no rpm-ostree
+supplementary version/checksum. That is what lets the same assertion helper
+prove rpm-ostree detail *absent* there instead of being handed data the
+daemon could not have emitted for that capability set.
+
 Two further runs replay the `ucore` fixture with one source failing, so the
 symmetric `bootc_available`/`bootc_error` and
 `rpm_ostree_available`/`rpm_ostree_error` pairs are each exercised in *both*
@@ -474,11 +491,14 @@ reboot-required posture with a reason — so that assertions about a rendered
 element being *absent* under a degraded fixture are meaningful rather than
 vacuously true against an empty response. Because the per-element assertions
 are driven from each fixture's own response (which is what lets the two
-failure runs share one assertion helper), `TestCannedHostImageFixtureIsPopulated`
+failure runs and the calibrated `bootc-only` run share one assertion helper),
+`TestCannedHostImageFixtureIsPopulated`
 pins that default response's shape directly: if it quietly lost its staged
 slot, its rollback slot, its rpm-ostree detail, or its soft-reboot flag, every
 fixture would simply agree the corresponding markup is expectedly absent and
-the matrix would keep passing while proving nothing.
+the matrix would keep passing while proving nothing. The same test pins each
+derived response too — the two failure ones and the calibrated `bootc-only`
+one — so none of them can drift into a duplicate of another.
 
 **Independent oracles.** Both harnesses decide what a fixture *should* see
 using local `allOfPresent` / `anyOfPresent` helpers that combine
