@@ -234,8 +234,9 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.ActionStorageMount:                     {capability.Systemd},
 	broker.ActionStorageUnmount:                   {capability.Systemd},
 	broker.ActionStorageDelete:                    {capability.Systemd},
-	// Queries (16 of the 17 declared; QueryHostImageStatus is the 17th and
-	// lives in capabilityAnyRequirements below, being the API's one any-of ID)
+	// Queries (16 of the 18 declared; QueryHostImageStatus and
+	// QueryAutoUpdateStatus are the two any-of queries and live in
+	// capabilityAnyRequirements below)
 	broker.QueryActivity:         nil,
 	broker.QueryBackupsState:     {capability.Systemd},
 	broker.QueryCapabilities:     nil,
@@ -257,17 +258,18 @@ var capabilityRequirements = map[string][]capability.ID{
 // capabilityAnyRequirements is the any-of counterpart of
 // capabilityRequirements, for broker IDs whose daemon-side registration guard
 // is HasAny rather than HasAll. It is likewise transcribed by hand from
-// docs/capabilities.md, which documents QueryHostImageStatus as the table's
-// one any-of row (`bootc OR rpm-ostree`) — a call the web side may make
-// whenever *either* source is advertised, so checking it with HasAll would
-// wrongly demand both.
+// docs/capabilities.md, which documents QueryHostImageStatus and
+// QueryAutoUpdateStatus as the table's two any-of rows (`bootc OR
+// rpm-ostree`) — calls the web side may make whenever *either* source is
+// advertised, so checking them with HasAll would wrongly demand both.
 //
 // A broker ID must appear in exactly one of the two maps; appearing in both
 // fails the test, as does appearing in neither (see requireAvailable). This
 // mirrors the moduleRequiredCapabilities / moduleRequiredAnyCapabilities split
 // below, for the same reason.
 var capabilityAnyRequirements = map[string][]capability.ID{
-	broker.QueryHostImageStatus: {capability.Bootc, capability.RPMOStree},
+	broker.QueryHostImageStatus:  {capability.Bootc, capability.RPMOStree},
+	broker.QueryAutoUpdateStatus: {capability.Bootc, capability.RPMOStree},
 }
 
 // webSideUngatedBrokerIDs is the exact, closed set of broker IDs whose
@@ -1173,7 +1175,7 @@ func contractDeploymentSlots(hostImage maintenance.HostImageStatus) []contractDe
 //   - the reboot-required card and its POST /maintenance/reboot form come
 //     from QueryMaintenanceState and require systemd;
 //   - the "Host image" section comes from QueryHostImageStatus and requires
-//     bootc OR rpm-ostree (the table's one any-of row, exception #4).
+//     bootc OR rpm-ostree (the first of the table's two any-of rows, exception #4).
 //
 // It also asserts the *calls*, not only the markup: the web side must never
 // invoke a broker ID the fixture's host does not advertise, and — the
@@ -1629,12 +1631,12 @@ func TestWebSideUngatedExemptionExcludesHostImageSurfaces(t *testing.T) {
 // implied by the fixture runs above, which only exercise the broker IDs the
 // web side happens to call:
 //
-//   - Completeness. Together the tables must carry all 52 declared broker IDs
-//     (35 Action* + 17 Query*), the same totals cmd/pilothoused's
+//   - Completeness. Together the tables must carry all 53 declared broker IDs
+//     (35 Action* + 18 Query*), the same totals cmd/pilothoused's
 //     TestCapabilityTableMirrorsBrokerAPIConstants pins against
 //     internal/broker/api.go's live go/ast-parsed declarations. Every key here
 //     is a broker.Action*/Query* constant reference, so a renamed constant is
-//     a compile error and 52 distinct keys can only mean full coverage — which
+//     a compile error and 53 distinct keys can only mean full coverage — which
 //     is what makes requireAvailable's "not in either table" branch a genuine
 //     tripwire for a newly added ID rather than a formality.
 //   - Disjointness. An ID carries at most one registration guard, so appearing
@@ -1648,17 +1650,19 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 		assert.NotContainsf(t, capabilityRequirements, id,
 			"broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
 	}
-	assert.Equal(t, 52, len(capabilityRequirements)+len(capabilityAnyRequirements),
-		"the two web-side broker-ID tables must together cover all 52 declared broker IDs (35 Action* + 17 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
+	assert.Equal(t, 53, len(capabilityRequirements)+len(capabilityAnyRequirements),
+		"the two web-side broker-ID tables must together cover all 53 declared broker IDs (35 Action* + 18 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
 
 	// Hand-written from docs/capabilities.md, not read back from the
-	// production gates: QueryHostImageStatus is the API's one any-of ID
-	// (bootc OR rpm-ostree, exception #4), and maintenance is the one module
-	// whose whole-module gate is any-of (systemd OR bootc OR rpm-ostree).
+	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are the
+	// API's two any-of IDs (bootc OR rpm-ostree, exception #4), and maintenance
+	// is the one module whose whole-module gate is any-of (systemd OR bootc OR
+	// rpm-ostree).
 	assert.Equal(t, map[string][]capability.ID{
-		broker.QueryHostImageStatus: {capability.Bootc, capability.RPMOStree},
+		broker.QueryHostImageStatus:  {capability.Bootc, capability.RPMOStree},
+		broker.QueryAutoUpdateStatus: {capability.Bootc, capability.RPMOStree},
 	}, capabilityAnyRequirements,
-		"QueryHostImageStatus must remain the sole any-of broker ID, requiring bootc OR rpm-ostree")
+		"QueryHostImageStatus and QueryAutoUpdateStatus must be the two any-of broker IDs, each requiring bootc OR rpm-ostree")
 	assert.Equal(t, map[string][]capability.ID{
 		"maintenance": {capability.Systemd, capability.Bootc, capability.RPMOStree},
 	}, moduleRequiredAnyCapabilities,

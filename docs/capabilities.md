@@ -545,7 +545,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 52 IDs, and asserts the two helpers do not
+are disjoint and together cover all 53 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as
