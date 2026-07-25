@@ -57,8 +57,8 @@ agents:
     model: gpt-5.5
     description: "Security-focused reviewer (cross-model GPT via Copilot)"
     prompt: |
-      You are reviewing a change to pilothouse, a web admin console for Snosi
-      systems. Its core security rule: the unprivileged web process must never
+      You are reviewing a change to pilothouse, a local web administration
+      console for image-based Linux systems. Its core security rule: the unprivileged web process must never
       touch root APIs directly — all privileged access goes through the
       pilothoused broker over a Unix socket. Conventions are in AGENTS.md.
 

@@ -5,7 +5,7 @@ group: Getting started
 order: 1
 ---
 
-pilothouse is a local web administration console for [snosi](https://github.com/frostyard/snosi) installations. It starts with a live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through the `updex` interface.
+pilothouse is a local web administration console for image-based Linux systems. It starts with a live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through the `updex` interface.
 
 The application is built from Go and templ on the server, HTMX for focused page updates, an embedded design system, and no Node runtime or external frontend assets.
 
@@ -51,5 +51,5 @@ Liveness and broker-aware readiness endpoints live at `/healthz` and `/readyz`.
 
 ## Where to start
 
-- Read [installation](/getting-started/installation/) to build and install pilothouse on a snosi host.
+- Read [installation](/getting-started/installation/) to build and install pilothouse on a host.
 - The [CLI reference](/reference/cli/) lists the flags for both the web process and the broker.

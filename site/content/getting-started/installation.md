@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Build pilothouse and install it on a snosi host.
+description: Build pilothouse and install it on a host.
 group: Getting started
 order: 2
 ---
@@ -44,7 +44,7 @@ the exact flags and defaults.
 
 Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext mutations, and Podman, Docker, and Incus mutations for whichever of those engines was configured above.
 
-## Install on snosi
+## Install
 
 ```bash
 make build

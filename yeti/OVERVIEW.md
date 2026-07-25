@@ -3,7 +3,7 @@
 ## Purpose
 
 Pilothouse (`github.com/frostyard/pilothouse`) is a local web administration
-console for [Snosi](https://github.com/frostyard/snosi) systems. It presents
+console for image-based Linux systems. It presents
 a live dashboard and management UI (system telemetry, sysext/`updex`
 lifecycle, systemd services, Podman/Docker/Incus workloads, journal search,
 backups, storage/disk health and managed NFS/SMB mounts, file browsing,

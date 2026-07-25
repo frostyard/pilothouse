@@ -1,6 +1,6 @@
 # Pilothouse
 
-Pilothouse is a local web administration console for [Snosi](https://github.com/frostyard/snosi) installations. It starts with an attractive live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through the `updex` interface.
+Pilothouse is a local web administration console for image-based Linux systems. It starts with an attractive live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through the `updex` interface.
 
 The application is bootstrapped from [housecat-inc/scratch](https://github.com/housecat-inc/scratch): Go and templ on the server, HTMX for focused page updates, an embedded design system, and no Node runtime or external frontend assets.
 
@@ -152,7 +152,7 @@ The Podman module intentionally manages the root/system store used for host serv
 
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 
-## Install on Snosi
+## Install
 
 ```bash
 make build
