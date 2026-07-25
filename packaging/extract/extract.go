@@ -1,9 +1,12 @@
 // Package extract reads a real operating-system package off disk and produces
 // the model that describes it.
 //
-// Deb returns a packaging.Model: a packaging.Format, one packaging.Entry per
-// installed file, the dependency strings the package declares, and an optional
-// packaging.Scriptlet. That is the whole job. Nothing here decides whether a
+// Deb and RPM each return a packaging.Model: a packaging.Format, one
+// packaging.Entry per installed file, the dependency strings the package
+// declares, and an optional packaging.Scriptlet. They read different metadata
+// from different tools, so a claim about one is not a claim about the other —
+// each function's own documentation states what it does. That is the whole job.
+// Nothing here decides whether a
 // model is acceptable — the artifact contract lives in the parent packaging
 // package and is checked there, and moving one of its assertions down here
 // would be a defect, because it is exactly that separation that keeps every
