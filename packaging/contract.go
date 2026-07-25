@@ -3,6 +3,7 @@ package packaging
 import (
 	"embed"
 	"fmt"
+	"io/fs"
 )
 
 // sources holds the repository files the built packages ship, compiled into
@@ -55,6 +56,22 @@ func sourceBytes(name string) []byte {
 type requirement struct {
 	// dest is the absolute destination path the package must install to.
 	dest string
+	// mode is the permission bits the contract pins for dest.
+	//
+	// The zero value means the contract states no mode for this destination
+	// and Verify asserts none. That is deliberate: .goreleaser.yaml sets
+	// file_info on exactly the four destinations that carry a non-zero mode
+	// below, so inventing a default for the unit files, the PAM policy, the
+	// sysusers file or the binaries would pin something the source of truth
+	// does not state.
+	//
+	// Only permission bits are ever compared, so a row may not carry type
+	// bits; see Verify for why.
+	mode fs.FileMode
+	// config reports whether the packaging metadata must designate dest a
+	// configuration file. False means the contract does not require it, not
+	// that the designation is forbidden — see Verify.
+	config bool
 }
 
 // requirements returns the contract table for the given format, and false when
@@ -62,8 +79,8 @@ type requirement struct {
 //
 // The table is per-format because the contract distinguishes the two — the
 // broker unit and the PAM policy are built from different repository sources
-// in each — but the destinations are the same ten in both, so at this commit
-// the two tables are identical.
+// in each — but the destinations, modes and config designations are the same
+// in both, so at this commit the two tables are identical.
 func requirements(f Format) ([]requirement, bool) {
 	switch f {
 	case FormatDeb, FormatRPM:
@@ -72,12 +89,12 @@ func requirements(f Format) ([]requirement, bool) {
 		return []requirement{
 			{dest: "/usr/lib/systemd/system/pilothouse.service"},
 			{dest: "/usr/lib/systemd/system/pilothoused.service"},
-			{dest: "/etc/pam.d/pilothouse"},
+			{dest: "/etc/pam.d/pilothouse", config: true},
 			{dest: "/usr/lib/sysusers.d/pilothouse.conf"},
-			{dest: "/etc/pilothouse"},
-			{dest: "/etc/pilothouse/storage/credentials"},
-			{dest: "/etc/pilothouse/pilothouse.env"},
-			{dest: "/etc/pilothouse/pilothoused.env"},
+			{dest: "/etc/pilothouse", mode: 0o750},
+			{dest: "/etc/pilothouse/storage/credentials", mode: 0o700},
+			{dest: "/etc/pilothouse/pilothouse.env", mode: 0o640, config: true},
+			{dest: "/etc/pilothouse/pilothoused.env", mode: 0o640, config: true},
 			{dest: "/usr/bin/pilothouse"},
 			{dest: "/usr/bin/pilothoused"},
 		}, true

@@ -1451,13 +1451,16 @@ postinstall scriptlet" — a state the model keeps distinct from shipping a
 scriptlet with unexpected bytes. An extractor that populates a `Model` from a real
 `.deb`/`.rpm` is out of scope for this package.
 
-**M1 — owner and group are recorded, never asserted.** `Entry.Owner` and
-`Entry.Group` exist for the convenience of extractors that surface them and
-drive no assertion. An artifact cannot prove installed ownership: nfpm's DEB
-payload records numeric UID/GID 0 by construction (which is why #66 added the
-postinstall scriptlet described above), and the RPM equivalent is unconfirmed
-against a real nfpm build. Ownership on disk after installation is #67's to
-verify.
+**M1 — modes are asserted from the payload; owner and group are recorded and
+never asserted.** `Entry.Mode` drives a real assertion (see `wrong_mode`
+below). `Entry.Owner` and `Entry.Group` do not: they exist for the convenience
+of extractors that surface them and no code in this package reads them. An
+artifact cannot prove installed ownership: nfpm's DEB payload records numeric
+UID/GID 0 by construction (which is why #66 added the postinstall scriptlet
+described above), and the RPM equivalent is unconfirmed against a real nfpm
+build. Ownership on disk after installation is #67's to verify.
+`grep -nE '\.Owner|\.Group' packaging/contract.go packaging/verify.go` printing
+nothing is the mechanical form of this rule.
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
@@ -1497,9 +1500,21 @@ does not know. Both `deb` and `rpm` require the same ten destinations:
 `/usr/lib/sysusers.d/pilothouse.conf`, `/etc/pilothouse`,
 `/etc/pilothouse/storage/credentials`, `/etc/pilothouse/pilothouse.env`,
 `/etc/pilothouse/pilothoused.env`, `/usr/bin/pilothouse` and
-`/usr/bin/pilothoused`. The table's rows carry only the fields the checks that
+`/usr/bin/pilothoused`. A row also carries the mode the contract pins for the
+destination and whether the packaging metadata must designate it a
+configuration file. The table's rows carry only the fields the checks that
 exist actually read; a field is added by the change that first asserts on it,
 so no field is ever dead.
+
+A row's `mode` is zero for every destination `.goreleaser.yaml` gives no
+`file_info`, and zero means "the contract states no mode, assert nothing" —
+inventing a default would pin something the source of truth does not state. The
+four destinations that do carry one are `/etc/pilothouse` (**0750**),
+`/etc/pilothouse/storage/credentials` (**0700**),
+`/etc/pilothouse/pilothouse.env` (**0640**) and
+`/etc/pilothouse/pilothoused.env` (**0640**). The three config-designated
+destinations are `/etc/pam.d/pilothouse`, `/etc/pilothouse/pilothouse.env` and
+`/etc/pilothouse/pilothoused.env`. Both sets are identical in `deb` and `rpm`.
 
 **`Verify`** (`packaging/verify.go`). The signature is
 `func Verify(m Model) []Finding`, fixed by the issue. **`Verify` accumulates:**
@@ -1508,7 +1523,7 @@ a finding, so the result holds every independent violation the model exhibits,
 and a nil or empty result means the model satisfies every assertion implemented
 so far.
 
-`Verify` performs exactly two checks at this commit:
+`Verify` performs exactly five checks at this commit:
 
 - **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
   zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
@@ -1518,6 +1533,32 @@ so far.
   required destinations no entry installs to. A file installed somewhere else —
   a binary under `/usr/local/bin`, say — leaves its contract destination
   uninstalled and is reported this way.
+- **`duplicate_entry`**, with `Path` set to the destination, when two or more
+  entries install to the same required destination — the multiplicity half of
+  "exactly one entry at `/usr/bin/pilothouse` and one at
+  `/usr/bin/pilothoused`", applied uniformly to all ten. Exactly **one**
+  finding is emitted per duplicated destination however many copies there are:
+  findings are identified by their `Code`/`Path` pair, so the N−1 further
+  identical findings a per-copy rule would emit carry no information.
+- **`wrong_mode`**, with `Path` set to the destination and a `Message` naming
+  want and got in octal, when the entry's mode differs from the one the
+  contract pins. Only the four modes listed above are asserted.
+- **`missing_config_flag`**, with `Path` set to the destination, when an entry
+  at one of the three config-designated destinations has `Config` false.
+
+Two rules keep those last two honest:
+
+- **Permission bits only.** Modes are compared as `Entry.Mode.Perm()`, so an
+  extractor that sets `fs.ModeDir` on the two directory entries is not falsely
+  reported; type bits are not part of the contract.
+- **An unexpected config designation is not a finding.** The contract pins a
+  minimum and the vocabulary has no `unexpected_config_flag`, so
+  `missing_config_flag` is the only asserted direction — designating, say, the
+  sysusers file a config file passes.
+
+A duplicate does not suppress the other checks for its destination: `Verify`
+evaluates the first entry installing there for mode and config designation, and
+still accumulates.
 
 Nothing else is asserted yet. The remaining assertions the contract calls for
 land in later changes and are documented here as each one arrives.
@@ -1526,11 +1567,16 @@ land in later changes and are documented here as each one arrives.
 `contractModel(t, format)` fixture that every mutation starts from, a
 `findingsFor(findings, code, path)` matcher (findings are matched by the
 `Code`/`Path` pair, never by `Message`), and table-driven mutations covering
-each required destination in each format, a relocated binary in each format,
-and two unrelated faults at once — which is what proves the accumulate
-guarantee rather than merely stating it. Its expected destinations are written
-out by hand rather than read back from `requirements`, since the table is the
-thing under test and may not also be the oracle.
+each required destination in each format (missing, then duplicated), a
+relocated binary in each format, a wrong mode on each of the four pinned
+destinations, a cleared config designation on each of the three, and several
+unrelated faults at once — which is what proves the accumulate guarantee rather
+than merely stating it. Three tests pin the deliberate silences: an
+`fs.ModeDir`-bearing directory entry verifies clean, changing the mode of a
+unit file or a binary produces nothing, and a config designation on the
+sysusers file produces nothing. Its expected destinations, modes and config
+designations are written out by hand rather than read back from `requirements`,
+since the table is the thing under test and may not also be the oracle.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If

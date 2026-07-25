@@ -8,9 +8,11 @@
 // shape. They are inert data: constructing or reading one opens no file and
 // starts no process.
 //
-// Verify checks a Model against the contract. It reports an unknown format and
-// every required destination the model installs nothing to; the remaining
-// assertions arrive in later changes.
+// Verify checks a Model against the contract. It reports an unknown format,
+// every required destination the model installs nothing to or installs more
+// than once, and — for the destinations the contract pins them on — a wrong
+// mode or a missing configuration-file designation; the remaining assertions
+// arrive in later changes.
 package packaging
 
 import "io/fs"
