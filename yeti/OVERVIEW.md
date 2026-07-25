@@ -96,7 +96,7 @@ by accident. Current modules:
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
 | `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), maintenance-job state, reboot posture (including the merged-but-disabled-extension reason it derives from the shared `sysext.ExtensionsSource` aggregate), confirmed reboot. No host-image mutation. Read-only automatic-update (updater policy/timer) status is reported daemon-side through `QueryAutoUpdateStatus`, consumed web-side by the module's own `queryAutoUpdate`, and rendered by the Maintenance page's "Automatic updates" section — one independent subsection per updater (bootc, rpm-ostree) carrying its timer active/unit-file state, next trigger, service active state and last result, normalized policy, and both drop-in-presence booleans, or an explicit "not configured" statement when that updater has no payload. The section is fetched and shown under the same `HasAny(bootc, rpm-ostree)` gate as the host-image section, so it is absent entirely on a host advertising neither. No automatic-update mutation: the section carries no control and the broker's ID vocabulary has no matching action. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
-| `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
+| `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. Because of that it is **not registered in production**: `cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only under the `--dev` flag (default `false`, and `packaging/pilothouse.service` does not pass it). Without `--dev` the module is never constructed, so `Mount` never runs and `/fleet`, `/fleet/enroll`, and `/fleet/systems/{id}` are unregistered routes (a mux 404, not a capability 404), with no nav entry and no sidebar system-picker link. |
 
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
@@ -599,9 +599,13 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   (`RequiredCapabilities() []capability.ID`) a `Module` optionally
   implements to declare that its whole surface (nav entry, dashboard cards,
   routes) needs some set of host capabilities present (`Set.HasAll`
-  semantics); a `Module` that does not implement it has no requirement and
-  is always available — the default for `system`/`files`/`activity`/`fleet`
-  and storage's own inventory reads. `Gate(host Host, ids []capability.ID,
+  semantics); a `Module` that does not implement it has no capability
+  requirement and is available whenever it is registered — the default for
+  `system`/`files`/`activity`/`fleet` and storage's own inventory reads.
+  (Registration is a separate switch from capability gating: `fleet` carries
+  no `CapabilityGate`, but `cmd/pilothouse` only registers it under `--dev`,
+  so on a production process it is absent from the registry entirely rather
+  than gated within it.) `Gate(host Host, ids []capability.ID,
   next http.HandlerFunc) http.HandlerFunc` wraps a `Mount`-registered
   handler so the route itself stays mounted on the shared mux, but 404s at
   request time when `host.Capabilities(ctx)` doesn't `HasAll(ids...)` —
@@ -1075,7 +1079,13 @@ optional tooling never shows a dead link or a button that always fails.
   delete) are wrapped in `platform.Gate(host, {Systemd}, ...)`, with the "Add
   remote mount" link and the entire per-mount actions block collapsed behind
   the same `Systemd` flag in `views.templ`. `system`, `files`, `activity`, and
-  `fleet` declare no capability requirement and are always available.
+  `fleet` declare no capability requirement, so they are available on every
+  capability set they are registered under. `fleet` is the one module whose
+  exposure is decided at registration rather than by capabilities:
+  `cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only under
+  the `--dev` flag (default `false`), so a production process has no fleet
+  module, no fleet nav entry, no fleet system-picker link, and no mounted
+  fleet routes at all.
 - **Attention's per-provider capability skip**
   (`internal/modules/attention/module.go`). The attention aggregator holds
   `[]platform.HealthProvider` and calls `Health` directly — outside any

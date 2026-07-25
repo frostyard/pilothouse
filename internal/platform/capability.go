@@ -9,9 +9,13 @@ import (
 // CapabilityGate is implemented by a Module that requires one or more host
 // capabilities to be present for its whole surface (navigation, dashboard
 // cards, routes) to be available. A Module that does not implement
-// CapabilityGate has no capability requirement and is always available —
-// this is the spec's default for modules like system, files, activity,
-// fleet, and storage's own inventory reads.
+// CapabilityGate has no capability requirement and is available on every
+// capability set it is registered under — this is the spec's default for
+// modules like system, files, activity, fleet, and storage's own inventory
+// reads. Registration is a separate switch from capability gating: fleet
+// carries no CapabilityGate, but cmd/pilothouse only registers it under its
+// --dev flag, so on a production process it is absent from the registry
+// entirely rather than gated within it.
 type CapabilityGate interface {
 	// RequiredCapabilities returns the capability IDs that must all be
 	// present (HasAll semantics) for the module to be available. An empty

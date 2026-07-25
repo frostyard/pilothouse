@@ -15,6 +15,13 @@ pilothouse ships two binaries. `pilothouse` is the unprivileged web process; `pi
 | `--broker-socket` | `/run/pilothouse/broker.sock` | Privileged broker Unix socket |
 | `--allowed-origin` | — | Trusted public HTTP(S) origin when behind a reverse proxy; repeatable |
 | `--secure-cookie` | `false` | Require HTTPS when sending the session cookie |
+| `--dev` | `false` | Register in-development preview modules that are not backed by real functionality |
+
+`--dev` currently gates exactly one module: the Fleet preview, a static mock
+with no real multi-system transport or enrollment behind it. Without the flag
+it is not registered at all, so it has no navigation entry, no sidebar
+system-picker link, and no routes — `/fleet` and its sub-paths return 404. The
+packaged unit does not pass `--dev`, so a normal installation runs without it.
 
 The web process reads extension state through the broker rather than running
 `updex` or `systemd-sysext` itself, so it has no `--definitions-root` or

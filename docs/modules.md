@@ -154,13 +154,27 @@ func (m *Module) RequiredCapabilities() []capability.ID {
 ```
 
 A module that does not implement `CapabilityGate` has no requirement and is
-always available — this is the default for `system`, `files`, `activity`,
-`fleet`, and storage's own inventory reads. `internal/web.Server` filters
-`CapabilityGate` modules out of both the shell's navigation list and the
-dashboard's per-module loop when a required capability is absent; skipped
-dashboard modules are omitted entirely (no `Dashboard()` call, no card, no
-error placeholder), since an unavailable surface is not rendered, not shown
-degraded.
+available whenever it is registered — this is the default for `system`,
+`files`, `activity`, `fleet`, and storage's own inventory reads.
+`internal/web.Server` filters `CapabilityGate` modules out of both the shell's
+navigation list and the dashboard's per-module loop when a required capability
+is absent; skipped dashboard modules are omitted entirely (no `Dashboard()`
+call, no card, no error placeholder), since an unavailable surface is not
+rendered, not shown degraded.
+
+Capability gating and registration are separate switches, and `fleet` is the
+one module gated by the latter. It is a static, non-functional UI preview, so
+`cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only when the
+`--dev` flag is set (default `false`; `packaging/pilothouse.service`'s
+`ExecStart` does not pass it, so production runs without it). With `--dev`
+absent, `fleet` is never constructed, its `Mount` is never called, and its
+three routes (`/fleet`, `/fleet/enroll`, `/fleet/systems/{id}`) are genuinely
+unregistered — a mux 404, not a `platform.Gate` 404. Every web-side surface
+follows from that single registration decision: the shell's nav loops and its
+sidebar system-picker link both derive from the registry's manifest list, so
+none of them can render a link to a module that was never registered. Prefer
+that pattern — derive from `data.Modules` — over hardcoding a module's path
+into `internal/web/shell.templ`.
 
 Routes stay mounted on the shared mux regardless — never register a route
 conditionally at startup based on capability. Instead, wrap the handler

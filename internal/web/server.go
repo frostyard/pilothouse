@@ -204,7 +204,11 @@ func (s *Server) Render(w http.ResponseWriter, r *http.Request, page platform.Pa
 // capability.Set. A module with no capability requirement (it does not
 // implement platform.CapabilityGate or platform.CapabilityGateAny) is always
 // included, matching the spec's default for
-// system/files/activity/fleet/storage-inventory.
+// system/files/activity/fleet/storage-inventory. "Registered" is the
+// operative word: this filter only ever narrows the registry, so a module
+// cmd/pilothouse never constructed (fleet, absent unless --dev is set) has no
+// manifest here at all, and every surface derived from this list — the
+// shell's nav loops and its sidebar system-picker link — drops with it.
 func (s *Server) availableManifests(ctx context.Context) []platform.Manifest {
 	caps := s.Capabilities(ctx)
 	modules := s.registry.Modules()
