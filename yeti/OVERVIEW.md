@@ -69,6 +69,13 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       artifact-contract behavioral tests; drift_test.go holds
                       the two guards tying contract.go's hand-written tables to
                       the live ../.goreleaser.yaml
+  extract/            subpackage (package extract) whose only job is to produce
+                      a packaging.Model from a real artifact on disk. At this
+                      commit it holds one backend, Deb, which shells out to
+                      dpkg-deb; there is no .rpm backend and no command-line
+                      entry point yet. Being a separate package is what keeps
+                      the parent's run-time-inert guarantee mechanically true
+                      (see "Artifact extraction" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
@@ -1534,14 +1541,18 @@ and `Group`. `Scriptlet` holds a maintainer script's `Content`. `Model` ties
 them together: `Format`, `Entries`, `Dependencies`, and `Postinstall`, a
 `*Scriptlet` whose nil value is the representation of "this package ships no
 postinstall scriptlet" — a state the model keeps distinct from shipping a
-scriptlet with unexpected bytes. An extractor that populates a `Model` from a real
-`.deb`/`.rpm` is out of scope for this package.
+scriptlet with unexpected bytes. Populating a `Model` from a real artifact is
+out of scope for this package: the deb extractor lives in the `packaging/extract`
+subpackage ("Artifact extraction" below), and an `.rpm` extractor does not exist
+yet.
 
 **M1 — modes are asserted from the payload; ownership is proved by the
 scriptlet; owner and group are never asserted.** `Entry.Mode` drives a real
 assertion (see `wrong_mode` below). `Entry.Owner` and `Entry.Group` do not:
-they exist for the convenience of extractors that surface them and no code in
-this package reads them. An artifact cannot prove installed ownership: nfpm's
+they exist for the convenience of an extractor that happens to surface them and
+no code in this package reads them. The deb extractor does not surface them — it
+leaves both empty, because a `dpkg-deb`-extracted tree cannot recover the
+archive's recorded ownership. An artifact cannot prove installed ownership: nfpm's
 DEB payload records numeric UID/GID 0 by construction (which is why #66 added
 the postinstall scriptlet), and the RPM equivalent is unconfirmed against a
 real nfpm build.
@@ -1941,7 +1952,7 @@ stops shipping a scriptlet or already carried the mutated bytes.
 tables that were *transcribed by hand* from `.goreleaser.yaml`. Two guards keep
 the transcription honest, and they live in
 their own file because that file is the one *artifact-contract* file that reads
-the working tree — see the three tiers below, which are what keep that
+the working tree — see the four tiers below, which are what keep that
 statement from being confused with a claim about the whole package.
 
 They are **not** a restatement of `goreleaser_config_test.go`. That test asserts
@@ -2022,10 +2033,12 @@ they guard is `contract.go` itself, so the way to demonstrate they fire is a
 dependency or binary destination, or a deleted row), never a checked-in mutation
 of `.goreleaser.yaml`.
 
-**Portability: three tiers, and why they must not be blurred.** The one claim
+**Portability: four tiers, and why they must not be blurred.** The one claim
 that holds without qualification across all of this work is: **no file added by
-the artifact-contract phase executes an external command.** Below that, the
-three tiers differ, and a sentence true of one is false of another.
+the artifact-contract phase executes an external command.** That phase is #70's,
+and it added only files in `packaging/` itself; the deb extractor #73 has since
+added is a *separate package* and is tier (d) below. Below that, the four tiers
+differ, and a sentence true of one is false of another.
 
 - **(a) The contract model, `Verify`, and their behavioral tests** —
   `packaging/model.go`, `finding.go`, `contract.go`, `verify.go`,
@@ -2050,19 +2063,31 @@ three tiers differ, and a sentence true of one is false of another.
   The skipping is exactly why **`make docker-ci` remains the full gate** — the
   dev image installs the systemd package and `shellcheck`, so those checks
   actually run there and quietly skip elsewhere.
+- **(d) The deb extractor** — `packaging/extract/`. A **different package**,
+  and the only tier here whose *non-test* code runs an external command: `Deb`
+  invokes `dpkg-deb` three times. It is a subpackage precisely so the
+  guarantee below stays exactly true — the glob is **not** recursive, so
+  `packaging/extract/*.go` is outside it and it still lists exactly the same two
+  files it always did. Its `dpkg-deb`-dependent tests resolve the tool through
+  `internal/packagingtest.LookTool`, so they skip with an explicit reason on a
+  host without it and **fail** rather than skip inside `make docker-ci`; its
+  missing-tool test drives `PATH=""` and needs no tool on any host.
 
 Because of (c), no sentence anywhere may claim that the `packaging` package's
 *whole test suite* runs no external command, nor that the contract tests *as a
 group* operate only over embedded bytes — the drift guards do not. Claims have
 to name the tier they describe. `grep -lE 'os/exec|exec\.Command' packaging/*.go`
 listing exactly `units_test.go` and `postinstall_test.go` is the mechanical form
-of the global guarantee.
+of the global guarantee, and adding tier (d) left that listing byte-for-byte
+unchanged.
 
 **Still out of scope for this package.**
 
-- **Reading real `.deb`/`.rpm` files.** Nothing here opens an artifact. The
-  extractor that populates a `Model` from a built package, and the CLI that
-  reports `Finding`s, are **#73**'s.
+- **Reading real `.deb`/`.rpm` files.** Nothing in `packaging/` itself opens an
+  artifact. The deb extractor that populates a `Model` from a built `.deb` now
+  exists, one directory down, in `packaging/extract` (tier (d) above); the
+  `.rpm` extractor and the CLI that reports `Finding`s do not exist yet and
+  remain **#73**'s.
 - **Building the packages.** A `make package` target and a CI packaging job are
   **#72**'s; this package is exercised by `go test` alone.
 - **On-disk state after a real install.** VM installs and verification of
@@ -2075,6 +2100,106 @@ of the global guarantee.
 unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.
+
+### Artifact extraction (`packaging/extract`)
+
+`packaging/extract` is a subpackage whose only job is to turn a real artifact on
+disk into a `packaging.Model`. At this commit it holds exactly one backend,
+`Deb`. There is no `.rpm` backend, no `cmd/verify-packages`, and no
+`make verify-packages` target yet; all three are still **#73**'s remaining work.
+Nothing here decides whether a model is acceptable — `packaging.Verify` remains
+the sole source of `Finding`s, and moving one of its assertions down into an
+extractor would be a defect, because that separation is what keeps every
+contract assertion provable on a host with no packaging tool installed.
+
+**Why a subpackage, not more files in `packaging/`.** Three structural reasons,
+not stylistic ones:
+
+- The `grep -lE 'os/exec|exec\.Command' packaging/*.go` guarantee above is a
+  **non-recursive** glob, so every `exec.Command` this package adds leaves it
+  exactly true. An extractor placed in `packaging/` would have falsified it,
+  along with `model.go`'s "they are inert data" and `contract.go`'s "nothing
+  here opens a file at run time".
+- `requirements`, `contractDependencies`, `forbiddenRoots`, `sourceBytes` and
+  `postinstallSource` are unexported. From another package they are not merely
+  off limits, they are **invisible**, so contract logic cannot leak into an
+  extractor by accident.
+- `packaging/drift_test.go` already declares `usrBinDir` and `underUsrBin` in
+  package `packaging`. Those are test-only and belong to the drift guard; they
+  stay exactly where they are, and `packaging/extract` declares its own copies
+  with a comment recording the deliberate duplication.
+
+`packaging` itself cannot move the other way: a `//go:embed` pattern may not name
+a parent directory, so only a package rooted at `packaging/` can embed
+`packaging/*`.
+
+**Shared helpers and the error-text contract** (`packaging/extract/extract.go`).
+`ErrToolUnavailable` is wrapped into every error caused by a tool that is not on
+`PATH`, so `errors.Is` separates an environmental fault from a definitive one: a
+tool that ran and rejected the artifact does **not** report it. Two unexported
+helpers do the work — `lookTool`, which resolves a tool, and `runTool`, which
+runs one with `exec.CommandContext` under the caller's context and folds its
+standard error into the returned error. Every error either one returns carries
+the literal prefix `packaging/extract: <tool>: `, for example
+`packaging/extract: dpkg-deb: packaging tool unavailable`. The prefix is produced
+inside those two helpers and never at a call site, so no path can return a tool
+error without it, and it is a token an artifact's filename cannot forge —
+matching on the bare tool name would be satisfied by any file called `b.rpm`.
+Folding standard error in is also what puts the offending artifact's path into
+the message, since `dpkg-deb` names the file it could not read there.
+
+**The deb backend** (`packaging/extract/deb.go`). `Deb(ctx, path)` runs
+`dpkg-deb` three separate times under `ctx`, once per thing it needs, and caches
+nothing between them:
+
+- `dpkg-deb -x <deb> <dir>` extracts the payload into scratch space. That
+  extraction was measured to reproduce recorded modes exactly (0640, 0700 and
+  0750 under `umask 077`), which is why entry modes are read off the extracted
+  tree rather than parsed out of the `drwxr-x---` strings `dpkg-deb -c` prints.
+- `dpkg-deb -e <deb> <dir>` extracts the control members. It writes a
+  **directory** and emits no tar stream, so a `-e … | tar -xO postinst` pipeline
+  is not a valid way to read one of them.
+- `dpkg-deb -f <deb> Depends` reads the dependency field. A package declaring no
+  dependencies exits 0 with empty output, so absence is not a failure.
+
+Neither `dpkg-deb -c` nor `-I` is used: the extracted tree already carries exact
+modes, and `-f` gives the one field needed. `dpkg-deb -c` *is* used one package
+over, in `internal/packagingtest`'s own tests, as an independent oracle for the
+fixture builder — a different role in a different package.
+
+Entries come from a `filepath.WalkDir` over the extracted payload with the tree
+root itself skipped, so `/` is never an entry, while the intermediate
+directories `dpkg-deb` synthesizes for a declared path **are** — a package
+rooted at `/opt/phx/…` and `/usr/bin/…` archives `./opt/`, `./opt/phx/`,
+`./usr/` and `./usr/bin/` too, and each becomes an entry. Directory entries
+carry `Mode` and nil `Content`; regular files carry their bytes except those
+under `/usr/bin`, whose nil `Content` means "deliberately not captured" rather
+than "empty file"; symlinks, devices and fifos are not emitted at all, so a
+required destination shipped in one of those shapes surfaces as a loud
+`missing_path` rather than being silently accepted. `Config` is true for the
+destinations the `conffiles` control member lists, and a `conffiles` line that is
+not an absolute path is an error rather than a dropped row — an artifact read
+wrong must not come back as a confident model. `Postinstall` is a non-nil
+`Scriptlet` exactly when a `postinst` control member exists and `nil` when it does
+not, keeping "ships none" distinct from "ships the wrong bytes". `Dependencies`
+are split on commas only and trimmed, so alternatives (`a | b`) and version
+constraints (`c (>= 1)`) pass through verbatim in declaration order; splitting on
+`|` would make `Verify`'s rule against alternatives unfireable. `Owner` and
+`Group` are left empty for a deb, because a `dpkg-deb`-extracted tree cannot
+recover the archive's recorded ownership and nFPM's DEB tar records numeric
+UID/GID 0 anyway — both fields are informational per M1.
+
+**Its tests** (`packaging/extract/deb_test.go`). The happy path builds a
+throwaway `.deb` with `packagingtest.BuildDeb` into a `t.TempDir()` and asserts
+every model field against literals hand-written from the `Spec` the test itself
+declares — never against a value the extractor, `Verify` or a contract helper
+produced. The destination assertion is **set equality in both directions**,
+including those synthesized parents and excluding `/`: a one-directional
+membership check would pass while the extractor invented or dropped entries. Two
+error-path tests pin the prefix — one on a non-archive file, which must also
+name the artifact and must **not** report `ErrToolUnavailable`, and one under
+`t.Setenv("PATH", "")`, which must. Only the first two need `dpkg-deb`, and both
+resolve it through `packagingtest.LookTool`.
 
 ## Release workflow
 

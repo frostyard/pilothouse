@@ -3,10 +3,10 @@
 //
 // The model is a plain in-memory description of a package: its format, the
 // files it installs, the dependencies it declares, and its postinstall
-// scriptlet. An extractor (out of scope here) populates it; the job of the
-// types declared in this file and in finding.go is only to describe the
-// shape. They are inert data: constructing or reading one opens no file and
-// starts no process.
+// scriptlet. The deb extractor in the packaging/extract subpackage populates it
+// from a real .deb; the job of the types declared in this file and in
+// finding.go is only to describe the shape. They are inert data: constructing
+// or reading one opens no file and starts no process.
 //
 // Verify checks a Model against the contract. It reports an unknown format,
 // every required destination the model installs nothing to or installs more
