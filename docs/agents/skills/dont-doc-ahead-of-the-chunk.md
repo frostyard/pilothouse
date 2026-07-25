@@ -76,3 +76,52 @@ filtered. Round 2 then hit the original temporal-overclaim failure mode too
 (claiming `sysext` was capability-gated when that module was explicitly
 out of scope and untouched) — confirming both failure modes show up in the
 same kind of chunk and both need checking before submitting a doc chunk.
+
+**This check is not just for dedicated end-of-series doc chunks — every
+ordinary code chunk's own inline doc edit needs the same clause-by-clause
+verification against its own landed diff.** Mill run for issue #64 (default-
+off container engines + dev-gated mock Fleet) got a doc-accuracy objection
+on nearly every chunk's `yeti/OVERVIEW.md` (or `README.md`) touch —
+5 of 6 chunks — each a different shape of the same underlying mistake
+(writing the doc sentence from the *intended* design rather than the
+*landed* code):
+
+- **Stale pre-change text left untouched.** Chunk 1 made Podman opt-in
+  (empty default, no ambient socket probe), but `yeti/OVERVIEW.md:68` still
+  described the old behavior — a running Podman socket being probed and
+  enabled with zero configuration — for the paragraph covering the exact
+  engine the chunk had just changed.
+- **Overclaiming an unwritten log line.** Chunk 2 added an explicit
+  `--docker` flag; the doc said an unreachable *configured* Docker endpoint
+  "is logged as a warning." The actual code (`ProbeDocker` on ping failure,
+  `connectDocker` only warning on client-construction failure) silently
+  degrades to absent with no warning in the ping-failure path — a specific,
+  checkable claim about logging behavior that nobody re-read against the
+  function it described.
+- **Order-of-operations claim contradicted by the code.** Chunk 3 said
+  "disabled `ProbeIncus` avoids constructing a client," but the function
+  actually calls `newIncusProbeClient()` unconditionally *before* checking
+  the enabled guard — the opt-in gate skips using the client, not building
+  it.
+- **A new flag omitted from an existing enumerated table.** Chunk 4 added
+  `--dev`; the pilothouse configuration/flag list in `yeti/OVERVIEW.md`
+  wasn't appended to include it, its default, or the Fleet-preview
+  consequence — the same "table siblings" trap
+  `grep-the-whole-doc-for-every-restatement-of-a-stale-claim.md` names for
+  counts, recurring here for a flag list instead of a count.
+- **A worked example asserting a consequence its own shown command doesn't
+  produce.** Chunk 5's `site/content/getting-started/installation.md`
+  walkthrough said administrators "can perform Podman and Docker mutations"
+  right after a local-run command example that passed none of the new
+  opt-in flags — under that literal command, both engines are disabled and
+  their modules aren't even registered. Ground a walkthrough's claims in
+  the exact command shown a few lines above, not in what the feature can do
+  in general.
+
+Every one of these was a single-clause factual error, not a wholesale
+false paragraph, which is exactly why re-reading only for "does this doc
+mention the new behavior" isn't enough — read each clause (what gets
+logged, what order two calls happen in, whether this exact flag appears in
+every table that lists its siblings, whether the example command shown
+actually enables what the next sentence claims) against the diff of the
+same chunk, even when that chunk is not a dedicated documentation chunk.
