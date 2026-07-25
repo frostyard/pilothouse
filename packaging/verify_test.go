@@ -141,6 +141,26 @@ func findingsFor(findings []Finding, code, path string) int {
 	return n
 }
 
+// codePath is the (Code, Path) pair a finding is identified by throughout this
+// package's tests.
+type codePath struct {
+	code string
+	path string
+}
+
+// codePaths projects findings onto their identifying pairs so a test can match
+// a whole result set as a SET — with require.ElementsMatch, which is
+// order-independent and index-independent but still multiplicity-sensitive.
+// Nothing in Verify's contract fixes the order findings are returned in.
+func codePaths(findings []Finding) []codePath {
+	pairs := make([]codePath, 0, len(findings))
+	for _, f := range findings {
+		pairs = append(pairs, codePath{code: f.Code, path: f.Path})
+	}
+
+	return pairs
+}
+
 // withoutEntry returns a copy of m with the entry installing to dest removed,
 // failing the test if the fixture had no such entry (which would make the
 // mutation vacuous).
@@ -207,6 +227,26 @@ func duplicateEntry(t *testing.T, m Model, dest string, copies int) Model {
 	}
 
 	m.Entries = entries
+
+	return m
+}
+
+// withExtraEntry returns a copy of m installing one further entry, failing the
+// test if the fixture already installs anything at that destination (which
+// would make the mutation a duplicate rather than an addition).
+//
+// This is the mutation the forbidden-path cases use: a package owning a
+// systemd-managed path does not move a contract entry there, it ships an extra
+// one alongside everything the contract requires.
+func withExtraEntry(t *testing.T, m Model, entry Entry) Model {
+	t.Helper()
+
+	for _, existing := range m.Entries {
+		require.NotEqualf(t, entry.Dest, existing.Dest,
+			"fixture already installs an entry at %s", entry.Dest)
+	}
+
+	m.Entries = append(slices.Clone(m.Entries), entry)
 
 	return m
 }
@@ -539,6 +579,35 @@ var contentFreeDestinations = []string{
 	"/usr/bin/pilothoused",
 	"/etc/pilothouse",
 	"/etc/pilothouse/storage/credentials",
+}
+
+// forbiddenRootDestinations is the two directories the broker unit owns
+// through RuntimeDirectory= and StateDirectory=, written out by hand from the
+// issue rather than read back from contract.go's forbiddenRoots: that slice is
+// the thing under test, so it may not also be the oracle.
+var forbiddenRootDestinations = []string{
+	"/run/pilothouse",
+	"/var/lib/pilothouse",
+}
+
+// forbiddenDescendantDestinations is one nested descendant of each forbidden
+// root — a real path each root would plausibly hold — likewise written out by
+// hand. Every entry here shares a whole leading path component with its root,
+// which is what the component-aware rule reports.
+var forbiddenDescendantDestinations = []string{
+	"/run/pilothouse/broker.sock",
+	"/var/lib/pilothouse/storage/mounts",
+}
+
+// nearMissSiblingDestinations is one sibling of each forbidden root that
+// shares a textual prefix with it but no whole path component.
+//
+// These are the destinations on which this package's component-aware rule and
+// goreleaser_config_test.go's plain-prefix checkNoSystemdManagedPaths
+// deliberately disagree; see TestVerifyForbiddenPathContainmentIsComponentAware.
+var nearMissSiblingDestinations = []string{
+	"/run/pilothouse-helper",
+	"/var/lib/pilothouse-helper",
 }
 
 // dependencyFaults names, per format, one concrete instance of each fault N2
@@ -990,6 +1059,131 @@ func TestVerifyContentNotComparedWhereContractStatesNoSource(t *testing.T) {
 				require.Empty(t, findings)
 			})
 		}
+	}
+}
+
+// TestVerifyForbiddenRootDestination installs one further entry AT each
+// systemd-managed root itself, in each format — four cases — and asserts the
+// forbidden-path finding carrying exactly that destination.
+//
+// The entry is a directory, which is what a package owning one of these roots
+// would actually ship: systemd creates and removes them at unit start and stop
+// with the ownership the broker needs, and a package-owned copy would fight
+// it.
+func TestVerifyForbiddenRootDestination(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, root := range forbiddenRootDestinations {
+			t.Run(tc.name+" "+root, func(t *testing.T) {
+				t.Parallel()
+
+				model := withExtraEntry(t, contractModel(t, tc.format), Entry{
+					Dest:  root,
+					Mode:  fs.ModeDir | 0o750,
+					Owner: "root",
+					Group: "pilothouse",
+				})
+
+				findings := Verify(model)
+				require.Equal(t, 1, findingsFor(findings, CodeForbiddenPath, root))
+				require.Len(t, findings, 1)
+			})
+		}
+	}
+}
+
+// TestVerifyForbiddenDescendantDestination installs one further entry NESTED
+// under each systemd-managed root, in each format — four more cases — and
+// asserts the forbidden-path finding carrying that entry's own destination
+// rather than the root it violates.
+func TestVerifyForbiddenDescendantDestination(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, dest := range forbiddenDescendantDestinations {
+			t.Run(tc.name+" "+dest, func(t *testing.T) {
+				t.Parallel()
+
+				model := withExtraEntry(t, contractModel(t, tc.format), Entry{
+					Dest:    dest,
+					Mode:    0o640,
+					Content: []byte("state the package must not ship\n"),
+					Owner:   "root",
+					Group:   "pilothouse",
+				})
+
+				findings := Verify(model)
+				require.Equal(t, 1, findingsFor(findings, CodeForbiddenPath, dest))
+				require.Len(t, findings, 1)
+			})
+		}
+	}
+}
+
+// TestVerifyForbiddenPathContainmentIsComponentAware pins the containment rule
+// as implemented: a destination violates a root only when it equals the root
+// or begins with the root followed by "/". A sibling that merely shares a
+// textual prefix — /run/pilothouse-helper — shares no whole path component
+// with the root and is therefore NOT reported here.
+//
+// This is a deliberate divergence, not an oversight, and the direction matters.
+// goreleaser_config_test.go's configuration-level checkNoSystemdManagedPaths
+// uses a plain strings.HasPrefix and so rejects that same sibling ON PURPOSE,
+// as its own comment states: a destination written into .goreleaser.yaml that
+// merely looks like a managed root is far likelier to be a typo for it than a
+// deliberate path, and this repository configures none. That check is
+// intentionally broader than this one and the two are not in conflict —
+// anything genuinely nested under a root is rejected by both. Per O4,
+// checkNoSystemdManagedPaths and the systemdManagedPaths slice it reads must
+// NOT be "harmonized" with the rule proven here; neither this test nor
+// packaging/verify.go's rule is a reason to change them.
+func TestVerifyForbiddenPathContainmentIsComponentAware(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, sibling := range nearMissSiblingDestinations {
+			t.Run(tc.name+" "+sibling, func(t *testing.T) {
+				t.Parallel()
+
+				model := withExtraEntry(t, contractModel(t, tc.format), Entry{
+					Dest:    sibling,
+					Mode:    0o755,
+					Content: []byte("a path the package legitimately owns\n"),
+					Owner:   "root",
+					Group:   "root",
+				})
+
+				findings := Verify(model)
+				require.Zero(t, findingsFor(findings, CodeForbiddenPath, sibling))
+				require.Empty(t, findings)
+			})
+		}
+	}
+}
+
+// TestVerifyForbiddenPathReportedOncePerDestination proves the rule is per
+// destination, not per entry: two entries at the same forbidden path still
+// produce exactly one forbidden-path finding, because findings are identified
+// by their (Code, Path) pair. The destination is not one the contract
+// requires, so no duplicate_entry finding accompanies it — the duplicate check
+// is scoped to the required destinations.
+func TestVerifyForbiddenPathReportedOncePerDestination(t *testing.T) {
+	t.Parallel()
+
+	const dest = "/var/lib/pilothouse/storage/mounts"
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := withExtraEntry(t, contractModel(t, tc.format), Entry{Dest: dest, Mode: 0o640})
+			model = duplicateEntry(t, model, dest, 1)
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeForbiddenPath, dest))
+			require.Len(t, findings, 1)
+		})
 	}
 }
 
@@ -1475,6 +1669,184 @@ func TestVerifyAccumulatesUnrelatedFaults(t *testing.T) {
 			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, "/etc/pam.d/pilothouse"))
 			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, "/usr/bin/pilothoused"))
 			require.Len(t, findings, 2)
+		})
+	}
+}
+
+// TestVerifyAccumulatesEveryFaultAtOnce is O1's required proof that Verify
+// never short-circuits: ONE model carries eight unrelated faults spanning
+// seven distinct codes, and every (Code, Path) pair they must produce is
+// present in a single result.
+//
+// The faults are deliberately of different shapes and at different
+// destinations — a missing directory, a wrong env-file mode, a cleared PAM
+// config designation, a perturbed unit file, a duplicated binary, a dropped
+// dependency, a mutated scriptlet, and an entry under a systemd-managed root —
+// so no two of them could be produced by the same check, and any check that
+// returned early would drop findings the assertion below demands.
+//
+// The result is matched as a SET, not by index or order: require.ElementsMatch
+// on the (Code, Path) pairs asserts every expected pair is present and, since
+// it is multiplicity-sensitive and total, that nothing else is. The two
+// wrong_content pairs are told apart by Path alone — one names the unit file,
+// the other is empty because the scriptlet has no destination.
+func TestVerifyAccumulatesEveryFaultAtOnce(t *testing.T) {
+	t.Parallel()
+
+	const (
+		missingDir = "/etc/pilothouse/storage/credentials"
+		envFile    = "/etc/pilothouse/pilothoused.env"
+		pamPolicy  = "/etc/pam.d/pilothouse"
+		webUnit    = "/usr/lib/systemd/system/pilothouse.service"
+		binary     = "/usr/bin/pilothoused"
+		forbidden  = "/var/lib/pilothouse/storage/mounts"
+	)
+
+	// dropped is one element of each format's contract list, written out by
+	// hand from .goreleaser.yaml's per-format overrides — the same provenance
+	// as fixtureDependencies, never read back from contractDependencies.
+	for _, tc := range []struct {
+		name    string
+		format  Format
+		dropped string
+	}{
+		{name: "deb", format: FormatDeb, dropped: "libpam-runtime"},
+		{name: "rpm", format: FormatRPM, dropped: "authselect-libs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := contractModel(t, tc.format)
+			model = withoutEntry(t, model, missingDir)
+			model = withMode(t, model, envFile, 0o644)
+			model = withConfig(t, model, pamPolicy, false)
+			model = withContent(t, model, webUnit, perturb(contentAt(t, model, webUnit)))
+			model = duplicateEntry(t, model, binary, 1)
+			model = withoutDependency(t, model, tc.dropped)
+			model = withScriptlet(t, model, withAppendedCommand(model.Postinstall.Content))
+			model = withExtraEntry(t, model, Entry{
+				Dest:    forbidden,
+				Mode:    0o640,
+				Content: []byte("state the package must not ship\n"),
+			})
+
+			want := []codePath{
+				{code: CodeMissingPath, path: missingDir},
+				{code: CodeWrongMode, path: envFile},
+				{code: CodeMissingConfigFlag, path: pamPolicy},
+				{code: CodeWrongContent, path: webUnit},
+				{code: CodeDuplicateEntry, path: binary},
+				{code: CodeDependencyMismatch, path: ""},
+				{code: CodeWrongContent, path: ""},
+				{code: CodeForbiddenPath, path: forbidden},
+			}
+
+			// Seven distinct codes across eight faults: wrong_content appears
+			// twice, path-scoped and not.
+			distinct := make(map[string]struct{}, len(want))
+			for _, pair := range want {
+				distinct[pair.code] = struct{}{}
+			}
+			require.Len(t, distinct, 7)
+
+			require.ElementsMatch(t, want, codePaths(Verify(model)))
+		})
+	}
+}
+
+// TestVerifyProducesEveryFindingCode proves the suite leaves no code declared
+// in packaging/finding.go unexercised: each of the nine is produced here by a
+// model that breaks exactly the thing that code names.
+//
+// The list below is written out by hand, so a tenth code added to finding.go
+// without a case here fails the length assertion rather than slipping in
+// unproven — the same discipline finding_test.go's own list keeps.
+func TestVerifyProducesEveryFindingCode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		code  string
+		model func(t *testing.T) Model
+	}{{
+		name:  "unknown_format",
+		code:  CodeUnknownFormat,
+		model: func(*testing.T) Model { return Model{} },
+	}, {
+		name: "missing_path",
+		code: CodeMissingPath,
+		model: func(t *testing.T) Model {
+			return withoutEntry(t, contractModel(t, FormatDeb), "/usr/bin/pilothouse")
+		},
+	}, {
+		name: "duplicate_entry",
+		code: CodeDuplicateEntry,
+		model: func(t *testing.T) Model {
+			return duplicateEntry(t, contractModel(t, FormatDeb), "/usr/bin/pilothouse", 1)
+		},
+	}, {
+		name: "wrong_mode",
+		code: CodeWrongMode,
+		model: func(t *testing.T) Model {
+			return withMode(t, contractModel(t, FormatDeb), "/etc/pilothouse", 0o755)
+		},
+	}, {
+		name: "missing_config_flag",
+		code: CodeMissingConfigFlag,
+		model: func(t *testing.T) Model {
+			return withConfig(t, contractModel(t, FormatDeb), "/etc/pam.d/pilothouse", false)
+		},
+	}, {
+		name: "wrong_content",
+		code: CodeWrongContent,
+		model: func(t *testing.T) Model {
+			const dest = "/etc/pilothouse/pilothouse.env"
+
+			model := contractModel(t, FormatDeb)
+
+			return withContent(t, model, dest, perturb(contentAt(t, model, dest)))
+		},
+	}, {
+		name: "dependency_mismatch",
+		code: CodeDependencyMismatch,
+		model: func(t *testing.T) Model {
+			return withoutDependency(t, contractModel(t, FormatDeb), "libc6")
+		},
+	}, {
+		name: "missing_scriptlet",
+		code: CodeMissingScriptlet,
+		model: func(t *testing.T) Model {
+			return withoutScriptlet(t, contractModel(t, FormatDeb))
+		},
+	}, {
+		name: "forbidden_path",
+		code: CodeForbiddenPath,
+		model: func(t *testing.T) Model {
+			return withExtraEntry(t, contractModel(t, FormatDeb), Entry{
+				Dest: "/var/lib/pilothouse",
+				Mode: fs.ModeDir | 0o750,
+			})
+		},
+	}}
+	require.Len(t, cases, 9)
+
+	covered := make(map[string]struct{}, len(cases))
+	for _, tc := range cases {
+		covered[tc.code] = struct{}{}
+	}
+	require.Len(t, covered, 9)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			produced := 0
+			for _, f := range Verify(tc.model(t)) {
+				if f.Code == tc.code {
+					produced++
+				}
+			}
+			require.Positivef(t, produced, "no finding carried the code %q", tc.code)
 		})
 	}
 }

@@ -108,6 +108,21 @@ func contractDependencies(f Format) ([]string, bool) {
 	}
 }
 
+// forbiddenRoots are the two directories the broker unit owns through
+// RuntimeDirectory= and StateDirectory=. A package must never install to
+// either of them, nor to anything nested under them: systemd creates and
+// removes them with the correct ownership at unit start and stop, and a
+// package-owned copy would fight it.
+//
+// The name is forbiddenRoots rather than the more obvious systemdManagedPaths
+// because goreleaser_config_test.go already declares systemdManagedPaths in
+// this package for the configuration-level assertion.
+//
+// Containment against these roots is COMPONENT-AWARE, and deliberately
+// narrower than the configuration-level check's. See forbiddenPathFindings in
+// verify.go for the rule and for why the two checks must not be harmonized.
+var forbiddenRoots = []string{"/run/pilothouse", "/var/lib/pilothouse"}
+
 // requirement is one thing the contract demands of a package.
 //
 // It carries only the fields the checks in verify.go read; a field is added by

@@ -12,12 +12,14 @@ import (
 // Verify ACCUMULATES. No check returns early and no check is skipped because
 // an earlier one produced a finding, so the returned slice holds every
 // independent violation the model exhibits. A nil or empty result means m
-// satisfies every assertion implemented so far.
+// satisfies the contract: at this commit every assertion the contract calls
+// for is implemented, so a clean result is a complete verdict rather than a
+// partial one.
 //
 // Verify is pure: it reads only m and the repository sources compiled into
 // this package, opens no file and runs no command.
 //
-// The assertions Verify makes at this commit are exactly nine:
+// The assertions Verify makes at this commit are exactly ten:
 //
 //   - CodeUnknownFormat (not path-scoped, so Path is empty) when m.Format is
 //     neither FormatDeb nor FormatRPM. Without it a zero-value Model would
@@ -67,6 +69,12 @@ import (
 //     finding that is not path-scoped; a consumer distinguishing the two reads
 //     Path, and a consumer distinguishing "no scriptlet" from "wrong scriptlet"
 //     reads the Code.
+//   - CodeForbiddenPath, with Path set to the offending entry's Dest, for every
+//     entry installed to one of the systemd-managed roots in forbiddenRoots or
+//     to anything nested under one. Exactly one finding per offending
+//     destination however many entries install there, for the same reason
+//     CodeDuplicateEntry is reported once per destination. See
+//     forbiddenPathFindings for the containment rule.
 //
 // Three deliberate silences:
 //
@@ -114,7 +122,15 @@ import (
 // evaluates the first entry installing there for mode, config designation and
 // content, and still accumulates.
 //
-// Nothing else is asserted yet; further assertions arrive in later changes.
+// An entry at a destination the contract neither requires nor forbids is not a
+// finding. A real .deb or .rpm also carries tooling artifacts such as
+// /usr/share/doc entries, so the contract is "these files, correct, and never
+// the forbidden roots", not "exactly these files and nothing else".
+//
+// These ten assertions are the whole of the contract Verify checks: every
+// assertion the artifact contract calls for is implemented. What remains
+// elsewhere is not another Verify check but the mechanical drift guard tying
+// this package's hand-written tables to .goreleaser.yaml.
 func Verify(m Model) []Finding {
 	var findings []Finding
 
@@ -198,6 +214,16 @@ func Verify(m Model) []Finding {
 		}
 	}
 
+	// Gated on the format being known for the same reason the requirement loop
+	// is. The forbidden roots are themselves format-independent — both packages
+	// ship the same broker unit shape — but a model whose format this package
+	// does not recognise describes a package whose contract is unknown rather
+	// than violated, and CodeUnknownFormat stays the only finding such a model
+	// gets.
+	if known {
+		findings = append(findings, forbiddenPathFindings(m.Entries)...)
+	}
+
 	// Gated on the format being known, for the same reason the requirement
 	// loop is: the contract for an unrecognised format is unknown, not
 	// violated, so CodeUnknownFormat stays the only finding such a model gets.
@@ -213,6 +239,72 @@ func Verify(m Model) []Finding {
 	// violated, and CodeUnknownFormat stays the only finding such a model gets.
 	if known {
 		findings = append(findings, postinstallFindings(m.Postinstall)...)
+	}
+
+	return findings
+}
+
+// forbiddenPathFindings reports every entry installed to a systemd-managed
+// root in forbiddenRoots, or to anything nested under one.
+//
+// Containment is COMPONENT-AWARE: an entry violates a root when its Dest
+// equals the root exactly, or begins with the root followed by "/". Whole path
+// components are compared, so /run/pilothouse and /run/pilothouse/broker.sock
+// are both reported and /run/pilothouse-helper is not.
+//
+// That is deliberately NARROWER than the configuration-level check
+// checkNoSystemdManagedPaths in goreleaser_config_test.go, which walks
+// .goreleaser.yaml's contents with a plain strings.HasPrefix and therefore
+// also rejects a near-miss sibling such as /run/pilothouse-helper. Its comment
+// says that breadth is on purpose, and it is: a destination in the packaging
+// configuration that merely looks like the managed root is overwhelmingly
+// likely to be a typo for it, and rejecting it there costs nothing because
+// this repository configures no such path.
+//
+// The two checks are NOT in conflict. Anything genuinely nested under a root
+// is rejected by both; they differ only on names that share a textual prefix
+// without sharing a path component, where the configuration check is stricter
+// than this one. Per O4 of the issue, checkNoSystemdManagedPaths must NOT be
+// "harmonized" with the rule here: leave it, and the systemdManagedPaths slice
+// it reads, exactly as they are. The narrower rule belongs here because this
+// package judges a real artifact's payload, where an entry named
+// /run/pilothouse-helper is a destination the package genuinely owns and no
+// systemd-managed directory is being fought over.
+//
+// Exactly one finding is emitted per offending destination however many
+// entries install there, for the same reason CodeDuplicateEntry is: findings
+// are identified by their (Code, Path) pair, so further identical findings
+// would carry no information. No forbidden destination is also a required one,
+// so a forbidden path duplicated across entries draws this finding alone: the
+// duplicate check iterates the contract table, which names none of them.
+func forbiddenPathFindings(entries []Entry) []Finding {
+	var findings []Finding
+
+	reported := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if reported[entry.Dest] {
+			continue
+		}
+
+		for _, root := range forbiddenRoots {
+			if entry.Dest != root && !strings.HasPrefix(entry.Dest, root+"/") {
+				continue
+			}
+
+			reported[entry.Dest] = true
+
+			findings = append(findings, Finding{
+				Code: CodeForbiddenPath,
+				Path: entry.Dest,
+				Message: fmt.Sprintf(
+					"the package installs %s; %s is created and removed by systemd "+
+						"through the broker unit, and the package must own nothing there",
+					entry.Dest, root,
+				),
+			})
+
+			break
+		}
 	}
 
 	return findings

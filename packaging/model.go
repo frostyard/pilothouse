@@ -14,9 +14,10 @@
 // mode, a missing configuration-file designation, or content that is not the
 // repository source the destination is built from. It also reports a declared
 // dependency list that does not match the format's, any dependency expression
-// offering an alternative, and a postinstall scriptlet that is absent or does
-// not carry the bytes of packaging/postinstall.sh; the remaining assertions
-// arrive in later changes.
+// offering an alternative, a postinstall scriptlet that is absent or does not
+// carry the bytes of packaging/postinstall.sh, and any entry installed to a
+// systemd-managed root or a descendant of one. That list is the whole of the
+// contract it checks; see Verify for the ten assertions it enumerates.
 package packaging
 
 import "io/fs"

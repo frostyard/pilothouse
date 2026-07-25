@@ -50,7 +50,8 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       make this a real Go package with an exported surface: the
                       artifact-contract model types, the finding vocabulary,
                       the embedded repository sources with the per-format
-                      requirement table and dependency lists, and Verify (see
+                      requirement table, dependency lists and forbidden
+                      systemd-managed roots, and Verify (see
                       "Artifact contract model" below). units_test.go,
                       postinstall_test.go, and goreleaser_config_test.go are
                       its configuration-level tests: the first runs the real
@@ -1426,7 +1427,10 @@ fails); both configuration directories and both env files carry the
 type/mode/owner/group above in both formats; `scripts.postinstall` is
 `./packaging/postinstall.sh`; `formats` is exactly `[deb, rpm]`; and no
 content entry in either format installs to `/run/pilothouse` or
-`/var/lib/pilothouse` or anything under them. The comparison helpers
+`/var/lib/pilothouse` or anything under them — a plain-prefix check that also
+rejects a near-miss sibling like `/run/pilothouse-helper` on purpose, and that
+is deliberately *broader* than the artifact-level rule below; see "The
+forbidden roots" for why the two must not be harmonized. The comparison helpers
 (`checkDependencies`, `checkNoSrc`, `checkNoSystemdManagedPaths`) return errors
 rather than asserting inline, so companion tests can mutate a *test-local deep
 copy* of the parsed data and prove each check actually fires — the real file is
@@ -1437,8 +1441,8 @@ disk, so it runs under plain `make test` as well as `make docker-ci`.
 
 The `packaging` directory is a real Go package, not only a home for tests. It
 holds the data types an artifact is described with, the codes a violation is
-named by, the destinations the contract requires, and `Verify`, which reports
-the violations it can see so far.
+named by, the destinations the contract requires, the two roots it forbids, and
+`Verify`, which reports every violation the contract names.
 
 **Model types** (`packaging/model.go`). `Format` is a string type with exactly
 two values, `FormatDeb` (`"deb"`) and `FormatRPM` (`"rpm"`). `Entry` describes
@@ -1551,6 +1555,40 @@ multiplicity are contract-relevant — and the two directory entries
 content at all. Whatever an extractor records at those four, including nothing,
 is not a finding.
 
+**The forbidden roots, and the deliberate divergence from the
+configuration-level check** (`packaging/contract.go`, `packaging/verify.go`).
+`forbiddenRoots` is `/run/pilothouse` and `/var/lib/pilothouse` — the two
+directories the broker unit owns through `RuntimeDirectory=` and
+`StateDirectory=`. systemd creates and removes them at unit start and stop with
+the ownership the broker needs, so a package-owned copy would fight it and the
+package must install **nothing** there. The slice is named `forbiddenRoots`
+rather than the obvious `systemdManagedPaths` because
+`goreleaser_config_test.go` already declares that name in this same package,
+the same collision `contractDependencies` avoids.
+
+Containment is **component-aware**: a destination `d` violates a root `m` when
+`d == m` or `strings.HasPrefix(d, m+"/")`. Whole path components are compared,
+so both the bare root and a nested descendant (`/run/pilothouse/broker.sock`,
+`/var/lib/pilothouse/storage/mounts`) are reported, and a sibling that merely
+shares a textual prefix — `/run/pilothouse-helper` — is not.
+
+That rule is **intentionally narrower** than
+`goreleaser_config_test.go`'s configuration-level `checkNoSystemdManagedPaths`,
+whose plain `strings.HasPrefix` over the same two roots *does* reject
+`/run/pilothouse-helper`, on purpose and as its own comment states: a
+destination written into `.goreleaser.yaml` that merely looks like a managed
+root is far likelier to be a typo for it than a deliberate path, and this
+repository configures none. The two are **not in conflict** — anything
+genuinely nested under a root is rejected by both, and they differ only on
+names sharing a textual prefix without sharing a path component, where the
+configuration check is the stricter of the two. The narrower rule belongs in
+`Verify` because it judges a real artifact's payload, where an entry at
+`/run/pilothouse-helper` is a path the package genuinely owns and no
+systemd-managed directory is being fought over. **Do not "harmonize" the two**:
+`checkNoSystemdManagedPaths` and the `systemdManagedPaths` slice it reads stay
+exactly as they are, and `packaging/verify.go` carries a comment saying so, so
+that neither side is "fixed" into the other later.
+
 **The scriptlet source** (`packaging/contract.go`). The postinstall scriptlet's
 expectation is the lone constant `postinstallSource = "postinstall.sh"` rather
 than a row in the requirement table, because the scriptlet is not path-scoped:
@@ -1610,10 +1648,11 @@ expression.
 `func Verify(m Model) []Finding`, fixed by the issue. **`Verify` accumulates:**
 no check returns early and no check is skipped because an earlier one produced
 a finding, so the result holds every independent violation the model exhibits,
-and a nil or empty result means the model satisfies every assertion implemented
-so far.
+and a nil or empty result means the model satisfies the contract — at this
+commit every assertion the contract calls for is implemented, so a clean result
+is a complete verdict rather than a partial one.
 
-`Verify` performs exactly nine checks at this commit:
+`Verify` performs exactly ten checks at this commit:
 
 - **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
   zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
@@ -1660,6 +1699,17 @@ so far.
   the empty `Path` is exactly what distinguishes it from a payload entry's.
   Both scriptlet checks are gated on a known format for the same reason
   everything else is.
+- **`forbidden_path`**, with `Path` set to the *offending entry's own*
+  destination (not the root it violates), for every entry installed to a
+  systemd-managed root or to anything nested under one — see the forbidden
+  roots below. Exactly **one** finding per offending destination however many
+  entries install there, for the same (`Code`, `Path`) reason
+  `duplicate_entry` is reported once per destination, and gated on a known
+  format like everything else. An entry at a destination the contract neither
+  requires nor forbids is *not* a finding: a real `.deb`/`.rpm` also carries
+  `/usr/share/doc` and similar tooling artifacts, so the contract is "these
+  files, correct, and never the forbidden roots", not "exactly these files and
+  nothing else".
 
 Three rules keep the mode, config and content checks honest:
 
@@ -1712,8 +1762,21 @@ idempotent, presence-guarded repairs are already proven by
 `packaging/postinstall_test.go`, which runs the real script; all this package
 has to add is that the artifact ships exactly those bytes (M1 above).
 
-Nothing else is asserted yet. The remaining assertions the contract calls for
-land in later changes and are documented here as each one arrives.
+**The accumulate guarantee, demonstrated end to end.** Those ten checks are the
+whole of the contract `Verify` asserts — every assertion the artifact contract
+calls for is implemented, and what has not landed is not a further check but
+the mechanical drift guard tying the hand-written tables to `.goreleaser.yaml`.
+Because the check list is complete, the accumulate guarantee is now proven
+rather than merely stated: `TestVerifyAccumulatesEveryFaultAtOnce` seeds **one**
+model with eight unrelated faults spanning **seven** distinct codes — a missing
+directory, a wrong env-file mode, a cleared PAM config designation, a perturbed
+unit file, a duplicated binary, a dropped dependency, a mutated scriptlet and an
+entry under a forbidden root — and matches the whole result as a **set** of
+(`Code`, `Path`) pairs with `require.ElementsMatch`, independent of order and
+index. No check may return early or be skipped because an earlier one fired, or
+that assertion loses pairs. `TestVerifyProducesEveryFindingCode` closes the
+other half: each of the nine codes declared in `packaging/finding.go` is
+produced by a model that breaks exactly the thing that code names.
 
 `packaging/verify_test.go` holds the behavioral tests: the shared
 `contractModel(t, format)` fixture that every mutation starts from, a
@@ -1725,8 +1788,10 @@ each required destination in each format (missing, then duplicated), a
 relocated binary in each format, a wrong mode on each of the four pinned
 destinations, a cleared config designation on each of the three, a perturbed
 and then a `nil` `Content` on each of the six byte-compared destinations, and
-several unrelated faults at once — which is what proves the accumulate
-guarantee rather than merely stating it. The dependency table is N2's five
+pairwise combinations of unrelated faults (a duplicate with a missing path, a
+wrong content with a missing path, a dependency or scriptlet fault with a
+missing path) on top of the whole-model accumulation proof described above.
+The dependency table is N2's five
 faults in each format, ten cases in all: a missing, an extra, a duplicated and
 a misspelled element, and an element rewritten as an alternative
 (`libc6 | libc6-udeb` for `deb`, `glibc | glibc-minimal-langpack` for `rpm`),
@@ -1752,6 +1817,20 @@ broken payload entry produces two `wrong_content` findings told apart by `Path`
 alone. The scriptlet mutations name their target positionally, never by what
 the affected line does, which is the same posture the production check takes.
 
+The forbidden-path cases use `withExtraEntry`, which adds an entry *alongside*
+everything the contract requires (and fails if the fixture already installs
+there) — a package owning a systemd-managed path ships an extra entry, it does
+not relocate a contract one. Eight mutation cases run the two roots and the two
+nested descendants in each format, each asserting `forbidden_path` at the
+entry's own destination and nothing else; a further test pins one finding per
+destination when two entries install to the same forbidden path. A dedicated
+test then pins the deliberate divergence described above — an entry at
+`/run/pilothouse-helper` or `/var/lib/pilothouse-helper` yields **no**
+`forbidden_path` finding here, while `checkNoSystemdManagedPaths` rejects that
+sibling at configuration level on purpose — and its comment, like
+`packaging/verify.go`'s, records that the configuration test must not be
+changed to match.
+
 Two cross-format tests are the point of the payload
 content check: an `rpm` model carrying `packaging/pilothouse.pam`'s
 bytes and a `deb` model carrying `packaging/rpm/pilothouse.pam`'s are each
@@ -1761,9 +1840,10 @@ tests pin the deliberate silences: an `fs.ModeDir`-bearing directory entry
 verifies clean, changing the mode of a unit file or a binary produces nothing,
 a config designation on the sysusers file produces nothing, and arbitrary or
 `nil` content on either binary or either directory produces nothing. Its
-expected destinations, modes, config designations, byte-compared set and
-dependency names are written out by hand rather than read back from
-`requirements` or `contractDependencies`, since those tables are the thing
+expected destinations, modes, config designations, byte-compared set,
+dependency names and forbidden roots are written out by hand rather than read
+back from `requirements`, `contractDependencies` or `forbiddenRoots`, since
+those tables are the thing
 under test and may not also be the oracle — `postinstallSource` included, whose
 value is written out as a literal in the scriptlet tests. The mutation helpers'
 vacuity guards are load-bearing here: `withContent` fails if the bytes it
