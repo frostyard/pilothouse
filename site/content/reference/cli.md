@@ -47,6 +47,22 @@ actually invokes the tools.
 | `--podman-socket` | — | Podman API Unix socket path; Podman requires explicit configuration to enable |
 | `--updex` | — | Path to the updex executable; updex requires explicit configuration to enable |
 
+The last four flags are the broker's only optional dependencies, and all
+four are off by default. Leaving one unset does not merely hide a surface:
+the corresponding probe reports the capability absent without any I/O — no
+command is run and no socket is dialled — so `updex` on `PATH`,
+a live `/run/podman/podman.sock`, an exported `DOCKER_HOST`, or a
+responding `/var/lib/incus/unix.socket` never enables anything on its own.
+The broker then registers no query or action for that tool, and the console
+shows no navigation entry, no dashboard card, and 404s its routes.
+
+The packaged `pilothoused.service` passes none of the four, and it declares
+no `Wants=` on `podman.socket` or `incus.socket` — only `After=`, which
+orders the broker behind those units if something else starts them. Add the
+flags you want to `ExecStart`. Every other capability (systemd, journald,
+`systemd-sysext`, bootc, rpm-ostree, and the automatic-update timer pairs)
+is detected by presence and has no flag.
+
 ## Environment files
 
 The packaged services read environment files under `/etc/pilothouse/`.

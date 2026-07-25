@@ -33,7 +33,8 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts
 - Responsive desktop and mobile layouts
-- Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when systemd, journald, updex, `systemd-sysext`, or a container engine is absent or unreachable
+- Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when systemd, journald, updex, `systemd-sysext`, or a container engine is absent or unreachable. Four of those capabilities — updex, Podman, Docker, Incus — are additionally opt-in, so "present" means "explicitly configured *and* reachable" rather than "detected on the host" (next bullet)
+- Explicit opt-in for every optional dependency: `updex`, Podman, Docker, and Incus are probed only when `--updex`, `--podman-socket`, `--docker`, or `--incus` is configured on `pilothoused`, and an unconfigured one is reported absent without any I/O — no command is run and no socket is dialled — so a binary on `PATH`, a socket at a conventional path, or an exported `DOCKER_HOST` never enables anything by itself, and the packaged unit passes none of the four. Every feature bullet above that names updex, Podman, Docker, or Incus therefore describes a surface that appears only once its flag is set. The remaining capabilities (systemd, journald, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs) stay presence-probed, and the broker also no longer declares `Wants=` on any engine socket
 
 Pilothouse-managed SMB mounts can optionally map file ownership to a local
 numeric UID/GID. Both IDs are required together; leaving both fields blank
@@ -55,6 +56,12 @@ make build
 sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id -gn)"
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
 ```
+
+That broker runs with no optional tooling configured, so Podman, Docker,
+Incus, and every `updex`-backed extension operation are absent from the
+console; add `--podman-socket`, `--docker`, `--incus`, or `--updex` to the
+`pilothoused` line to work on those surfaces, and `--dev` to the
+`pilothouse` line to see the static Fleet preview.
 
 Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
 
@@ -160,5 +167,19 @@ sudo install -d -m0755 /etc/pilothouse
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
+
+Both packaged units are deliberately minimal. `pilothoused.service`'s
+`ExecStart` passes no optional-tooling flag, and the unit declares no
+`Wants=` on `podman.socket` or `incus.socket` (only `After=`, which orders
+the broker behind those units without pulling them in), so a stock install
+enables no container engine and no `updex`-backed extension operation. Add
+the flags for the surfaces you want to that `ExecStart`:
+`--updex /usr/bin/updex` (adjust to your host's path),
+`--podman-socket /run/podman/podman.sock`,
+`--docker unix:///var/run/docker.sock`, and `--incus`.
+`systemd-sysext`, systemd, journald, bootc, and rpm-ostree need no flag;
+they are still detected by presence. `pilothouse.service` likewise omits
+`--dev`, so the static Fleet preview is not registered in a normal
+installation.
 
 For an immutable production image, package the binary and unit in a dedicated sysext and keep mutable updex state under `/etc/sysupdate.d` and `/var/lib/extensions.d`.

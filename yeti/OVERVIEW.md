@@ -1073,7 +1073,9 @@ optional tooling never shows a dead link or a button that always fails.
 
   Modules with partial or no gating: `storage` deliberately does *not*
   implement `CapabilityGate` — its inventory (nav, dashboard card,
-  `GET /storage`) is always available, and only its three remote-mount routes
+  `GET /storage`) is available on every capability set — `storage` is
+  registered unconditionally, so unlike `fleet` there is no registration
+  switch either — and only its three remote-mount routes
   (`GET /storage/mounts/new`, `POST /storage/mounts`, and
   `POST /storage/mounts/{id}/{action}`, which covers mount, unmount, and
   delete) are wrapped in `platform.Gate(host, {Systemd}, ...)`, with the "Add
@@ -1144,6 +1146,52 @@ optional tooling never shows a dead link or a button that always fails.
   `webSideUngatedBrokerIDs` exemption (the four `ActionSysext*` IDs) and its
   `Len == 4` assertion were deleted in the same change, so those IDs are now
   subject to the ordinary web-side capability check.
+
+### Optional tooling is explicitly opt-in (end state, #64)
+
+Several bullets above narrate individual pieces of #64 (sub-phase 1 of 4
+split from #53, phase 4 of the #35 arc). This is the landed end state in one
+place, so a reader who lands here first does not have to reassemble it.
+
+- **The rule.** An optional dependency is enabled only by explicit
+  configuration *plus* a reachable endpoint. Presence on the host is never
+  enough. Four dependencies are optional in this sense — `updex`, Podman,
+  Docker, Incus — and each is now off unless its flag is set: `--updex`
+  (path, default empty), `--podman-socket` (path, default empty), `--docker`
+  (endpoint, default empty), `--incus` (bool, default `false`). At the zero
+  value each probe returns an empty `Set` before doing any I/O: no command
+  is run and no socket is dialled, with no `PATH` fallback for `updex` and
+  no `dockerclient.FromEnv` for Docker. `ProbePodman`/`ProbeDocker` do not
+  reach their client constructors at all; `ProbeIncus` allocates its client
+  struct before the guard, but that allocation performs no I/O and the
+  client's only dialling method is never called.
+- **What did not change.** `systemd`, `journald`, `sysext`, `bootc`,
+  `rpm-ostree`, and the two `autoupdate-*` capabilities stay presence-probed
+  and carry no flag. Every `registerX` guard in `cmd/pilothoused` is
+  untouched — the guards were already correct, and the defect was entirely
+  in what fed them. No broker ID was added or removed: `internal/broker/api.go`
+  still declares 35 `Action*` and 19 `Query*` constants (54 total), and
+  `docs/capabilities.md`'s binding table and both capability contract tests
+  are unchanged in shape and count. Both contract harnesses build fixtures
+  from explicit `capability.Set` values rather than from a live `Probe`, so a
+  fixture naming `podman` still means "podman was configured and reachable."
+- **Systemd units.** `packaging/pilothoused.service` declares no `Wants=` on
+  any engine socket (only `After=`, ordering without pull-in), and its
+  `ExecStart` passes none of the four flags — so a stock install runs with
+  every optional dependency off, and starting the broker never activates
+  `podman.socket` or `incus.socket`.
+- **Mock Fleet.** `fleet` is a static preview with no real transport, so it
+  is gated at *registration*, not by capabilities: `newRegistry(dev bool)`
+  appends `fleet.New()` only under `--dev`. With the flag off the module is
+  never constructed, so there is no nav entry, no sidebar system-picker link
+  (that link derives from `data.Modules` rather than a hardcoded href), and
+  `/fleet`, `/fleet/enroll`, and `/fleet/systems/{id}` are unregistered — a
+  mux 404, not a `platform.Gate` 404.
+- **Net effect on a bare host.** `pilothoused` on a host with nothing
+  configured probes clean, advertises whatever presence-probed capabilities
+  it found, registers no engine or `updex` query/action, and starts
+  successfully; the console renders the surfaces that remain and omits the
+  rest entirely rather than showing them broken.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 
@@ -1226,6 +1274,11 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   (default `/run/pilothouse/broker.sock`)
 - repeatable `--allowed-origin`; also augmented by `PILOTHOUSE_ALLOWED_ORIGINS`
 - `--secure-cookie` (set behind a TLS-terminating proxy)
+- `--dev` (default `false`) — registers in-development preview modules not
+  backed by real functionality; today that is exactly one module, `fleet`.
+  It is a bare bool with no companion environment variable, matching
+  `--secure-cookie` rather than the repeatable env-augmented flags, and
+  `packaging/pilothouse.service`'s `ExecStart` does not pass it
 
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
 - `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)

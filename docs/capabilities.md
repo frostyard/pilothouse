@@ -75,6 +75,18 @@ maintenance, and is the table's third **any-of** row: `registerExtensions`
 guards it with `caps.HasAny(capability.Updex, capability.Sysext)` — either tool
 alone yields a usable inventory (see exception #6 below).
 
+**#64 added no broker ID.** Both commands above were re-run against this
+tree at the close of #64 (optional engines and `updex` become explicitly
+opt-in, mock Fleet moves behind `--dev`) and still print 35 and 19 — 54 IDs
+total, unchanged. That phase declares no new `Action*`/`Query*` constant and
+removes none: it changes only *what causes* four already-declared
+capabilities (`updex`, `podman`, `docker`, `incus`) to be advertised, which
+is upstream of every row below. No row in this table, no row in
+`cmd/pilothoused/capability_contract_test.go`'s `capabilityTable`, and no
+count in either contract test moved. This is recorded rather than left
+implicit precisely because "nothing changed" and "nobody checked" produce
+identical diffs.
+
 Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
 `autoupdate-bootc`, `podman`, `docker`, `incus`.
@@ -870,3 +882,71 @@ as prose only:
   tokenized with `go/scanner` so comment exclusion is exact). Explaining in a
   comment why Zincati is not consulted stays allowed; a token that reaches the
   compiler does not.
+
+## Phase 4a (#64) — four capabilities become explicitly opt-in
+
+This phase changed no broker ID, no registry, and no row of this table (see
+the "#64 added no broker ID" note near the top for the re-run counts). It
+changed what makes four of the eleven canonical capability IDs present in
+the probed `capability.Set` in the first place, which is the input every row
+here is read against:
+
+| Capability | Advertised only when | Zero value |
+|---|---|---|
+| `updex` | `--updex <path>` is set *and* the executable answers | empty — no command is run, and there is no `PATH` fallback |
+| `podman` | `--podman-socket <path>` is set *and* the socket answers | empty — no client is constructed, nothing is dialled |
+| `docker` | `--docker <endpoint>` is set *and* the endpoint answers | empty — no client is constructed; `dockerclient.FromEnv`/`DOCKER_HOST` is never consulted |
+| `incus` | `--incus` is passed *and* `/var/lib/incus/unix.socket` answers | `false` — the fixed socket path is not contacted at all |
+
+Reachability alone is no longer sufficient for any of the four: an
+unconfigured probe returns an empty `Set` before performing any I/O.
+`systemd`, `journald`, `sysext`, `bootc`, `rpm-ostree`, and the two
+`autoupdate-*` pairs are unchanged — they remain presence-probed and carry
+no flag.
+
+The consequence for this table is that on a default-flagged daemon every
+`podman`, `docker`, and `incus` row is unregistered, as is every row whose
+requirement *requires* `updex` (`ActionSysextUpdate`, and
+`ActionSysextEnable`/`ActionSysextDisable` through their `updex AND sysext`
+guard). The guard clauses are unchanged; their input is simply empty. The
+one `updex`-mentioning row that survives is the any-of
+`QueryExtensionsState` (`updex OR sysext`), which `registerExtensions` still
+registers on a host where `systemd-sysext` alone is present — the inventory
+then carries only what `systemd-sysext` contributes, with
+`updex_available: false`, exactly as the `sysext-without-updex` fixture
+already describes. Both contract harnesses are unaffected, because both drive
+their fixtures from explicit `capability.Set` values rather than from a live
+`Probe` — a fixture that names `podman` still means "a daemon on which
+podman was configured and reachable," which is exactly what it always
+meant.
+
+### Two residual hits a whole-repo grep still finds, and why neither is a hole
+
+The claims above are scoped to the probes, so a sweep for "does any
+`PATH`-resolved `updex` or `dockerclient.FromEnv` survive anywhere in the
+tree?" turns up two sites that are *not* counterexamples. Both are recorded
+here so a future sweep does not have to re-derive the reasoning:
+
+- **`extctl.NewSystemManager` still defaults an empty `updex` argument to the
+  bare name `"updex"`** (`internal/modules/sysext/extctl/manager.go`), and
+  `cmd/pilothoused` constructs that manager unconditionally, so on a daemon
+  started without `--updex` the field does hold `"updex"`. It is never
+  executed, because every method that runs `m.updex` — `Check`, `Enable`,
+  `Disable`, `Update`, and `State`'s `updexInventory` branch — is reachable
+  only behind a `capability.Updex` guard: `registerSysextActions` gates
+  `ActionSysextUpdate` on `Updex` and `ActionSysextEnable`/`ActionSysextDisable`
+  on `HasAll(Updex, Sysext)`, and `registerExtensions` passes
+  `caps.Has(capability.Updex)` into `State`, which skips `updexInventory`
+  when it is false. The one action that survives on a sysext-only host,
+  `ActionSysextRefresh`, runs `systemd-sysext refresh` and never touches
+  `m.updex`. The default is therefore dead code on an unconfigured daemon,
+  not a second enablement path — but it is a live default, so a future
+  change that adds an ungated exec path to that manager would resurrect the
+  `PATH` fallback this phase removed from the probe.
+- **`dockerclient.FromEnv` still appears in
+  `internal/modules/docker/manager_live_test.go`**, an opt-in live test that
+  runs only when `PILOTHOUSE_LIVE_DOCKER=1` is exported. It is test-only and
+  builds its own client rather than going through `ProbeDocker` or `run()`;
+  no production path constructs a Docker client from the environment. Both
+  `ProbeDocker` and `cmd/pilothoused`'s `connectDocker` use
+  `dockerclient.WithHost(endpoint)` and return early on an empty endpoint.
