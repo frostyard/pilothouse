@@ -438,8 +438,15 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `--podman-socket`, and `--docker` all default to empty and `--incus`
   defaults to `false`, and an unset value makes
   `ProbeUpdex`/`ProbePodman`/`ProbeDocker`/`ProbeIncus` report the
-  capability absent without running any command, constructing a client, or
-  dialling anything, so a host that merely happens to have `updex` on
+  capability absent without running any command, performing any I/O, or
+  dialling anything. The "no client is built" half of that holds literally
+  for Docker — `probeDocker`'s empty-endpoint guard sits ahead of its
+  constructor — but not for Incus: `ProbeIncus` evaluates
+  `newIncusProbeClient()` in its call to `probeIncus`, before the `enabled`
+  guard, so a disabled probe does allocate that struct. It is a pure
+  allocation with no dial and no I/O, and `probeIncus` returns early
+  without ever calling its `Server` method. So a host that merely happens
+  to have `updex` on
   `PATH`, a socket at the conventional path, `DOCKER_HOST` exported, or a
   live `/var/lib/incus/unix.socket` never enables the tool/engine. Docker's
   non-empty endpoint is also the *only* input its client is built from —
@@ -463,12 +470,16 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   convention new modules follow. `registerPodman`/`registerDocker`/
   `registerIncus` are the first full conversions — each takes `caps
   capability.Set` and registers nothing for its engine when the
-  corresponding capability is absent (an unreachable or misconfigured
-  engine, including a Docker client that fails to construct from a
-  configured `--docker` endpoint, is logged as a warning, never a fatal
-  `run()` error; an *unconfigured* engine — `--docker` left empty — is not
-  a warnable condition, so `connectDocker` returns nil silently and no
-  client is built). Podman's and Incus's client constructors stay
+  corresponding capability is absent. No engine state is ever a fatal
+  `run()` error, but only one of them is warned about. A *configured but
+  unreachable* engine degrades silently: `ProbeDocker` narrows to absent on
+  a `Ping` failure without logging anything, and `registerDocker` then
+  registers nothing. The single warnable case is a Docker client that fails
+  to construct from a configured `--docker` endpoint (e.g. a malformed
+  endpoint), which `connectDocker` logs as a warning before returning nil.
+  An *unconfigured* engine — `--docker` left empty — is not a warnable
+  condition either, so `connectDocker` returns nil silently and no client
+  is built. Podman's and Incus's client constructors stay
   unconditional in `run()` because neither performs I/O at construction;
   for Incus, `--incus` acts entirely through the probe, so
   `registerIncus`'s `caps.Has(capability.Incus)` guard is what leaves the
