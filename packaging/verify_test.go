@@ -311,14 +311,65 @@ func contentAt(t *testing.T, m Model, dest string) []byte {
 
 // perturb returns content with a single newline appended.
 //
-// The comparison is exact and normalizes nothing, so this minimal difference —
-// the one a well-meaning extractor is most likely to introduce — must be
-// reported just as loudly as a wholly different file.
+// The PAYLOAD comparison is exact and normalizes nothing, so this minimal
+// difference — the one a well-meaning extractor is most likely to introduce —
+// must be reported just as loudly as a wholly different file. perturb is used
+// only on payload entries; the scriptlet's narrower rule is exercised by
+// TestVerifyScriptletTrailingNewline instead.
 func perturb(content []byte) []byte {
 	perturbed := make([]byte, 0, len(content)+1)
 	perturbed = append(perturbed, content...)
 
 	return append(perturbed, '\n')
+}
+
+// withoutScriptlet returns a copy of m shipping no postinstall scriptlet,
+// failing the test if the fixture already shipped none (which would make the
+// mutation vacuous).
+func withoutScriptlet(t *testing.T, m Model) Model {
+	t.Helper()
+
+	require.NotNil(t, m.Postinstall, "fixture should ship a postinstall scriptlet")
+
+	m.Postinstall = nil
+
+	return m
+}
+
+// withScriptlet returns a copy of m whose postinstall scriptlet carries
+// content, failing the test if the fixture already shipped exactly those bytes
+// (which would make the mutation vacuous).
+func withScriptlet(t *testing.T, m Model, content []byte) Model {
+	t.Helper()
+
+	require.NotNil(t, m.Postinstall, "fixture should ship a postinstall scriptlet")
+	require.NotEqual(t, m.Postinstall.Content, content,
+		"mutating the scriptlet to the bytes it already carried would be a no-op")
+
+	m.Postinstall = &Scriptlet{Content: content}
+
+	return m
+}
+
+// withoutLine returns script with its line at index removed, failing the test
+// if the script is too short to have one.
+//
+// The line is named by position rather than by content on purpose: this
+// package asserts that the artifact ships the script's exact bytes and knows
+// nothing whatever about what any individual line of it does.
+func withoutLine(t *testing.T, script []byte, index int) []byte {
+	t.Helper()
+
+	lines := bytes.Split(script, []byte("\n"))
+	require.Greaterf(t, len(lines), index+1, "the script should have a line at index %d", index)
+
+	return bytes.Join(slices.Concat(lines[:index], lines[index+1:]), []byte("\n"))
+}
+
+// withAppendedCommand returns script with one further command appended, so the
+// artifact would run something the repository's script does not.
+func withAppendedCommand(script []byte) []byte {
+	return append(slices.Clone(script), []byte("true\n")...)
 }
 
 // withoutDependency returns a copy of m no longer declaring dep, failing the
@@ -571,7 +622,17 @@ func TestVerifyContractModelIsClean(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Empty(t, Verify(contractModel(t, tc.format)))
+			model := contractModel(t, tc.format)
+
+			// The scriptlet is the one part of the fixture with no
+			// destination to fail a presence check on, so its provenance is
+			// pinned here: it is populated from the embedded repository
+			// source, not left nil or empty, which is what stops the
+			// scriptlet assertions passing vacuously.
+			require.NotNil(t, model.Postinstall)
+			require.NotEmpty(t, model.Postinstall.Content)
+
+			require.Empty(t, Verify(model))
 		})
 	}
 }
@@ -1110,6 +1171,192 @@ func TestVerifyDependencyFindingsAreNotPathScoped(t *testing.T) {
 				require.Equal(t, CodeDependencyMismatch, finding.Code)
 				require.Empty(t, finding.Path, "a dependency finding is not path-scoped")
 			}
+		})
+	}
+}
+
+// TestVerifyMissingScriptlet proves a package shipping no postinstall
+// scriptlet is reported, in each format, under its own code and with an empty
+// Path.
+//
+// The code is deliberately not missing_path: the scriptlet has no
+// destination, so reporting it that way would mean inventing one, and #73's
+// CLI has to tell "no scriptlet" apart from "wrong scriptlet".
+func TestVerifyMissingScriptlet(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			findings := Verify(withoutScriptlet(t, contractModel(t, tc.format)))
+			require.Equal(t, 1, findingsFor(findings, CodeMissingScriptlet, ""))
+			require.Len(t, findings, 1)
+
+			require.Empty(t, findings[0].Path, "a scriptlet finding is not path-scoped")
+			require.NotEqual(t, CodeMissingPath, findings[0].Code)
+		})
+	}
+}
+
+// TestVerifyScriptletWrongContent mutates the scriptlet's bytes in each format
+// and asserts the wrong-content finding, once for each direction a shipped
+// script can differ in: a line removed, and a command appended.
+//
+// Both mutations are described positionally rather than by what the affected
+// line does. That is the whole posture of this check — the artifact must ship
+// the repository's exact bytes, and what any individual command in the script
+// achieves is already proven by running the real script in
+// packaging/postinstall_test.go.
+func TestVerifyScriptletWrongContent(t *testing.T) {
+	t.Parallel()
+
+	// Written out by hand rather than read back from contract.go's
+	// postinstallSource, which is the thing under test.
+	const scriptSource = "postinstall.sh"
+
+	for _, tc := range packagedFormats {
+		for _, mutation := range []struct {
+			name  string
+			apply func(*testing.T, []byte) []byte
+		}{{
+			name:  "a line dropped",
+			apply: func(t *testing.T, script []byte) []byte { t.Helper(); return withoutLine(t, script, 0) },
+		}, {
+			name:  "a command appended",
+			apply: func(t *testing.T, script []byte) []byte { t.Helper(); return withAppendedCommand(script) },
+		}} {
+			t.Run(tc.name+" "+mutation.name, func(t *testing.T) {
+				t.Parallel()
+
+				model := contractModel(t, tc.format)
+				model = withScriptlet(t, model, mutation.apply(t, sourceBytes(scriptSource)))
+
+				findings := Verify(model)
+				require.Equal(t, 1, findingsFor(findings, CodeWrongContent, ""))
+				require.Len(t, findings, 1)
+
+				require.Contains(t, findings[0].Message, "packaging/"+scriptSource,
+					"the finding should name the repository source it expected")
+			})
+		}
+	}
+}
+
+// TestVerifyScriptletTrailingNewline pins the scriptlet comparison's one piece
+// of normalization exactly as implemented: at most ONE trailing "\n" is
+// stripped from each side.
+//
+// packaging/postinstall.sh ends with exactly one newline — asserted below, so
+// the three cases stay grounded if the file is ever re-saved — which makes the
+// rule's three consequences these:
+//
+//   - the script with its single trailing newline removed verifies clean;
+//   - the script exactly as it stands verifies clean;
+//   - the script with one further newline appended is wrong_content.
+//
+// The third case is the point of the test. Stripping ALL trailing newlines
+// instead would silently accept a script padded with blank lines, weakening
+// the only assertion this package makes about the scriptlet, so nothing here
+// asserts that an appended newline verifies clean.
+func TestVerifyScriptletTrailingNewline(t *testing.T) {
+	t.Parallel()
+
+	script := sourceBytes("postinstall.sh")
+	require.True(t, bytes.HasSuffix(script, []byte("\n")),
+		"packaging/postinstall.sh should end with a newline")
+	require.False(t, bytes.HasSuffix(script, []byte("\n\n")),
+		"packaging/postinstall.sh should end with exactly one newline")
+
+	for _, tc := range packagedFormats {
+		for _, newline := range []struct {
+			name    string
+			content []byte
+			want    int
+		}{{
+			name:    "final newline removed",
+			content: bytes.TrimSuffix(script, []byte("\n")),
+			want:    0,
+		}, {
+			name:    "shipped exactly as the repository holds it",
+			content: script,
+			want:    0,
+		}, {
+			name:    "one extra newline appended",
+			content: append(slices.Clone(script), '\n'),
+			want:    1,
+		}} {
+			t.Run(tc.name+" "+newline.name, func(t *testing.T) {
+				t.Parallel()
+
+				model := contractModel(t, tc.format)
+				model.Postinstall = &Scriptlet{Content: newline.content}
+
+				findings := Verify(model)
+				require.Equal(t, newline.want, findingsFor(findings, CodeWrongContent, ""))
+				require.Len(t, findings, newline.want)
+			})
+		}
+	}
+}
+
+// TestVerifyAccumulatesScriptletAndMissingPath proves each scriptlet finding
+// coexists with an unrelated path-scoped one rather than either masking the
+// other — the accumulate guarantee, applied to the check this chunk adds.
+func TestVerifyAccumulatesScriptletAndMissingPath(t *testing.T) {
+	t.Parallel()
+
+	const missingDest = "/usr/lib/sysusers.d/pilothouse.conf"
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name+" missing scriptlet", func(t *testing.T) {
+			t.Parallel()
+
+			model := withoutScriptlet(t, contractModel(t, tc.format))
+			model = withoutEntry(t, model, missingDest)
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeMissingScriptlet, ""))
+			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, missingDest))
+			require.Len(t, findings, 2)
+		})
+
+		t.Run(tc.name+" wrong scriptlet", func(t *testing.T) {
+			t.Parallel()
+
+			model := contractModel(t, tc.format)
+			model = withScriptlet(t, model, withAppendedCommand(sourceBytes("postinstall.sh")))
+			model = withoutEntry(t, model, missingDest)
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, ""))
+			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, missingDest))
+			require.Len(t, findings, 2)
+		})
+	}
+}
+
+// TestVerifyScriptletWrongContentIsDistinctFromAPayloadEntry proves the empty
+// Path is what separates the scriptlet's wrong_content finding from a payload
+// entry's: breaking both at once produces two findings under the same code,
+// told apart by Path alone.
+func TestVerifyScriptletWrongContentIsDistinctFromAPayloadEntry(t *testing.T) {
+	t.Parallel()
+
+	const payloadDest = "/etc/pilothouse/pilothouse.env"
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := contractModel(t, tc.format)
+			model = withScriptlet(t, model, withAppendedCommand(sourceBytes("postinstall.sh")))
+			model = withContent(t, model, payloadDest, perturb(contentAt(t, model, payloadDest)))
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, ""))
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, payloadDest))
+			require.Len(t, findings, 2)
 		})
 	}
 }

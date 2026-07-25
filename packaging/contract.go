@@ -35,6 +35,16 @@ var sourceNames = []string{
 	"rpm/pilothoused.service",
 }
 
+// postinstallSource is the embedded repository source whose bytes the
+// package's postinstall scriptlet must equal.
+//
+// It is a lone constant rather than a row in requirements because the
+// scriptlet is not path-scoped: nfpm's scripts key is a single value with no
+// destination and no per-format variant, so the same script is the deb
+// postinst and the rpm %post. Every field a requirement carries — dest, mode,
+// config — is meaningless for it.
+const postinstallSource = "postinstall.sh"
+
 // sourceBytes returns the embedded bytes of the named repository source.
 //
 // A name absent from the embed is a programming error, not runtime input — the

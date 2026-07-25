@@ -1451,16 +1451,27 @@ postinstall scriptlet" — a state the model keeps distinct from shipping a
 scriptlet with unexpected bytes. An extractor that populates a `Model` from a real
 `.deb`/`.rpm` is out of scope for this package.
 
-**M1 — modes are asserted from the payload; owner and group are recorded and
-never asserted.** `Entry.Mode` drives a real assertion (see `wrong_mode`
-below). `Entry.Owner` and `Entry.Group` do not: they exist for the convenience
-of extractors that surface them and no code in this package reads them. An
-artifact cannot prove installed ownership: nfpm's DEB payload records numeric
-UID/GID 0 by construction (which is why #66 added the postinstall scriptlet
-described above), and the RPM equivalent is unconfirmed against a real nfpm
-build. Ownership on disk after installation is #67's to verify.
+**M1 — modes are asserted from the payload; ownership is proved by the
+scriptlet; owner and group are never asserted.** `Entry.Mode` drives a real
+assertion (see `wrong_mode` below). `Entry.Owner` and `Entry.Group` do not:
+they exist for the convenience of extractors that surface them and no code in
+this package reads them. An artifact cannot prove installed ownership: nfpm's
+DEB payload records numeric UID/GID 0 by construction (which is why #66 added
+the postinstall scriptlet), and the RPM equivalent is unconfirmed against a
+real nfpm build.
 `grep -nE '\.Owner|\.Group' packaging/contract.go packaging/verify.go` printing
-nothing is the mechanical form of this rule.
+nothing is the mechanical form of that half of the rule.
+
+The positive half is the scriptlet check below. Correct install-time ownership
+is produced by `packaging/postinstall.sh` and by nothing else — the **Postinstall
+scriptlet** paragraph above describes what that script does and
+`packaging/postinstall_test.go` proves it, by running the real script. So this
+package proves ownership the only way an artifact can: by asserting that the
+package **ships exactly that script**, present and byte-for-byte. A package
+whose payload claimed `root:pilothouse` would prove nothing; a package that
+ships the scriptlet whose behavior is already pinned proves everything the
+artifact is capable of proving. On-disk ownership after a real install remains
+#67's to verify.
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
@@ -1540,6 +1551,17 @@ multiplicity are contract-relevant — and the two directory entries
 content at all. Whatever an extractor records at those four, including nothing,
 is not a finding.
 
+**The scriptlet source** (`packaging/contract.go`). The postinstall scriptlet's
+expectation is the lone constant `postinstallSource = "postinstall.sh"` rather
+than a row in the requirement table, because the scriptlet is not path-scoped:
+nfpm's `scripts` key is a single value with no destination and no per-format
+variant, so every field a row carries — `dest`, `mode`, `config` — is
+meaningless for it. Its bytes come from the same `//go:embed` as the payload
+sources, so the scriptlet assertions read nothing at run time. (Contrast
+`packaging/postinstall_test.go`, which deliberately `os.ReadFile`s the same
+script and execs `shellcheck` and `/bin/sh` against it: that file proves the
+script's *behavior*, this package proves the artifact *ships* it.)
+
 **The dependency lists** (`packaging/contract.go`). `contractDependencies(format)`
 returns the runtime dependency list the contract requires for a format, and
 `false` for a format this package does not know. It is named
@@ -1591,7 +1613,7 @@ a finding, so the result holds every independent violation the model exhibits,
 and a nil or empty result means the model satisfies every assertion implemented
 so far.
 
-`Verify` performs exactly seven checks at this commit:
+`Verify` performs exactly nine checks at this commit:
 
 - **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
   zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
@@ -1627,6 +1649,17 @@ so far.
   expression. The check is skipped entirely for an unknown format, for the same
   reason the destination checks are: the contract for such a package is
   unknown, not violated.
+- **`missing_scriptlet`**, with `Path` **empty**, when `Postinstall` is nil —
+  the model's representation of "this package ships no postinstall scriptlet".
+  The distinct code (rather than `missing_path`) exists because the scriptlet
+  has no destination to name and because #73's CLI has to tell "no scriptlet"
+  apart from "wrong scriptlet".
+- **`wrong_content`**, with `Path` **also empty** and a `Message` naming
+  `packaging/postinstall.sh`, when the scriptlet's bytes are not that embedded
+  source's. This is the one `wrong_content` finding that is not path-scoped;
+  the empty `Path` is exactly what distinguishes it from a payload entry's.
+  Both scriptlet checks are gated on a known format for the same reason
+  everything else is.
 
 Three rules keep the mode, config and content checks honest:
 
@@ -1637,17 +1670,47 @@ Three rules keep the mode, config and content checks honest:
   minimum and the vocabulary has no `unexpected_config_flag`, so
   `missing_config_flag` is the only asserted direction — designating, say, the
   sysusers file a config file passes.
-- **The content comparison is exact and normalizes nothing.** It is a plain
-  `bytes.Equal` against the embedded source: a payload entry extracted from a
-  real archive carries the shipped bytes verbatim, so a single added newline is
-  reported like any other difference. A byte-compared entry whose `Content` is
-  `nil` is reported too, since every embedded source is non-empty — an
-  extractor that failed to capture the bytes must not verify clean, or the
+- **The *payload* content comparison is exact and normalizes nothing.** It is a
+  plain `bytes.Equal` against the embedded source: a payload entry extracted
+  from a real archive carries the shipped bytes verbatim, so a single added
+  newline is reported like any other difference. A byte-compared entry whose
+  `Content` is `nil` is reported too, since every embedded source is non-empty —
+  an extractor that failed to capture the bytes must not verify clean, or the
   extractor bugs #73 will have to find become invisible.
 
 A duplicate does not suppress the other checks for its destination: `Verify`
 evaluates the first entry installing there for mode, config designation and
 content, and still accumulates.
+
+**The scriptlet rule: exact bytes, with at most one trailing newline
+normalized.** The scriptlet comparison is the single place any normalization
+happens, and it is deliberately as narrow as it can be: `trimFinalNewline`
+applies `bytes.TrimSuffix(x, []byte("\n"))` — **at most one** trailing `"\n"` —
+to each side, and then compares with the same exact `bytes.Equal`.
+`packaging/postinstall.sh` ends with exactly one newline, so the rule has
+exactly three consequences, all intended:
+
+| Scriptlet `Content` | Result |
+| --- | --- |
+| the script with its single trailing newline removed | clean |
+| the script exactly as the repository holds it | clean |
+| the script with one further newline appended | `wrong_content` |
+
+That asymmetry is the design, not an oversight. The normalization exists for
+one reason only — whether a script is shipped with or without a *final* newline
+is not a contract violation, and an extractor may present it either way. The
+rejected alternative, `bytes.TrimRight(x, "\n")`, strips *all* trailing
+newlines and would silently accept a script padded with arbitrary blank lines:
+a real byte difference in a file whose entire contract is "ships exactly these
+bytes".
+
+**No shell parsing.** Nothing in the scriptlet check tokenizes shell, applies a
+regular expression to the script, or looks for any individual command inside
+it — `grep -nE 'chown|chmod|systemd-sysusers' packaging/verify.go` prints
+nothing. That is not a gap to be filled later. The script's fail-fast,
+idempotent, presence-guarded repairs are already proven by
+`packaging/postinstall_test.go`, which runs the real script; all this package
+has to add is that the artifact ships exactly those bytes (M1 above).
 
 Nothing else is asserted yet. The remaining assertions the contract calls for
 land in later changes and are documented here as each one arrives.
@@ -1655,7 +1718,9 @@ land in later changes and are documented here as each one arrives.
 `packaging/verify_test.go` holds the behavioral tests: the shared
 `contractModel(t, format)` fixture that every mutation starts from, a
 `findingsFor(findings, code, path)` matcher (findings are matched by the
-`Code`/`Path` pair, never by `Message`), and table-driven mutations covering
+`Code`/`Path` pair; a `Message` is read in only two places, each matching a
+required substring and never the surrounding wording), and table-driven
+mutations covering
 each required destination in each format (missing, then duplicated), a
 relocated binary in each format, a wrong mode on each of the four pinned
 destinations, a cleared config designation on each of the three, a perturbed
@@ -1670,10 +1735,25 @@ fixture's list reversed verifies clean (order-independence), replacing one
 element with a duplicate of another is reported even though the list keeps its
 length and every declared name remains one the contract expects
 (multiplicity), and the alternative case reports two findings, one of which
-names the offending expression (independence from the sorted comparison). That
-last assertion is the only place these tests read a `Message`, and it matches
-only on the expression, never on the wording. Two cross-format tests are the point
-of the content check: an `rpm` model carrying `packaging/pilothouse.pam`'s
+names the offending expression (independence from the sorted comparison) — the
+first of the two `Message` reads.
+
+The scriptlet cases run in each format too: `Postinstall` set to nil yields
+`missing_scriptlet` with an empty `Path`, and two byte mutations — a line
+dropped and a command appended — each yield `wrong_content` with an empty
+`Path` and a `Message` naming `packaging/postinstall.sh`, which is the second
+`Message` read. Three further cases pin the newline rule exactly as implemented
+(final newline removed → clean, shipped unchanged → clean, one extra newline
+appended → `wrong_content`); nothing asserts that an appended newline verifies
+clean, and the test first asserts the premise that `packaging/postinstall.sh`
+ends with exactly one newline. Both scriptlet faults are also shown coexisting
+with an unrelated `missing_path`, and a model with a broken scriptlet *and* a
+broken payload entry produces two `wrong_content` findings told apart by `Path`
+alone. The scriptlet mutations name their target positionally, never by what
+the affected line does, which is the same posture the production check takes.
+
+Two cross-format tests are the point of the payload
+content check: an `rpm` model carrying `packaging/pilothouse.pam`'s
 bytes and a `deb` model carrying `packaging/rpm/pilothouse.pam`'s are each
 reported at `/etc/pam.d/pilothouse`, and the same pair of substitutions is made
 for the broker unit at `/usr/lib/systemd/system/pilothoused.service`. Four
@@ -1684,10 +1764,13 @@ a config designation on the sysusers file produces nothing, and arbitrary or
 expected destinations, modes, config designations, byte-compared set and
 dependency names are written out by hand rather than read back from
 `requirements` or `contractDependencies`, since those tables are the thing
-under test and may not also be the oracle. The mutation helpers'
+under test and may not also be the oracle — `postinstallSource` included, whose
+value is written out as a literal in the scriptlet tests. The mutation helpers'
 vacuity guards are load-bearing here: `withContent` fails if the bytes it
 installs are the ones the entry already carried, so the cross-format tests
-cannot silently degrade to no-ops if the two formats' sources ever converge.
+cannot silently degrade to no-ops if the two formats' sources ever converge,
+and `withScriptlet`/`withoutScriptlet` fail the same way if the fixture ever
+stops shipping a scriptlet or already carried the mutated bytes.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
