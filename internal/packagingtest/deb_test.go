@@ -1,6 +1,7 @@
 package packagingtest_test
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -237,6 +238,157 @@ func TestBuildDebUsesATempDirTree(t *testing.T) {
 
 	if got := dirMode(t, filepath.Join(staging, "DEBIAN")); got != 0o755 {
 		t.Errorf("staged DEBIAN is mode %04o, want 0755", got)
+	}
+}
+
+// rawControl is a minimal, well-formed DEBIAN/control. BuildDebRaw synthesizes
+// no control metadata, so this file writes out every field itself.
+const rawControl = "Package: packagingtest-raw\n" +
+	"Version: 0.0.1\n" +
+	"Architecture: all\n" +
+	"Maintainer: packagingtest <packagingtest@example.invalid>\n" +
+	"Description: raw fixture staged verbatim\n"
+
+// rawConffiles is the malformed control member BuildDebRaw exists to ship: a
+// conffiles line that is not an absolute path. It is the reason the builder
+// passes --nocheck, and TestBuildDebRawShipsWhatBuildDebRefuses proves dpkg-deb
+// still rejects it without that flag.
+const rawConffiles = "etc/phx/relative.conf\n"
+
+// TestBuildDebRawPacksAStagedTreeVerbatim checks the raw builder against
+// dpkg-deb itself — `-e` for the control area, `-c` for the payload path/mode
+// table — never against other Go code. The control area is the load-bearing
+// half: its bytes must survive into the archive exactly as staged, malformed
+// line included, because a builder that normalized or rejected them could not
+// produce the artifact this escape hatch exists for.
+func TestBuildDebRawPacksAStagedTreeVerbatim(t *testing.T) {
+	dir := t.TempDir()
+
+	deb := packagingtest.BuildDebRaw(t, dir,
+		map[string][]byte{
+			"DEBIAN/control":        []byte(rawControl),
+			"DEBIAN/conffiles":      []byte(rawConffiles),
+			"opt/phx/relative.conf": []byte("alpha = 1\n"),
+			"opt/phx/notes.txt":     []byte("notes\n"),
+		},
+		map[string]fs.FileMode{
+			"DEBIAN/control":        0o644,
+			"DEBIAN/conffiles":      0o644,
+			"opt/phx/relative.conf": 0o640,
+			"opt/phx/notes.txt":     0o644,
+			"opt/phx":               0o750,
+		},
+	)
+
+	if filepath.Dir(deb) != dir {
+		t.Errorf("BuildDebRaw returned %q, want an artifact directly inside %q", deb, dir)
+	}
+
+	if filepath.Ext(deb) != ".deb" {
+		t.Errorf("BuildDebRaw returned %q, want a path ending in .deb", deb)
+	}
+
+	if _, err := os.Stat(deb); err != nil {
+		t.Fatalf("stat built artifact: %v", err)
+	}
+
+	control := extractControlDir(t, deb)
+
+	if got, want := controlMembers(t, control), []string{"conffiles", "control"}; !equalStrings(got, want) {
+		t.Errorf("control directory holds %q, want %q", got, want)
+	}
+
+	if got := readFile(t, filepath.Join(control, "conffiles")); got != rawConffiles {
+		t.Errorf("conffiles holds %q, want the staged bytes %q", got, rawConffiles)
+	}
+
+	if got := readFile(t, filepath.Join(control, "control")); got != rawControl {
+		t.Errorf("control holds %q, want the staged bytes %q", got, rawControl)
+	}
+
+	// The hand-written path/mode table, in the symbolic form `dpkg-deb -c`
+	// renders. "/opt" is a parent no key of modes names, so it carries the 0755
+	// every intermediate directory gets.
+	wantContents := map[string]string{
+		"./opt/":                  "drwxr-xr-x",
+		"./opt/phx/":              "drwxr-x---",
+		"./opt/phx/relative.conf": "-rw-r-----",
+		"./opt/phx/notes.txt":     "-rw-r--r--",
+	}
+
+	contents := debContents(t, deb)
+
+	for path, mode := range wantContents {
+		got, ok := contents[path]
+		if !ok {
+			t.Errorf("dpkg-deb -c does not list %s", path)
+
+			continue
+		}
+
+		if got != mode {
+			t.Errorf("dpkg-deb -c lists %s with mode %s, want %s", path, got, mode)
+		}
+	}
+
+	// DEBIAN is a control member, not payload: it must not appear in the file
+	// table at all.
+	for path := range contents {
+		if strings.HasPrefix(path, "./DEBIAN") {
+			t.Errorf("dpkg-deb -c lists %s, want the control area kept out of the payload", path)
+		}
+	}
+}
+
+// TestBuildDebRawShipsWhatBuildDebRefuses pins the measured premise behind
+// BuildDebRaw's --nocheck: dpkg-deb's own content check rejects a relative
+// conffiles line, so an ordinary `--build` of the very same staged tree fails
+// and BuildDebRaw's succeeds. Without this, the escape hatch's justification
+// would be a comment rather than a runnable claim.
+func TestBuildDebRawShipsWhatBuildDebRefuses(t *testing.T) {
+	tool := packagingtest.LookTool(t, "dpkg-deb")
+	if tool == "" {
+		return
+	}
+
+	dir := t.TempDir()
+	staging := filepath.Join(dir, "tree")
+	controlDir := filepath.Join(staging, "DEBIAN")
+
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("stage control directory: %v", err)
+	}
+
+	if err := os.Chmod(controlDir, 0o755); err != nil {
+		t.Fatalf("chmod control directory: %v", err)
+	}
+
+	for name, body := range map[string]string{"control": rawControl, "conffiles": rawConffiles} {
+		if err := os.WriteFile(filepath.Join(controlDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("stage DEBIAN/%s: %v", name, err)
+		}
+	}
+
+	out, err := exec.Command(tool, "--root-owner-group", "--build", staging, filepath.Join(dir, "checked.deb")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("dpkg-deb --build accepted a relative conffiles line, so BuildDebRaw's --nocheck is no longer the only way to stage one:\n%s", out)
+	}
+
+	if want := "not an absolute pathname"; !strings.Contains(string(out), want) {
+		t.Errorf("dpkg-deb --build failed with %q, want output containing %q", out, want)
+	}
+
+	// The same tree, packed through the escape hatch, builds.
+	raw := packagingtest.BuildDebRaw(t, dir,
+		map[string][]byte{
+			"DEBIAN/control":   []byte(rawControl),
+			"DEBIAN/conffiles": []byte(rawConffiles),
+		},
+		nil,
+	)
+
+	if _, err := os.Stat(raw); err != nil {
+		t.Fatalf("stat artifact built with --nocheck: %v", err)
 	}
 }
 

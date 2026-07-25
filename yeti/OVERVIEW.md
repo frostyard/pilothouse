@@ -31,9 +31,10 @@ internal/
   jobs/                durable background-job store (bbolt), for long-running privileged mutations
   auth/, auth/pam/     NSS group resolution and PAM authentication (used only by pilothoused)
   packagingtest/       test-support helpers imported only by test files: the packaging-tool
-                       skip-vs-fail gate and the .deb fixture builder (see "Packaging test
-                       fixtures" below). Ships in no binary and imports no other repository
-                       package
+                       skip-vs-fail gate and the two .deb fixture builders — BuildDeb from a
+                       declarative Spec, BuildDebRaw from an already-staged tree (see
+                       "Packaging test fixtures" below). Ships in no binary and imports no
+                       other repository package
 
 docs/                 authoritative subsystem docs (kept here, not duplicated into yeti/):
   authentication.md    login, session, authorization, audit, PAM policy, deployment rules
@@ -1390,11 +1391,32 @@ product of the caller's umask. Declared modes are applied with an explicit
 `os.Chmod` for the same reason, rather than relying on the permission argument
 of `os.Mkdir`/`os.WriteFile`.
 
-The package's own tests check the builder against `dpkg-deb` itself — `-c` for
+**The raw escape hatch.** `BuildDebRaw(t, outDir, tree, modes)` packs an
+already-staged tree verbatim instead of rendering a `Spec`: `tree` maps a
+relative path to the bytes of a regular file there — `DEBIAN/control` included,
+since nothing is synthesized — and `modes` gives a path's mode, naming a
+directory when `tree` has no such file. It exists because a control area a
+broken package could genuinely carry is not always expressible through `Spec`:
+`dpkg-deb --build` **rejects** a `DEBIAN/conffiles` line that is not an absolute
+path outright (`conffile name 'etc/phx/relative.conf' is not an absolute
+pathname`, exit 2) — the message the package's own test requires it to print.
+So the only way to obtain that artifact is `--nocheck`, which `dpkg-deb`
+documents as building any archive you want no matter how broken. `BuildDebRaw`
+passes `--nocheck` and `BuildDeb` does not, which keeps malformed metadata in
+reach of only the tests that ask for it rather than making it expressible by
+every `Spec`. It carries `BuildDeb`'s umask defences over: every intermediate
+directory it creates is chmodded to 0755, each staged file is chmodded to its
+declared mode explicitly, declared directory modes are applied deepest path
+first once every file is written, and `DEBIAN` is chmodded to 0755 last.
+
+The package's own tests check both builders against `dpkg-deb` itself — `-c` for
 the path/mode table, `-f` for the dependency field, `-e` for the control
 directory — never against other Go code, and drive the gate's two branches
 through a recording `TestingT` in a test that needs no external tool on any
-host.
+host. `BuildDebRaw`'s tests additionally pin the premise behind its
+`--nocheck`: an ordinary `--build` of the very same staged tree is required to
+fail, so the escape hatch's justification is a runnable claim rather than a
+comment.
 
 ## Configuration
 
@@ -2071,7 +2093,9 @@ differ, and a sentence true of one is false of another.
   files it always did. Its `dpkg-deb`-dependent tests resolve the tool through
   `internal/packagingtest.LookTool`, so they skip with an explicit reason on a
   host without it and **fail** rather than skip inside `make docker-ci`; its
-  missing-tool test drives `PATH=""` and needs no tool on any host.
+  missing-tool test drives `PATH=""`, and its internal tables over the
+  unexported `conffiles`/`Depends` parsers read bytes the test itself staged, so
+  neither needs a tool on any host.
 
 Because of (c), no sentence anywhere may claim that the `packaging` package's
 *whole test suite* runs no external command, nor that the contract tests *as a
@@ -2189,17 +2213,53 @@ constraints (`c (>= 1)`) pass through verbatim in declaration order; splitting o
 recover the archive's recorded ownership and nFPM's DEB tar records numeric
 UID/GID 0 anyway — both fields are informational per M1.
 
-**Its tests** (`packaging/extract/deb_test.go`). The happy path builds a
-throwaway `.deb` with `packagingtest.BuildDeb` into a `t.TempDir()` and asserts
-every model field against literals hand-written from the `Spec` the test itself
-declares — never against a value the extractor, `Verify` or a contract helper
-produced. The destination assertion is **set equality in both directions**,
-including those synthesized parents and excluding `/`: a one-directional
-membership check would pass while the extractor invented or dropped entries. Two
-error-path tests pin the prefix — one on a non-archive file, which must also
-name the artifact and must **not** report `ErrToolUnavailable`, and one under
-`t.Setenv("PATH", "")`, which must. Only the first two need `dpkg-deb`, and both
-resolve it through `packagingtest.LookTool`.
+**What failure means for `Deb`.** Everything in this paragraph is a statement
+about the deb backend alone — there is no `.rpm` backend at this commit, and
+none of it is a claim about one or about extraction in general. `Deb`
+distinguishes three outcomes. (1) **Absent optional metadata is not a failure.**
+A package with no `Depends` field returns no dependencies and a nil error,
+because `dpkg-deb -f <deb> Depends` exits 0 with empty output there; a package
+with no `conffiles` member marks no entry `Config`; a package with no `postinst`
+member returns a nil `Postinstall`, which stays distinct from the non-nil empty
+`Scriptlet` a zero-byte member returns. (2) **A definitive fault returns a
+non-nil error and the zero-value `packaging.Model`** — never a confidently empty
+model, which would otherwise verify as a pile of absent paths indistinguishable
+from a genuinely broken package. A nonexistent path and a file that is not an
+`ar` archive both land here, and both name the offending artifact, because
+`dpkg-deb` writes the filename to standard error and `runTool` folds it in.
+Metadata that is present but malformed lands here too: a `conffiles` line that
+is not an absolute path is an error rather than a row silently defaulted to "not
+a configuration file". (3) **An environmental fault also carries
+`ErrToolUnavailable`**, so `errors.Is` separates "this host has no `dpkg-deb`"
+from "`dpkg-deb` ran and rejected the artifact". Every error that comes from
+*running* the tool — outcome (3), and the two archive faults in (2) — carries the
+`packaging/extract: dpkg-deb: ` prefix, because `runTool` produces it. The
+malformed-`conffiles` error does not: no tool failed there, so it reads
+`packaging/extract: conffiles entry "…" is not an absolute path` and names the
+offending line. Only (3) satisfies `errors.Is(err, ErrToolUnavailable)`.
+
+**Its tests** (`packaging/extract/deb_test.go`, `extract_test.go`). The happy
+path builds a throwaway `.deb` with `packagingtest.BuildDeb` into a
+`t.TempDir()` and asserts every model field against literals hand-written from
+the `Spec` the test itself declares — never against a value the extractor,
+`Verify` or a contract helper produced. The destination assertion is **set
+equality in both directions**, including those synthesized parents and excluding
+`/`: a one-directional membership check would pass while the extractor invented
+or dropped entries. Around it sits one fixture-backed row per outcome above: a
+fixture with no config file, no `Depends` and no postinstall; one whose
+postinstall is a zero-byte member; a nonexistent path and a file of arbitrary
+non-`ar` bytes, both required to return the zero-value model; a `conffiles`
+member holding a relative path, which needs `packagingtest.BuildDebRaw` because
+`dpkg-deb` will not `--build` such a tree; and `t.Setenv("PATH", "")` for the
+`ErrToolUnavailable` row, which needs no packaging tool and therefore executes
+on every host with no skip. `extract_test.go` is an **internal** test (package
+`extract`) holding table-driven tests over the unexported `conffiles` and
+`Depends` parsers, reaching the shapes a real `dpkg-deb` cannot be made to emit
+(an empty comma-separated component, a member of nothing but whitespace); they
+supplement the fixture-backed tests rather than replacing them. Every
+fixture-backed test resolves `dpkg-deb` through `packagingtest.LookTool`, so on
+a host without it they skip with an explicit reason while the parser tables and
+the `ErrToolUnavailable` row still run.
 
 ## Release workflow
 

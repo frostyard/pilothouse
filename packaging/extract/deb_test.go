@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -197,34 +198,234 @@ func TestDebMapsFixtureOntoModel(t *testing.T) {
 	}
 }
 
-// TestDebOnNonArchiveNamesToolAndArtifact pins the error-text contract on the
-// path where the tool ran and rejected the file, which is the case that must
-// NOT be reported as a missing tool.
-func TestDebOnNonArchiveNamesToolAndArtifact(t *testing.T) {
+// degenerateSpec returns the fixture with every optional piece of metadata
+// left out: nothing marked Config (so BuildDeb writes no DEBIAN/conffiles
+// member at all), no Depends (so DEBIAN/control carries no such field), and
+// whatever postinstall state the caller asks for. One of its files is named
+// like a configuration file but is deliberately NOT marked Config, so an
+// extractor that guessed Config from a path instead of reading conffiles would
+// fail rather than pass by luck.
+func degenerateSpec(postinstall *string) packagingtest.Spec {
+	return packagingtest.Spec{
+		Name:    "extractdegenerate",
+		Version: "0.1.0",
+		Dirs: []packagingtest.Dir{
+			{Dest: "/opt/phx/data", Mode: 0o750},
+		},
+		Files: []packagingtest.File{
+			{Dest: "/opt/phx/plain.txt", Mode: 0o644, Content: []byte("plain\n")},
+			{Dest: "/opt/phx/etc/other.conf", Mode: 0o640, Content: []byte("key = value\n")},
+		},
+		Postinstall: postinstall,
+	}
+}
+
+// degenerateDests is the complete destination set degenerateSpec produces,
+// hand-written: the two declared files, the declared directory, and the
+// intermediate directories dpkg-deb synthesizes for them. "/" is excluded,
+// because the payload tree root is not an entry.
+var degenerateDests = []string{
+	"/opt",
+	"/opt/phx",
+	"/opt/phx/data",
+	"/opt/phx/etc",
+	"/opt/phx/etc/other.conf",
+	"/opt/phx/plain.txt",
+}
+
+// TestDebOnFixtureWithoutOptionalMetadata covers three degenerate rows at once
+// on one fixture, each with its own assertion: a package that ships no
+// postinstall yields a nil Postinstall, a package that marks nothing a
+// configuration file yields Config false on every entry, and a package
+// declaring no dependencies yields no dependencies AND no error.
+//
+// The last of those is the measured one: `dpkg-deb -f <deb> Depends` on a
+// package without that field exits 0 with empty output, so absence must not be
+// reported as a tool failure.
+func TestDebOnFixtureWithoutOptionalMetadata(t *testing.T) {
+	deb := packagingtest.BuildDeb(t, t.TempDir(), degenerateSpec(nil))
+
+	model, err := extract.Deb(t.Context(), deb)
+	if err != nil {
+		t.Fatalf("extract.Deb(%s) failed for a fixture declaring no Depends field, no config file and no postinstall; `dpkg-deb -f` exits 0 with empty output for a missing field, so absence must not be an error: %v", deb, err)
+	}
+
+	// The load-bearing half of the nil-vs-empty distinction: shipping no
+	// scriptlet must stay distinguishable from shipping an empty one.
+	if model.Postinstall != nil {
+		t.Errorf("Postinstall = &{%q}, want nil for a fixture that ships no postinst member", model.Postinstall.Content)
+	}
+
+	// A nil slice and an empty one both satisfy this; what matters is that no
+	// dependency was invented and that err above was nil.
+	if len(model.Dependencies) != 0 {
+		t.Errorf("Dependencies = %q, want none for a fixture declaring no Depends field", model.Dependencies)
+	}
+
+	// The destination set is pinned in both directions first, so the Config
+	// sweep below cannot pass vacuously over an empty or truncated entry list.
+	got := make(map[string]packaging.Entry, len(model.Entries))
+
+	for _, entry := range model.Entries {
+		got[entry.Dest] = entry
+	}
+
+	for _, dest := range degenerateDests {
+		if _, ok := got[dest]; !ok {
+			t.Errorf("Entries is missing destination %q", dest)
+		}
+	}
+
+	for dest := range got {
+		if !slices.Contains(degenerateDests, dest) {
+			t.Errorf("Entries contains unexpected destination %q", dest)
+		}
+	}
+
+	// With no conffiles control member, nothing is a configuration file — not
+	// even the entry whose name ends in .conf.
+	for _, entry := range model.Entries {
+		if entry.Config {
+			t.Errorf("%s: Config = true, want false for a fixture with no conffiles member", entry.Dest)
+		}
+	}
+}
+
+// TestDebOnFixtureWithEmptyPostinstall is the other side of that distinction,
+// and is a separate test from the nil case on purpose: a fixture that ships a
+// zero-byte postinst member must come back as a non-nil Scriptlet with empty
+// Content. An extractor that collapsed "ships none" into "ships an empty one"
+// would pass the nil test and fail here.
+func TestDebOnFixtureWithEmptyPostinstall(t *testing.T) {
+	empty := ""
+
+	deb := packagingtest.BuildDeb(t, t.TempDir(), degenerateSpec(&empty))
+
+	model, err := extract.Deb(t.Context(), deb)
+	if err != nil {
+		t.Fatalf("extract.Deb(%s): %v", deb, err)
+	}
+
+	if model.Postinstall == nil {
+		t.Fatalf("Postinstall = nil, want a non-nil Scriptlet for a fixture shipping a zero-byte postinst member")
+	}
+
+	if len(model.Postinstall.Content) != 0 {
+		t.Errorf("Postinstall.Content = %q, want empty", model.Postinstall.Content)
+	}
+}
+
+// TestDebOnMalformedConffilesFails covers the row an ordinary builder cannot
+// produce: a conffiles control member holding a line that is not an absolute
+// path. dpkg-deb's own `--build` rejects such a tree, so the fixture is packed
+// with packagingtest.BuildDebRaw, which passes --nocheck.
+//
+// Malformed external metadata must be an error rather than defaulting to "not a
+// configuration file": a package whose config flags were silently dropped would
+// otherwise come back as a confident model.
+func TestDebOnMalformedConffilesFails(t *testing.T) {
+	const (
+		control   = "Package: extractmalformed\nVersion: 0.0.1\nArchitecture: all\nMaintainer: packagingtest <packagingtest@example.invalid>\nDescription: fixture whose conffiles member is malformed\n"
+		conffiles = "opt/phx/relative.conf\n"
+	)
+
+	deb := packagingtest.BuildDebRaw(t, t.TempDir(),
+		map[string][]byte{
+			"DEBIAN/control":        []byte(control),
+			"DEBIAN/conffiles":      []byte(conffiles),
+			"opt/phx/relative.conf": []byte("key = value\n"),
+		},
+		map[string]fs.FileMode{
+			"opt/phx/relative.conf": 0o640,
+			"opt/phx":               0o750,
+		},
+	)
+
+	model, err := extract.Deb(t.Context(), deb)
+	if err == nil {
+		t.Fatalf("extract.Deb(%s) returned no error for a conffiles line that is not an absolute path", deb)
+	}
+
+	if !reflect.DeepEqual(model, packaging.Model{}) {
+		t.Errorf("model = %+v, want the zero value", model)
+	}
+
+	// The offending line has to reach the message, and the failure has to be
+	// attributable to the parse rather than to a missing tool: dpkg-deb ran
+	// here, and it succeeded.
+	if want := strings.TrimSuffix(conffiles, "\n"); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the offending line %q", err, want)
+	}
+
+	if errors.Is(err, extract.ErrToolUnavailable) {
+		t.Errorf("error %q reports ErrToolUnavailable, but dpkg-deb ran and the conffiles member is what was rejected", err)
+	}
+}
+
+// TestDebOnUnreadableArtifact pins the error-text contract on the two ways an
+// artifact can be unreadable, and pins the model each returns.
+//
+// Both rows are cases where the tool ran and rejected the file, so neither may
+// report a missing tool, and neither may come back as a confidently empty
+// model: a zero-value Model that verified as a pile of absent paths would be
+// indistinguishable from a genuinely broken package.
+func TestDebOnUnreadableArtifact(t *testing.T) {
 	if packagingtest.LookTool(t, "dpkg-deb") == "" {
 		return
 	}
 
-	artifact := filepath.Join(t.TempDir(), "not-an-archive.deb")
-	if err := os.WriteFile(artifact, []byte("this is not a Debian archive\n"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", artifact, err)
+	cases := []struct {
+		name string
+		// write is nil for the row whose artifact must not exist.
+		write []byte
+	}{
+		{
+			name:  "path does not exist",
+			write: nil,
+		},
+		{
+			// Arbitrary bytes carrying none of ar's "!<arch>\n" magic. They are
+			// a fixed literal rather than drawn from a random source, so a
+			// failure here reproduces byte for byte on the next run.
+			name:  "not an ar archive",
+			write: []byte("\x00\x01\x02 these bytes are not a Debian archive \xff\xfe\n"),
+		},
 	}
 
-	_, err := extract.Deb(t.Context(), artifact)
-	if err == nil {
-		t.Fatalf("extract.Deb(%s) returned no error, want a failure", artifact)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			artifact := filepath.Join(t.TempDir(), "artifact.deb")
 
-	if !strings.Contains(err.Error(), toolErrorPrefix) {
-		t.Errorf("error %q does not contain %q", err, toolErrorPrefix)
-	}
+			if tc.write != nil {
+				if err := os.WriteFile(artifact, tc.write, 0o644); err != nil {
+					t.Fatalf("write %s: %v", artifact, err)
+				}
+			}
 
-	if !strings.Contains(err.Error(), artifact) {
-		t.Errorf("error %q does not name the artifact %q", err, artifact)
-	}
+			model, err := extract.Deb(t.Context(), artifact)
+			if err == nil {
+				t.Fatalf("extract.Deb(%s) returned no error, want a failure", artifact)
+			}
 
-	if errors.Is(err, extract.ErrToolUnavailable) {
-		t.Errorf("error %q reports ErrToolUnavailable, but dpkg-deb ran and rejected the artifact", err)
+			if !reflect.DeepEqual(model, packaging.Model{}) {
+				t.Errorf("model = %+v, want the zero value", model)
+			}
+
+			if !strings.Contains(err.Error(), artifact) {
+				t.Errorf("error %q does not name the artifact %q", err, artifact)
+			}
+
+			// runTool adds this prefix to every tool failure unconditionally, so
+			// both rows carry it. It is the token no artifact filename can
+			// forge.
+			if !strings.Contains(err.Error(), toolErrorPrefix) {
+				t.Errorf("error %q does not contain %q", err, toolErrorPrefix)
+			}
+
+			if errors.Is(err, extract.ErrToolUnavailable) {
+				t.Errorf("error %q reports ErrToolUnavailable, but dpkg-deb ran and rejected the artifact", err)
+			}
+		})
 	}
 }
 

@@ -2,9 +2,11 @@ package packagingtest
 
 import (
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -54,6 +56,10 @@ const controlDirMode = fs.FileMode(0o755)
 // of the caller's umask.
 const synthesizedDirMode = fs.FileMode(0o755)
 
+// rawFileMode is the mode BuildDebRaw writes a staged file with when its caller
+// declares none.
+const rawFileMode = fs.FileMode(0o644)
+
 // BuildDeb builds a .deb from s into outDir and returns the artifact's path.
 //
 // The staging tree is created in scratch space inside outDir, so outDir ends
@@ -97,6 +103,126 @@ func BuildDeb(t TestingT, outDir string, s Spec) string {
 	}
 
 	return deb
+}
+
+// BuildDebRaw packs an already-staged tree into a .deb verbatim and returns the
+// artifact's path.
+//
+// It is the lower-level escape hatch beside BuildDeb, and it exists for one
+// reason: a control area that a broken package could genuinely carry is not
+// always expressible through Spec, because dpkg-deb refuses to produce it.
+// The measured example is a DEBIAN/conffiles line that is not an absolute path:
+// `dpkg-deb --build` rejects it outright ("conffile name 'etc/x.conf' is not an
+// absolute pathname", exit 2), so the only way to obtain such an artifact is
+// --nocheck, which dpkg-deb documents as building any archive you want no
+// matter how broken. BuildDebRaw passes --nocheck and BuildDeb does not, so the
+// malformed shapes stay in reach of only the tests that ask for one instead of
+// becoming expressible by every Spec.
+//
+// tree maps a slash-separated path, relative to the staging root, to the bytes
+// of a regular file at that path. Nothing here synthesizes control metadata:
+// a caller that wants DEBIAN/control writes it itself, byte for byte.
+//
+// modes gives the mode of a path. For a key that tree also holds, it is that
+// file's mode, defaulting to rawFileMode when absent. For a key tree does not
+// hold, it names a directory, which is created and chmodded to that mode. Every
+// intermediate directory not named in modes is chmodded to synthesizedDirMode,
+// exactly as BuildDeb does, so a synthesized parent's archived mode cannot
+// depend on the caller's umask. Declared directory modes are applied deepest
+// path first and only once every file is written, so a restrictive mode cannot
+// block the staging of something beneath it.
+//
+// DEBIAN is created if the caller staged nothing into it and is chmodded to
+// controlDirMode last, honouring the same measured dpkg-deb constraint BuildDeb
+// does (`--build` refuses a control directory outside 0755-0775, and
+// os.MkdirTemp creates 0700 unconditionally). A mode declared for DEBIAN itself
+// therefore has no effect.
+//
+// dpkg-deb is resolved through LookTool, so a host without it skips the calling
+// test with an explicit reason and an environment declaring the tools present
+// (RequireEnv=1) fails instead.
+func BuildDebRaw(t TestingT, outDir string, tree map[string][]byte, modes map[string]fs.FileMode) string {
+	t.Helper()
+
+	dpkgDeb := LookTool(t, "dpkg-deb")
+	if dpkgDeb == "" {
+		return ""
+	}
+
+	staging, err := os.MkdirTemp(outDir, "packagingtest-debraw-")
+	if err != nil {
+		t.Fatalf("packagingtest: create staging tree under %s: %v", outDir, err)
+
+		return ""
+	}
+
+	if err := stageDebRaw(staging, tree, modes); err != nil {
+		t.Fatalf("packagingtest: stage raw deb tree in %s: %v", staging, err)
+
+		return ""
+	}
+
+	// The artifact sits beside the staging directory it was packed from and
+	// borrows its unique name, so repeated calls into one outDir cannot collide.
+	deb := staging + ".deb"
+
+	out, err := exec.Command(dpkgDeb, "--root-owner-group", "--nocheck", "--build", staging, deb).CombinedOutput()
+	if err != nil {
+		t.Fatalf("packagingtest: dpkg-deb --nocheck --build %s %s: %v\n%s", staging, deb, err, out)
+
+		return ""
+	}
+
+	return deb
+}
+
+// stageDebRaw lays out the caller's files and directories under staging.
+func stageDebRaw(staging string, tree map[string][]byte, modes map[string]fs.FileMode) error {
+	// Sorted iteration only so a staging failure reports the same path every
+	// run; map iteration order would make it vary.
+	for _, path := range slices.Sorted(maps.Keys(tree)) {
+		if err := makeDirs(staging, filepath.Dir(filepath.FromSlash(path))); err != nil {
+			return err
+		}
+
+		mode := rawFileMode
+		if declared, ok := modes[path]; ok {
+			mode = declared
+		}
+
+		if err := writeFileMode(filepath.Join(staging, filepath.FromSlash(path)), tree[path], mode); err != nil {
+			return err
+		}
+	}
+
+	dirs := make([]string, 0, len(modes))
+
+	for _, path := range slices.Sorted(maps.Keys(modes)) {
+		if _, isFile := tree[path]; isFile {
+			continue
+		}
+
+		if err := makeDirs(staging, path); err != nil {
+			return err
+		}
+
+		dirs = append(dirs, path)
+	}
+
+	// Deepest path first, for the same reason stageDebPayload does it.
+	slices.SortFunc(dirs, func(a, b string) int { return len(splitPath(b)) - len(splitPath(a)) })
+
+	for _, dir := range dirs {
+		if err := os.Chmod(filepath.Join(staging, filepath.FromSlash(dir)), modes[dir]); err != nil {
+			return err
+		}
+	}
+
+	if err := makeDirs(staging, "DEBIAN"); err != nil {
+		return err
+	}
+
+	return os.Chmod(filepath.Join(staging, "DEBIAN"), controlDirMode)
 }
 
 // stageDeb lays out the DEBIAN control directory and the payload tree.
