@@ -189,7 +189,8 @@ func probeDocker(ctx context.Context, endpoint string, newClient func(string) (d
 // needs: a server-info call. *incusProbeClient satisfies it directly, and
 // unlike podman/docker, incus client construction never performs I/O or
 // takes a configurable socket path -- the default local socket is fixed,
-// per the spec.
+// per the spec. Whether that socket is contacted at all is governed by the
+// --incus flag, not by the client's construction.
 type incusClient interface {
 	Server(ctx context.Context) (*api.Server, error)
 }
@@ -214,16 +215,33 @@ func (c *incusProbeClient) Server(ctx context.Context) (*api.Server, error) {
 	return value, err
 }
 
-// ProbeIncus probes the incus capability: present iff the default local
-// socket responds to a Server call within engineProbeTimeout.
-func ProbeIncus(ctx context.Context) Set {
-	return probeIncus(ctx, newIncusProbeClient())
+// ProbeIncus probes the incus capability: absent outright unless enabled is
+// true, and otherwise present iff the fixed default local socket
+// (incusLocalSocket) responds to a Server call within engineProbeTimeout.
+// enabled carries the --incus flag, which defaults to false; a false value
+// means incus is not opted in, so the capability is absent and the socket is
+// never contacted at all -- a host that merely happens to answer on
+// /var/lib/incus/unix.socket must never enable the engine without explicit
+// pilothouse-level configuration. The socket path itself stays fixed and is
+// not configurable: the flag gates whether it is probed, nothing more. When
+// enabled is true the probe behaves exactly as it did before the flag
+// existed, degrading to "incus absent" on any dial or Server error rather
+// than failing.
+func ProbeIncus(ctx context.Context, enabled bool) Set {
+	return probeIncus(ctx, enabled, newIncusProbeClient())
 }
 
 // probeIncus is the testable core of ProbeIncus: client is injected so
-// tests can exercise both branches (a fake client whose Server call
-// succeeds or fails) without a real incus socket.
-func probeIncus(ctx context.Context, client incusClient) Set {
+// tests can exercise every branch (opted out, plus a fake client whose
+// Server call succeeds or fails) without a real incus socket. The
+// enabled guard lives here, ahead of every use of client, so the injected
+// client's Server call -- the only place this probe dials anything, since
+// newIncusProbeClient merely allocates a struct and performs no I/O -- is
+// provably never reached when incus is not opted in.
+func probeIncus(ctx context.Context, enabled bool, client incusClient) Set {
+	if !enabled {
+		return New()
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, engineProbeTimeout)
 	defer cancel()
 

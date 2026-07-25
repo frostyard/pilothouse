@@ -36,6 +36,7 @@ actually invokes the tools.
 | `--backup-max-age` | `48h` | Maximum acceptable age of a successful configured backup |
 | `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
 | `--docker` | — | Docker endpoint such as `unix:///var/run/docker.sock`; Docker requires explicit configuration to enable |
+| `--incus` | `false` | Enable Incus inventory against the local socket `/var/lib/incus/unix.socket`; Incus requires this explicit opt-in to enable, and the socket path is fixed rather than configurable |
 | `--podman-socket` | — | Podman API Unix socket path; Podman requires explicit configuration to enable |
 | `--updex` | — | Path to the updex executable; updex requires explicit configuration to enable |
 

@@ -65,9 +65,12 @@ installing and starting the broker never pulls in or activates
 themselves (see the README's Podman note). The unit keeps
 `After=incus.socket systemd-sysext.service podman.socket`, which only orders
 the broker behind those units when something else has already started them.
-Note that at this commit an engine socket that happens to be running is still
-probed and enabled without explicit Pilothouse configuration — this change
-removes only the unit-level pull-in, not presence-based enablement.
+That change removed only the unit-level pull-in; presence-based enablement
+was removed separately, per engine, by the `--podman-socket`, `--docker`, and
+`--incus` flags described under "Capability probing at startup" below. As of
+this commit none of the three container engines is enabled by socket presence:
+an engine socket that happens to be running is not probed at all unless its
+flag is set.
 
 ### Modules (`internal/modules/<name>`)
 
@@ -430,20 +433,24 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. `updex`, Podman, and Docker are
+  probing itself is never fatal. `updex`, Podman, Docker, and Incus are
   additionally gated on explicit configuration: `--updex`,
-  `--podman-socket`, and `--docker` all default to empty, and an empty
-  value makes `ProbeUpdex`/`ProbePodman`/`ProbeDocker` report the
-  capability absent without running any command or constructing a client,
-  so a host that merely happens to have `updex` on `PATH`, a socket at the
-  conventional path, or `DOCKER_HOST` exported never enables the
-  tool/engine. Docker's non-empty endpoint is also the *only* input its
-  client is built from — `ProbeDocker` and `cmd/pilothoused`'s live client
-  both use `dockerclient.WithHost(endpoint)`, never `dockerclient.FromEnv`,
-  so the SDK's implicit `DOCKER_HOST`/default-socket resolution is never
-  consulted. (Incus still probes from a fixed ambient input — the default
-  local socket; giving it the same explicit-configuration treatment is the
-  rest of #64's work.) The resulting `capability.Set` is not
+  `--podman-socket`, and `--docker` all default to empty and `--incus`
+  defaults to `false`, and an unset value makes
+  `ProbeUpdex`/`ProbePodman`/`ProbeDocker`/`ProbeIncus` report the
+  capability absent without running any command, constructing a client, or
+  dialling anything, so a host that merely happens to have `updex` on
+  `PATH`, a socket at the conventional path, `DOCKER_HOST` exported, or a
+  live `/var/lib/incus/unix.socket` never enables the tool/engine. Docker's
+  non-empty endpoint is also the *only* input its client is built from —
+  `ProbeDocker` and `cmd/pilothoused`'s live client both use
+  `dockerclient.WithHost(endpoint)`, never `dockerclient.FromEnv`, so the
+  SDK's implicit `DOCKER_HOST`/default-socket resolution is never
+  consulted. Incus is the opposite shape: its socket path is *not*
+  configurable — it stays fixed at `/var/lib/incus/unix.socket` — so
+  `capability.Config.IncusEnabled` is a plain bool carrying `--incus`, and
+  `ProbeIncus(ctx, false)` returns an empty set before its client's
+  `Server` call is ever reached. The resulting `capability.Set` is not
   cached or re-probed later; a daemon restart re-probes from scratch. It is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
@@ -461,7 +468,12 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   configured `--docker` endpoint, is logged as a warning, never a fatal
   `run()` error; an *unconfigured* engine — `--docker` left empty — is not
   a warnable condition, so `connectDocker` returns nil silently and no
-  client is built). `registerServices` and
+  client is built). Podman's and Incus's client constructors stay
+  unconditional in `run()` because neither performs I/O at construction;
+  for Incus, `--incus` acts entirely through the probe, so
+  `registerIncus`'s `caps.Has(capability.Incus)` guard is what leaves the
+  engine with no registered query or action when the flag is false.
+  `registerServices` and
   `registerLogs` are the next conversions: `registerServices` guards
   `QueryServicesState` and every services lifecycle action on
   `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
@@ -1220,6 +1232,13 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 - `--docker` endpoint, e.g. `unix:///var/run/docker.sock` (default empty —
   Docker requires explicit configuration to enable; unset means no docker
   client is constructed at all, in the probe or in `run()`)
+- `--incus` bool (default `false` — Incus requires this explicit opt-in to
+  enable; unset means `ProbeIncus` returns an empty set without contacting
+  the socket, so `registerIncus` registers nothing). The socket path itself
+  is not configurable: it stays fixed at `/var/lib/incus/unix.socket`, and
+  the flag gates only whether that path is probed. `incus.NewLocalClient()`
+  in `run()` is still constructed unconditionally — it performs no I/O —
+  since the capability guard is what withholds registration
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)

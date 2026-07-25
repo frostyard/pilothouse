@@ -284,43 +284,87 @@ func TestProbeDockerAbsentOnRealUnreachableSocket(t *testing.T) {
 
 // fakeIncusClient implements incusClient end-to-end with no real socket
 // involved. incus.NewLocalClient's default socket path is fixed (not
-// configurable), and this test host may or may not have a real incus
-// socket, so the incus probe is exercised entirely through fakes -- both
-// branches are still the full success/failure path, since probeIncus never
-// does anything with a successful *api.Server response beyond checking the
-// error.
+// configurable -- the --incus flag gates whether it is probed, never where),
+// and this test host may or may not have a real incus socket, so the
+// enabled probe's success and failure branches are exercised entirely
+// through fakes -- both are still the full path, since probeIncus never does
+// anything with a successful *api.Server response beyond checking the error.
+// It counts Server calls so the disabled branch can assert the socket is
+// never contacted at all, rather than only that the resulting Set is empty.
 type fakeIncusClient struct {
 	server *api.Server
 	err    error
 	ctx    context.Context
+	calls  int
 }
 
 func (f *fakeIncusClient) Server(ctx context.Context) (*api.Server, error) {
+	f.calls++
 	f.ctx = ctx
 	return f.server, f.err
 }
 
 func TestProbeIncusPresentOnSuccess(t *testing.T) {
 	fake := &fakeIncusClient{server: &api.Server{}}
-	s := probeIncus(context.Background(), fake)
+	s := probeIncus(context.Background(), true, fake)
 
 	assert.True(t, s.Has(Incus))
 	assert.ElementsMatch(t, []ID{Incus}, s.List())
+	assert.Equal(t, 1, fake.calls)
 }
 
 func TestProbeIncusAbsentOnServerError(t *testing.T) {
 	fake := &fakeIncusClient{err: errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")}
-	s := probeIncus(context.Background(), fake)
+	s := probeIncus(context.Background(), true, fake)
 
 	assert.False(t, s.Has(Incus))
 	assert.Empty(t, s.List())
+	assert.Equal(t, 1, fake.calls)
 }
 
 func TestProbeIncusAppliesBoundedTimeout(t *testing.T) {
 	fake := &fakeIncusClient{server: &api.Server{}}
 	start := time.Now()
-	probeIncus(context.Background(), fake)
+	probeIncus(context.Background(), true, fake)
 
 	require.NotNil(t, fake.ctx)
 	assertBoundedEngineTimeout(t, fake.ctx, start)
+}
+
+func TestProbeIncusAbsentAndNeverCallsClientWhenDisabled(t *testing.T) {
+	// The --incus flag defaults to false. A not-opted-in incus must be
+	// reported absent *without* the probe contacting the local socket at
+	// all. The injected fake is wired to succeed, so this test cannot pass
+	// merely because a dial was attempted and failed: the only way the Set
+	// stays empty is if Server is never reached -- asserted directly as a
+	// zero call count, so mere socket reachability can no longer enable the
+	// capability without the flag.
+	fake := &fakeIncusClient{server: &api.Server{}}
+	s := probeIncus(context.Background(), false, fake)
+
+	assert.Equal(t, 0, fake.calls, "a disabled incus must never invoke the client's Server call")
+	assert.Nil(t, fake.ctx)
+	assert.False(t, s.Has(Incus))
+	assert.Empty(t, s.List())
+}
+
+func TestProbeIncusExportedAbsentWhenDisabled(t *testing.T) {
+	// The same guard through the exported production entry point, with no
+	// injection at all: whatever this test host's /var/lib/incus/unix.socket
+	// answers (or does not answer), a false flag keeps incus absent.
+	s := ProbeIncus(context.Background(), false)
+
+	assert.False(t, s.Has(Incus))
+	assert.Empty(t, s.List())
+}
+
+func TestProbeIncusDisabledKeepsIncusOutOfComposedProbe(t *testing.T) {
+	// The guard through the production composition path: Probe's entry in
+	// probes passes Config.IncusEnabled straight to ProbeIncus, so a
+	// zero-value Config (the flag left at its false default) must leave
+	// Incus out of the composed Set on every host, including one with a
+	// live incus socket.
+	s := Probe(context.Background(), Config{})
+
+	assert.False(t, s.Has(Incus))
 }

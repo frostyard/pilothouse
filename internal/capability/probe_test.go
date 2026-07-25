@@ -125,8 +125,9 @@ func TestProbePartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 func TestProbePassesConfigThroughToEachProbe(t *testing.T) {
 	// Proves Probe hands its config argument through to every probe in the
 	// table (not a zero-value Config), by asserting each fake observes the
-	// exact DockerEndpoint/PodmanSocket/Updex values passed to Probe.
-	want := Config{DockerEndpoint: "unix:///custom/docker.sock", PodmanSocket: "/custom/podman.sock", Updex: "/custom/updex"}
+	// exact DockerEndpoint/IncusEnabled/PodmanSocket/Updex values passed to
+	// Probe.
+	want := Config{DockerEndpoint: "unix:///custom/docker.sock", IncusEnabled: true, PodmanSocket: "/custom/podman.sock", Updex: "/custom/updex"}
 	var got []Config
 	withFakeProbes(t, []probeFn{
 		func(_ context.Context, config Config) Set { got = append(got, config); return New() },
@@ -151,7 +152,9 @@ func TestProbeHasNoErrorReturnAndCompletesWithoutPanic(t *testing.T) {
 	// partial fixtures above already cover the aggregation logic itself.
 	// The docker endpoint, podman socket, and updex path are pointed at
 	// guaranteed-nonexistent paths so at least those three real probes'
-	// failure branches are exercised too, regardless of host.
+	// failure branches are exercised too, regardless of host, and
+	// IncusEnabled is left at its false default so incus is deterministically
+	// absent without the fixed local socket being contacted at all.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -166,6 +169,7 @@ func TestProbeHasNoErrorReturnAndCompletesWithoutPanic(t *testing.T) {
 		s = Probe(ctx, config)
 	})
 	assert.False(t, s.Has(Docker), "the configured docker endpoint is guaranteed unreachable")
+	assert.False(t, s.Has(Incus), "incus is not opted in via IncusEnabled")
 	assert.False(t, s.Has(Podman), "the configured podman socket is guaranteed unreachable")
 	assert.False(t, s.Has(Updex), "the configured updex path is guaranteed nonexistent")
 }

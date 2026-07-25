@@ -3,10 +3,7 @@ package capability
 import "context"
 
 // Config carries every runtime input Probe needs to run every probe in this
-// package, mirroring cmd/pilothoused's flags one field per flag. Incus needs
-// no configuration here yet: its probe still reuses the same fixed input
-// (the default local incus socket) main.go constructs its client from
-// unconditionally today.
+// package, mirroring cmd/pilothoused's flags one field per flag.
 type Config struct {
 	// DockerEndpoint is the configured --docker endpoint (e.g.
 	// unix:///var/run/docker.sock). That flag defaults to empty; empty
@@ -15,6 +12,13 @@ type Config struct {
 	// value is the only input the docker client is built from -- the
 	// SDK's DOCKER_HOST/default-socket resolution is never consulted.
 	DockerEndpoint string
+	// IncusEnabled is the configured --incus opt-in. That flag defaults
+	// to false; false means incus is not opted in, so ProbeIncus reports
+	// it absent without contacting the local incus socket at all. Unlike
+	// docker and podman, the socket path is not carried here: it stays
+	// fixed at /var/lib/incus/unix.socket, so this flag gates only
+	// whether that fixed path is probed.
+	IncusEnabled bool
 	// PodmanSocket is the already-configured --podman-socket path. That
 	// flag defaults to empty; empty means podman is not configured, so
 	// ProbePodman reports it absent without constructing a client or
@@ -51,7 +55,7 @@ var probes = []probeFn{
 	func(ctx context.Context, config Config) Set { return ProbeRPMOStree(ctx, ExecRunner{}) },
 	func(ctx context.Context, config Config) Set { return ProbePodman(ctx, config.PodmanSocket) },
 	func(ctx context.Context, config Config) Set { return ProbeDocker(ctx, config.DockerEndpoint) },
-	func(ctx context.Context, config Config) Set { return ProbeIncus(ctx) },
+	func(ctx context.Context, config Config) Set { return ProbeIncus(ctx, config.IncusEnabled) },
 }
 
 // Probe runs every probe in this package -- systemd (plus, sharing its
