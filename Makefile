@@ -159,8 +159,8 @@ docker-next-version: ## Calculate the next version with pinned svu
 		$(DOCKER_IMAGE) \
 		svu next
 
-docker-tools-check: docker-image ## Verify release tools are executable in Docker
-	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version'
+docker-tools-check: docker-image ## Verify release and packaging tools are executable in Docker
+	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2cpio cpio; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
 
 test-bump: ## Test release orchestration without publishing
 	bash scripts/bump_test.sh

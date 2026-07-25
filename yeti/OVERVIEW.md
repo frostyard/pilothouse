@@ -67,7 +67,22 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       the live ../.goreleaser.yaml
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
-                      packaging scriptlet) for docker-* make targets
+                      packaging scriptlet) for docker-* make targets. It also
+                      installs `rpm` (which on the Debian bookworm base provides
+                      `rpm`, `rpmbuild` and `rpm2cpio`) and `cpio`; `dpkg-deb`
+                      already comes from the Debian base image, so no package is
+                      needed for it. The image declares
+                      `ENV PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1`, which reaches
+                      every docker-* target through the Makefile's `DOCKER_RUN`
+                      with no per-target flag: because the image guarantees those
+                      tools, a tool-dependent test that would otherwise skip when
+                      one is missing must fail inside this image instead. Nothing
+                      in Go code reads the variable at this commit. `make
+                      docker-tools-check` asserts the whole set — it resolves
+                      `dpkg-deb`, `rpm`, `rpmbuild`, `rpm2cpio` and `cpio` and
+                      prints the flag's value, alongside the `svu` and
+                      `golangci-lint` checks it has always run — and stays
+                      outside `ci`/`docker-ci`
 ```
 
 ### Two binaries, one protocol
