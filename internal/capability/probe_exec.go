@@ -12,11 +12,6 @@ import (
 // dbusProbeTimeout for the equivalent on the D-Bus-backed probe).
 const execProbeTimeout = 5 * time.Second
 
-// defaultUpdex is the executable name resolved via PATH lookup -- matching
-// the existing --updex flag's default in cmd/pilothoused/main.go -- used
-// when no executable is configured.
-const defaultUpdex = "updex"
-
 // CommandRunner runs an external command and returns its combined output.
 // It mirrors internal/modules/sysext/extctl.CommandRunner's shape but is kept
 // local to this package: internal/capability is foundational and must not
@@ -37,13 +32,16 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 
 // ProbeUpdex probes the updex capability: present iff the configured
 // executable runs `--help` and exits 0. updex is the executable configured
-// via cmd/pilothoused's --updex flag; an empty value falls back to a PATH
-// lookup of "updex", matching that flag's own default. This deliberately
-// never invokes `--json features` and never passes a definitions-root
-// argument -- the probe must not depend on a configured definitions root.
+// via cmd/pilothoused's --updex flag, which defaults to empty. An empty
+// value means updex is not configured, so the capability is absent and the
+// runner is never invoked at all -- there is deliberately no PATH-lookup
+// fallback: an unconfigured updex must never be exec'd, even if some
+// binary named "updex" happens to be on PATH. This deliberately never
+// invokes `--json features` and never passes a definitions-root argument --
+// the probe must not depend on a configured definitions root.
 func ProbeUpdex(ctx context.Context, runner CommandRunner, updex string) Set {
 	if updex == "" {
-		updex = defaultUpdex
+		return New()
 	}
 	return probeExecSuccess(ctx, runner, Updex, updex, "--help")
 }

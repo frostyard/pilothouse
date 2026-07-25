@@ -94,18 +94,28 @@ func (e *podmanProbeStatusError) Error() string { return "podman API " + e.statu
 
 // ProbePodman probes the podman capability: present iff the configured
 // --podman-socket responds to a Version call within engineProbeTimeout.
-// newPodmanProbeClient never itself returns an error -- it only builds an
-// HTTP client bound to the socket path, performing no I/O -- so every
-// failure mode (including an entirely unreachable socket) surfaces at the
-// Version call, never at construction, and is never fatal or propagated.
+// An empty socket means podman is not configured -- that flag defaults to
+// empty -- so the capability is absent, no probe client is constructed, and
+// nothing is dialled: a host that merely happens to have a podman socket at
+// some well-known path must never enable the engine without explicit
+// configuration. When a socket is configured, newPodmanProbeClient never
+// itself returns an error -- it only builds an HTTP client bound to the
+// socket path, performing no I/O -- so every failure mode (including an
+// entirely unreachable socket) surfaces at the Version call, never at
+// construction, and is never fatal or propagated.
 func ProbePodman(ctx context.Context, socket string) Set {
 	return probePodman(ctx, socket, func(socket string) podmanClient { return newPodmanProbeClient(socket) })
 }
 
 // probePodman is the testable core of ProbePodman: newClient is injected so
-// tests can exercise both branches (a fake client whose Version succeeds or
-// fails) without a real podman socket.
+// tests can exercise every branch (unconfigured, plus a fake client whose
+// Version succeeds or fails) without a real podman socket. The
+// empty-socket guard lives here, ahead of newClient, so the injected
+// constructor is provably never reached when podman is unconfigured.
 func probePodman(ctx context.Context, socket string, newClient func(string) podmanClient) Set {
+	if socket == "" {
+		return New()
+	}
 	client := newClient(socket)
 	defer client.Close()
 

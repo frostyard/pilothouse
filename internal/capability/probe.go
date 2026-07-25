@@ -10,11 +10,15 @@ import "context"
 // (dockerclient.FromEnv, the default local incus socket) main.go already
 // constructs their clients from unconditionally today.
 type Config struct {
-	// PodmanSocket is the already-configured --podman-socket path.
+	// PodmanSocket is the already-configured --podman-socket path. That
+	// flag defaults to empty; empty means podman is not configured, so
+	// ProbePodman reports it absent without constructing a client or
+	// dialling anything.
 	PodmanSocket string
-	// Updex is the already-configured --updex executable path; empty
-	// resolves via PATH lookup, matching that flag's own default and
-	// ProbeUpdex's behavior.
+	// Updex is the already-configured --updex executable path. That flag
+	// defaults to empty; empty means updex is not configured, so
+	// ProbeUpdex reports it absent without running any command. There is
+	// no PATH-lookup fallback.
 	Updex string
 }
 

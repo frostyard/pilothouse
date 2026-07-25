@@ -35,8 +35,8 @@ actually invokes the tools.
 | `--backup-timer` | — | Exact systemd backup timer to monitor; repeatable |
 | `--backup-max-age` | `48h` | Maximum acceptable age of a successful configured backup |
 | `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
-| `--podman-socket` | `/run/podman/podman.sock` | Podman API Unix socket path |
-| `--updex` | `updex` | Path to the updex executable |
+| `--podman-socket` | — | Podman API Unix socket path; Podman requires explicit configuration to enable |
+| `--updex` | — | Path to the updex executable; updex requires explicit configuration to enable |
 
 ## Environment files
 

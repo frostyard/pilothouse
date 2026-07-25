@@ -63,10 +63,10 @@ func run() error {
 	flag.Var(filesRoots.Flag(true), "files-write-root", "writable files root as id=absolute-path; repeatable")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
-	podmanSocket := flag.String("podman-socket", "/run/podman/podman.sock", "Podman API Unix socket path")
+	podmanSocket := flag.String("podman-socket", "", "Podman API Unix socket path; Podman stays disabled unless this is set")
 	socket := flag.String("socket", "/run/pilothouse/broker.sock", "Unix socket path")
 	socketGroup := flag.String("socket-group", "pilothouse", "group allowed to connect to the broker")
-	updex := flag.String("updex", "updex", "path to the updex executable")
+	updex := flag.String("updex", "", "path to the updex executable; updex stays disabled unless this is set")
 	flag.Parse()
 	backupTimers.addCommaSeparated(os.Getenv("PILOTHOUSE_BACKUP_TIMERS"))
 	if os.Geteuid() != 0 {

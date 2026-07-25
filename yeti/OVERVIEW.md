@@ -430,7 +430,14 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. The resulting `capability.Set` is not
+  probing itself is never fatal. `updex` and Podman are additionally
+  gated on explicit configuration: `--updex` and `--podman-socket` both
+  default to empty, and an empty value makes `ProbeUpdex`/`ProbePodman`
+  report the capability absent without running any command or constructing
+  a client, so a host that merely happens to have `updex` on `PATH` or a
+  socket at the conventional path never enables the tool/engine. (Docker
+  and Incus still probe from fixed ambient inputs; giving them the same
+  explicit-configuration treatment is the rest of #64's work.) The resulting `capability.Set` is not
   cached or re-probed later; a daemon restart re-probes from scratch. It is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
@@ -1197,8 +1204,10 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 - `--audit-db`, `--jobs-db` bbolt DB paths (default under `/var/lib/pilothouse`)
 - backup timer name(s) and `--backup-max-age` (default `48h`); also augmented
   by `PILOTHOUSE_BACKUP_TIMERS`
-- sysext definitions root and `updex` executable path
-- `--podman-socket` (default `/run/podman/podman.sock`)
+- sysext definitions root; `--updex` executable path (default empty — updex
+  requires explicit configuration to enable)
+- `--podman-socket` (default empty — Podman requires explicit configuration
+  to enable)
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)

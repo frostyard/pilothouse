@@ -87,6 +87,44 @@ func TestProbePodmanAppliesBoundedTimeout(t *testing.T) {
 	assertBoundedEngineTimeout(t, fake.ctx, start)
 }
 
+func TestProbePodmanAbsentAndNeverConstructsClientWhenUnconfigured(t *testing.T) {
+	// The --podman-socket flag defaults to empty. An unconfigured podman
+	// must be reported absent *without* the probe building a client or
+	// dialling: a host that merely happens to have a socket at some
+	// well-known path must not enable the engine. The injected constructor
+	// is wired to return a client whose Version succeeds, so this test
+	// cannot pass merely because a dial was attempted and failed -- the
+	// only way the Set stays empty is if the constructor is never reached.
+	constructed := false
+	fake := &fakePodmanClient{version: "5.0.0"}
+	s := probePodman(context.Background(), "", func(string) podmanClient {
+		constructed = true
+		return fake
+	})
+
+	assert.False(t, constructed, "an unconfigured podman socket must never construct a probe client")
+	assert.False(t, s.Has(Podman))
+	assert.Empty(t, s.List())
+}
+
+func TestProbePodmanExportedAbsentWhenUnconfigured(t *testing.T) {
+	// The same guard through the exported production entry point, with no
+	// injection at all.
+	s := ProbePodman(context.Background(), "")
+
+	assert.False(t, s.Has(Podman))
+	assert.Empty(t, s.List())
+}
+
+func TestProbePodmanUnconfiguredKeepsPodmanOutOfComposedProbe(t *testing.T) {
+	// The guard through the production composition path: Probe's entry in
+	// probes passes Config.PodmanSocket straight to ProbePodman, so an
+	// empty Config.PodmanSocket must leave Podman out of the composed Set.
+	s := Probe(context.Background(), Config{})
+
+	assert.False(t, s.Has(Podman))
+}
+
 func TestProbePodmanAbsentOnUnreachableSocket(t *testing.T) {
 	// Real ProbePodman (no fake) against a socket path that is guaranteed
 	// never to exist: podman.NewAPIClient never errors at construction, so
