@@ -2494,12 +2494,25 @@ header-shaped lines above and asserts `Postinstall.Content` byte-equal to it;
 that test is the standing guard against reintroducing a report-anchored parse,
 which returns a truncated body for exactly that fixture. A third pair of
 fixtures pins the trailing-newline behaviour in both directions. The pipe helper
-gets its own two rows: `rpm2cpio` against a file that is not an rpm (the source
-half exits non-zero) and a real artifact extracted into a directory the process
-cannot write to (the destination half exits non-zero, after `rpm2cpio` exited
-0), each required to surface as an error carrying that half's
-`packaging/extract: <tool>: ` prefix; the happy path is the other side of that
-contract, proving `cpio`'s `2 blocks` on standard error is not treated as a
+gets its own three rows, each required to surface as an error carrying the
+failing half's `packaging/extract: <tool>: ` prefix: `rpm2cpio` against a file
+that is not an rpm (the source half exits non-zero), a real artifact extracted
+into a directory that does not exist (the destination half never starts), and a
+real artifact whose payload is deliberately larger than any pipe buffer piped
+into a `cpio` given an option it does not implement (**the destination half
+exits before draining the pipe**). That last row is the deadlock guard: it is
+the case a sequential `Wait` hangs on forever — measured, it does not return,
+and the row's own 30-second deadline fails it rather than letting the test
+binary time out — while the concurrent implementation returns in under a tenth
+of a second. It is also the case a happy-path row cannot reach, because the
+hang needs the *consumer* to leave first with more than a buffer still to
+write. None of the three simulates a denial by `chmod`-ing a directory
+unwritable: root and `CAP_DAC_OVERRIDE` write into one anyway, so such a row
+asserts a property of whoever ran the test rather than of the code (see
+`docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md`);
+a file that is not an rpm, a path that does not exist and an unimplemented
+option get the same answer for every user. The happy path is the other side of
+that contract, proving `cpio`'s `2 blocks` on standard error is not treated as a
 failure. The four table-driven tables — the file-table line parser, the whole
 file-table output, the dependency-pairing function with the *measured* flag words
 `0`, `12`, `1280` and `16777226`, and the postinstall presence-marker parser —

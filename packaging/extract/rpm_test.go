@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frostyard/pilothouse/internal/packagingtest"
 	"github.com/frostyard/pilothouse/packaging"
@@ -90,6 +91,49 @@ func rpmHappySpec() packagingtest.Spec {
 		Postinstall: &postinstall,
 	}
 }
+
+// rpmBulkPayloadSize is the target size of the extra file rpmBulkSpec ships —
+// the file is that many bytes rounded DOWN to a whole number of content blocks.
+// It is far above Linux's 64 KiB default pipe buffer, and above the 1 MiB
+// ceiling an unprivileged F_SETPIPE_SZ can raise one to, so a consumer that
+// exits without reading cannot leave the producer's write satisfied by
+// buffering alone.
+const rpmBulkPayloadSize = 4 << 20
+
+// rpmBulkSpec is rpmHappySpec plus one file large enough to fill any pipe
+// buffer several times over.
+//
+// The content is trivially compressible, which does NOT weaken the test:
+// rpm2cpio writes the cpio stream UNCOMPRESSED, so the artifact's own
+// compression shrinks the file on disk while the pipe still carries
+// rpmBulkPayloadSize bytes.
+func rpmBulkSpec() packagingtest.Spec {
+	spec := rpmHappySpec()
+	spec.Name = "extractrpmbulkfixture"
+	spec.Files = append(spec.Files, packagingtest.File{
+		Dest:    "/opt/phx/share/bulk.dat",
+		Mode:    0o644,
+		Content: bytes.Repeat([]byte("pilothouse fixture payload block\n"), rpmBulkPayloadSize/33),
+		Owner:   "alpha",
+		Group:   "beta",
+	})
+
+	return spec
+}
+
+// rpmBogusCpioOption is an option no cpio implements. cpio rejects it and exits
+// non-zero before reading a byte of its input, which is a failure no privilege
+// level can turn into a success — unlike a directory made unwritable with
+// chmod, which root and CAP_DAC_OVERRIDE ignore.
+const rpmBogusCpioOption = "--pilothouse-not-an-option"
+
+// rpmPipeDeadline bounds how long the pipe-failure rows may take. Measured, the
+// row below returns in under a tenth of a second, so this is more than two
+// orders of magnitude of headroom: exceeding it means one half is blocked
+// rather than slow, and the row then reports a deadlock instead of hanging
+// until the whole test binary times out. Measured against a sequential
+// implementation, that row does hang and this deadline is what fails it.
+const rpmPipeDeadline = 30 * time.Second
 
 // rpmbuildTool builds the fixtures. It is named here rather than imported from
 // packagingtest because that package resolves it internally and exports no name
@@ -380,10 +424,22 @@ func TestRPMPassesRPMsTrailingNewlineBehaviourThrough(t *testing.T) {
 }
 
 // TestRPMPipeReportsFailureInEitherHalf drives the production pipe helper —
-// the same one RPM extracts every payload with — and asserts that a non-zero
-// exit from EITHER half surfaces as an error carrying that half's
+// the same one RPM extracts every payload with — and asserts that a failure in
+// EITHER half surfaces as an error carrying that half's
 // "packaging/extract: <tool>: " prefix. A shell pipeline would report only the
 // second status; this one checks both.
+//
+// Every row fails for a reason the operating system gives the same answer to
+// for every user — a file that is not an rpm, a directory that does not exist,
+// an option cpio does not implement. None simulates a denial with chmod, which
+// root and CAP_DAC_OVERRIDE ignore and which would therefore make the required
+// failure a property of who ran the test.
+//
+// The last row is the deadlock guard. It is the case the earlier sequential
+// implementation hung on forever, and the one a happy-path row cannot reach:
+// the CONSUMER exits first, while the producer still has more than a pipe
+// buffer left to write. See
+// docs/agents/skills/piped-subprocess-pairs-need-concurrent-wait.md.
 //
 // The happy-path test above is the other side of the same contract: cpio writes
 // its `2 blocks` progress line to standard error on SUCCESS, so a successful
@@ -413,38 +469,65 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 		}
 	})
 
-	t.Run("destination half exits non-zero", func(t *testing.T) {
+	t.Run("destination half never starts", func(t *testing.T) {
 		requireRPMTools(t)
-
-		// This row denies the write with a directory mode, which root and any
-		// process holding CAP_DAC_OVERRIDE ignore — cpio would then succeed and
-		// the row would report a failure that is about the runner, not the code.
-		// Skipping is the honest outcome; `make docker-ci` runs as the host
-		// UID/GID, so the row still executes where it matters.
-		if os.Geteuid() == 0 {
-			t.Skip("skipping: a mode-denied directory does not deny root, so this row cannot isolate a cpio failure")
-		}
 
 		artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmHappySpec())
 
-		// A directory the extraction cannot write into: rpm2cpio still exits 0
-		// after streaming the whole payload, and cpio still drains it, so this
-		// row isolates a failure in the SECOND half alone.
-		dir := t.TempDir()
+		// A destination directory that does not exist, so cpio's chdir fails
+		// and the SECOND half is the only one that failed. ENOENT is the same
+		// answer for every user, which a mode-denied directory is not: root and
+		// any process holding CAP_DAC_OVERRIDE write into one anyway, so a
+		// chmod-simulated denial makes the required failure a property of the
+		// runner rather than of the code (see
+		// docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md).
+		missing := filepath.Join(t.TempDir(), "no-such-directory")
 
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-
-		if err := os.Chmod(dir, 0o500); err != nil {
-			t.Fatalf("chmod %s: %v", dir, err)
-		}
-
-		err := rpmExtractPayload(t.Context(), artifact, dir)
+		err := rpmExtractPayload(t.Context(), artifact, missing)
 		if err == nil {
-			t.Fatalf("rpmExtractPayload returned no error when extracting into a directory it cannot write to")
+			t.Fatalf("rpmExtractPayload returned no error when extracting into %s, which does not exist", missing)
 		}
 
 		if want := "packaging/extract: " + cpioTool + ": "; !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not carry the prefix %q", err, want)
+		}
+	})
+
+	t.Run("destination half exits before draining a payload larger than the pipe buffer", func(t *testing.T) {
+		requireRPMTools(t)
+
+		artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmBulkSpec())
+
+		// cpio rejects the option and exits BEFORE reading a byte, which no
+		// privilege level can turn into a success. rpm2cpio meanwhile has a
+		// payload far larger than a pipe buffer still to write — rpm2cpio
+		// writes the cpio stream UNCOMPRESSED, so the artifact's own
+		// compression cannot shrink it below one. That is the shape that used
+		// to hang here forever: a producer blocked on a full pipe nobody will
+		// read, reaped before the consumer whose status explains it.
+		done := make(chan error, 1)
+
+		go func() {
+			done <- runPipe(t.Context(), t.TempDir(),
+				pipeCommand{name: rpm2cpioTool, args: []string{artifact}},
+				pipeCommand{name: cpioTool, args: []string{rpmBogusCpioOption}},
+			)
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("runPipe returned no error when %s rejected %s", cpioTool, rpmBogusCpioOption)
+			}
+
+			// The consumer's status is the root cause: the producer's own
+			// failure here is a broken pipe it took because the consumer left.
+			if want := "packaging/extract: " + cpioTool + ": "; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not carry the prefix %q", err, want)
+			}
+		case <-time.After(rpmPipeDeadline):
+			t.Fatalf("runPipe did not return within %s: the producer is wedged writing into a pipe its consumer abandoned, which is the deadlock this test exists to catch",
+				rpmPipeDeadline)
 		}
 	})
 }
