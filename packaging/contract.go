@@ -49,6 +49,55 @@ func sourceBytes(name string) []byte {
 	return b
 }
 
+// contractDependencies returns the runtime dependency list the contract
+// requires for the given format, and false when the format is not one this
+// package knows.
+//
+// The two lists are hand-written constants, transcribed from
+// .goreleaser.yaml's per-format overrides.<format>.dependencies at b1294e1.
+// Nothing here reads that file: keeping the expectation hand-written is what
+// makes it an independent statement of the contract rather than a restatement
+// of whatever the config happens to say. Tying the two together is a separate
+// drift guard, which arrives in a later change.
+//
+// The name is contractDependencies rather than the more obvious
+// wantDependencies because goreleaser_config_test.go already declares
+// wantDependencies in this package for the configuration-level assertion.
+//
+// Each list names the DIRECT provider of the same six runtime roles on both
+// platforms: the linked C library, the PAM shared library pilothoused links
+// via cgo, the package providing the PAM modules the policy loads, the package
+// providing the PAM stacks the policy includes, the libsystemd shared library,
+// and systemd itself.
+//
+// A fresh slice per call, for the same reason requirements returns one:
+// callers must not be able to mutate the contract by writing through a shared
+// backing array, and Verify sorts what it compares.
+func contractDependencies(f Format) ([]string, bool) {
+	switch f {
+	case FormatDeb:
+		return []string{
+			"libc6",
+			"libpam0g",
+			"libpam-modules",
+			"libpam-runtime",
+			"libsystemd0",
+			"systemd",
+		}, true
+	case FormatRPM:
+		return []string{
+			"glibc",
+			"pam-libs",
+			"pam",
+			"authselect-libs",
+			"systemd-libs",
+			"systemd",
+		}, true
+	default:
+		return nil, false
+	}
+}
+
 // requirement is one thing the contract demands of a package.
 //
 // It carries only the fields the checks in verify.go read; a field is added by

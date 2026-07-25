@@ -50,8 +50,8 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       make this a real Go package with an exported surface: the
                       artifact-contract model types, the finding vocabulary,
                       the embedded repository sources with the per-format
-                      requirement table, and Verify (see "Artifact contract
-                      model" below). units_test.go,
+                      requirement table and dependency lists, and Verify (see
+                      "Artifact contract model" below). units_test.go,
                       postinstall_test.go, and goreleaser_config_test.go are
                       its configuration-level tests: the first runs the real
                       `systemd-analyze verify` against both broker units and
@@ -1540,6 +1540,50 @@ multiplicity are contract-relevant — and the two directory entries
 content at all. Whatever an extractor records at those four, including nothing,
 is not a finding.
 
+**The dependency lists** (`packaging/contract.go`). `contractDependencies(format)`
+returns the runtime dependency list the contract requires for a format, and
+`false` for a format this package does not know. It is named
+`contractDependencies` and not the more obvious `wantDependencies` because
+`goreleaser_config_test.go` already declares `wantDependencies` in this same
+package for the configuration-level assertion. Each list names the **direct**
+provider of the same six runtime roles on both platforms — the linked C
+library, the PAM shared library `pilothoused` links via cgo, the package
+providing the PAM modules the policy loads, the package providing the PAM
+stacks the policy includes, the libsystemd shared library, and systemd itself:
+
+| Role | `deb` | `rpm` |
+| --- | --- | --- |
+| C library | `libc6` | `glibc` |
+| PAM shared library | `libpam0g` | `pam-libs` |
+| PAM modules | `libpam-modules` | `pam` |
+| PAM stacks the policy includes | `libpam-runtime` | `authselect-libs` |
+| libsystemd shared library | `libsystemd0` | `systemd-libs` |
+| systemd | `systemd` | `systemd` |
+
+**Provenance:** both lists are hand-written constants transcribed from
+`.goreleaser.yaml`'s per-format `overrides.<format>.dependencies` at
+`b1294e1`. Nothing in this package reads that file — keeping the expectation
+hand-written is what makes it an independent statement of the contract rather
+than a restatement of whatever the config happens to say. Tying the two
+together mechanically is a separate drift guard, which has not landed yet.
+
+**Comparison, order-independent and multiplicity-sensitive.** `Verify` compares
+*sorted clones* of the declared and the expected list with `slices.Equal`,
+never mutating the model. Nothing in the contract fixes the order the packaging
+metadata lists dependencies in, so order is not asserted; but the comparison is
+on slices, not set membership, so a missing, extra, **duplicated** or misspelled
+element all fail — including a list that repeats one name and omits another,
+whose set of names would still be a subset of the contract's.
+
+**The alternatives rule (N2).** Debian permits alternatives
+(`libc6 | libc6-udeb`), which satisfy a requirement only by accident of which
+alternative the resolver picks. The contract requires plain package names, so
+**any declared expression containing `|` is reported on its own**, independently
+of the sorted comparison and once per offending expression. A list carrying both
+faults — an otherwise-correct list with one element rewritten as an alternative
+— therefore produces two findings: the whole-list mismatch, and one naming that
+expression.
+
 **`Verify`** (`packaging/verify.go`). The signature is
 `func Verify(m Model) []Finding`, fixed by the issue. **`Verify` accumulates:**
 no check returns early and no check is skipped because an earlier one produced
@@ -1547,7 +1591,7 @@ a finding, so the result holds every independent violation the model exhibits,
 and a nil or empty result means the model satisfies every assertion implemented
 so far.
 
-`Verify` performs exactly six checks at this commit:
+`Verify` performs exactly seven checks at this commit:
 
 - **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
   zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
@@ -1576,8 +1620,15 @@ so far.
   the check that makes "the `rpm` shipped the `deb`'s PAM file" detectable at
   all: such a package installs a valid file at the right destination with the
   right mode and config designation, and nothing but the bytes gives it away.
+- **`dependency_mismatch`**, with `Path` **empty** — a dependency concerns no
+  destination — in the two independent shapes described above: one finding
+  naming got and want when the sorted declared list differs from the format's,
+  and one further finding per declared expression containing `|`, naming that
+  expression. The check is skipped entirely for an unknown format, for the same
+  reason the destination checks are: the contract for such a package is
+  unknown, not violated.
 
-Three rules keep those last three honest:
+Three rules keep the mode, config and content checks honest:
 
 - **Permission bits only.** Modes are compared as `Entry.Mode.Perm()`, so an
   extractor that sets `fs.ModeDir` on the two directory entries is not falsely
@@ -1610,7 +1661,18 @@ relocated binary in each format, a wrong mode on each of the four pinned
 destinations, a cleared config designation on each of the three, a perturbed
 and then a `nil` `Content` on each of the six byte-compared destinations, and
 several unrelated faults at once — which is what proves the accumulate
-guarantee rather than merely stating it. Two cross-format tests are the point
+guarantee rather than merely stating it. The dependency table is N2's five
+faults in each format, ten cases in all: a missing, an extra, a duplicated and
+a misspelled element, and an element rewritten as an alternative
+(`libc6 | libc6-udeb` for `deb`, `glibc | glibc-minimal-langpack` for `rpm`),
+with three companion tests pinning the rules those cases rest on — the
+fixture's list reversed verifies clean (order-independence), replacing one
+element with a duplicate of another is reported even though the list keeps its
+length and every declared name remains one the contract expects
+(multiplicity), and the alternative case reports two findings, one of which
+names the offending expression (independence from the sorted comparison). That
+last assertion is the only place these tests read a `Message`, and it matches
+only on the expression, never on the wording. Two cross-format tests are the point
 of the content check: an `rpm` model carrying `packaging/pilothouse.pam`'s
 bytes and a `deb` model carrying `packaging/rpm/pilothouse.pam`'s are each
 reported at `/etc/pam.d/pilothouse`, and the same pair of substitutions is made
@@ -1619,9 +1681,10 @@ tests pin the deliberate silences: an `fs.ModeDir`-bearing directory entry
 verifies clean, changing the mode of a unit file or a binary produces nothing,
 a config designation on the sysusers file produces nothing, and arbitrary or
 `nil` content on either binary or either directory produces nothing. Its
-expected destinations, modes, config designations and byte-compared set are
-written out by hand rather than read back from `requirements`, since the table
-is the thing under test and may not also be the oracle. The mutation helpers'
+expected destinations, modes, config designations, byte-compared set and
+dependency names are written out by hand rather than read back from
+`requirements` or `contractDependencies`, since those tables are the thing
+under test and may not also be the oracle. The mutation helpers'
 vacuity guards are load-bearing here: `withContent` fails if the bytes it
 installs are the ones the entry already carried, so the cross-format tests
 cannot silently degrade to no-ops if the two formats' sources ever converge.

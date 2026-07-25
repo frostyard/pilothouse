@@ -3,6 +3,8 @@ package packaging
 import (
 	"bytes"
 	"io/fs"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -319,6 +321,97 @@ func perturb(content []byte) []byte {
 	return append(perturbed, '\n')
 }
 
+// withoutDependency returns a copy of m no longer declaring dep, failing the
+// test if the fixture did not declare it exactly once (which would make the
+// mutation vacuous or ambiguous).
+func withoutDependency(t *testing.T, m Model, dep string) Model {
+	t.Helper()
+
+	kept := make([]string, 0, len(m.Dependencies))
+	removed := 0
+
+	for _, declared := range m.Dependencies {
+		if declared == dep {
+			removed++
+
+			continue
+		}
+
+		kept = append(kept, declared)
+	}
+
+	require.Equalf(t, 1, removed, "fixture should declare %s exactly once", dep)
+
+	m.Dependencies = kept
+
+	return m
+}
+
+// withExtraDependency returns a copy of m declaring dep in addition to
+// everything it already declares, failing the test if the fixture already
+// declares it — that would be the duplicate mutation, not the extra one.
+func withExtraDependency(t *testing.T, m Model, dep string) Model {
+	t.Helper()
+
+	require.NotContainsf(t, m.Dependencies, dep, "fixture should not already declare %s", dep)
+
+	m.Dependencies = append(slices.Clone(m.Dependencies), dep)
+
+	return m
+}
+
+// withDuplicatedDependency returns a copy of m declaring dep a second time,
+// failing the test if the fixture did not declare it exactly once.
+//
+// This is the mutation a set-membership comparison would silently accept: the
+// set of declared names is unchanged and only the multiplicity differs.
+func withDuplicatedDependency(t *testing.T, m Model, dep string) Model {
+	t.Helper()
+
+	declared := 0
+
+	for _, name := range m.Dependencies {
+		if name == dep {
+			declared++
+		}
+	}
+
+	require.Equalf(t, 1, declared, "fixture should declare %s exactly once", dep)
+
+	m.Dependencies = append(slices.Clone(m.Dependencies), dep)
+
+	return m
+}
+
+// withRenamedDependency returns a copy of m declaring to where it declared
+// from, failing the test if the fixture did not declare from exactly once or
+// if the two names are equal (which would make the mutation vacuous).
+//
+// to may be a name the fixture already declares: that is exactly the
+// multiplicity mutation, which keeps the list's length and drops one distinct
+// name.
+func withRenamedDependency(t *testing.T, m Model, from, to string) Model {
+	t.Helper()
+
+	require.NotEqual(t, from, to, "renaming a dependency to itself is not a mutation")
+
+	deps := slices.Clone(m.Dependencies)
+	renamed := 0
+
+	for i := range deps {
+		if deps[i] == from {
+			deps[i] = to
+			renamed++
+		}
+	}
+
+	require.Equalf(t, 1, renamed, "fixture should declare %s exactly once", from)
+
+	m.Dependencies = deps
+
+	return m
+}
+
 // packagedFormats is the (format, name) axis every mutation table runs over.
 var packagedFormats = []struct {
 	name   string
@@ -396,6 +489,60 @@ var contentFreeDestinations = []string{
 	"/etc/pilothouse",
 	"/etc/pilothouse/storage/credentials",
 }
+
+// dependencyFaults names, per format, one concrete instance of each fault N2
+// requires a dependency list to be rejected for.
+//
+// Every name here is written out by hand from .goreleaser.yaml's per-format
+// overrides — the same provenance as fixtureDependencies — and never read back
+// from contract.go's contractDependencies, which is the thing under test and
+// may not also be the oracle.
+var dependencyFaults = []struct {
+	name   string
+	format Format
+	// drop is the element the missing-element mutation removes.
+	drop string
+	// extra is a plausible neighbouring package the fixture does NOT declare,
+	// which the extra-element mutation adds.
+	extra string
+	// duplicate is the element the duplicated-element mutation repeats.
+	duplicate string
+	// misspelledFrom and misspelledTo are the element the misspelling
+	// mutation replaces and the near-miss name it replaces it with.
+	misspelledFrom, misspelledTo string
+	// collapsedFrom and collapsedTo are the multiplicity mutation: the
+	// element replaced, and the already-declared element it is replaced by.
+	// The result has the same length as the contract list and one fewer
+	// distinct name, so only a multiset comparison rejects it.
+	collapsedFrom, collapsedTo string
+	// alternativeFrom is the element the alternatives mutation rewrites, and
+	// alternativeTo is the alternative-bearing expression it becomes.
+	alternativeFrom, alternativeTo string
+}{{
+	name:            "deb",
+	format:          FormatDeb,
+	drop:            "libpam-runtime",
+	extra:           "libpam-modules-bin",
+	duplicate:       "systemd",
+	misspelledFrom:  "libsystemd0",
+	misspelledTo:    "libsystemd-0",
+	collapsedFrom:   "libpam0g",
+	collapsedTo:     "libc6",
+	alternativeFrom: "libc6",
+	alternativeTo:   "libc6 | libc6-udeb",
+}, {
+	name:            "rpm",
+	format:          FormatRPM,
+	drop:            "authselect-libs",
+	extra:           "pam-devel",
+	duplicate:       "systemd",
+	misspelledFrom:  "systemd-libs",
+	misspelledTo:    "systemd-lib",
+	collapsedFrom:   "pam-libs",
+	collapsedTo:     "glibc",
+	alternativeFrom: "glibc",
+	alternativeTo:   "glibc | glibc-minimal-langpack",
+}}
 
 // verifyAsContractSignature returns Verify through exactly the signature the
 // issue fixes, func(Model) []Finding. The return statement stops compiling if
@@ -782,6 +929,211 @@ func TestVerifyContentNotComparedWhereContractStatesNoSource(t *testing.T) {
 				require.Empty(t, findings)
 			})
 		}
+	}
+}
+
+// TestVerifyDependencyFaults is N2's mutation table: each of the five faults a
+// dependency list must be rejected for, in each format — ten cases. Every case
+// asserts a dependency_mismatch finding and pins the total number of findings,
+// so a mutation may not produce a second, unrelated one.
+//
+// The alternative case expects two: rewriting an element as an alternative
+// also breaks the sorted comparison, and N2 makes the two rejection reasons
+// independent, so both are reported. The dedicated alternatives test below is
+// what proves which finding is which.
+func TestVerifyDependencyFaults(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range dependencyFaults {
+		for _, mutation := range []struct {
+			name  string
+			apply func(*testing.T, Model) Model
+			want  int
+		}{{
+			name:  "missing element",
+			apply: func(t *testing.T, m Model) Model { t.Helper(); return withoutDependency(t, m, tc.drop) },
+			want:  1,
+		}, {
+			name:  "extra element",
+			apply: func(t *testing.T, m Model) Model { t.Helper(); return withExtraDependency(t, m, tc.extra) },
+			want:  1,
+		}, {
+			name:  "duplicated element",
+			apply: func(t *testing.T, m Model) Model { t.Helper(); return withDuplicatedDependency(t, m, tc.duplicate) },
+			want:  1,
+		}, {
+			name: "misspelled element",
+			apply: func(t *testing.T, m Model) Model {
+				t.Helper()
+
+				return withRenamedDependency(t, m, tc.misspelledFrom, tc.misspelledTo)
+			},
+			want: 1,
+		}, {
+			name: "alternative-containing expression",
+			apply: func(t *testing.T, m Model) Model {
+				t.Helper()
+
+				return withRenamedDependency(t, m, tc.alternativeFrom, tc.alternativeTo)
+			},
+			want: 2,
+		}} {
+			t.Run(tc.name+" "+mutation.name, func(t *testing.T) {
+				t.Parallel()
+
+				findings := Verify(mutation.apply(t, contractModel(t, tc.format)))
+				require.Equal(t, mutation.want, findingsFor(findings, CodeDependencyMismatch, ""))
+				require.Len(t, findings, mutation.want)
+			})
+		}
+	}
+}
+
+// TestVerifyDependencyOrderIsNotAsserted proves the comparison is
+// order-independent: nothing in the contract fixes the order the packaging
+// metadata lists dependencies in, so the fixture's list reversed — a fixed
+// permutation, not a random shuffle, so the test is deterministic — must
+// verify clean.
+func TestVerifyDependencyOrderIsNotAsserted(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := contractModel(t, tc.format)
+
+			reversed := slices.Clone(model.Dependencies)
+			slices.Reverse(reversed)
+			require.NotEqual(t, model.Dependencies, reversed, "reversing should be a real permutation")
+
+			model.Dependencies = reversed
+
+			require.Empty(t, Verify(model))
+		})
+	}
+}
+
+// TestVerifyDependencyMultiplicityIsCompared proves the comparison is on
+// slices rather than set membership: replacing one element with a duplicate of
+// another keeps the list's length and merely drops one distinct name, which a
+// set comparison built on "every declared name is expected" would accept.
+func TestVerifyDependencyMultiplicityIsCompared(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range dependencyFaults {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fixture := contractModel(t, tc.format)
+			model := withRenamedDependency(t, fixture, tc.collapsedFrom, tc.collapsedTo)
+
+			// The mutation is exactly the one described: same length, one
+			// fewer distinct name, and every declared name still one the
+			// contract expects.
+			require.Len(t, model.Dependencies, len(fixture.Dependencies))
+			require.Len(t, slices.Compact(slices.Sorted(slices.Values(model.Dependencies))),
+				len(fixture.Dependencies)-1)
+
+			for _, dep := range model.Dependencies {
+				require.Contains(t, fixture.Dependencies, dep)
+			}
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeDependencyMismatch, ""))
+			require.Len(t, findings, 1)
+		})
+	}
+}
+
+// TestVerifyDependencyAlternativeIsReportedSeparatelyFromTheSortedComparison
+// proves the alternatives rule is an independent rejection reason and not a
+// side effect of the list comparison: exactly one element of an otherwise
+// correct list is rewritten to offer an alternative, and Verify reports the
+// sorted-slice mismatch AND a second finding naming that expression.
+//
+// This is the one place this package's tests read a Message. They match only
+// on the expression the finding must name — the criterion N2 states — never on
+// the surrounding wording, which stays unstable.
+func TestVerifyDependencyAlternativeIsReportedSeparatelyFromTheSortedComparison(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range dependencyFaults {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Contains(t, tc.alternativeTo, " | ", "the mutation should offer an alternative")
+
+			model := withRenamedDependency(t, contractModel(t, tc.format), tc.alternativeFrom, tc.alternativeTo)
+
+			findings := Verify(model)
+			require.Equal(t, 2, findingsFor(findings, CodeDependencyMismatch, ""))
+			require.Len(t, findings, 2)
+
+			naming := 0
+
+			for _, finding := range findings {
+				if strings.Contains(finding.Message, tc.alternativeTo) {
+					naming++
+				}
+			}
+
+			// One of the two names the expression on its own; the other is the
+			// whole-list comparison, which happens to quote it inside the got
+			// list as well, so at least one is the assertion that holds.
+			require.GreaterOrEqual(t, naming, 1,
+				"a finding should name the alternative-containing expression")
+		})
+	}
+}
+
+// TestVerifyDependencyFindingsAreNotPathScoped pins O1's "empty where not
+// path-scoped" for this code: a dependency concerns no destination, so every
+// dependency finding — from either rejection reason — carries an empty Path.
+func TestVerifyDependencyFindingsAreNotPathScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range dependencyFaults {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Both faults at once, so both shapes of dependency finding are
+			// covered by the assertion below.
+			model := withExtraDependency(t, contractModel(t, tc.format), tc.extra)
+			model = withRenamedDependency(t, model, tc.alternativeFrom, tc.alternativeTo)
+
+			findings := Verify(model)
+			require.Equal(t, 2, findingsFor(findings, CodeDependencyMismatch, ""))
+			require.Len(t, findings, 2)
+
+			for _, finding := range findings {
+				require.Equal(t, CodeDependencyMismatch, finding.Code)
+				require.Empty(t, finding.Path, "a dependency finding is not path-scoped")
+			}
+		})
+	}
+}
+
+// TestVerifyAccumulatesDependencyAndMissingPath proves the dependency check
+// accumulates with the path-scoped checks rather than either masking the
+// other: a non-path-scoped finding and a path-scoped one coexist.
+func TestVerifyAccumulatesDependencyAndMissingPath(t *testing.T) {
+	t.Parallel()
+
+	const missingDest = "/usr/lib/sysusers.d/pilothouse.conf"
+
+	for _, tc := range dependencyFaults {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := withoutDependency(t, contractModel(t, tc.format), tc.drop)
+			model = withoutEntry(t, model, missingDest)
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeDependencyMismatch, ""))
+			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, missingDest))
+			require.Len(t, findings, 2)
+		})
 	}
 }
 

@@ -3,6 +3,8 @@ package packaging
 import (
 	"bytes"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // Verify reports every way m violates the packaging contract.
@@ -15,7 +17,7 @@ import (
 // Verify is pure: it reads only m and the repository sources compiled into
 // this package, opens no file and runs no command.
 //
-// The assertions Verify makes at this commit are exactly six:
+// The assertions Verify makes at this commit are exactly seven:
 //
 //   - CodeUnknownFormat (not path-scoped, so Path is empty) when m.Format is
 //     neither FormatDeb nor FormatRPM. Without it a zero-value Model would
@@ -43,6 +45,16 @@ import (
 //     exactly the bytes of the embedded source the contract builds that
 //     destination from. Six destinations are compared this way; a requirement
 //     whose source is empty compares no content (see requirement.source).
+//   - CodeDependencyMismatch, with Path empty because a dependency concerns no
+//     destination, in two independent shapes. One finding, naming got and
+//     want, when the sorted declared list is not equal to the sorted list the
+//     format's contract requires — so a missing, extra, duplicated or
+//     misspelled element all fail. One further finding per declared expression
+//     containing "|", naming that expression, because the contract requires
+//     simple package names and a Debian alternative such as
+//     "libc6 | libc6-udeb" satisfies the requirement only by accident of which
+//     alternative the resolver picks. The two are independent: a list carrying
+//     both faults reports both.
 //
 // Three deliberate silences:
 //
@@ -66,6 +78,13 @@ import (
 // worth reporting. A byte-compared entry whose Content is nil is likewise
 // reported, because every embedded source is non-empty: an extractor that
 // failed to capture the bytes must not verify clean.
+//
+// The dependency comparison is on SORTED CLONES, so it is order-independent —
+// nothing in the contract fixes the order the packaging metadata lists
+// dependencies in — but multiplicity-sensitive: it compares slices, not set
+// membership, so a list that repeats one name and omits another is reported
+// even though its set of names would still be a subset of the contract's.
+// Neither clone is written back: m is never mutated.
 //
 // A duplicate does not suppress the other checks for its destination: Verify
 // evaluates the first entry installing there for mode, config designation and
@@ -153,6 +172,57 @@ func Verify(m Model) []Finding {
 				),
 			})
 		}
+	}
+
+	// Gated on the format being known, for the same reason the requirement
+	// loop is: the contract for an unrecognised format is unknown, not
+	// violated, so CodeUnknownFormat stays the only finding such a model gets.
+	if want, known := contractDependencies(m.Format); known {
+		findings = append(findings, dependencyFindings(m.Dependencies, want)...)
+	}
+
+	return findings
+}
+
+// dependencyFindings reports every way the declared dependency list got
+// violates the contract list want.
+//
+// The two checks are deliberately independent, and a list exhibiting both
+// faults produces one finding from each: an otherwise-correct list in which a
+// single element has been rewritten as an alternative fails the sorted
+// comparison too, but the alternative must be named on its own so the reason
+// it is rejected is not buried in a whole-list diff.
+//
+// Both findings carry an empty Path: a dependency concerns no destination.
+func dependencyFindings(got, want []string) []Finding {
+	var findings []Finding
+
+	gotSorted := slices.Sorted(slices.Values(got))
+	wantSorted := slices.Sorted(slices.Values(want))
+
+	if !slices.Equal(gotSorted, wantSorted) {
+		findings = append(findings, Finding{
+			Code: CodeDependencyMismatch,
+			Message: fmt.Sprintf(
+				"the package declares dependencies %q; the contract requires exactly %q",
+				gotSorted, wantSorted,
+			),
+		})
+	}
+
+	for _, dep := range got {
+		if !strings.Contains(dep, "|") {
+			continue
+		}
+
+		findings = append(findings, Finding{
+			Code: CodeDependencyMismatch,
+			Message: fmt.Sprintf(
+				"the dependency expression %q offers an alternative; "+
+					"the contract requires plain package names",
+				dep,
+			),
+		})
 	}
 
 	return findings
