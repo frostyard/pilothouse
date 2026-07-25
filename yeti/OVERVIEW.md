@@ -1390,3 +1390,9 @@ rationale.
   response schema, the bootc and rpm-ostree policy normalizers, the daemon-side
   `AutoUpdateManager`, and the Maintenance page's read-only "Automatic updates"
   section (`queryAutoUpdate` → `autoUpdateSection`), which exposes no mutation.
+- `docs/branding.md` — the neutral-branding rules: the canonical
+  self-description sentence and where it may be used, the rule that `updex`/
+  `sysext`/`systemd-sysext`/`bootc`/`rpm-ostree` are tool and capability
+  identifiers rather than branding, and the allowlist of sites (test fixtures,
+  `docs/capabilities.md` fixture prose, the `release.yml` dispatch, mock Fleet
+  data, `yeti/` historical narrative) that naming sweeps must leave unchanged.
