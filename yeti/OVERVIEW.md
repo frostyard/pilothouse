@@ -44,12 +44,17 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       installing the package changes no runtime behavior); deb/ and
                       rpm/ hold the per-distro-family variants (broker unit's
                       --admin-group, PAM stack names) selected by
-                      .goreleaser.yaml's nfpms overrides. units_test.go is a
-                      test-only package (no exported surface) that runs the real
-                      `systemd-analyze verify` against both broker units and
-                      asserts they differ in exactly one line
+                      .goreleaser.yaml's nfpms overrides. postinstall.sh is the
+                      single shared package scriptlet (deb postinst and rpm
+                      %post). units_test.go and postinstall_test.go form a
+                      test-only package (no exported surface): the first runs
+                      the real `systemd-analyze verify` against both broker
+                      units and asserts they differ in exactly one line, the
+                      second runs the real `shellcheck` against postinstall.sh
+                      and exercises it against a temporary root
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
-                      package so `systemd-analyze` exists) for docker-* make targets
+                      package so `systemd-analyze` exists and `shellcheck` for the
+                      packaging scriptlet) for docker-* make targets
 ```
 
 ### Two binaries, one protocol
@@ -1363,9 +1368,35 @@ role rather than relying on transitive requires — deb: `libc6`, `libpam0g`,
 `pam-libs`, `pam`, `authselect-libs`, `systemd-libs`, `systemd`. The six
 roles line up one-to-one across the platforms: linked C library, PAM shared
 library, PAM modules providing `pam_nologin.so`, provider of the PAM stacks
-the policy includes, libsystemd shared library, and systemd itself. Note
-that nfpm's static owner/group metadata alone does not produce correct
-install-time ownership on either format.
+the policy includes, libsystemd shared library, and systemd itself.
+
+**Postinstall scriptlet.** nfpm's static owner/group metadata alone does not
+produce correct install-time ownership on either format: the payload is
+extracted before the `pilothouse` account exists, and nfpm's DEB tar metadata
+leaves numeric UID/GID at zero. `packaging/postinstall.sh` is wired once as
+`nfpms[0].scripts.postinstall` (nfpm's `scripts` key is not per-format, so the
+same script is the deb `postinst` and the rpm `%post`). It creates the account
+by invoking `systemd-sysusers` scoped to this package's own
+`/usr/lib/sysusers.d/pilothouse.conf` — never bare — falling back to a
+guarded `groupadd`/`useradd` pair reproducing the sysusers declaration
+(system account, primary group `pilothouse`, home `/nonexistent`, shell
+`/usr/sbin/nologin`) when `systemd-sysusers` is absent. It then re-applies
+`root:pilothouse` 0750 to `/etc/pilothouse`, `root:root` 0700 to
+`/etc/pilothouse/storage/credentials`, and `root:pilothouse` 0640 to each env
+file *that still exists* (both are `type: config`, so a deliberate deletion
+must survive an upgrade rather than fail it). `set -e` is its first effective
+line, so any failing repair exits non-zero — on Debian that leaves the package
+not-configured; on RPM the payload stays installed but the scriptlet error is
+reported, since a `%post` runs after extraction and cannot roll back its
+transaction. `PILOTHOUSE_ROOT` is a test-only seam: it defaults to empty (so
+production operands are exactly the paths above) and prefixes *only* the three
+filesystem operands the script hands to `chown`/`chmod`/`[ -e ]`, letting
+`packaging/postinstall_test.go` run the real script against a `t.TempDir()`
+with PATH-injected `chown`/`chmod`/`systemd-sysusers` fakes. The
+sysusers positional config path (relocated by `--root` instead) and the
+fallback account's home and shell values stay unprefixed. Nothing here runs
+privileged Go code or touches the broker socket — it is package-manager
+shell, invoked outside the running daemon.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If

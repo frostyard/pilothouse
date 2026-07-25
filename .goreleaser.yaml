@@ -124,6 +124,16 @@ nfpms:
     formats:
       - deb
       - rpm
+    # nFPM's `scripts` key is not per-format, so this one script is wired here,
+    # at the top level of the nfpms entry, and runs as both the Debian
+    # `postinst` and the RPM `%post`. It creates the `pilothouse` user and
+    # group from the shipped sysusers file and repairs the ownership and mode
+    # of the configuration directories and env files, which the static
+    # owner/group metadata below cannot produce on its own (the payload is
+    # extracted before the account exists, and nFPM's DEB tar metadata leaves
+    # numeric UID/GID at zero).
+    scripts:
+      postinstall: ./packaging/postinstall.sh
     # NFPM treats `overrides.<format>.contents` as a full replacement of the
     # base contents list for that format, so each override below is a
     # complete, self-contained list rather than a delta. The two formats
