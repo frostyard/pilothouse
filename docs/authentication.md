@@ -43,8 +43,12 @@ symptom.
 Every authenticated account may read metrics, extension state, storage
 inventory, and the narrow system container-engine inventories returned by
 the broker. Privileged actions require membership in the broker's
-`--admin-group`, which defaults to `sudo`. An optional `--login-group`
-restricts login entirely.
+`--admin-group`, whose flag default is `sudo`. The packaging layer, not the
+binary, carries the distro difference: the packaged broker unit passes
+`--admin-group sudo` on Debian-family hosts
+(`packaging/deb/pilothoused.service`) and `--admin-group wheel` on
+Fedora-family hosts (`packaging/rpm/pilothoused.service`). An optional
+`--login-group` restricts login entirely.
 
 The web process submits fixed query or action IDs and structured parameters. Before each operation, the broker resolves the account again so group removal takes effect without waiting for the session to expire. The registries are the only paths to privileged code; neither can execute caller-supplied commands. Action definitions reject missing and unexpected parameters, derive a canonical resource key, serialize conflicting operations, and require exact confirmation for destructive actions. Podman and Docker operations accept only full hexadecimal container IDs discovered from their system inventories. Incus operations accept only projects and validated instance names rediscovered from the local daemon before each mutation; the broker uses the fixed `/var/lib/incus/unix.socket` path and never loads configured remotes. Storage remote-mount actions (create/mount/unmount/delete for NFS and SMB) are administrator-only and modify only definitions Pilothouse itself created; unmanaged mounts are never touched. The two SMB ownership-mapped create actions additionally require paired canonical numeric `uid`/`gid` values, which the broker renders only as fixed deterministic CIFS `uid=`/`gid=` mount options — it never resolves names or accepts free-form options. Files reads (list/download) and uploads are administrator-only and are bounded to explicitly configured root IDs with a 256 MiB transfer limit; there is no generic filesystem proxy.
 
@@ -54,7 +58,7 @@ Long-running extension updates and refreshes are accepted into a separate root-o
 
 ## PAM policy
 
-`packaging/pilothouse.pam` follows the system's common authentication and account policy and honors `/etc/nologin`. Snow currently delegates these common stacks to local Unix accounts, while future SSSD, LDAP, Kerberos, smart-card, or other PAM modules can participate without changes to Pilothouse.
+Two PAM policies ship, one per distro family, because the two families name their shared stacks differently. `packaging/pilothouse.pam` is the Debian-family policy: it `@include`s `common-auth` and `common-account`. `packaging/rpm/pilothouse.pam` is the Fedora-family policy: it includes `password-auth` — Fedora's stack for non-tty, network-facing services, as opposed to `system-auth` for local console logins. Both define only the `auth` and `account` groups, because the code calls only `pam_authenticate` and `pam_acct_mgmt`, and both run `pam_nologin.so` before the account include so `/etc/nologin` is honored. Each policy delegates to whatever its host's stack resolves to — local Unix accounts today, while future SSSD, LDAP, Kerberos, smart-card, or other PAM modules can participate without changes to Pilothouse.
 
 The initial HTML conversation supports username and password prompts. Multi-step PAM conversations such as OTP enrollment or password changes will need a stateful conversation extension.
 

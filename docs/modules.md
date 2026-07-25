@@ -129,9 +129,11 @@ its one dialling method is never reached.) A
 binary on `PATH`, a live socket at a conventional path, or an exported
 `DOCKER_HOST` therefore never advertises the capability, so the `registerX`
 guard above withholds registration and the web-side gate omits the module's
-nav entry, dashboard card, and routes. `packaging/pilothoused.service`'s
-`ExecStart` passes none of the four, so a stock install runs with all four
-off until an operator adds them. Follow the same
+nav entry, dashboard card, and routes. Both packaged broker units
+(`packaging/deb/pilothoused.service` and `packaging/rpm/pilothoused.service`,
+which differ only in their `--admin-group` argument) pass none of the four in
+their `ExecStart`, so a stock install runs with all four off until an operator
+adds them. Follow the same
 shape for new optional tooling: add a `capability.Config` field fed by an
 explicitly-set flag rather than probing whatever the host happens to have.
 By contrast, the non-optional host facts (`systemd`, `journald`,

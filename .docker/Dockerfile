@@ -6,7 +6,7 @@ ARG SVU_VERSION=v3.4.1
 ARG GOVULNCHECK_VERSION=latest
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpam0g-dev libsystemd-dev \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpam0g-dev libsystemd-dev systemd \
     && rm -rf /var/lib/apt/lists/* \
     && go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} \
     && go install github.com/caarlos0/svu/v3@${SVU_VERSION} \

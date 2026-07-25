@@ -36,8 +36,15 @@ docs/                 authoritative subsystem docs (kept here, not duplicated in
   modules.md           how to add a new module: contract, file layout, action/query rules
   capabilities.md      binding table mapping every broker ID to its required host capability
 
-packaging/            systemd units, PAM policy, sysusers declaration
-.docker/              development container image (Go + PAM + systemd headers) for docker-* make targets
+packaging/            systemd units, PAM policy, sysusers declaration; deb/ and
+                      rpm/ hold the per-distro-family variants (broker unit's
+                      --admin-group, PAM stack names) selected by
+                      .goreleaser.yaml's nfpms overrides. units_test.go is a
+                      test-only package (no exported surface) that runs the real
+                      `systemd-analyze verify` against both broker units and
+                      asserts they differ in exactly one line
+.docker/              development container image (Go + PAM + systemd headers, plus the systemd
+                      package so `systemd-analyze` exists) for docker-* make targets
 ```
 
 ### Two binaries, one protocol
@@ -59,7 +66,9 @@ packaging/            systemd units, PAM policy, sysusers declaration
   Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
   permissions — never a TCP listener.
 
-`packaging/pilothoused.service` declares no `Wants=` on any engine socket, so
+Both packaged broker units (`packaging/deb/pilothoused.service` and
+`packaging/rpm/pilothoused.service`, which differ only in `--admin-group`)
+declare no `Wants=` on any engine socket, so
 installing and starting the broker never pulls in or activates
 `incus.socket` or `podman.socket`; an operator enables those units
 themselves (see the README's Podman note). The unit keeps
@@ -1186,8 +1195,10 @@ place, so a reader who lands here first does not have to reassemble it.
   are unchanged in shape and count. Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
-- **Systemd units.** `packaging/pilothoused.service` declares no `Wants=` on
-  any engine socket (only `After=`, ordering without pull-in), and its
+- **Systemd units.** Both packaged broker units
+  (`packaging/deb/pilothoused.service` and `packaging/rpm/pilothoused.service`)
+  declare no `Wants=` on
+  any engine socket (only `After=`, ordering without pull-in), and their
   `ExecStart` passes none of the four flags — so a stock install runs with
   every optional dependency off, and starting the broker never activates
   `podman.socket` or `incus.socket`.
@@ -1292,7 +1303,10 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   `packaging/pilothouse.service`'s `ExecStart` does not pass it
 
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
-- `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)
+- `--admin-group` (flag default `sudo`; the packaged units override it per
+  distro family — `packaging/deb/pilothoused.service` passes `sudo`,
+  `packaging/rpm/pilothoused.service` passes `wheel` — the Go default itself is
+  unchanged), `--login-group` (optional, restricts login)
 - `--pam-service` (default `pilothouse`)
 - `--socket` (default `/run/pilothouse/broker.sock`), `--socket-group`
   (default `pilothouse`)

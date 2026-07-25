@@ -121,20 +121,38 @@ nfpms:
       A local web administration console for image-based Linux systems, with
       an unprivileged web process and a root-only action broker.
     license: MIT
-    contents:
-      - src: ./packaging/pilothouse.service
-        dst: /usr/lib/systemd/system/pilothouse.service
-      - src: ./packaging/pilothoused.service
-        dst: /usr/lib/systemd/system/pilothoused.service
-      - src: ./packaging/pilothouse.pam
-        dst: /etc/pam.d/pilothouse
-        type: config
-      - src: ./packaging/pilothouse.sysusers
-        dst: /usr/lib/sysusers.d/pilothouse.conf
     formats:
       - deb
       - rpm
-      - apk
+    # NFPM treats `overrides.<format>.contents` as a full replacement of the
+    # base contents list for that format, so each override below is a
+    # complete, self-contained list rather than a delta. The two formats
+    # differ in their PAM stack (Debian `common-*` includes vs. Fedora
+    # `password-auth`) and in the broker unit's `--admin-group` default
+    # (`sudo` vs. `wheel`).
+    overrides:
+      deb:
+        contents:
+          - src: ./packaging/pilothouse.service
+            dst: /usr/lib/systemd/system/pilothouse.service
+          - src: ./packaging/deb/pilothoused.service
+            dst: /usr/lib/systemd/system/pilothoused.service
+          - src: ./packaging/pilothouse.pam
+            dst: /etc/pam.d/pilothouse
+            type: config
+          - src: ./packaging/pilothouse.sysusers
+            dst: /usr/lib/sysusers.d/pilothouse.conf
+      rpm:
+        contents:
+          - src: ./packaging/pilothouse.service
+            dst: /usr/lib/systemd/system/pilothouse.service
+          - src: ./packaging/rpm/pilothoused.service
+            dst: /usr/lib/systemd/system/pilothoused.service
+          - src: ./packaging/rpm/pilothouse.pam
+            dst: /etc/pam.d/pilothouse
+            type: config
+          - src: ./packaging/pilothouse.sysusers
+            dst: /usr/lib/sysusers.d/pilothouse.conf
 
 release:
   mode: replace

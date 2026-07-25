@@ -42,9 +42,11 @@ console. Add `--podman-socket`, `--docker`, `--incus`, or `--updex` to the
 line for the static Fleet preview. The [CLI reference](/reference/cli/) lists
 the exact flags and defaults.
 
-Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext mutations, and Podman, Docker, and Incus mutations for whichever of those engines was configured above.
+Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group can perform sysext mutations, and Podman, Docker, and Incus mutations for whichever of those engines was configured above. The packaged broker unit configures that group per distro family — `sudo` on Debian-family hosts, `wheel` on Fedora-family hosts.
 
 ## Install
+
+Start with the steps that are the same everywhere:
 
 ```bash
 make build
@@ -52,8 +54,27 @@ sudo systemd-sysusers packaging/pilothouse.sysusers
 sudo install -Dm0755 bin/pilothouse /usr/local/bin/pilothouse
 sudo install -Dm0755 bin/pilothoused /usr/local/libexec/pilothoused
 sudo install -Dm0644 packaging/pilothouse.service /etc/systemd/system/pilothouse.service
-sudo install -Dm0644 packaging/pilothoused.service /etc/systemd/system/pilothoused.service
+```
+
+The PAM policy and the broker unit are distro-specific, so run **only** the block matching your host. Debian-family hosts use the `common-auth`/`common-account` PAM stacks and the `sudo` admin group; Fedora-family hosts use the `password-auth` stack and the `wheel` admin group.
+
+Debian-family (Debian, Ubuntu, …):
+
+```bash
+sudo install -Dm0644 packaging/deb/pilothoused.service /etc/systemd/system/pilothoused.service
 sudo install -Dm0644 packaging/pilothouse.pam /etc/pam.d/pilothouse
+```
+
+Fedora-family (Fedora, uCore, RHEL, …):
+
+```bash
+sudo install -Dm0644 packaging/rpm/pilothoused.service /etc/systemd/system/pilothoused.service
+sudo install -Dm0644 packaging/rpm/pilothouse.pam /etc/pam.d/pilothouse
+```
+
+Then finish on either family:
+
+```bash
 sudo install -d -m0755 /etc/pilothouse
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
