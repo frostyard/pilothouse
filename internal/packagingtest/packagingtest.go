@@ -12,6 +12,7 @@
 package packagingtest
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 )
@@ -66,4 +67,77 @@ func LookTool(t TestingT, name string) string {
 	t.Skipf("skipping: %s is not on PATH (%v); `.docker/Dockerfile` installs it so this check runs under `make docker-ci`", name, err)
 
 	return ""
+}
+
+// DefaultOwner is the user name a fixture entry is recorded as owned by when
+// its Owner is empty.
+//
+// It is a placeholder name rather than "root" on purpose. A test asserting that
+// an entry's ownership was read out of a package's own metadata would pass
+// against a reader that hardcoded "root" and would therefore prove nothing;
+// against this name it cannot. Only BuildRPM records ownership — see BuildDeb
+// for why the deb builder ignores the fields entirely.
+const DefaultOwner = "alpha"
+
+// DefaultGroup is the group name a fixture entry is recorded as owned by when
+// its Group is empty. It is a placeholder rather than "root" for the reason
+// DefaultOwner gives.
+const DefaultGroup = "beta"
+
+// Dir declares a directory a fixture package installs.
+type Dir struct {
+	// Dest is the absolute destination path.
+	Dest string
+	// Mode is the mode the directory is recorded with.
+	Mode fs.FileMode
+	// Owner is the user name the directory is recorded as owned by, defaulting
+	// to DefaultOwner when empty. BuildRPM records it per entry; BuildDeb
+	// ignores it.
+	Owner string
+	// Group is the group name the directory is recorded as owned by, defaulting
+	// to DefaultGroup when empty. BuildRPM records it per entry; BuildDeb
+	// ignores it.
+	Group string
+}
+
+// File declares a regular file a fixture package installs.
+type File struct {
+	// Dest is the absolute destination path.
+	Dest string
+	// Mode is the mode the file is recorded with.
+	Mode fs.FileMode
+	// Content is the file's bytes.
+	Content []byte
+	// Config marks the file as a configuration file in the package metadata.
+	Config bool
+	// Owner is the user name the file is recorded as owned by, defaulting to
+	// DefaultOwner when empty. BuildRPM records it per entry; BuildDeb ignores
+	// it.
+	Owner string
+	// Group is the group name the file is recorded as owned by, defaulting to
+	// DefaultGroup when empty. BuildRPM records it per entry; BuildDeb ignores
+	// it.
+	Group string
+}
+
+// Spec declares a throwaway fixture package.
+//
+// One Spec feeds both builders, so a Spec handed to both has to stay within
+// what both accept. Depends is the one field where that bites: its strings are
+// written into each format's own metadata verbatim, never translated, so a
+// shared Spec must use syntax valid in both — plain dependency names. See
+// BuildRPM for rpm's version-constraint syntax and BuildDeb for deb's.
+//
+// Postinstall distinguishes three states, and the distinction is load-bearing:
+// nil means the fixture ships no postinstall scriptlet at all, while a non-nil
+// pointer — including one to the empty string — means it ships that body. Only
+// BuildDeb can express the empty case; BuildRPM rejects it, for the measured
+// reason its doc comment gives.
+type Spec struct {
+	Name        string
+	Version     string
+	Dirs        []Dir
+	Files       []File
+	Depends     []string
+	Postinstall *string
 }

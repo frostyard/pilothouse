@@ -10,40 +10,6 @@ import (
 	"strings"
 )
 
-// Dir declares a directory a fixture package installs.
-type Dir struct {
-	// Dest is the absolute destination path.
-	Dest string
-	// Mode is the mode the directory is recorded with.
-	Mode fs.FileMode
-}
-
-// File declares a regular file a fixture package installs.
-type File struct {
-	// Dest is the absolute destination path.
-	Dest string
-	// Mode is the mode the file is recorded with.
-	Mode fs.FileMode
-	// Content is the file's bytes.
-	Content []byte
-	// Config marks the file as a configuration file in the package metadata.
-	Config bool
-}
-
-// Spec declares a throwaway fixture package.
-//
-// Postinstall distinguishes three states, and the distinction is load-bearing:
-// nil means the fixture ships no postinstall scriptlet at all, while a non-nil
-// pointer — including one to the empty string — means it ships that body.
-type Spec struct {
-	Name        string
-	Version     string
-	Dirs        []Dir
-	Files       []File
-	Depends     []string
-	Postinstall *string
-}
-
 // controlDirMode is the mode dpkg-deb requires of a DEBIAN control directory.
 // `dpkg-deb --build` refuses anything outside 0755-0775 ("control directory
 // has bad permissions 700"), and t.TempDir() creates 0700 directories, so
@@ -68,6 +34,13 @@ const rawFileMode = fs.FileMode(0o644)
 // later scans for packages. Every declared directory and file is chmodded to
 // its declared mode explicitly, so the caller's umask cannot alter what the
 // package records.
+//
+// BuildDeb ignores Dir.Owner, Dir.Group, File.Owner and File.Group. It builds
+// with `dpkg-deb --root-owner-group`, which records every archived path as
+// root/root, and a deb's payload is read back by extracting it to disk, from
+// which the archived ownership cannot be recovered at all. Honouring the fields
+// would therefore record something no reader of the artifact could observe.
+// BuildRPM is where they take effect.
 //
 // dpkg-deb is resolved through LookTool, so a host without it skips the
 // calling test with an explicit reason and an environment declaring the tools
@@ -209,7 +182,7 @@ func stageDebRaw(staging string, tree map[string][]byte, modes map[string]fs.Fil
 		dirs = append(dirs, path)
 	}
 
-	// Deepest path first, for the same reason stageDebPayload does it.
+	// Deepest path first, for the same reason stagePayload does it.
 	slices.SortFunc(dirs, func(a, b string) int { return len(splitPath(b)) - len(splitPath(a)) })
 
 	for _, dir := range dirs {
@@ -231,7 +204,7 @@ func stageDeb(tree string, s Spec) error {
 		return err
 	}
 
-	return stageDebPayload(tree, s)
+	return stagePayload(tree, s)
 }
 
 // stageDebControl writes DEBIAN/control plus the two optional control members.
@@ -277,13 +250,15 @@ func stageDebControl(tree string, s Spec) error {
 	return nil
 }
 
-// stageDebPayload creates the declared directories and files.
+// stagePayload creates the declared directories and files. Both builders use
+// it: the payload tree a Spec describes is the same tree whichever format packs
+// it, and only the metadata around it differs.
 //
 // Directories are created at synthesizedDirMode first and given their declared
 // modes only once every file is written, so a restrictive declared mode cannot
 // block the staging of something beneath it. The declared modes are applied
 // deepest path first for the same reason.
-func stageDebPayload(tree string, s Spec) error {
+func stagePayload(tree string, s Spec) error {
 	for _, d := range s.Dirs {
 		if err := makeDirs(tree, d.Dest); err != nil {
 			return err
