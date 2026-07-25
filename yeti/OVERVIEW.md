@@ -59,6 +59,16 @@ packaging/            systemd units, PAM policy, sysusers declaration
   Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
   permissions — never a TCP listener.
 
+`packaging/pilothoused.service` declares no `Wants=` on any engine socket, so
+installing and starting the broker never pulls in or activates
+`incus.socket` or `podman.socket`; an operator enables those units
+themselves (see the README's Podman note). The unit keeps
+`After=incus.socket systemd-sysext.service podman.socket`, which only orders
+the broker behind those units when something else has already started them.
+Note that at this commit an engine socket that happens to be running is still
+probed and enabled without explicit Pilothouse configuration — this change
+removes only the unit-level pull-in, not presence-based enablement.
+
 ### Modules (`internal/modules/<name>`)
 
 Each module is a vertical slice: collector/manager, `module.go` (routes +
