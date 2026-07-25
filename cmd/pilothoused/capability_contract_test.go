@@ -585,9 +585,13 @@ func registerEverythingForFixture(t *testing.T, caps capability.Set) contractReg
 	require.NoError(t, registerAutoUpdate(queries, maintenance.NewAutoUpdateManager(autoUpdateSystemdClient, caps.Has(capability.AutoupdateBootc), caps.Has(capability.AutoupdateRPMOStree), t.TempDir()), caps))
 
 	// podman/docker/incus client construction never depends on a probed
-	// capability either (a bad socket/env just makes the engine
+	// capability either (a bad socket/endpoint just makes the engine
 	// unreachable, which capability.Probe already accounts for), so their
-	// fakes are always live too.
+	// fakes are always live too. Docker's live client is additionally gated
+	// on the --docker flag in run() (see connectDocker), but that gate gives
+	// registerDocker no capability it wouldn't otherwise get: an unset flag
+	// also leaves the docker capability absent, which is exactly the
+	// capability-off column this matrix already covers.
 	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, caps))
 	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, caps))
 	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, caps))

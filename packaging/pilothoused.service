@@ -1,7 +1,6 @@
 [Unit]
 Description=Pilothouse privileged broker
 After=incus.socket systemd-sysext.service podman.socket
-Wants=incus.socket podman.socket
 Before=pilothouse.service
 
 [Service]

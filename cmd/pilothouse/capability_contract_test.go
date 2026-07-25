@@ -1268,9 +1268,19 @@ func cannedQueryResponse(target any) error {
 // a completeness assertion is only meaningful when it is checked against
 // the live production wiring, not a second copy of the module list that
 // could silently drift from it.
+//
+// dev=true: this harness's moduleRequiredCapabilities oracle carries an
+// explicit `"fleet": nil` entry (fleet is always available on every fixture,
+// with no capability gate), and expectModuleAvailable fails on any module ID
+// missing from that map — so the harness requires fleet to stay registered.
+// Passing true keeps every fixture here exercising exactly the module set it
+// was written against, rather than expanding this harness's fixture matrix
+// along a second, capability-independent axis. The production default
+// (--dev absent, so newRegistry(false) and no fleet at all) is covered
+// directly by cmd/pilothouse/fleet_test.go instead.
 func newCapabilityContractServer(t *testing.T, brokerClient web.BrokerClient) (*platform.Registry, http.Handler) {
 	t.Helper()
-	registry, err := newRegistry()
+	registry, err := newRegistry(true)
 	require.NoError(t, err)
 	server, err := web.NewServer(registry, brokerClient, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 	require.NoError(t, err)

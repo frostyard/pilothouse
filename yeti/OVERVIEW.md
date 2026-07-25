@@ -59,6 +59,19 @@ packaging/            systemd units, PAM policy, sysusers declaration
   Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
   permissions — never a TCP listener.
 
+`packaging/pilothoused.service` declares no `Wants=` on any engine socket, so
+installing and starting the broker never pulls in or activates
+`incus.socket` or `podman.socket`; an operator enables those units
+themselves (see the README's Podman note). The unit keeps
+`After=incus.socket systemd-sysext.service podman.socket`, which only orders
+the broker behind those units when something else has already started them.
+That change removed only the unit-level pull-in; presence-based enablement
+was removed separately, per engine, by the `--podman-socket`, `--docker`, and
+`--incus` flags described under "Capability probing at startup" below. As of
+this commit none of the three container engines is enabled by socket presence:
+an engine socket that happens to be running is not probed at all unless its
+flag is set.
+
 ### Modules (`internal/modules/<name>`)
 
 Each module is a vertical slice: collector/manager, `module.go` (routes +
@@ -83,7 +96,7 @@ by accident. Current modules:
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
 | `maintenance` | Read-only host-image status (booted/staged/rollback deployments with bootc's image references and digests, supplemented by rpm-ostree version/checksum detail, plus soft-reboot eligibility when bootc reports it), maintenance-job state, reboot posture (including the merged-but-disabled-extension reason it derives from the shared `sysext.ExtensionsSource` aggregate), confirmed reboot. No host-image mutation. Read-only automatic-update (updater policy/timer) status is reported daemon-side through `QueryAutoUpdateStatus`, consumed web-side by the module's own `queryAutoUpdate`, and rendered by the Maintenance page's "Automatic updates" section — one independent subsection per updater (bootc, rpm-ostree) carrying its timer active/unit-file state, next trigger, service active state and last result, normalized policy, and both drop-in-presence booleans, or an explicit "not configured" statement when that updater has no payload. The section is fetched and shown under the same `HasAny(bootc, rpm-ostree)` gate as the host-image section, so it is absent entirely on a host advertising neither. No automatic-update mutation: the section carries no control and the broker's ID vocabulary has no matching action. |
 | `activity` | Admin-only view over durable audit history (`QueryActivity`) and background jobs (`QueryJobs`). |
-| `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. |
+| `fleet` | Static UI preview only — no real multi-system transport/enrollment exists yet. Because of that it is **not registered in production**: `cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only under the `--dev` flag (default `false`, and `packaging/pilothouse.service` does not pass it). Without `--dev` the module is never constructed, so `Mount` never runs and `/fleet`, `/fleet/enroll`, and `/fleet/systems/{id}` are unregistered routes (a mux 404, not a capability 404), with no nav entry and no sidebar system-picker link. |
 
 See `docs/modules.md` for the module contract, recommended file layout, and
 rules for adding a new module (routes, actions, queries).
@@ -420,7 +433,31 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. The resulting `capability.Set` is not
+  probing itself is never fatal. `updex`, Podman, Docker, and Incus are
+  additionally gated on explicit configuration: `--updex`,
+  `--podman-socket`, and `--docker` all default to empty and `--incus`
+  defaults to `false`, and an unset value makes
+  `ProbeUpdex`/`ProbePodman`/`ProbeDocker`/`ProbeIncus` report the
+  capability absent without running any command, performing any I/O, or
+  dialling anything. The "no client is built" half of that holds literally
+  for Docker — `probeDocker`'s empty-endpoint guard sits ahead of its
+  constructor — but not for Incus: `ProbeIncus` evaluates
+  `newIncusProbeClient()` in its call to `probeIncus`, before the `enabled`
+  guard, so a disabled probe does allocate that struct. It is a pure
+  allocation with no dial and no I/O, and `probeIncus` returns early
+  without ever calling its `Server` method. So a host that merely happens
+  to have `updex` on
+  `PATH`, a socket at the conventional path, `DOCKER_HOST` exported, or a
+  live `/var/lib/incus/unix.socket` never enables the tool/engine. Docker's
+  non-empty endpoint is also the *only* input its client is built from —
+  `ProbeDocker` and `cmd/pilothoused`'s live client both use
+  `dockerclient.WithHost(endpoint)`, never `dockerclient.FromEnv`, so the
+  SDK's implicit `DOCKER_HOST`/default-socket resolution is never
+  consulted. Incus is the opposite shape: its socket path is *not*
+  configurable — it stays fixed at `/var/lib/incus/unix.socket` — so
+  `capability.Config.IncusEnabled` is a plain bool carrying `--incus`, and
+  `ProbeIncus(ctx, false)` returns an empty set before its client's
+  `Server` call is ever reached. The resulting `capability.Set` is not
   cached or re-probed later; a daemon restart re-probes from scratch. It is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
@@ -433,9 +470,21 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   convention new modules follow. `registerPodman`/`registerDocker`/
   `registerIncus` are the first full conversions — each takes `caps
   capability.Set` and registers nothing for its engine when the
-  corresponding capability is absent (an unreachable or misconfigured
-  engine, including a Docker client that fails to construct, is logged as
-  a warning, never a fatal `run()` error). `registerServices` and
+  corresponding capability is absent. No engine state is ever a fatal
+  `run()` error, but only one of them is warned about. A *configured but
+  unreachable* engine degrades silently: `ProbeDocker` narrows to absent on
+  a `Ping` failure without logging anything, and `registerDocker` then
+  registers nothing. The single warnable case is a Docker client that fails
+  to construct from a configured `--docker` endpoint (e.g. a malformed
+  endpoint), which `connectDocker` logs as a warning before returning nil.
+  An *unconfigured* engine — `--docker` left empty — is not a warnable
+  condition either, so `connectDocker` returns nil silently and no client
+  is built. Podman's and Incus's client constructors stay
+  unconditional in `run()` because neither performs I/O at construction;
+  for Incus, `--incus` acts entirely through the probe, so
+  `registerIncus`'s `caps.Has(capability.Incus)` guard is what leaves the
+  engine with no registered query or action when the flag is false.
+  `registerServices` and
   `registerLogs` are the next conversions: `registerServices` guards
   `QueryServicesState` and every services lifecycle action on
   `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
@@ -561,9 +610,13 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   (`RequiredCapabilities() []capability.ID`) a `Module` optionally
   implements to declare that its whole surface (nav entry, dashboard cards,
   routes) needs some set of host capabilities present (`Set.HasAll`
-  semantics); a `Module` that does not implement it has no requirement and
-  is always available — the default for `system`/`files`/`activity`/`fleet`
-  and storage's own inventory reads. `Gate(host Host, ids []capability.ID,
+  semantics); a `Module` that does not implement it has no capability
+  requirement and is available whenever it is registered — the default for
+  `system`/`files`/`activity`/`fleet` and storage's own inventory reads.
+  (Registration is a separate switch from capability gating: `fleet` carries
+  no `CapabilityGate`, but `cmd/pilothouse` only registers it under `--dev`,
+  so on a production process it is absent from the registry entirely rather
+  than gated within it.) `Gate(host Host, ids []capability.ID,
   next http.HandlerFunc) http.HandlerFunc` wraps a `Mount`-registered
   handler so the route itself stays mounted on the shared mux, but 404s at
   request time when `host.Capabilities(ctx)` doesn't `HasAll(ids...)` —
@@ -1031,13 +1084,21 @@ optional tooling never shows a dead link or a button that always fails.
 
   Modules with partial or no gating: `storage` deliberately does *not*
   implement `CapabilityGate` — its inventory (nav, dashboard card,
-  `GET /storage`) is always available, and only its three remote-mount routes
+  `GET /storage`) is available on every capability set — `storage` is
+  registered unconditionally, so unlike `fleet` there is no registration
+  switch either — and only its three remote-mount routes
   (`GET /storage/mounts/new`, `POST /storage/mounts`, and
   `POST /storage/mounts/{id}/{action}`, which covers mount, unmount, and
   delete) are wrapped in `platform.Gate(host, {Systemd}, ...)`, with the "Add
   remote mount" link and the entire per-mount actions block collapsed behind
   the same `Systemd` flag in `views.templ`. `system`, `files`, `activity`, and
-  `fleet` declare no capability requirement and are always available.
+  `fleet` declare no capability requirement, so they are available on every
+  capability set they are registered under. `fleet` is the one module whose
+  exposure is decided at registration rather than by capabilities:
+  `cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only under
+  the `--dev` flag (default `false`), so a production process has no fleet
+  module, no fleet nav entry, no fleet system-picker link, and no mounted
+  fleet routes at all.
 - **Attention's per-provider capability skip**
   (`internal/modules/attention/module.go`). The attention aggregator holds
   `[]platform.HealthProvider` and calls `Health` directly — outside any
@@ -1096,6 +1157,52 @@ optional tooling never shows a dead link or a button that always fails.
   `webSideUngatedBrokerIDs` exemption (the four `ActionSysext*` IDs) and its
   `Len == 4` assertion were deleted in the same change, so those IDs are now
   subject to the ordinary web-side capability check.
+
+### Optional tooling is explicitly opt-in (end state, #64)
+
+Several bullets above narrate individual pieces of #64 (sub-phase 1 of 4
+split from #53, phase 4 of the #35 arc). This is the landed end state in one
+place, so a reader who lands here first does not have to reassemble it.
+
+- **The rule.** An optional dependency is enabled only by explicit
+  configuration *plus* a reachable endpoint. Presence on the host is never
+  enough. Four dependencies are optional in this sense — `updex`, Podman,
+  Docker, Incus — and each is now off unless its flag is set: `--updex`
+  (path, default empty), `--podman-socket` (path, default empty), `--docker`
+  (endpoint, default empty), `--incus` (bool, default `false`). At the zero
+  value each probe returns an empty `Set` before doing any I/O: no command
+  is run and no socket is dialled, with no `PATH` fallback for `updex` and
+  no `dockerclient.FromEnv` for Docker. `ProbePodman`/`ProbeDocker` do not
+  reach their client constructors at all; `ProbeIncus` allocates its client
+  struct before the guard, but that allocation performs no I/O and the
+  client's only dialling method is never called.
+- **What did not change.** `systemd`, `journald`, `sysext`, `bootc`,
+  `rpm-ostree`, and the two `autoupdate-*` capabilities stay presence-probed
+  and carry no flag. Every `registerX` guard in `cmd/pilothoused` is
+  untouched — the guards were already correct, and the defect was entirely
+  in what fed them. No broker ID was added or removed: `internal/broker/api.go`
+  still declares 35 `Action*` and 19 `Query*` constants (54 total), and
+  `docs/capabilities.md`'s binding table and both capability contract tests
+  are unchanged in shape and count. Both contract harnesses build fixtures
+  from explicit `capability.Set` values rather than from a live `Probe`, so a
+  fixture naming `podman` still means "podman was configured and reachable."
+- **Systemd units.** `packaging/pilothoused.service` declares no `Wants=` on
+  any engine socket (only `After=`, ordering without pull-in), and its
+  `ExecStart` passes none of the four flags — so a stock install runs with
+  every optional dependency off, and starting the broker never activates
+  `podman.socket` or `incus.socket`.
+- **Mock Fleet.** `fleet` is a static preview with no real transport, so it
+  is gated at *registration*, not by capabilities: `newRegistry(dev bool)`
+  appends `fleet.New()` only under `--dev`. With the flag off the module is
+  never constructed, so there is no nav entry, no sidebar system-picker link
+  (that link derives from `data.Modules` rather than a hardcoded href), and
+  `/fleet`, `/fleet/enroll`, and `/fleet/systems/{id}` are unregistered — a
+  mux 404, not a `platform.Gate` 404.
+- **Net effect on a bare host.** `pilothoused` on a host with nothing
+  configured probes clean, advertises whatever presence-probed capabilities
+  it found, registers no engine or `updex` query/action, and starts
+  successfully; the console renders the surfaces that remain and omits the
+  rest entirely rather than showing them broken.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 
@@ -1178,6 +1285,11 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   (default `/run/pilothouse/broker.sock`)
 - repeatable `--allowed-origin`; also augmented by `PILOTHOUSE_ALLOWED_ORIGINS`
 - `--secure-cookie` (set behind a TLS-terminating proxy)
+- `--dev` (default `false`) — registers in-development preview modules not
+  backed by real functionality; today that is exactly one module, `fleet`.
+  It is a bare bool with no companion environment variable, matching
+  `--secure-cookie` rather than the repeatable env-augmented flags, and
+  `packaging/pilothouse.service`'s `ExecStart` does not pass it
 
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
 - `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)
@@ -1187,8 +1299,20 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
 - `--audit-db`, `--jobs-db` bbolt DB paths (default under `/var/lib/pilothouse`)
 - backup timer name(s) and `--backup-max-age` (default `48h`); also augmented
   by `PILOTHOUSE_BACKUP_TIMERS`
-- sysext definitions root and `updex` executable path
-- `--podman-socket` (default `/run/podman/podman.sock`)
+- sysext definitions root; `--updex` executable path (default empty — updex
+  requires explicit configuration to enable)
+- `--podman-socket` (default empty — Podman requires explicit configuration
+  to enable)
+- `--docker` endpoint, e.g. `unix:///var/run/docker.sock` (default empty —
+  Docker requires explicit configuration to enable; unset means no docker
+  client is constructed at all, in the probe or in `run()`)
+- `--incus` bool (default `false` — Incus requires this explicit opt-in to
+  enable; unset means `ProbeIncus` returns an empty set without contacting
+  the socket, so `registerIncus` registers nothing). The socket path itself
+  is not configurable: it stays fixed at `/var/lib/incus/unix.socket`, and
+  the flag gates only whether that path is probed. `incus.NewLocalClient()`
+  in `run()` is still constructed unconditionally — it performs no I/O —
+  since the capability guard is what withholds registration
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)

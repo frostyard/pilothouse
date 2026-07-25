@@ -72,13 +72,28 @@ func TestProbeUpdexInvocationIsExactlyHelp(t *testing.T) {
 		"probe must not invoke --json/features or pass a definitions-root argument")
 }
 
-func TestProbeUpdexResolvesEmptyExecutableToPathLookup(t *testing.T) {
+func TestProbeUpdexAbsentAndNeverRunsAnythingWhenUnconfigured(t *testing.T) {
+	// The --updex flag defaults to empty. An unconfigured updex must be
+	// reported absent *without* the probe exec'ing anything -- there is no
+	// PATH-lookup fallback to "updex" any more. The runner is wired to
+	// succeed so this test cannot pass merely because a probe ran and
+	// failed: the only way the Set stays empty is if Run is never reached.
 	runner := &fakeCommandRunner{output: []byte("usage: updex ...")}
 	s := ProbeUpdex(context.Background(), runner, "")
 
-	require.Len(t, runner.calls, 1)
-	assert.Equal(t, "updex", runner.calls[0].name)
-	assert.True(t, s.Has(Updex))
+	assert.Empty(t, runner.calls, "an unconfigured updex must never be exec'd, not even via PATH")
+	assert.False(t, s.Has(Updex))
+	assert.Empty(t, s.List())
+}
+
+func TestProbeUpdexUnconfiguredKeepsUpdexOutOfComposedProbe(t *testing.T) {
+	// The same guard through the production composition path: Probe's
+	// entry in probes passes Config.Updex straight to ProbeUpdex, so an
+	// empty Config.Updex must leave Updex out of the composed Set. This
+	// proves the wiring from Config to the guard, not just the guard.
+	s := Probe(context.Background(), Config{})
+
+	assert.False(t, s.Has(Updex))
 }
 
 func TestProbeUpdexUsesConfiguredExecutable(t *testing.T) {

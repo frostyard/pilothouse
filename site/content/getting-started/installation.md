@@ -35,7 +35,14 @@ sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
 ```
 
-Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext, Podman, and Docker mutations.
+That broker line configures none of the optional tooling, so Podman, Docker,
+Incus, and every `updex`-backed extension operation are absent from the
+console. Add `--podman-socket`, `--docker`, `--incus`, or `--updex` to the
+`pilothoused` line for the surfaces you want, and `--dev` to the `pilothouse`
+line for the static Fleet preview. The [CLI reference](/reference/cli/) lists
+the exact flags and defaults.
+
+Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext mutations, and Podman, Docker, and Incus mutations for whichever of those engines was configured above.
 
 ## Install on snosi
 
@@ -51,6 +58,8 @@ sudo install -d -m0755 /etc/pilothouse
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
+
+The packaged units are deliberately minimal: `pilothoused.service` passes none of the four optional-tooling flags and declares no `Wants=` on `podman.socket` or `incus.socket`, and `pilothouse.service` does not pass `--dev`. A stock install therefore enables no container engine, no `updex`-backed extension operation, and no Fleet preview until you add the flags to the relevant `ExecStart`.
 
 For an immutable production image, package the binary and unit in a dedicated sysext and keep mutable updex state under `/etc/sysupdate.d` and `/var/lib/extensions.d`.
 

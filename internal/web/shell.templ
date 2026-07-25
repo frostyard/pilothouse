@@ -44,7 +44,14 @@ templ Layout(data LayoutData, body templ.Component) {
 						<span class="brand-mark">❄</span>
 						<span><strong>Pilothouse</strong><small>frostyard admin</small></span>
 					</a>
-					<div class="system-picker"><span>System</span><a href="/fleet"><strong>local</strong><small>connected · this host</small></a></div>
+					<div class="system-picker">
+						<span>System</span>
+						if path := fleetPath(data.Modules); path != "" {
+							<a href={ templ.SafeURL(path) }><strong>local</strong><small>connected · this host</small></a>
+						} else {
+							<div class="system-entry"><strong>local</strong><small>connected · this host</small></div>
+						}
+					</div>
 					<nav class="nav" aria-label="Primary navigation">
 						<div class="nav-group">Console</div>
 						<a href="/" class={ "nav-link", templ.KV("active", data.Active == "dashboard") }>
@@ -204,6 +211,23 @@ func userInitial(username string) string {
 
 func navNumber(value int) string {
 	return fmt.Sprintf("%02d", value)
+}
+
+// fleetPath returns the registered fleet module's path, or "" when fleet is
+// not in modules. The sidebar's system-picker uses it to decide whether the
+// "local" entry is a link into the Fleet preview at all, so that link is
+// derived from the same already-filtered manifest list the nav loops read
+// rather than from a hardcoded href. Fleet is registered only under
+// cmd/pilothouse's --dev flag; deriving the link this way means it can never
+// render — and so can never point at an unregistered, 404ing route — on a
+// production build where fleet was never registered.
+func fleetPath(modules []platform.Manifest) string {
+	for _, module := range modules {
+		if module.ID == "fleet" {
+			return module.Path
+		}
+	}
+	return ""
 }
 
 templ Login(message, username, csrf string) {

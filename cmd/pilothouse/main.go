@@ -45,11 +45,12 @@ func run() error {
 	var allowedOrigins stringListFlag
 	flag.Var(&allowedOrigins, "allowed-origin", "trusted public HTTP(S) origin when behind a reverse proxy; repeatable")
 	secureCookie := flag.Bool("secure-cookie", false, "require HTTPS when sending the session cookie")
+	dev := flag.Bool("dev", false, "register in-development preview modules that are not backed by real functionality")
 	flag.Parse()
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	registry, err := newRegistry()
+	registry, err := newRegistry(*dev)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
@@ -88,23 +89,39 @@ func run() error {
 // the real, production-wired registry directly instead of maintaining a
 // second, hand-duplicated module list.
 //
-// It takes no arguments: every module here is now either self-contained or
-// broker-backed. sysext was the last holdout — it used to be handed an
-// exec-backed extension manager built from the web process's own
-// --definitions-root/--updex flags, and now reads through
-// broker.QueryExtensionsState like every other read-only module, so those
-// two flags no longer exist on the web binary. The exec-backed manager
-// itself moved to internal/modules/sysext/extctl, which this binary does
-// not import at all. (cmd/pilothoused keeps its own definitions-root/updex
-// flags; it is the process that actually runs the tools.)
-func newRegistry() (*platform.Registry, error) {
+// Every module here is either self-contained or broker-backed. sysext was
+// the last holdout — it used to be handed an exec-backed extension manager
+// built from the web process's own --definitions-root/--updex flags, and now
+// reads through broker.QueryExtensionsState like every other read-only
+// module, so those two flags no longer exist on the web binary. The
+// exec-backed manager itself moved to internal/modules/sysext/extctl, which
+// this binary does not import at all. (cmd/pilothoused keeps its own
+// definitions-root/updex flags; it is the process that actually runs the
+// tools.)
+//
+// Its one argument, dev, mirrors run()'s --dev flag (default false, so
+// production — including packaging/pilothouse.service's ExecStart, which
+// does not pass it — gets dev=false). It gates the preview-only modules that
+// are not backed by real functionality; today that is exactly fleet, a
+// static mock with no multi-system transport or enrollment behind it. When
+// dev is false, fleet.New() is never constructed and never reaches
+// platform.NewRegistry, so Mount() is never called for it and all three of
+// its routes (/fleet, /fleet/enroll, /fleet/systems/{id}) are genuinely
+// unregistered — a real 404 from the mux, not a capability gate. Because
+// internal/web derives the nav entry and the sidebar system-picker link from
+// the registry's manifests, dropping the registration is the single switch
+// that removes all three of Fleet's surfaces at once.
+func newRegistry(dev bool) (*platform.Registry, error) {
 	system := systemmodule.New(systemmodule.NewLinuxCollector("/"))
 	serviceModule := services.New()
 	backupModule := backups.New()
 	maintenanceModule := maintenance.New()
 	storageModule := storage.New()
-	return platform.NewRegistry(
-		fleet.New(),
+	modules := []platform.Module{}
+	if dev {
+		modules = append(modules, fleet.New())
+	}
+	modules = append(modules,
 		attention.New(system, serviceModule, maintenanceModule, backupModule, storageModule),
 		activity.New(),
 		system,
@@ -119,6 +136,7 @@ func newRegistry() (*platform.Registry, error) {
 		maintenanceModule,
 		backupModule,
 	)
+	return platform.NewRegistry(modules...)
 }
 
 type stringListFlag []string

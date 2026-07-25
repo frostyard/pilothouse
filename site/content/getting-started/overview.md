@@ -5,7 +5,7 @@ group: Getting started
 order: 1
 ---
 
-pilothouse is a local web administration console for [snosi](https://github.com/frostyard/snosi) installations. It starts with a live system dashboard and complete sysext lifecycle management through snosi's `updex` interface.
+pilothouse is a local web administration console for [snosi](https://github.com/frostyard/snosi) installations. It starts with a live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through snosi's `updex` interface.
 
 The application is built from Go and templ on the server, HTMX for focused page updates, an embedded design system, and no Node runtime or external frontend assets.
 
@@ -20,6 +20,24 @@ The application is built from Go and templ on the server, HTMX for focused page 
 - System Podman, Docker Engine, and local Incus inventories with lifecycle controls and bounded log viewing
 - Reboot-required posture and confirmed host reboot
 - Exact systemd backup timer monitoring with freshness and last-result health
+
+## What is optional
+
+`updex` and the three container engines are off unless you configure them.
+The broker probes `updex`, Podman, Docker, and Incus only when `--updex`,
+`--podman-socket`, `--docker`, or `--incus` is passed to `pilothoused`; an
+unconfigured one is reported absent without running a command or contacting
+a socket, so an engine socket that merely happens to be running on the host
+never enables anything. The packaged unit passes none of the four, which
+means a stock install shows no Podman, Docker, or Incus surface and no
+`updex`-backed extension operations until an operator adds the flags. See
+the [CLI reference](/reference/cli/) for the exact flags and defaults.
+
+Everything else is detected by presence and needs no flag: systemd,
+journald, `systemd-sysext`, bootc, rpm-ostree, and the automatic-update
+timer pairs. A surface whose dependency is absent is omitted — no navigation
+entry, no dashboard card, and its routes return 404 — rather than shown
+broken.
 
 ## How it is built
 

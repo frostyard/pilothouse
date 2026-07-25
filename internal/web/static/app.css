@@ -58,7 +58,7 @@ svg { display: block; height: 1.05rem; width: 1.05rem; }
 .brand small, .sidebar-foot small { color: var(--text-eyebrow); display: block; font-family: var(--font-mono); font-size: 9px; font-weight: 400; letter-spacing: .1em; margin-top: 2px; text-transform: uppercase; }
 .system-picker { border-bottom: 1px solid var(--line); display: grid; gap: 4px; margin: 0 6px 4px; padding-bottom: 12px; }
 .system-picker > span { color: #7cbddc; font: 700 9px var(--font-mono); letter-spacing: .14em; text-transform: uppercase; }
-.system-picker a { background: #061826; border: 1px solid var(--line); color: var(--text-body); display: block; padding: 6px 8px; text-decoration: none; }
+.system-picker a, .system-picker .system-entry { background: #061826; border: 1px solid var(--line); color: var(--text-body); display: block; padding: 6px 8px; text-decoration: none; }
 .system-picker a:hover { border-color: var(--sky); }
 .system-picker strong { display: block; font-size: 11.5px; }
 .system-picker small { color: var(--text-footer); display: block; font-size: 9px; margin-top: 2px; }

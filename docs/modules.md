@@ -115,6 +115,29 @@ than letting a missing or unreachable dependency fail daemon startup. See
 engine capability isn't present. New modules that depend on optional host
 tooling should follow the same shape from the start.
 
+The guard is only half the contract. For the four *optional* dependencies —
+`updex`, Podman, Docker, and Incus — the capability itself is gated on
+explicit operator configuration, not on the tooling merely being present:
+`capability.Config` carries `Updex`, `PodmanSocket`, `DockerEndpoint`, and
+`IncusEnabled` straight from `cmd/pilothoused`'s `--updex`,
+`--podman-socket`, `--docker`, and `--incus` flags, all of which default to
+the zero value, and each probe returns an empty `Set` on the zero value
+without performing any I/O — no command is run and no socket is dialled.
+(`ProbePodman`/`ProbeDocker` do not even construct a client; `ProbeIncus`
+allocates its client struct first, but that constructor performs no I/O and
+its one dialling method is never reached.) A
+binary on `PATH`, a live socket at a conventional path, or an exported
+`DOCKER_HOST` therefore never advertises the capability, so the `registerX`
+guard above withholds registration and the web-side gate omits the module's
+nav entry, dashboard card, and routes. `packaging/pilothoused.service`'s
+`ExecStart` passes none of the four, so a stock install runs with all four
+off until an operator adds them. Follow the same
+shape for new optional tooling: add a `capability.Config` field fed by an
+explicitly-set flag rather than probing whatever the host happens to have.
+By contrast, the non-optional host facts (`systemd`, `journald`,
+`systemd-sysext`, `bootc`, `rpm-ostree`, and the automatic-update unit
+pairs) stay presence-probed and carry no flag.
+
 When a module's registrations have *mixed* capability requirements —
 `registerServices` is the example: `QueryServicesState` and every services
 lifecycle action need only `Systemd`, while `QueryServicesJournal`
@@ -154,13 +177,27 @@ func (m *Module) RequiredCapabilities() []capability.ID {
 ```
 
 A module that does not implement `CapabilityGate` has no requirement and is
-always available — this is the default for `system`, `files`, `activity`,
-`fleet`, and storage's own inventory reads. `internal/web.Server` filters
-`CapabilityGate` modules out of both the shell's navigation list and the
-dashboard's per-module loop when a required capability is absent; skipped
-dashboard modules are omitted entirely (no `Dashboard()` call, no card, no
-error placeholder), since an unavailable surface is not rendered, not shown
-degraded.
+available whenever it is registered — this is the default for `system`,
+`files`, `activity`, `fleet`, and storage's own inventory reads.
+`internal/web.Server` filters `CapabilityGate` modules out of both the shell's
+navigation list and the dashboard's per-module loop when a required capability
+is absent; skipped dashboard modules are omitted entirely (no `Dashboard()`
+call, no card, no error placeholder), since an unavailable surface is not
+rendered, not shown degraded.
+
+Capability gating and registration are separate switches, and `fleet` is the
+one module gated by the latter. It is a static, non-functional UI preview, so
+`cmd/pilothouse`'s `newRegistry(dev bool)` appends `fleet.New()` only when the
+`--dev` flag is set (default `false`; `packaging/pilothouse.service`'s
+`ExecStart` does not pass it, so production runs without it). With `--dev`
+absent, `fleet` is never constructed, its `Mount` is never called, and its
+three routes (`/fleet`, `/fleet/enroll`, `/fleet/systems/{id}`) are genuinely
+unregistered — a mux 404, not a `platform.Gate` 404. Every web-side surface
+follows from that single registration decision: the shell's nav loops and its
+sidebar system-picker link both derive from the registry's manifest list, so
+none of them can render a link to a module that was never registered. Prefer
+that pattern — derive from `data.Modules` — over hardcoding a module's path
+into `internal/web/shell.templ`.
 
 Routes stay mounted on the shared mux regardless — never register a route
 conditionally at startup based on capability. Instead, wrap the handler

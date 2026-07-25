@@ -94,18 +94,28 @@ func (e *podmanProbeStatusError) Error() string { return "podman API " + e.statu
 
 // ProbePodman probes the podman capability: present iff the configured
 // --podman-socket responds to a Version call within engineProbeTimeout.
-// newPodmanProbeClient never itself returns an error -- it only builds an
-// HTTP client bound to the socket path, performing no I/O -- so every
-// failure mode (including an entirely unreachable socket) surfaces at the
-// Version call, never at construction, and is never fatal or propagated.
+// An empty socket means podman is not configured -- that flag defaults to
+// empty -- so the capability is absent, no probe client is constructed, and
+// nothing is dialled: a host that merely happens to have a podman socket at
+// some well-known path must never enable the engine without explicit
+// configuration. When a socket is configured, newPodmanProbeClient never
+// itself returns an error -- it only builds an HTTP client bound to the
+// socket path, performing no I/O -- so every failure mode (including an
+// entirely unreachable socket) surfaces at the Version call, never at
+// construction, and is never fatal or propagated.
 func ProbePodman(ctx context.Context, socket string) Set {
 	return probePodman(ctx, socket, func(socket string) podmanClient { return newPodmanProbeClient(socket) })
 }
 
 // probePodman is the testable core of ProbePodman: newClient is injected so
-// tests can exercise both branches (a fake client whose Version succeeds or
-// fails) without a real podman socket.
+// tests can exercise every branch (unconfigured, plus a fake client whose
+// Version succeeds or fails) without a real podman socket. The
+// empty-socket guard lives here, ahead of newClient, so the injected
+// constructor is provably never reached when podman is unconfigured.
 func probePodman(ctx context.Context, socket string, newClient func(string) podmanClient) Set {
+	if socket == "" {
+		return New()
+	}
 	client := newClient(socket)
 	defer client.Close()
 
@@ -125,27 +135,42 @@ type dockerClient interface {
 	Close() error
 }
 
-// ProbeDocker probes the docker capability: present iff a
-// dockerclient.FromEnv-constructed client's Ping succeeds within
-// engineProbeTimeout. Unlike podman, docker client construction genuinely
-// can fail (e.g. a malformed DOCKER_HOST) -- that failure is treated as
-// "docker absent," never propagated as fatal, exactly like an unreachable
-// socket at Ping time.
-func ProbeDocker(ctx context.Context) Set {
-	return probeDocker(ctx, newDockerClient)
+// ProbeDocker probes the docker capability: present iff a client bound to
+// the configured --docker endpoint answers a Ping within
+// engineProbeTimeout. An empty endpoint means docker is not configured --
+// that flag defaults to empty -- so the capability is absent, no docker
+// client is constructed at all, and nothing is dialled: a host that merely
+// happens to export DOCKER_HOST, or to have a docker socket at the SDK's
+// implicit default path, must never enable the engine without explicit
+// pilothouse-level configuration. When an endpoint is configured, the
+// client is built from that endpoint alone (never dockerclient.FromEnv), so
+// the capability never follows the SDK's implicit environment resolution.
+// Unlike podman, docker client construction genuinely can fail (e.g. a
+// malformed endpoint) -- that failure is treated as "docker absent," never
+// propagated as fatal, exactly like an unreachable socket at Ping time.
+func ProbeDocker(ctx context.Context, endpoint string) Set {
+	return probeDocker(ctx, endpoint, newDockerClient)
 }
 
 // newDockerClient is the production docker client constructor: it builds a
-// client from the environment, the same way cmd/pilothoused already does.
-func newDockerClient() (dockerClient, error) {
-	return dockerclient.New(dockerclient.FromEnv)
+// client bound to the explicitly configured endpoint via
+// dockerclient.WithHost, the same way cmd/pilothoused now does. It
+// deliberately does not use dockerclient.FromEnv, so DOCKER_HOST and the
+// SDK's default socket can never enable docker on their own.
+func newDockerClient(endpoint string) (dockerClient, error) {
+	return dockerclient.New(dockerclient.WithHost(endpoint))
 }
 
 // probeDocker is the testable core of ProbeDocker: newClient is injected so
 // tests can exercise a client-construction error, a Ping failure, and a
-// Ping success without touching a real docker daemon.
-func probeDocker(ctx context.Context, newClient func() (dockerClient, error)) Set {
-	client, err := newClient()
+// Ping success without touching a real docker daemon. The empty-endpoint
+// guard lives here, ahead of newClient, so the injected constructor is
+// provably never reached when docker is unconfigured.
+func probeDocker(ctx context.Context, endpoint string, newClient func(string) (dockerClient, error)) Set {
+	if endpoint == "" {
+		return New()
+	}
+	client, err := newClient(endpoint)
 	if err != nil {
 		return New()
 	}
@@ -164,7 +189,8 @@ func probeDocker(ctx context.Context, newClient func() (dockerClient, error)) Se
 // needs: a server-info call. *incusProbeClient satisfies it directly, and
 // unlike podman/docker, incus client construction never performs I/O or
 // takes a configurable socket path -- the default local socket is fixed,
-// per the spec.
+// per the spec. Whether that socket is contacted at all is governed by the
+// --incus flag, not by the client's construction.
 type incusClient interface {
 	Server(ctx context.Context) (*api.Server, error)
 }
@@ -189,16 +215,33 @@ func (c *incusProbeClient) Server(ctx context.Context) (*api.Server, error) {
 	return value, err
 }
 
-// ProbeIncus probes the incus capability: present iff the default local
-// socket responds to a Server call within engineProbeTimeout.
-func ProbeIncus(ctx context.Context) Set {
-	return probeIncus(ctx, newIncusProbeClient())
+// ProbeIncus probes the incus capability: absent outright unless enabled is
+// true, and otherwise present iff the fixed default local socket
+// (incusLocalSocket) responds to a Server call within engineProbeTimeout.
+// enabled carries the --incus flag, which defaults to false; a false value
+// means incus is not opted in, so the capability is absent and the socket is
+// never contacted at all -- a host that merely happens to answer on
+// /var/lib/incus/unix.socket must never enable the engine without explicit
+// pilothouse-level configuration. The socket path itself stays fixed and is
+// not configurable: the flag gates whether it is probed, nothing more. When
+// enabled is true the probe behaves exactly as it did before the flag
+// existed, degrading to "incus absent" on any dial or Server error rather
+// than failing.
+func ProbeIncus(ctx context.Context, enabled bool) Set {
+	return probeIncus(ctx, enabled, newIncusProbeClient())
 }
 
 // probeIncus is the testable core of ProbeIncus: client is injected so
-// tests can exercise both branches (a fake client whose Server call
-// succeeds or fails) without a real incus socket.
-func probeIncus(ctx context.Context, client incusClient) Set {
+// tests can exercise every branch (opted out, plus a fake client whose
+// Server call succeeds or fails) without a real incus socket. The
+// enabled guard lives here, ahead of every use of client, so the injected
+// client's Server call -- the only place this probe dials anything, since
+// newIncusProbeClient merely allocates a struct and performs no I/O -- is
+// provably never reached when incus is not opted in.
+func probeIncus(ctx context.Context, enabled bool, client incusClient) Set {
+	if !enabled {
+		return New()
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, engineProbeTimeout)
 	defer cancel()
 
