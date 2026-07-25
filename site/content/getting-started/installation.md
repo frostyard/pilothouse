@@ -75,10 +75,15 @@ sudo install -Dm0644 packaging/rpm/pilothouse.pam /etc/pam.d/pilothouse
 Then finish on either family:
 
 ```bash
-sudo install -d -m0755 /etc/pilothouse
+sudo install -d -m0750 -o root -g pilothouse /etc/pilothouse
+sudo install -d -m0700 -o root -g root /etc/pilothouse/storage/credentials
+sudo install -Dm0640 -o root -g pilothouse packaging/pilothouse.env /etc/pilothouse/pilothouse.env
+sudo install -Dm0640 -o root -g pilothouse packaging/pilothoused.env /etc/pilothouse/pilothoused.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
+
+`/etc/pilothouse` is `root:pilothouse` mode `0750` so the units can read their `EnvironmentFile=` as the `pilothouse` group without exposing it to every account on the host. `/etc/pilothouse/storage/credentials` is stricter — `root:root` mode `0700` — because it holds remote-mount secrets only the root broker reads. Both env files ship with every setting commented out, so copying them changes no behavior: uncomment `PILOTHOUSE_ALLOWED_ORIGINS` in `/etc/pilothouse/pilothouse.env` for a reverse-proxy deployment (see [Expose beyond loopback](#expose-beyond-loopback)) and `PILOTHOUSE_BACKUP_TIMERS` in `/etc/pilothouse/pilothoused.env` to name the backup timers to monitor (see [Backup monitoring](#backup-monitoring)). The `.deb` and `.rpm` packages create the same two directories and install the same two files as configuration files, and declare their PAM and systemd runtime dependencies per format.
 
 The packaged units are deliberately minimal: `pilothoused.service` passes none of the four optional-tooling flags and declares no `Wants=` on `podman.socket` or `incus.socket`, and `pilothouse.service` does not pass `--dev`. A stock install therefore enables no container engine, no `updex`-backed extension operation, and no Fleet preview until you add the flags to the relevant `ExecStart`.
 

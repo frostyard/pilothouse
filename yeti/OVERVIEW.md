@@ -36,7 +36,12 @@ docs/                 authoritative subsystem docs (kept here, not duplicated in
   modules.md           how to add a new module: contract, file layout, action/query rules
   capabilities.md      binding table mapping every broker ID to its required host capability
 
-packaging/            systemd units, PAM policy, sysusers declaration; deb/ and
+packaging/            systemd units, PAM policy, sysusers declaration, and the two
+                      commented-out environment files (pilothouse.env documents
+                      PILOTHOUSE_ALLOWED_ORIGINS, pilothoused.env documents
+                      PILOTHOUSE_BACKUP_TIMERS — both are real variables the
+                      binaries read, shipped with every setting commented out so
+                      installing the package changes no runtime behavior); deb/ and
                       rpm/ hold the per-distro-family variants (broker unit's
                       --admin-group, PAM stack names) selected by
                       .goreleaser.yaml's nfpms overrides. units_test.go is a
@@ -1332,7 +1337,35 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)
 
 **Environment files** (systemd `EnvironmentFile=-`, optional):
-`/etc/pilothouse/pilothouse.env`, `/etc/pilothouse/pilothoused.env`.
+`/etc/pilothouse/pilothouse.env`, `/etc/pilothouse/pilothoused.env`. Both are
+shipped by the `.deb`/`.rpm` packages (sources: `packaging/pilothouse.env`,
+`packaging/pilothoused.env`) as nfpm `type: config` entries, mode `0640`
+`root:pilothouse`. They are not inert placeholders: each documents, commented
+out, the one real environment variable its binary reads —
+`PILOTHOUSE_ALLOWED_ORIGINS` (`cmd/pilothouse/main.go`, merged into
+`--allowed-origin` after `flag.Parse`) and `PILOTHOUSE_BACKUP_TIMERS`
+(`cmd/pilothoused/main.go`, merged into `--backup-timer`), each a
+comma-separated list. Every line ships commented out, so installing the
+package changes no runtime behavior. Neither file carries `--admin-group`:
+that stays a per-format unit-file argument.
+
+**Package-owned configuration directories and runtime dependencies.**
+`.goreleaser.yaml`'s `nfpms[0].overrides.<format>.contents` declares two
+`type: dir` entries in both formats — `/etc/pilothouse` (`root:pilothouse`,
+mode `0750`, group-readable so the units' `EnvironmentFile=` works) and
+`/etc/pilothouse/storage/credentials` (`root:root`, mode `0700`, stricter than
+its parent because only the root broker reads remote-mount secrets).
+`/run/pilothouse` and `/var/lib/pilothouse` are deliberately not packaged;
+the broker unit's `RuntimeDirectory=`/`StateDirectory=` own them. Runtime
+dependencies are declared per format, naming the direct provider of each
+role rather than relying on transitive requires — deb: `libc6`, `libpam0g`,
+`libpam-modules`, `libpam-runtime`, `libsystemd0`, `systemd`; rpm: `glibc`,
+`pam-libs`, `pam`, `authselect-libs`, `systemd-libs`, `systemd`. The six
+roles line up one-to-one across the platforms: linked C library, PAM shared
+library, PAM modules providing `pam_nologin.so`, provider of the PAM stacks
+the policy includes, libsystemd shared library, and systemd itself. Note
+that nfpm's static owner/group metadata alone does not produce correct
+install-time ownership on either format.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If

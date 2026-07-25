@@ -130,8 +130,32 @@ nfpms:
     # differ in their PAM stack (Debian `common-*` includes vs. Fedora
     # `password-auth`) and in the broker unit's `--admin-group` default
     # (`sudo` vs. `wheel`).
+    #
+    # `dependencies` is likewise per-format. Each list names the DIRECT
+    # provider of every runtime requirement, in the same six roles on both
+    # platforms: the linked C library, the PAM shared library `pilothoused`
+    # links via cgo, the package providing the PAM modules the policy loads
+    # (`pam_nologin.so`), the package providing the PAM stacks the policy
+    # includes, the libsystemd shared library, and systemd itself.
+    #
+    # The two configuration directories carry distinct metadata:
+    # /etc/pilothouse is group-readable by `pilothouse` so the units'
+    # `EnvironmentFile=` reads work, while /etc/pilothouse/storage/credentials
+    # holds secrets only the root broker reads and is root-only. Both env
+    # files are `type: config` so local edits survive upgrades; each ships
+    # with every setting commented out, so installing the package changes no
+    # runtime behavior. /run/pilothouse and /var/lib/pilothouse are
+    # deliberately NOT packaged — systemd's `RuntimeDirectory=` and
+    # `StateDirectory=` own them.
     overrides:
       deb:
+        dependencies:
+          - libc6
+          - libpam0g
+          - libpam-modules
+          - libpam-runtime
+          - libsystemd0
+          - systemd
         contents:
           - src: ./packaging/pilothouse.service
             dst: /usr/lib/systemd/system/pilothouse.service
@@ -142,7 +166,40 @@ nfpms:
             type: config
           - src: ./packaging/pilothouse.sysusers
             dst: /usr/lib/sysusers.d/pilothouse.conf
+          - dst: /etc/pilothouse
+            type: dir
+            file_info:
+              mode: 0750
+              owner: root
+              group: pilothouse
+          - dst: /etc/pilothouse/storage/credentials
+            type: dir
+            file_info:
+              mode: 0700
+              owner: root
+              group: root
+          - src: ./packaging/pilothouse.env
+            dst: /etc/pilothouse/pilothouse.env
+            type: config
+            file_info:
+              mode: 0640
+              owner: root
+              group: pilothouse
+          - src: ./packaging/pilothoused.env
+            dst: /etc/pilothouse/pilothoused.env
+            type: config
+            file_info:
+              mode: 0640
+              owner: root
+              group: pilothouse
       rpm:
+        dependencies:
+          - glibc
+          - pam-libs
+          - pam
+          - authselect-libs
+          - systemd-libs
+          - systemd
         contents:
           - src: ./packaging/pilothouse.service
             dst: /usr/lib/systemd/system/pilothouse.service
@@ -153,6 +210,32 @@ nfpms:
             type: config
           - src: ./packaging/pilothouse.sysusers
             dst: /usr/lib/sysusers.d/pilothouse.conf
+          - dst: /etc/pilothouse
+            type: dir
+            file_info:
+              mode: 0750
+              owner: root
+              group: pilothouse
+          - dst: /etc/pilothouse/storage/credentials
+            type: dir
+            file_info:
+              mode: 0700
+              owner: root
+              group: root
+          - src: ./packaging/pilothouse.env
+            dst: /etc/pilothouse/pilothouse.env
+            type: config
+            file_info:
+              mode: 0640
+              owner: root
+              group: pilothouse
+          - src: ./packaging/pilothoused.env
+            dst: /etc/pilothouse/pilothoused.env
+            type: config
+            file_info:
+              mode: 0640
+              owner: root
+              group: pilothouse
 
 release:
   mode: replace
