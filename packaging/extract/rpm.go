@@ -3,6 +3,7 @@ package extract
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/frostyard/pilothouse/packaging"
 )
@@ -439,10 +442,23 @@ type pipeCommand struct {
 // so treating a non-empty standard error as a failure would fail every correct
 // extraction.
 //
-// src is waited on first because that is what closes this process's copy of the
-// pipe, which is what lets dst see end of input. Its status is also preferred
-// when both halves failed, because a src that dies mid-stream makes dst fail
-// too and the root cause is the more useful of the two.
+// The pipe is an os.Pipe rather than srcCmd.StdoutPipe(), and BOTH parent
+// copies of it are closed as soon as both children are running. That is what
+// makes an early dst exit survivable: with the parent holding no read end, a
+// src that keeps writing into the drained-and-abandoned pipe takes SIGPIPE and
+// dies, instead of blocking forever on a full buffer nobody will ever read.
+// StdoutPipe cannot give that guarantee — the parent owns its read end, and
+// exec's own documentation warns that Wait closes it out from under any
+// in-flight copy.
+//
+// Both halves are then waited on CONCURRENTLY. Waiting on src first is what
+// deadlocked earlier: if dst had already exited, src was still blocked writing,
+// so src's Wait never returned and dst's status was never collected.
+//
+// Error precedence: src's failure is reported first because a src that dies
+// mid-stream makes dst fail too and is the more useful root cause — EXCEPT when
+// src died of SIGPIPE, which means dst went away first and dst's status is the
+// real explanation.
 func runPipe(ctx context.Context, dir string, src, dst pipeCommand) error {
 	srcPath, err := lookTool(src.name)
 	if err != nil {
@@ -463,28 +479,62 @@ func runPipe(ctx context.Context, dir string, src, dst pipeCommand) error {
 	srcCmd.Stderr = &srcStderr
 	dstCmd.Stderr = &dstStderr
 
-	pipe, err := srcCmd.StdoutPipe()
+	pipeRead, pipeWrite, err := os.Pipe()
 	if err != nil {
 		return pipeError(src.name, err, &srcStderr)
 	}
 
-	dstCmd.Stdin = pipe
+	// Both ends are *os.File, so exec hands the descriptors straight to the
+	// children instead of interposing a copying goroutine in this process.
+	srcCmd.Stdout = pipeWrite
+	dstCmd.Stdin = pipeRead
 
 	if err := srcCmd.Start(); err != nil {
+		_ = pipeRead.Close()
+		_ = pipeWrite.Close()
+
 		return pipeError(src.name, err, &srcStderr)
 	}
 
 	if err := dstCmd.Start(); err != nil {
+		// Drop both ends before reaping src: without a reader, a src already
+		// writing cannot wedge on a full pipe while we wait for it.
+		_ = pipeRead.Close()
+		_ = pipeWrite.Close()
 		_ = srcCmd.Process.Kill()
 		_ = srcCmd.Wait()
 
 		return pipeError(dst.name, err, &dstStderr)
 	}
 
-	srcErr := srcCmd.Wait()
-	dstErr := dstCmd.Wait()
+	// The children hold their own descriptors now. This process must let go of
+	// both: keeping the write end open would deny dst its end of input, and
+	// keeping the read end open would let src block forever if dst exits early.
+	_ = pipeRead.Close()
+	_ = pipeWrite.Close()
 
-	if srcErr != nil {
+	var (
+		wg             sync.WaitGroup
+		srcErr, dstErr error
+	)
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		srcErr = srcCmd.Wait()
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		dstErr = dstCmd.Wait()
+	}()
+
+	wg.Wait()
+
+	if srcErr != nil && !isBrokenPipe(srcErr) {
 		return pipeError(src.name, srcErr, &srcStderr)
 	}
 
@@ -492,7 +542,25 @@ func runPipe(ctx context.Context, dir string, src, dst pipeCommand) error {
 		return pipeError(dst.name, dstErr, &dstStderr)
 	}
 
+	if srcErr != nil {
+		return pipeError(src.name, srcErr, &srcStderr)
+	}
+
 	return nil
+}
+
+// isBrokenPipe reports whether err is a process killed by SIGPIPE — the shape a
+// producer takes when its consumer exited first. It is the one src failure that
+// says nothing about src.
+func isBrokenPipe(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+
+	return ok && status.Signaled() && status.Signal() == syscall.SIGPIPE
 }
 
 // pipeError wraps one half of a pipe's failure in the same shape runTool

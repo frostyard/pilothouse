@@ -2349,11 +2349,30 @@ cached between them:
 - `rpm -qp --qf '%|POSTIN?{HAS\n%{POSTIN}}:{NONE\n}|' <rpm>` for the postinstall
   body behind a tag-presence marker.
 - `rpm2cpio <rpm>` piped into `cpio -idm --no-absolute-filenames` for the
-  payload bytes. The pipe is wired **in Go** with `StdoutPipe`, so no shell is
-  invoked and **both** exit statuses are the verdict — a shell pipeline would
-  report only the last one. `cpio` writes its `2 blocks` progress line to
-  standard error on *success*, so standard error is folded into an error message
-  and is read for nothing else.
+  payload bytes. The pipe is wired **in Go**, so no shell is invoked and
+  **both** exit statuses are the verdict — a shell pipeline would report only
+  the last one. `cpio` writes its `2 blocks` progress line to standard error on
+  *success*, so standard error is folded into an error message and is read for
+  nothing else.
+
+**The pipe uses `os.Pipe`, not `StdoutPipe`, and waits on both halves at
+once.** This is a correctness requirement, not a style choice. `StdoutPipe`
+leaves the *parent* holding the read end, and an earlier implementation waited
+on `rpm2cpio` before `cpio`: when `cpio` exited early, `rpm2cpio` kept writing
+into a full pipe, and because this process still held a reader it never took
+`SIGPIPE` — so the wait never returned and extraction hung forever with no
+deadline. Both ends are now `*os.File`, handed straight to the children with no
+copying goroutine in between, and **this process closes both of its copies as
+soon as both children are running**: dropping the read end is what lets
+`SIGPIPE` reach a producer whose consumer has gone, and dropping the write end
+is what gives the consumer its end of input. The two `Wait` calls then run
+concurrently so neither can block the other's reaping.
+
+Error precedence follows from the same asymmetry: the producer's status is
+reported first, because a producer that dies mid-stream makes the consumer fail
+too and is the more useful root cause — **except** when the producer died of
+`SIGPIPE`, which means the consumer went first and the consumer's status is the
+real explanation.
 
 **Why the file table is a tab-delimited `--qf` and not rpm's positional dump
 alias.** The alias *pads* its columns — an `X` where a symlink target would go,

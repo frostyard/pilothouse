@@ -416,6 +416,15 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 	t.Run("destination half exits non-zero", func(t *testing.T) {
 		requireRPMTools(t)
 
+		// This row denies the write with a directory mode, which root and any
+		// process holding CAP_DAC_OVERRIDE ignore — cpio would then succeed and
+		// the row would report a failure that is about the runner, not the code.
+		// Skipping is the honest outcome; `make docker-ci` runs as the host
+		// UID/GID, so the row still executes where it matters.
+		if os.Geteuid() == 0 {
+			t.Skip("skipping: a mode-denied directory does not deny root, so this row cannot isolate a cpio failure")
+		}
+
 		artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmHappySpec())
 
 		// A directory the extraction cannot write into: rpm2cpio still exits 0
