@@ -30,6 +30,10 @@ internal/
   audit/               durable action-history store (bbolt)
   jobs/                durable background-job store (bbolt), for long-running privileged mutations
   auth/, auth/pam/     NSS group resolution and PAM authentication (used only by pilothoused)
+  packagingtest/       test-support helpers imported only by test files: the packaging-tool
+                       skip-vs-fail gate and the .deb fixture builder (see "Packaging test
+                       fixtures" below). Ships in no binary and imports no other repository
+                       package
 
 docs/                 authoritative subsystem docs (kept here, not duplicated into yeti/):
   authentication.md    login, session, authorization, audit, PAM policy, deployment rules
@@ -76,8 +80,10 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       every docker-* target through the Makefile's `DOCKER_RUN`
                       with no per-target flag: because the image guarantees those
                       tools, a tool-dependent test that would otherwise skip when
-                      one is missing must fail inside this image instead. Nothing
-                      in Go code reads the variable at this commit. `make
+                      one is missing must fail inside this image instead. The one
+                      reader in Go code is `internal/packagingtest.LookTool`,
+                      which exposes the variable's name as
+                      `packagingtest.RequireEnv`. `make
                       docker-tools-check` asserts the whole set — it resolves
                       `dpkg-deb`, `rpm`, `rpmbuild`, `rpm2cpio` and `cpio` and
                       prints the flag's value, alongside the `svu` and
@@ -1323,6 +1329,65 @@ list in `cmd/pilothouse/main.go`, not just registered in
 - Optional live integration tests are gated behind env vars:
   `PILOTHOUSE_LIVE_PODMAN`, `PILOTHOUSE_LIVE_DOCKER`, `PILOTHOUSE_LIVE_INCUS`,
   `JOURNAL_SMOKE`.
+
+### Packaging test fixtures (`internal/packagingtest`)
+
+`internal/packagingtest` is an ordinary Go package — its files carry no
+`_test.go` suffix — whose only consumers are test files. It exists because the
+two helpers below are needed by the tests of more than one package, and an
+unexported helper living in a `_test.go` file is unreachable from another
+package. It sits under `internal/` because it ships in no binary, and it imports
+nothing else in this repository, so it can hold no knowledge of any packaging
+contract: a fixture it builds describes only what its caller declared.
+
+**The tool gate.** `LookTool(t, name)` resolves an external packaging tool and
+is the only place in the package that looks a name up on `PATH`; every
+tool-dependent test goes through it, so none can reach a tool around the gate.
+When the tool cannot be resolved, the behaviour depends on `RequireEnv`
+(`PILOTHOUSE_REQUIRE_PACKAGING_TOOLS`, which `.docker/Dockerfile` sets to `1`):
+
+- variable unset — `Skipf` with a reason naming the tool and pointing at
+  `.docker/Dockerfile`, following the wording of `packaging/units_test.go`'s
+  `systemd-analyze` skip and `packaging/postinstall_test.go`'s `shellcheck`
+  skip;
+- variable set to `1` — `Fatalf` instead, because the environment declares the
+  tool present and skipping there would silently hide the check.
+
+The parameter is a local three-method `TestingT` interface (`Helper`, `Skipf`,
+`Fatalf`) that `*testing.T` satisfies, rather than `testing.TB`, which has an
+unexported method and cannot be implemented outside `testing`. That is what
+lets a recording fake observe both branches from a test that itself passes, and
+it keeps `testing` out of the package's non-test imports.
+
+**The deb fixture builder.** `BuildDeb(t, outDir, spec)` builds a throwaway
+`.deb` from a hand-written `Spec` — `Dirs` and `Files` with a declared mode
+each, a per-file `Config` flag, `Depends`, and a `*string` `Postinstall` — and
+returns the artifact's path. `outDir` is caller-supplied, so fixtures can be
+built straight into a directory the caller later scans; the staging tree is
+scratch space inside it. `Depends` entries pass through verbatim, joined with
+`", "`, so alternatives and version constraints are never rewritten.
+`DEBIAN/conffiles` is written only when at least one `File` is marked `Config`.
+`Postinstall` keeps three states apart: nil ships no `DEBIAN/postinst` member at
+all, a pointer to `""` ships a zero-byte one, and a pointer to a body ships
+those bytes. `dpkg-deb` is resolved through `LookTool`, so a host without it
+skips with an explicit reason and the dev image cannot skip.
+
+Two measured `dpkg-deb` constraints shape the builder. `dpkg-deb --build`
+refuses a control directory outside 0755-0775 (`control directory has bad
+permissions 700`) while `t.TempDir()` and `os.MkdirTemp` produce 0700
+directories, so `DEBIAN` is chmodded to 0755 explicitly. And `dpkg-deb`
+synthesizes the intermediate directories of every declared path into the
+archive, so each intermediate directory the builder creates is chmodded to 0755,
+making every synthesized parent's archived mode determinate rather than a
+product of the caller's umask. Declared modes are applied with an explicit
+`os.Chmod` for the same reason, rather than relying on the permission argument
+of `os.Mkdir`/`os.WriteFile`.
+
+The package's own tests check the builder against `dpkg-deb` itself — `-c` for
+the path/mode table, `-f` for the dependency field, `-e` for the control
+directory — never against other Go code, and drive the gate's two branches
+through a recording `TestingT` in a test that needs no external tool on any
+host.
 
 ## Configuration
 
