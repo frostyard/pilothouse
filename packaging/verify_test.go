@@ -1,6 +1,7 @@
 package packaging
 
 import (
+	"bytes"
 	"io/fs"
 	"testing"
 
@@ -254,6 +255,70 @@ func withConfig(t *testing.T, m Model, dest string, config bool) Model {
 	return m
 }
 
+// withContent returns a copy of m with the content of the entry installing to
+// dest replaced, failing the test if the fixture had no entry at dest or
+// already carried exactly those bytes (which would make the mutation vacuous).
+//
+// The vacuity guard is load-bearing for the cross-format tests: substituting
+// the other format's PAM policy or broker unit only proves anything because
+// this require fails if the two repository sources are ever made identical.
+func withContent(t *testing.T, m Model, dest string, content []byte) Model {
+	t.Helper()
+
+	changed := 0
+	entries := make([]Entry, len(m.Entries))
+	copy(entries, m.Entries)
+
+	for i := range entries {
+		if entries[i].Dest == dest {
+			require.Falsef(t, bytes.Equal(entries[i].Content, content),
+				"fixture already records exactly these bytes at %s", dest)
+			entries[i].Content = content
+			changed++
+		}
+	}
+
+	require.Equalf(t, 1, changed, "fixture should install exactly one entry at %s", dest)
+
+	m.Entries = entries
+
+	return m
+}
+
+// contentAt returns the content of the entry installing to dest, failing the
+// test if the fixture does not install exactly one entry there.
+func contentAt(t *testing.T, m Model, dest string) []byte {
+	t.Helper()
+
+	var content []byte
+
+	found := 0
+
+	for _, entry := range m.Entries {
+		if entry.Dest == dest {
+			content = entry.Content
+			found++
+		}
+	}
+
+	require.Equalf(t, 1, found, "fixture should install exactly one entry at %s", dest)
+	require.NotEmptyf(t, content, "fixture should carry content at %s", dest)
+
+	return content
+}
+
+// perturb returns content with a single newline appended.
+//
+// The comparison is exact and normalizes nothing, so this minimal difference —
+// the one a well-meaning extractor is most likely to introduce — must be
+// reported just as loudly as a wholly different file.
+func perturb(content []byte) []byte {
+	perturbed := make([]byte, 0, len(content)+1)
+	perturbed = append(perturbed, content...)
+
+	return append(perturbed, '\n')
+}
+
 // packagedFormats is the (format, name) axis every mutation table runs over.
 var packagedFormats = []struct {
 	name   string
@@ -306,6 +371,30 @@ var configDestinations = []string{
 	"/etc/pam.d/pilothouse",
 	"/etc/pilothouse/pilothouse.env",
 	"/etc/pilothouse/pilothoused.env",
+}
+
+// byteComparedDestinations is the six destinations whose bytes the contract
+// pins to a repository source, written out by hand from the issue for the same
+// reason requiredDestinations is: contract.go's table is the thing under test
+// and may not also be the oracle.
+var byteComparedDestinations = []string{
+	"/usr/lib/systemd/system/pilothouse.service",
+	"/usr/lib/systemd/system/pilothoused.service",
+	"/etc/pam.d/pilothouse",
+	"/usr/lib/sysusers.d/pilothouse.conf",
+	"/etc/pilothouse/pilothouse.env",
+	"/etc/pilothouse/pilothoused.env",
+}
+
+// contentFreeDestinations is the four destinations the contract compares no
+// content at: the two binaries, whose bytes differ per build so only
+// destination and multiplicity are contract-relevant, and the two directories,
+// which have no content.
+var contentFreeDestinations = []string{
+	"/usr/bin/pilothouse",
+	"/usr/bin/pilothoused",
+	"/etc/pilothouse",
+	"/etc/pilothouse/storage/credentials",
 }
 
 // verifyAsContractSignature returns Verify through exactly the signature the
@@ -560,6 +649,168 @@ func TestVerifyUnexpectedConfigFlagIsNotAFinding(t *testing.T) {
 	}
 }
 
+// TestVerifyWrongContent perturbs the content of each byte-compared
+// destination in turn, in each format, and asserts the wrong-content finding
+// for exactly that destination. The perturbation is a single appended newline,
+// which is what proves the comparison normalizes nothing.
+func TestVerifyWrongContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, dest := range byteComparedDestinations {
+			t.Run(tc.name+" "+dest, func(t *testing.T) {
+				t.Parallel()
+
+				model := contractModel(t, tc.format)
+				model = withContent(t, model, dest, perturb(contentAt(t, model, dest)))
+
+				findings := Verify(model)
+				require.Equal(t, 1, findingsFor(findings, CodeWrongContent, dest))
+				require.Len(t, findings, 1)
+			})
+		}
+	}
+}
+
+// TestVerifyNilContentIsWrongContent proves an entry the contract byte-compares
+// whose Content is nil is reported rather than treated as "nothing to compare".
+// An extractor that failed to capture the bytes must not verify clean, or
+// #73's extractor bugs become invisible.
+func TestVerifyNilContentIsWrongContent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, dest := range byteComparedDestinations {
+			t.Run(tc.name+" "+dest, func(t *testing.T) {
+				t.Parallel()
+
+				findings := Verify(withContent(t, contractModel(t, tc.format), dest, nil))
+				require.Equal(t, 1, findingsFor(findings, CodeWrongContent, dest))
+				require.Len(t, findings, 1)
+			})
+		}
+	}
+}
+
+// TestVerifyCrossFormatPAMPolicy is one of the two proofs this check exists
+// for: a package shipping the *other* format's PAM policy installs a
+// syntactically valid file at the right destination with the right mode and
+// config designation, and only the byte comparison can catch it.
+func TestVerifyCrossFormatPAMPolicy(t *testing.T) {
+	t.Parallel()
+
+	const dest = "/etc/pam.d/pilothouse"
+
+	for _, tc := range []struct {
+		name   string
+		format Format
+		source string
+	}{
+		{name: "rpm shipping the deb PAM policy", format: FormatRPM, source: "pilothouse.pam"},
+		{name: "deb shipping the rpm PAM policy", format: FormatDeb, source: "rpm/pilothouse.pam"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := withContent(t, contractModel(t, tc.format), dest, sourceBytes(tc.source))
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, dest))
+			require.Len(t, findings, 1)
+		})
+	}
+}
+
+// TestVerifyCrossFormatBrokerUnit is the other cross-format proof: the two
+// packaged broker units differ only in their --admin-group default, so a
+// package shipping the wrong one starts cleanly and grants the wrong group.
+func TestVerifyCrossFormatBrokerUnit(t *testing.T) {
+	t.Parallel()
+
+	const dest = "/usr/lib/systemd/system/pilothoused.service"
+
+	for _, tc := range []struct {
+		name   string
+		format Format
+		source string
+	}{
+		{name: "rpm shipping the deb broker unit", format: FormatRPM, source: "deb/pilothoused.service"},
+		{name: "deb shipping the rpm broker unit", format: FormatDeb, source: "rpm/pilothoused.service"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := withContent(t, contractModel(t, tc.format), dest, sourceBytes(tc.source))
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, dest))
+			require.Len(t, findings, 1)
+		})
+	}
+}
+
+// TestVerifyContentNotComparedWhereContractStatesNoSource pins the deliberate
+// exclusion: the two binaries and the two directories carry no source in the
+// contract, so whatever an extractor records as their content — arbitrary
+// bytes or none at all — must produce nothing.
+func TestVerifyContentNotComparedWhereContractStatesNoSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range packagedFormats {
+		for _, dest := range contentFreeDestinations {
+			t.Run(tc.name+" "+dest+" arbitrary bytes", func(t *testing.T) {
+				t.Parallel()
+
+				model := withContent(t, contractModel(t, tc.format), dest, []byte("bytes from some other build"))
+
+				findings := Verify(model)
+				require.Zero(t, findingsFor(findings, CodeWrongContent, dest))
+				require.Empty(t, findings)
+			})
+
+			t.Run(tc.name+" "+dest+" nil", func(t *testing.T) {
+				t.Parallel()
+
+				// Reached by way of arbitrary bytes so the mutation is never
+				// vacuous: the two directory entries already carry nil content
+				// in the fixture.
+				model := withContent(t, contractModel(t, tc.format), dest, []byte("bytes from some other build"))
+				model = withContent(t, model, dest, nil)
+
+				findings := Verify(model)
+				require.Zero(t, findingsFor(findings, CodeWrongContent, dest))
+				require.Empty(t, findings)
+			})
+		}
+	}
+}
+
+// TestVerifyAccumulatesWrongContentAndMissing proves the content check
+// accumulates with the presence check rather than either masking the other.
+func TestVerifyAccumulatesWrongContentAndMissing(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wrongDest   = "/etc/pilothouse/pilothouse.env"
+		missingDest = "/usr/lib/sysusers.d/pilothouse.conf"
+	)
+
+	for _, tc := range packagedFormats {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := contractModel(t, tc.format)
+			model = withContent(t, model, wrongDest, perturb(contentAt(t, model, wrongDest)))
+			model = withoutEntry(t, model, missingDest)
+
+			findings := Verify(model)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, wrongDest))
+			require.Equal(t, 1, findingsFor(findings, CodeMissingPath, missingDest))
+			require.Len(t, findings, 2)
+		})
+	}
+}
+
 // TestVerifyAccumulatesDuplicateAndMissing proves the new checks accumulate
 // with the presence check rather than either masking the other.
 func TestVerifyAccumulatesDuplicateAndMissing(t *testing.T) {
@@ -581,8 +832,9 @@ func TestVerifyAccumulatesDuplicateAndMissing(t *testing.T) {
 }
 
 // TestVerifyDuplicateDoesNotSuppressTheOtherChecks proves a duplicated
-// destination is still evaluated for mode and config designation: Verify reads
-// the first entry installing there and accumulates all three findings.
+// destination is still evaluated for mode, config designation and content:
+// Verify reads the first entry installing there and accumulates all four
+// findings.
 func TestVerifyDuplicateDoesNotSuppressTheOtherChecks(t *testing.T) {
 	t.Parallel()
 
@@ -594,13 +846,15 @@ func TestVerifyDuplicateDoesNotSuppressTheOtherChecks(t *testing.T) {
 
 			model := withMode(t, contractModel(t, tc.format), dest, 0o644)
 			model = withConfig(t, model, dest, false)
+			model = withContent(t, model, dest, perturb(contentAt(t, model, dest)))
 			model = duplicateEntry(t, model, dest, 1)
 
 			findings := Verify(model)
 			require.Equal(t, 1, findingsFor(findings, CodeDuplicateEntry, dest))
 			require.Equal(t, 1, findingsFor(findings, CodeWrongMode, dest))
 			require.Equal(t, 1, findingsFor(findings, CodeMissingConfigFlag, dest))
-			require.Len(t, findings, 3)
+			require.Equal(t, 1, findingsFor(findings, CodeWrongContent, dest))
+			require.Len(t, findings, 4)
 		})
 	}
 }

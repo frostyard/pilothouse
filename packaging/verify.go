@@ -1,6 +1,9 @@
 package packaging
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 // Verify reports every way m violates the packaging contract.
 //
@@ -12,7 +15,7 @@ import "fmt"
 // Verify is pure: it reads only m and the repository sources compiled into
 // this package, opens no file and runs no command.
 //
-// The assertions Verify makes at this commit are exactly five:
+// The assertions Verify makes at this commit are exactly six:
 //
 //   - CodeUnknownFormat (not path-scoped, so Path is empty) when m.Format is
 //     neither FormatDeb nor FormatRPM. Without it a zero-value Model would
@@ -35,8 +38,13 @@ import "fmt"
 //   - CodeMissingConfigFlag, with Path set to the destination, when an entry
 //     the contract requires to be config-designated is not. Only three
 //     destinations require it.
+//   - CodeWrongContent, with Path set to the destination and a Message naming
+//     the repository source expected there, when the entry's bytes are not
+//     exactly the bytes of the embedded source the contract builds that
+//     destination from. Six destinations are compared this way; a requirement
+//     whose source is empty compares no content (see requirement.source).
 //
-// Two deliberate silences:
+// Three deliberate silences:
 //
 //   - Modes are compared on permission bits only (Entry.Mode.Perm()). An
 //     extractor that sets fs.ModeDir on a directory entry — which a real one
@@ -47,10 +55,21 @@ import "fmt"
 //     config is not a finding. The contract pins a minimum, and the code
 //     vocabulary has no unexpected_config_flag: missing_config_flag is the
 //     only asserted direction.
+//   - Content is never compared at the four destinations whose requirement
+//     carries no source: the two binaries, whose bytes differ per build, and
+//     the two directories, which have no content. Whatever an extractor
+//     records there — arbitrary bytes or none — is not a finding.
+//
+// The content comparison is exact bytes.Equal against the embedded source,
+// with no normalization of any kind: an entry extracted from a real archive
+// carries the shipped bytes verbatim, so even one added byte is a difference
+// worth reporting. A byte-compared entry whose Content is nil is likewise
+// reported, because every embedded source is non-empty: an extractor that
+// failed to capture the bytes must not verify clean.
 //
 // A duplicate does not suppress the other checks for its destination: Verify
-// evaluates the first entry installing there for mode and config designation,
-// and still accumulates.
+// evaluates the first entry installing there for mode, config designation and
+// content, and still accumulates.
 //
 // Nothing else is asserted yet; further assertions arrive in later changes.
 func Verify(m Model) []Finding {
@@ -120,6 +139,17 @@ func Verify(m Model) []Finding {
 				Message: fmt.Sprintf(
 					"%s is not designated a configuration file by the packaging metadata",
 					req.dest,
+				),
+			})
+		}
+
+		if req.source != "" && !bytes.Equal(entry.Content, sourceBytes(req.source)) {
+			findings = append(findings, Finding{
+				Code: CodeWrongContent,
+				Path: req.dest,
+				Message: fmt.Sprintf(
+					"%s does not carry the bytes of the repository source packaging/%s",
+					req.dest, req.source,
 				),
 			})
 		}

@@ -11,7 +11,8 @@
 // Verify checks a Model against the contract. It reports an unknown format,
 // every required destination the model installs nothing to or installs more
 // than once, and — for the destinations the contract pins them on — a wrong
-// mode or a missing configuration-file designation; the remaining assertions
+// mode, a missing configuration-file designation, or content that is not the
+// repository source the destination is built from; the remaining assertions
 // arrive in later changes.
 package packaging
 

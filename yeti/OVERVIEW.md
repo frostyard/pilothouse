@@ -1488,9 +1488,10 @@ not embedded (the set is fixed at compile time, so a miss is a programming
 error, not runtime input). This embed is why the artifact-contract code lives
 in `packaging/` rather than under `internal/`: a `//go:embed` pattern may not
 contain `..`, and `Verify`'s signature is fixed, so there is no seam through
-which an `fs.FS` could be injected instead. At this commit the embedded bytes
-are consumed by the test fixture, which builds a contract-satisfying `Model`
-from the real repository sources without reading the working tree.
+which an `fs.FS` could be injected instead. The embedded bytes are consumed by
+`Verify`'s content comparison (below) and by the test fixture, which builds a
+contract-satisfying `Model` from the same real repository sources — neither
+reads the working tree.
 
 **The requirement table** (`packaging/contract.go`). `requirements(format)`
 returns the contract table for a format, and `false` for a format this package
@@ -1501,10 +1502,10 @@ does not know. Both `deb` and `rpm` require the same ten destinations:
 `/etc/pilothouse/storage/credentials`, `/etc/pilothouse/pilothouse.env`,
 `/etc/pilothouse/pilothoused.env`, `/usr/bin/pilothouse` and
 `/usr/bin/pilothoused`. A row also carries the mode the contract pins for the
-destination and whether the packaging metadata must designate it a
-configuration file. The table's rows carry only the fields the checks that
-exist actually read; a field is added by the change that first asserts on it,
-so no field is ever dead.
+destination, whether the packaging metadata must designate it a configuration
+file, and the embedded repository source whose bytes the entry must equal. The
+table's rows carry only the fields the checks that exist actually read; a field
+is added by the change that first asserts on it, so no field is ever dead.
 
 A row's `mode` is zero for every destination `.goreleaser.yaml` gives no
 `file_info`, and zero means "the contract states no mode, assert nothing" —
@@ -1516,6 +1517,29 @@ four destinations that do carry one are `/etc/pilothouse` (**0750**),
 destinations are `/etc/pam.d/pilothouse`, `/etc/pilothouse/pilothouse.env` and
 `/etc/pilothouse/pilothoused.env`. Both sets are identical in `deb` and `rpm`.
 
+**Provenance: which entries are byte-compared, and which are deliberately
+not.** A row's `source` names the embedded repository source the destination is
+built from, and the empty string means "the contract compares no content here".
+**Six** destinations are byte-compared, and the `deb` and `rpm` tables differ in
+exactly the two rows whose source is per-format:
+
+| Destination | `deb` source | `rpm` source |
+| --- | --- | --- |
+| `/usr/lib/systemd/system/pilothouse.service` | `pilothouse.service` | `pilothouse.service` |
+| `/usr/lib/systemd/system/pilothoused.service` | `deb/pilothoused.service` | `rpm/pilothoused.service` |
+| `/etc/pam.d/pilothouse` | `pilothouse.pam` | `rpm/pilothouse.pam` |
+| `/usr/lib/sysusers.d/pilothouse.conf` | `pilothouse.sysusers` | `pilothouse.sysusers` |
+| `/etc/pilothouse/pilothouse.env` | `pilothouse.env` | `pilothouse.env` |
+| `/etc/pilothouse/pilothoused.env` | `pilothoused.env` | `pilothoused.env` |
+
+The **four** destinations that are deliberately *not* content-compared are
+`/usr/bin/pilothouse` and `/usr/bin/pilothoused` — a binary's bytes differ per
+build (version stamps, build IDs, toolchain), so only its destination and
+multiplicity are contract-relevant — and the two directory entries
+`/etc/pilothouse` and `/etc/pilothouse/storage/credentials`, which have no
+content at all. Whatever an extractor records at those four, including nothing,
+is not a finding.
+
 **`Verify`** (`packaging/verify.go`). The signature is
 `func Verify(m Model) []Finding`, fixed by the issue. **`Verify` accumulates:**
 no check returns early and no check is skipped because an earlier one produced
@@ -1523,7 +1547,7 @@ a finding, so the result holds every independent violation the model exhibits,
 and a nil or empty result means the model satisfies every assertion implemented
 so far.
 
-`Verify` performs exactly five checks at this commit:
+`Verify` performs exactly six checks at this commit:
 
 - **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
   zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
@@ -1545,8 +1569,15 @@ so far.
   contract pins. Only the four modes listed above are asserted.
 - **`missing_config_flag`**, with `Path` set to the destination, when an entry
   at one of the three config-designated destinations has `Config` false.
+- **`wrong_content`**, with `Path` set to the destination and a `Message`
+  naming the expected `packaging/<source>`, when the entry's bytes are not
+  exactly the bytes of the source the table pins for that destination in that
+  format. Only the six byte-compared destinations above are checked. This is
+  the check that makes "the `rpm` shipped the `deb`'s PAM file" detectable at
+  all: such a package installs a valid file at the right destination with the
+  right mode and config designation, and nothing but the bytes gives it away.
 
-Two rules keep those last two honest:
+Three rules keep those last three honest:
 
 - **Permission bits only.** Modes are compared as `Entry.Mode.Perm()`, so an
   extractor that sets `fs.ModeDir` on the two directory entries is not falsely
@@ -1555,10 +1586,17 @@ Two rules keep those last two honest:
   minimum and the vocabulary has no `unexpected_config_flag`, so
   `missing_config_flag` is the only asserted direction — designating, say, the
   sysusers file a config file passes.
+- **The content comparison is exact and normalizes nothing.** It is a plain
+  `bytes.Equal` against the embedded source: a payload entry extracted from a
+  real archive carries the shipped bytes verbatim, so a single added newline is
+  reported like any other difference. A byte-compared entry whose `Content` is
+  `nil` is reported too, since every embedded source is non-empty — an
+  extractor that failed to capture the bytes must not verify clean, or the
+  extractor bugs #73 will have to find become invisible.
 
 A duplicate does not suppress the other checks for its destination: `Verify`
-evaluates the first entry installing there for mode and config designation, and
-still accumulates.
+evaluates the first entry installing there for mode, config designation and
+content, and still accumulates.
 
 Nothing else is asserted yet. The remaining assertions the contract calls for
 land in later changes and are documented here as each one arrives.
@@ -1569,14 +1607,24 @@ land in later changes and are documented here as each one arrives.
 `Code`/`Path` pair, never by `Message`), and table-driven mutations covering
 each required destination in each format (missing, then duplicated), a
 relocated binary in each format, a wrong mode on each of the four pinned
-destinations, a cleared config designation on each of the three, and several
-unrelated faults at once — which is what proves the accumulate guarantee rather
-than merely stating it. Three tests pin the deliberate silences: an
-`fs.ModeDir`-bearing directory entry verifies clean, changing the mode of a
-unit file or a binary produces nothing, and a config designation on the
-sysusers file produces nothing. Its expected destinations, modes and config
-designations are written out by hand rather than read back from `requirements`,
-since the table is the thing under test and may not also be the oracle.
+destinations, a cleared config designation on each of the three, a perturbed
+and then a `nil` `Content` on each of the six byte-compared destinations, and
+several unrelated faults at once — which is what proves the accumulate
+guarantee rather than merely stating it. Two cross-format tests are the point
+of the content check: an `rpm` model carrying `packaging/pilothouse.pam`'s
+bytes and a `deb` model carrying `packaging/rpm/pilothouse.pam`'s are each
+reported at `/etc/pam.d/pilothouse`, and the same pair of substitutions is made
+for the broker unit at `/usr/lib/systemd/system/pilothoused.service`. Four
+tests pin the deliberate silences: an `fs.ModeDir`-bearing directory entry
+verifies clean, changing the mode of a unit file or a binary produces nothing,
+a config designation on the sysusers file produces nothing, and arbitrary or
+`nil` content on either binary or either directory produces nothing. Its
+expected destinations, modes, config designations and byte-compared set are
+written out by hand rather than read back from `requirements`, since the table
+is the thing under test and may not also be the oracle. The mutation helpers'
+vacuity guards are load-bearing here: `withContent` fails if the bytes it
+installs are the ones the entry already carried, so the cross-format tests
+cannot silently degrade to no-ops if the two formats' sources ever converge.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If

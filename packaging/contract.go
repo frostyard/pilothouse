@@ -72,33 +72,51 @@ type requirement struct {
 	// configuration file. False means the contract does not require it, not
 	// that the designation is forbidden — see Verify.
 	config bool
+	// source is the name of the embedded repository source whose bytes the
+	// entry installed to dest must equal, exactly.
+	//
+	// The empty string means the contract compares no content at this
+	// destination, and it is empty for exactly four rows: the two binaries,
+	// whose bytes differ per build so only destination and multiplicity are
+	// contract-relevant, and the two directories, which have no content.
+	source string
 }
 
 // requirements returns the contract table for the given format, and false when
 // the format is not one this package knows.
 //
-// The table is per-format because the contract distinguishes the two — the
+// The table is per-format because the contract distinguishes the two: the
+// destinations, modes and config designations are the same in both, but the
 // broker unit and the PAM policy are built from different repository sources
-// in each — but the destinations, modes and config designations are the same
-// in both, so at this commit the two tables are identical.
+// in each, so the two tables differ in exactly those two source names.
 func requirements(f Format) ([]requirement, bool) {
+	// The two per-format sources. The broker unit differs in its
+	// --admin-group default and the PAM policy in the stacks it includes, so
+	// a package shipping the other format's file is a real defect and is
+	// precisely what the source column makes detectable.
+	var brokerUnit, pamPolicy string
+
 	switch f {
-	case FormatDeb, FormatRPM:
-		// A fresh slice per call: callers must not be able to mutate the
-		// contract by writing through a shared backing array.
-		return []requirement{
-			{dest: "/usr/lib/systemd/system/pilothouse.service"},
-			{dest: "/usr/lib/systemd/system/pilothoused.service"},
-			{dest: "/etc/pam.d/pilothouse", config: true},
-			{dest: "/usr/lib/sysusers.d/pilothouse.conf"},
-			{dest: "/etc/pilothouse", mode: 0o750},
-			{dest: "/etc/pilothouse/storage/credentials", mode: 0o700},
-			{dest: "/etc/pilothouse/pilothouse.env", mode: 0o640, config: true},
-			{dest: "/etc/pilothouse/pilothoused.env", mode: 0o640, config: true},
-			{dest: "/usr/bin/pilothouse"},
-			{dest: "/usr/bin/pilothoused"},
-		}, true
+	case FormatDeb:
+		brokerUnit, pamPolicy = "deb/pilothoused.service", "pilothouse.pam"
+	case FormatRPM:
+		brokerUnit, pamPolicy = "rpm/pilothoused.service", "rpm/pilothouse.pam"
 	default:
 		return nil, false
 	}
+
+	// A fresh slice per call: callers must not be able to mutate the contract
+	// by writing through a shared backing array.
+	return []requirement{
+		{dest: "/usr/lib/systemd/system/pilothouse.service", source: "pilothouse.service"},
+		{dest: "/usr/lib/systemd/system/pilothoused.service", source: brokerUnit},
+		{dest: "/etc/pam.d/pilothouse", config: true, source: pamPolicy},
+		{dest: "/usr/lib/sysusers.d/pilothouse.conf", source: "pilothouse.sysusers"},
+		{dest: "/etc/pilothouse", mode: 0o750},
+		{dest: "/etc/pilothouse/storage/credentials", mode: 0o700},
+		{dest: "/etc/pilothouse/pilothouse.env", mode: 0o640, config: true, source: "pilothouse.env"},
+		{dest: "/etc/pilothouse/pilothoused.env", mode: 0o640, config: true, source: "pilothoused.env"},
+		{dest: "/usr/bin/pilothouse"},
+		{dest: "/usr/bin/pilothoused"},
+	}, true
 }
