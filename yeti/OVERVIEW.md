@@ -46,10 +46,12 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       --admin-group, PAM stack names) selected by
                       .goreleaser.yaml's nfpms overrides. postinstall.sh is the
                       single shared package scriptlet (deb postinst and rpm
-                      %post). model.go and finding.go make this a real Go
-                      package with an exported surface: the artifact-contract
-                      model types and the finding vocabulary (see "Artifact
-                      contract model" below). units_test.go,
+                      %post). model.go, finding.go, contract.go and verify.go
+                      make this a real Go package with an exported surface: the
+                      artifact-contract model types, the finding vocabulary,
+                      the embedded repository sources with the per-format
+                      requirement table, and Verify (see "Artifact contract
+                      model" below). units_test.go,
                       postinstall_test.go, and goreleaser_config_test.go are
                       its configuration-level tests: the first runs the real
                       `systemd-analyze verify` against both broker units and
@@ -58,7 +60,8 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       exercises it against a temporary root, the third parses
                       ../.goreleaser.yaml and asserts the nfpms packaging
                       contract. finding_test.go pins the finding codes'
-                      string values
+                      string values and verify_test.go holds the
+                      artifact-contract behavioral tests
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets
@@ -1430,11 +1433,12 @@ copy* of the parsed data and prove each check actually fires — the real file i
 never written. The test needs no container: it only reads a YAML file from
 disk, so it runs under plain `make test` as well as `make docker-ci`.
 
-### Artifact contract model (`packaging/model.go`, `packaging/finding.go`)
+### Artifact contract model (`packaging/model.go`, `packaging/finding.go`, `packaging/contract.go`, `packaging/verify.go`)
 
-The `packaging` directory is a real Go package as of this change, not only a
-home for tests. What exists at this commit is the vocabulary alone — the data
-types an artifact is described with, and the codes a violation is named by.
+The `packaging` directory is a real Go package, not only a home for tests. It
+holds the data types an artifact is described with, the codes a violation is
+named by, the destinations the contract requires, and `Verify`, which reports
+the violations it can see so far.
 
 **Model types** (`packaging/model.go`). `Format` is a string type with exactly
 two values, `FormatDeb` (`"deb"`) and `FormatRPM` (`"rpm"`). `Entry` describes
@@ -1471,11 +1475,62 @@ not path-scoped, so reporting it as `missing_path` would require inventing a
 fake `Path`, and a code for an unrecognised `Format` is what keeps a zero-value
 `Model` from ever being accepted as satisfying the contract.
 
-**No verification function exists yet.** Nothing in this package reads a
-`Model` or emits a `Finding` at this commit; the codes are declared vocabulary
-with no producer. The `Verify` function that checks a `Model` against the
-contract described earlier in this section lands in the following change, and
-the assertions it makes are documented there as each one arrives.
+**Embedded repository sources** (`packaging/contract.go`). The nine files in
+this directory that the packages ship — `pilothouse.service`,
+`pilothouse.pam`, `pilothouse.sysusers`, `pilothouse.env`, `pilothoused.env`,
+`postinstall.sh`, `deb/pilothoused.service`, `rpm/pilothouse.pam` and
+`rpm/pilothoused.service` — are compiled into the package with `//go:embed` and
+read through the unexported `sourceBytes(name)`, which panics on a name that is
+not embedded (the set is fixed at compile time, so a miss is a programming
+error, not runtime input). This embed is why the artifact-contract code lives
+in `packaging/` rather than under `internal/`: a `//go:embed` pattern may not
+contain `..`, and `Verify`'s signature is fixed, so there is no seam through
+which an `fs.FS` could be injected instead. At this commit the embedded bytes
+are consumed by the test fixture, which builds a contract-satisfying `Model`
+from the real repository sources without reading the working tree.
+
+**The requirement table** (`packaging/contract.go`). `requirements(format)`
+returns the contract table for a format, and `false` for a format this package
+does not know. Both `deb` and `rpm` require the same ten destinations:
+`/usr/lib/systemd/system/pilothouse.service`,
+`/usr/lib/systemd/system/pilothoused.service`, `/etc/pam.d/pilothouse`,
+`/usr/lib/sysusers.d/pilothouse.conf`, `/etc/pilothouse`,
+`/etc/pilothouse/storage/credentials`, `/etc/pilothouse/pilothouse.env`,
+`/etc/pilothouse/pilothoused.env`, `/usr/bin/pilothouse` and
+`/usr/bin/pilothoused`. The table's rows carry only the fields the checks that
+exist actually read; a field is added by the change that first asserts on it,
+so no field is ever dead.
+
+**`Verify`** (`packaging/verify.go`). The signature is
+`func Verify(m Model) []Finding`, fixed by the issue. **`Verify` accumulates:**
+no check returns early and no check is skipped because an earlier one produced
+a finding, so the result holds every independent violation the model exhibits,
+and a nil or empty result means the model satisfies every assertion implemented
+so far.
+
+`Verify` performs exactly two checks at this commit:
+
+- **`unknown_format`** when `Format` is neither `deb` nor `rpm`, including the
+  zero-value `Model`. The finding is not path-scoped, so its `Path` is empty.
+  An unknown format produces no other finding: the contract for such a package
+  is unknown, not violated.
+- **`missing_path`**, with `Path` set to the destination, for each of the ten
+  required destinations no entry installs to. A file installed somewhere else —
+  a binary under `/usr/local/bin`, say — leaves its contract destination
+  uninstalled and is reported this way.
+
+Nothing else is asserted yet. The remaining assertions the contract calls for
+land in later changes and are documented here as each one arrives.
+
+`packaging/verify_test.go` holds the behavioral tests: the shared
+`contractModel(t, format)` fixture that every mutation starts from, a
+`findingsFor(findings, code, path)` matcher (findings are matched by the
+`Code`/`Path` pair, never by `Message`), and table-driven mutations covering
+each required destination in each format, a relocated binary in each format,
+and two unrelated faults at once — which is what proves the accumulate
+guarantee rather than merely stating it. Its expected destinations are written
+out by hand rather than read back from `requirements`, since the table is the
+thing under test and may not also be the oracle.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
