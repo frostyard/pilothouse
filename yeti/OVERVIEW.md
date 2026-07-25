@@ -62,7 +62,9 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       ../.goreleaser.yaml and asserts the nfpms packaging
                       contract. finding_test.go pins the finding codes'
                       string values and verify_test.go holds the
-                      artifact-contract behavioral tests
+                      artifact-contract behavioral tests; drift_test.go holds
+                      the two guards tying contract.go's hand-written tables to
+                      the live ../.goreleaser.yaml
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets
@@ -1622,10 +1624,12 @@ stacks the policy includes, the libsystemd shared library, and systemd itself:
 
 **Provenance:** both lists are hand-written constants transcribed from
 `.goreleaser.yaml`'s per-format `overrides.<format>.dependencies` at
-`b1294e1`. Nothing in this package reads that file — keeping the expectation
-hand-written is what makes it an independent statement of the contract rather
-than a restatement of whatever the config happens to say. Tying the two
-together mechanically is a separate drift guard, which has not landed yet.
+`b1294e1`. No non-test file in this package reads that file — keeping the
+expectation hand-written is what makes it an independent statement of the
+contract rather than a restatement of whatever the config happens to say. Tying
+the two together mechanically is the job of the drift guards in
+`packaging/drift_test.go` ("The drift guards" below), which do read the live
+config.
 
 **Comparison, order-independent and multiplicity-sensitive.** `Verify` compares
 *sorted clones* of the declared and the expected list with `slices.Equal`,
@@ -1764,8 +1768,9 @@ has to add is that the artifact ships exactly those bytes (M1 above).
 
 **The accumulate guarantee, demonstrated end to end.** Those ten checks are the
 whole of the contract `Verify` asserts — every assertion the artifact contract
-calls for is implemented, and what has not landed is not a further check but
-the mechanical drift guard tying the hand-written tables to `.goreleaser.yaml`.
+calls for is implemented. What the drift guards below add is not a further
+`Verify` check: they judge the contract *tables* against `.goreleaser.yaml`,
+never a `Model`.
 Because the check list is complete, the accumulate guarantee is now proven
 rather than merely stated: `TestVerifyAccumulatesEveryFaultAtOnce` seeds **one**
 model with eight unrelated faults spanning **seven** distinct codes — a missing
@@ -1851,6 +1856,132 @@ installs are the ones the entry already carried, so the cross-format tests
 cannot silently degrade to no-ops if the two formats' sources ever converge,
 and `withScriptlet`/`withoutScriptlet` fail the same way if the fixture ever
 stops shipping a scriptlet or already carried the mutated bytes.
+
+**The drift guards** (`packaging/drift_test.go`). Everything above rests on
+tables that were *transcribed by hand* from `.goreleaser.yaml`. Two guards keep
+the transcription honest, and they live in
+their own file because that file is the one *artifact-contract* file that reads
+the working tree — see the three tiers below, which are what keep that
+statement from being confused with a claim about the whole package.
+
+They are **not** a restatement of `goreleaser_config_test.go`. That test asserts
+*the config* matches hand-written expectations; these assert *`Verify`'s tables*
+match the live config. Opposite direction, and the only thing standing between
+`contract.go` and silent divergence
+(`docs/agents/skills/completeness-tests-need-live-source-of-truth.md` is why an
+embedded snapshot of the YAML would not do: the snapshot and the tables would
+drift together, undetected).
+
+**Guard 1 — `TestContractTablesMatchGoreleaserConfig`.** It parses
+`../.goreleaser.yaml` through `goreleaser_config_test.go`'s existing
+`goreleaserConfigPath` constant and its `loadNFPMEntry`, `loadOverride`,
+`normalizeSrc` and `entriesWithDst` helpers, so it holds no second copy of the
+configuration. Per format it asserts:
+
+- **Converse direction.** Every `dst` a format's override actually packages
+  appears in `requirements(format)`, so adding a packaged file to
+  `.goreleaser.yaml` without updating `contract.go` fails here.
+- **Forward direction.** Each of the **eight** requirements whose `dest` is not
+  under `/usr/bin` is installed by exactly one live entry, and the row's three
+  metadata fields agree with it. Two of the three comparisons are conditional,
+  because the config has an absent case for each:
+  - **source** — when the row's `source` is empty the entry must carry no `src`
+    *and* be `type: dir`; otherwise `normalizeSrc(entry.Src)` must equal
+    `"packaging/" + source`. The split is forced: the two directory entries
+    (`/etc/pilothouse`, `/etc/pilothouse/storage/credentials`) are the four
+    `type: dir` entries in the file — two per format — and none carries a `src`
+    key, and `normalizeSrc("")` is `""`, which can never equal `"packaging/"`.
+    The `type: dir` half is what keeps the directory branch from degenerating
+    into "assert nothing".
+  - **mode** — when the entry has `file_info` the row's mode must equal
+    `fs.FileMode(entry.FileInfo.Mode)` (the field is an `int` holding the YAML
+    octal literal, so `0750` arrives as 488); when it has none the row's mode
+    must be `0`, which is the "the contract states no mode" encoding.
+  - **config** — the total comparison `requirement.config == (entry.Type ==
+    "config")`, so both an unrequired designation and a missing one fail.
+- **Dependencies.** `contractDependencies(format)` equals the live
+  `overrides.<format>.dependencies`, both sorted.
+- **Scriptlet source.** `scripts.postinstall` is `./packaging/postinstall.sh` —
+  the file `postinstallSource` names and whose bytes the scriptlet check
+  compares against.
+
+**What guard 1 deliberately does not cover.** The two binary destinations
+`/usr/bin/pilothouse` and `/usr/bin/pilothoused` appear in no assertion above.
+They are nFPM **build outputs**, not override contents: goreleaser installs each
+`builds[]` entry's binary itself, so neither destination is written into
+`overrides.<format>.contents` and neither exists in the config this guard walks.
+That is a gap in what the config can be asked, not a hole to be closed by
+widening the guard — guard 2 is their cover, and the guard's doc comment says
+so.
+
+**Guard 2 — `TestBinaryDestinationsMatchBuilds`.** The existing parser discards
+the `builds` section, so this guard declares its own minimal local types
+(`binaryProvenanceConfig`, `buildTarget`, `bindirEntry` — names chosen not to
+collide with `goreleaserConfig`, `nfpmEntry`, `contentEntry`, `fileInfo`,
+`formatOverride` or `nfpmScripts`) and parses the same path through the same
+reused `goreleaserConfigPath` constant. It asserts the whole chain that makes
+`/usr/bin/<binary>` a contract destination in the first place: `builds[].binary`
+is exactly the two-element set `{pilothouse, pilothoused}`; `nfpms[0].bindir` is
+unset, so nFPM's `/usr/bin` default applies; `requirements(format)` contains
+exactly one requirement at `/usr/bin/pilothouse` and one at
+`/usr/bin/pilothoused` in **both** formats; and no override content entry in
+either format installs to `/usr/bin` or anything under it — which is what
+confirms the binaries are genuinely outside guard 1's reach rather than merely
+overlooked by it.
+
+Neither guard has a companion mutation test, and that is deliberate: the thing
+they guard is `contract.go` itself, so the way to demonstrate they fire is a
+*temporary local edit to its tables* (a changed source name, mode, config flag,
+dependency or binary destination, or a deleted row), never a checked-in mutation
+of `.goreleaser.yaml`.
+
+**Portability: three tiers, and why they must not be blurred.** The one claim
+that holds without qualification across all of this work is: **no file added by
+the artifact-contract phase executes an external command.** Below that, the
+three tiers differ, and a sentence true of one is false of another.
+
+- **(a) The contract model, `Verify`, and their behavioral tests** —
+  `packaging/model.go`, `finding.go`, `contract.go`, `verify.go`,
+  `finding_test.go` and `verify_test.go`. Pure Go over bytes embedded at compile
+  time by `//go:embed`. They read **no file** and run **no command** at run
+  time; every expected byte comes from the FS compiled into the test binary.
+  `grep -nE 'os\.ReadFile|os\.Open|os\.Stat|os/exec|exec\.Command'` over those
+  six files prints nothing.
+- **(b) The drift guards** — `packaging/drift_test.go`. This file **does** read
+  the live `../.goreleaser.yaml` from the working tree, deliberately: a guard
+  compared against an embedded snapshot could not detect drift at all. It is
+  the single named exception, it reads that one path and nothing else, and it
+  still runs **no external command** — so it runs under a plain
+  `go test ./packaging/` on any machine with the repository checked out.
+- **(c) The pre-existing configuration-level tests** —
+  `packaging/units_test.go` and `packaging/postinstall_test.go`. These **do**
+  exec external tools: `systemd-analyze` (`units_test.go`), and `shellcheck`
+  plus `/bin/sh` (`postinstall_test.go`, which runs the real scriptlet against a
+  `t.TempDir()`). The two optional tools are resolved with `exec.LookPath` and
+  their tests **skip with an explanatory message** when the tool is absent from
+  `PATH`; `/bin/sh` is invoked directly, as a POSIX shell is assumed present.
+  The skipping is exactly why **`make docker-ci` remains the full gate** — the
+  dev image installs the systemd package and `shellcheck`, so those checks
+  actually run there and quietly skip elsewhere.
+
+Because of (c), no sentence anywhere may claim that the `packaging` package's
+*whole test suite* runs no external command, nor that the contract tests *as a
+group* operate only over embedded bytes — the drift guards do not. Claims have
+to name the tier they describe. `grep -lE 'os/exec|exec\.Command' packaging/*.go`
+listing exactly `units_test.go` and `postinstall_test.go` is the mechanical form
+of the global guarantee.
+
+**Still out of scope for this package.**
+
+- **Reading real `.deb`/`.rpm` files.** Nothing here opens an artifact. The
+  extractor that populates a `Model` from a built package, and the CLI that
+  reports `Finding`s, are **#73**'s.
+- **Building the packages.** A `make package` target and a CI packaging job are
+  **#72**'s; this package is exercised by `go test` alone.
+- **On-disk state after a real install.** VM installs and verification of
+  installed ownership are **#67**'s — see M1 above for why an artifact cannot
+  prove ownership and why `Entry.Owner`/`Entry.Group` therefore drive no
+  assertion.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If

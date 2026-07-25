@@ -128,9 +128,10 @@ import (
 // the forbidden roots", not "exactly these files and nothing else".
 //
 // These ten assertions are the whole of the contract Verify checks: every
-// assertion the artifact contract calls for is implemented. What remains
-// elsewhere is not another Verify check but the mechanical drift guard tying
-// this package's hand-written tables to .goreleaser.yaml.
+// assertion the artifact contract calls for is implemented. The hand-written
+// tables those assertions read are tied to .goreleaser.yaml by the two drift
+// guards in drift_test.go, which are not further Verify checks: they judge the
+// contract tables, not a Model.
 func Verify(m Model) []Finding {
 	var findings []Finding
 

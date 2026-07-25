@@ -67,8 +67,10 @@ func sourceBytes(name string) []byte {
 // .goreleaser.yaml's per-format overrides.<format>.dependencies at b1294e1.
 // Nothing here reads that file: keeping the expectation hand-written is what
 // makes it an independent statement of the contract rather than a restatement
-// of whatever the config happens to say. Tying the two together is a separate
-// drift guard, which arrives in a later change.
+// of whatever the config happens to say. Tying the two together is the job of a
+// separate drift guard, TestContractTablesMatchGoreleaserConfig in
+// drift_test.go, which does read the live config. No non-test file in this
+// package does.
 //
 // The name is contractDependencies rather than the more obvious
 // wantDependencies because goreleaser_config_test.go already declares
