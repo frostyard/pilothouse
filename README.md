@@ -1,6 +1,6 @@
 # Pilothouse
 
-Pilothouse is a local web administration console for [Snosi](https://github.com/frostyard/snosi) installations. It starts with an attractive live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through Snosi's `updex` interface.
+Pilothouse is a local web administration console for image-based Linux systems. It starts with an attractive live system dashboard and, once the broker is pointed at `updex`, complete sysext lifecycle management through the `updex` interface.
 
 The application is bootstrapped from [housecat-inc/scratch](https://github.com/housecat-inc/scratch): Go and templ on the server, HTMX for focused page updates, an embedded design system, and no Node runtime or external frontend assets.
 
@@ -12,7 +12,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Storage health that distinguishes expected immutable EROFS mounts from unexpected read-only or capacity-exhausted writable filesystems
 - Storage Attention and topology deep links that land on the matching inventory, mount, or finding row
 - Systemd service, socket, and timer inventory with administrator-only lifecycle and enablement controls
-- Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` Snosi definitions through updex
+- Layered discovery of shared `sysupdate.d` and component-scoped `sysupdate.<name>.d` `updex` definitions
 - Installed and merged state from `systemd-sysext`
 - Extension update availability on the Extensions page — the pending component updates for each extension, an "Update available" badge on every affected extension row, and the aggregate count on the dashboard card
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
@@ -152,7 +152,7 @@ The Podman module intentionally manages the root/system store used for host serv
 
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 
-## Install on Snosi
+## Install
 
 ```bash
 make build

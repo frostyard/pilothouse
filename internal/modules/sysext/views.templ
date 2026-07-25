@@ -48,7 +48,7 @@ templ Summary(state ExtensionsState) {
 templ Page(state ExtensionsState, csrf string, admin bool, enableDisableAvailable bool, refreshAvailable bool, updateAvailable bool) {
 	<div class="page-stack">
 		<div class="page-intro">
-			<p>Optional Snosi software layers managed through updex. Enabling downloads and merges the newest extension; removing an active extension disables it now and takes effect on reboot.</p>
+			<p>Optional software layers managed through updex. Enabling downloads and merges the newest extension; removing an active extension disables it now and takes effect on reboot.</p>
 			if !admin {
 				<span class="badge">Read only</span>
 			} else if refreshAvailable || updateAvailable {

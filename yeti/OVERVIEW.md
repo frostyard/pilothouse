@@ -3,7 +3,7 @@
 ## Purpose
 
 Pilothouse (`github.com/frostyard/pilothouse`) is a local web administration
-console for [Snosi](https://github.com/frostyard/snosi) systems. It presents
+console for image-based Linux systems. It presents
 a live dashboard and management UI (system telemetry, sysext/`updex`
 lifecycle, systemd services, Podman/Docker/Incus workloads, journal search,
 backups, storage/disk health and managed NFS/SMB mounts, file browsing,
@@ -87,7 +87,7 @@ by accident. Current modules:
 | `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. SMB creation optionally supports paired numeric local UID/GID mapping. Expected immutable EROFS mounts retain their inventory usage and read-only state but are excluded from capacity and read-only health findings; other filesystems retain those checks. |
 | `attention` | Aggregates `platform.HealthProvider` findings from other modules (bounded 2s/provider) into one "needs attention" view. |
 | `services` | Systemd service/socket/timer inventory and lifecycle/enablement control via system D-Bus; bounded journal diagnostics. |
-| `sysext` | Snosi `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
+| `sysext` | `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
 | `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`; lifecycle actions. |
@@ -1390,3 +1390,9 @@ rationale.
   response schema, the bootc and rpm-ostree policy normalizers, the daemon-side
   `AutoUpdateManager`, and the Maintenance page's read-only "Automatic updates"
   section (`queryAutoUpdate` → `autoUpdateSection`), which exposes no mutation.
+- `docs/branding.md` — the neutral-branding rules: the canonical
+  self-description sentence and where it may be used, the rule that `updex`/
+  `sysext`/`systemd-sysext`/`bootc`/`rpm-ostree` are tool and capability
+  identifiers rather than branding, and the allowlist of sites (test fixtures,
+  `docs/capabilities.md` fixture prose, the `release.yml` dispatch, mock Fleet
+  data, `yeti/` historical narrative) that naming sweeps must leave unchanged.

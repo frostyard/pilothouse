@@ -12,7 +12,7 @@ pro: true
 project_name: pilothouse
 
 metadata:
-  description: pilothouse - local web administration console for Snosi installations
+  description: pilothouse - a local web administration console for image-based Linux systems
   homepage: "https://github.com/frostyard/pilothouse"
   license: MIT
   maintainers:
@@ -118,8 +118,8 @@ nfpms:
   - file_name_template: "{{ .ConventionalFileName }}"
     package_name: frostyard-pilothouse
     description: |-
-      Local web administration console for Snosi installations, with an
-      unprivileged web process and a root-only action broker.
+      A local web administration console for image-based Linux systems, with
+      an unprivileged web process and a root-only action broker.
     license: MIT
     contents:
       - src: ./packaging/pilothouse.service

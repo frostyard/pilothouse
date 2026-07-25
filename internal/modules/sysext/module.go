@@ -60,7 +60,7 @@ func (m *Module) Dashboard(ctx context.Context, host platform.Host) ([]platform.
 
 func (m *Module) Manifest() platform.Manifest {
 	return platform.Manifest{
-		Description: "Install, remove, update, and refresh Snosi system extensions",
+		Description: "Install, remove, update, and refresh system extensions",
 		Icon:        "sysext",
 		ID:          "sysext",
 		Name:        "Extensions",

@@ -1,5 +1,5 @@
 [Unit]
-Description=Pilothouse Snosi web console
+Description=Pilothouse web console
 After=network.target pilothoused.service
 Requires=pilothoused.service
 
