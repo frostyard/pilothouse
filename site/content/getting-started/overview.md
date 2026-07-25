@@ -43,7 +43,7 @@ broken.
 
 Two processes share the work. An unprivileged web process serves the console; a root-only action broker performs privileged operations. They connect through a protected Unix socket.
 
-Authentication uses PAM against the host's users and account policy. Sessions are opaque and idle-expiring, with per-session CSRF tokens. Members of the configured broker admin group (`sudo` by default) can perform sysext and container mutations; every other authenticated account can view the dashboard.
+Authentication uses PAM against the host's users and account policy. Sessions are opaque and idle-expiring, with per-session CSRF tokens. Members of the configured broker admin group can perform sysext and container mutations; every other authenticated account can view the dashboard. The packaged broker unit configures that group per distro family — `sudo` on Debian-family hosts, `wheel` on Fedora-family hosts.
 
 Privileged actions are durable: the broker records action history, requires destructive confirmations, and serializes actions per resource. Extension update and refresh operations run as durable background jobs.
 

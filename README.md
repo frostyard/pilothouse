@@ -101,7 +101,7 @@ Local-only tags are preserved and rejected rather than silently deleted.
 make bump
 ```
 
-Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group (`sudo` by default) can perform sysext, Podman, and Docker mutations.
+Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group can perform sysext, Podman, and Docker mutations. The packaged broker unit configures that group per distro family — `sudo` on Debian-family hosts, `wheel` on Fedora-family hosts.
 
 The default is intentionally loopback-only. Terminate TLS at a reverse proxy and add `--secure-cookie` to the web service before exposing it to another machine.
 
@@ -154,19 +154,58 @@ See [docs/modules.md](docs/modules.md) for a worked module template and [docs/au
 
 ## Install
 
+Start with the steps that are the same everywhere:
+
 ```bash
 make build
 sudo systemd-sysusers packaging/pilothouse.sysusers
 sudo install -Dm0755 bin/pilothouse /usr/local/bin/pilothouse
 sudo install -Dm0755 bin/pilothoused /usr/local/libexec/pilothoused
 sudo install -Dm0644 packaging/pilothouse.service /etc/systemd/system/pilothouse.service
-sudo install -Dm0644 packaging/pilothoused.service /etc/systemd/system/pilothoused.service
+```
+
+The PAM policy and the broker unit are distro-specific, so run **only** the
+block matching your host. Debian-family hosts use the
+`common-auth`/`common-account` PAM stacks and the `sudo` admin group;
+Fedora-family hosts use the `password-auth` stack and the `wheel` admin group.
+
+Debian-family (Debian, Ubuntu, …):
+
+```bash
+sudo install -Dm0644 packaging/deb/pilothoused.service /etc/systemd/system/pilothoused.service
 sudo install -Dm0644 packaging/pilothouse.pam /etc/pam.d/pilothouse
-sudo install -d -m0755 /etc/pilothouse
-# Set PILOTHOUSE_ALLOWED_ORIGINS in /etc/pilothouse/pilothouse.env when using a reverse proxy.
+```
+
+Fedora-family (Fedora, uCore, RHEL, …):
+
+```bash
+sudo install -Dm0644 packaging/rpm/pilothoused.service /etc/systemd/system/pilothoused.service
+sudo install -Dm0644 packaging/rpm/pilothouse.pam /etc/pam.d/pilothouse
+```
+
+Then finish on either family:
+
+```bash
+sudo install -d -m0750 -o root -g pilothouse /etc/pilothouse
+sudo install -d -m0700 -o root -g root /etc/pilothouse/storage/credentials
+sudo install -Dm0640 -o root -g pilothouse packaging/pilothouse.env /etc/pilothouse/pilothouse.env
+sudo install -Dm0640 -o root -g pilothouse packaging/pilothoused.env /etc/pilothouse/pilothoused.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
+
+`/etc/pilothouse` is `root:pilothouse` mode `0750` so the units can read their
+`EnvironmentFile=` as the `pilothouse` group without exposing it to every
+account on the host. `/etc/pilothouse/storage/credentials` is deliberately
+stricter — `root:root` mode `0700` — because it holds remote-mount secrets
+that only the root broker ever reads. The two env files ship with every
+setting commented out, so copying them changes no behavior: uncomment
+`PILOTHOUSE_ALLOWED_ORIGINS` in `/etc/pilothouse/pilothouse.env` when a
+reverse proxy is in front of the console, and `PILOTHOUSE_BACKUP_TIMERS` in
+`/etc/pilothouse/pilothoused.env` to name the backup timers to monitor. The
+`.deb` and `.rpm` packages create the same two directories and install the
+same two files as configuration files, and declare their PAM and systemd
+runtime dependencies per format.
 
 Both packaged units are deliberately minimal. `pilothoused.service`'s
 `ExecStart` passes no optional-tooling flag, and the unit declares no

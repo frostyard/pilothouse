@@ -36,8 +36,28 @@ docs/                 authoritative subsystem docs (kept here, not duplicated in
   modules.md           how to add a new module: contract, file layout, action/query rules
   capabilities.md      binding table mapping every broker ID to its required host capability
 
-packaging/            systemd units, PAM policy, sysusers declaration
-.docker/              development container image (Go + PAM + systemd headers) for docker-* make targets
+packaging/            systemd units, PAM policy, sysusers declaration, and the two
+                      commented-out environment files (pilothouse.env documents
+                      PILOTHOUSE_ALLOWED_ORIGINS, pilothoused.env documents
+                      PILOTHOUSE_BACKUP_TIMERS — both are real variables the
+                      binaries read, shipped with every setting commented out so
+                      installing the package changes no runtime behavior); deb/ and
+                      rpm/ hold the per-distro-family variants (broker unit's
+                      --admin-group, PAM stack names) selected by
+                      .goreleaser.yaml's nfpms overrides. postinstall.sh is the
+                      single shared package scriptlet (deb postinst and rpm
+                      %post). units_test.go, postinstall_test.go, and
+                      goreleaser_config_test.go form a test-only package (no
+                      exported surface): the first runs the real
+                      `systemd-analyze verify` against both broker units and
+                      asserts they differ in exactly one line, the second runs
+                      the real `shellcheck` against postinstall.sh and
+                      exercises it against a temporary root, the third parses
+                      ../.goreleaser.yaml and asserts the nfpms packaging
+                      contract
+.docker/              development container image (Go + PAM + systemd headers, plus the systemd
+                      package so `systemd-analyze` exists and `shellcheck` for the
+                      packaging scriptlet) for docker-* make targets
 ```
 
 ### Two binaries, one protocol
@@ -59,7 +79,9 @@ packaging/            systemd units, PAM policy, sysusers declaration
   Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
   permissions — never a TCP listener.
 
-`packaging/pilothoused.service` declares no `Wants=` on any engine socket, so
+Both packaged broker units (`packaging/deb/pilothoused.service` and
+`packaging/rpm/pilothoused.service`, which differ only in `--admin-group`)
+declare no `Wants=` on any engine socket, so
 installing and starting the broker never pulls in or activates
 `incus.socket` or `podman.socket`; an operator enables those units
 themselves (see the README's Podman note). The unit keeps
@@ -1186,8 +1208,10 @@ place, so a reader who lands here first does not have to reassemble it.
   are unchanged in shape and count. Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
-- **Systemd units.** `packaging/pilothoused.service` declares no `Wants=` on
-  any engine socket (only `After=`, ordering without pull-in), and its
+- **Systemd units.** Both packaged broker units
+  (`packaging/deb/pilothoused.service` and `packaging/rpm/pilothoused.service`)
+  declare no `Wants=` on
+  any engine socket (only `After=`, ordering without pull-in), and their
   `ExecStart` passes none of the four flags — so a stock install runs with
   every optional dependency off, and starting the broker never activates
   `podman.socket` or `incus.socket`.
@@ -1292,7 +1316,10 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   `packaging/pilothouse.service`'s `ExecStart` does not pass it
 
 **`pilothoused` (broker) flags** — `cmd/pilothoused/main.go`:
-- `--admin-group` (default `sudo`), `--login-group` (optional, restricts login)
+- `--admin-group` (flag default `sudo`; the packaged units override it per
+  distro family — `packaging/deb/pilothoused.service` passes `sudo`,
+  `packaging/rpm/pilothoused.service` passes `wheel` — the Go default itself is
+  unchanged), `--login-group` (optional, restricts login)
 - `--pam-service` (default `pilothouse`)
 - `--socket` (default `/run/pilothouse/broker.sock`), `--socket-group`
   (default `pilothouse`)
@@ -1318,7 +1345,86 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)
 
 **Environment files** (systemd `EnvironmentFile=-`, optional):
-`/etc/pilothouse/pilothouse.env`, `/etc/pilothouse/pilothoused.env`.
+`/etc/pilothouse/pilothouse.env`, `/etc/pilothouse/pilothoused.env`. Both are
+shipped by the `.deb`/`.rpm` packages (sources: `packaging/pilothouse.env`,
+`packaging/pilothoused.env`) as nfpm `type: config` entries, mode `0640`
+`root:pilothouse`. They are not inert placeholders: each documents, commented
+out, the one real environment variable its binary reads —
+`PILOTHOUSE_ALLOWED_ORIGINS` (`cmd/pilothouse/main.go`, merged into
+`--allowed-origin` after `flag.Parse`) and `PILOTHOUSE_BACKUP_TIMERS`
+(`cmd/pilothoused/main.go`, merged into `--backup-timer`), each a
+comma-separated list. Every line ships commented out, so installing the
+package changes no runtime behavior. Neither file carries `--admin-group`:
+that stays a per-format unit-file argument.
+
+**Package-owned configuration directories and runtime dependencies.**
+`.goreleaser.yaml`'s `nfpms[0].overrides.<format>.contents` declares two
+`type: dir` entries in both formats — `/etc/pilothouse` (`root:pilothouse`,
+mode `0750`, group-readable so the units' `EnvironmentFile=` works) and
+`/etc/pilothouse/storage/credentials` (`root:root`, mode `0700`, stricter than
+its parent because only the root broker reads remote-mount secrets).
+`/run/pilothouse` and `/var/lib/pilothouse` are deliberately not packaged;
+the broker unit's `RuntimeDirectory=`/`StateDirectory=` own them. Runtime
+dependencies are declared per format, naming the direct provider of each
+role rather than relying on transitive requires — deb: `libc6`, `libpam0g`,
+`libpam-modules`, `libpam-runtime`, `libsystemd0`, `systemd`; rpm: `glibc`,
+`pam-libs`, `pam`, `authselect-libs`, `systemd-libs`, `systemd`. The six
+roles line up one-to-one across the platforms: linked C library, PAM shared
+library, PAM modules providing `pam_nologin.so`, provider of the PAM stacks
+the policy includes, libsystemd shared library, and systemd itself.
+
+**Postinstall scriptlet.** nfpm's static owner/group metadata alone does not
+produce correct install-time ownership on either format: the payload is
+extracted before the `pilothouse` account exists, and nfpm's DEB tar metadata
+leaves numeric UID/GID at zero. `packaging/postinstall.sh` is wired once as
+`nfpms[0].scripts.postinstall` (nfpm's `scripts` key is not per-format, so the
+same script is the deb `postinst` and the rpm `%post`). It creates the account
+by invoking `systemd-sysusers` scoped to this package's own
+`/usr/lib/sysusers.d/pilothouse.conf` — never bare — falling back to a
+guarded `groupadd`/`useradd` pair reproducing the sysusers declaration
+(system account, primary group `pilothouse`, home `/nonexistent`, shell
+`/usr/sbin/nologin`) when `systemd-sysusers` is absent. It then re-applies
+`root:pilothouse` 0750 to `/etc/pilothouse`, `root:root` 0700 to
+`/etc/pilothouse/storage/credentials`, and `root:pilothouse` 0640 to each env
+file *that still exists* (both are `type: config`, so a deliberate deletion
+must survive an upgrade rather than fail it). `set -e` is its first effective
+line, so any failing repair exits non-zero — on Debian that leaves the package
+not-configured; on RPM the payload stays installed but the scriptlet error is
+reported, since a `%post` runs after extraction and cannot roll back its
+transaction. `PILOTHOUSE_ROOT` is a test-only seam: it defaults to empty (so
+production operands are exactly the paths above) and prefixes *only* the three
+filesystem operands the script hands to `chown`/`chmod`/`[ -e ]`, letting
+`packaging/postinstall_test.go` run the real script against a `t.TempDir()`
+with PATH-injected `chown`/`chmod`/`systemd-sysusers` fakes. The
+sysusers positional config path (relocated by `--root` instead) and the
+fallback account's home and shell values stay unprefixed. Nothing here runs
+privileged Go code or touches the broker socket — it is package-manager
+shell, invoked outside the running daemon.
+
+**Configuration-assertion test.** `packaging/goreleaser_config_test.go` parses
+`.goreleaser.yaml` with `gopkg.in/yaml.v3` — a direct module requirement as of
+this test — into a minimal set of structs covering only the `nfpms` shape this
+repository owns. It deliberately does **not** decode into GoReleaser's own
+`config.Project` type and performs no schema validation: that type cannot
+represent this repo's GoReleaser Pro `nightly` block, and the goal is to pin
+*this repository's* packaging contract, not GoReleaser's schema. Unknown keys
+are ignored, so `builds`, `archives`, `changelog`, `release`, and `nightly`
+parse and are discarded. What it pins: each format's override contains exactly
+one `/etc/pam.d/pilothouse` entry and exactly one
+`/usr/lib/systemd/system/pilothoused.service` entry, sourced from that
+format's own file, with the *other* format's PAM policy and unit asserted
+absent from the same list; both dependency lists match their six expected
+elements exactly when sorted (so an extra, missing, or duplicated element
+fails); both configuration directories and both env files carry the
+type/mode/owner/group above in both formats; `scripts.postinstall` is
+`./packaging/postinstall.sh`; `formats` is exactly `[deb, rpm]`; and no
+content entry in either format installs to `/run/pilothouse` or
+`/var/lib/pilothouse` or anything under them. The comparison helpers
+(`checkDependencies`, `checkNoSrc`, `checkNoSystemdManagedPaths`) return errors
+rather than asserting inline, so companion tests can mutate a *test-local deep
+copy* of the parsed data and prove each check actually fires — the real file is
+never written. The test needs no container: it only reads a YAML file from
+disk, so it runs under plain `make test` as well as `make docker-ci`.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
