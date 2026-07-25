@@ -317,9 +317,9 @@ func forbiddenPathFindings(entries []Entry) []Finding {
 // The two faults are mutually exclusive and use distinct codes. A nil
 // scriptlet is CodeMissingScriptlet rather than CodeMissingPath: O1's code
 // list is explicitly a minimum, the scriptlet is not path-scoped so
-// CodeMissingPath would have to invent a Path for it, and #73's CLI has to
-// tell "this package ships no scriptlet" apart from "this package ships the
-// wrong scriptlet". Differing bytes reuse CodeWrongContent, because that is
+// CodeMissingPath would have to invent a Path for it, and
+// cmd/verify-packages has to tell "this package ships no scriptlet" apart from
+// "this package ships the wrong scriptlet". Differing bytes reuse CodeWrongContent, because that is
 // exactly what they are — the finding is distinguished from a payload one by
 // its empty Path.
 //

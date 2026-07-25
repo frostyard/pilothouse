@@ -21,6 +21,11 @@ of broker queries/actions implemented by a root-only daemon
 ```
 cmd/pilothouse/       unprivileged web binary (main.go) — TCP listener, no root
 cmd/pilothoused/      privileged broker binary (main.go) — Unix socket only, requires euid==0
+cmd/verify-packages/  repository tool (main.go) — reports packaging.Verify's findings for
+                      built .deb/.rpm artifacts. NOT a shipped binary: absent from
+                      `make build` and from .goreleaser.yaml's builds, so bin/ holds only
+                      the two above. Unreachable from either of them; performs no
+                      privileged operation (see "Artifact extraction" below)
 
 internal/
   modules/<name>/     vertical feature slices (UI + domain logic), one per management area
@@ -1664,7 +1669,7 @@ artifact is capable of proving. On-disk ownership after a real install remains
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
-package's tests and #73's planned CLI both key off it, so its value is part of
+package's tests and `cmd/verify-packages` both key off it, so its value is part of
 the contract, and `packaging/finding_test.go` pins each value literally and
 asserts the nine are pairwise distinct. `Path` is the destination a finding
 concerns and is empty for findings that are not path-scoped. `Message` is
@@ -1878,8 +1883,8 @@ is a complete verdict rather than a partial one.
 - **`missing_scriptlet`**, with `Path` **empty**, when `Postinstall` is nil —
   the model's representation of "this package ships no postinstall scriptlet".
   The distinct code (rather than `missing_path`) exists because the scriptlet
-  has no destination to name and because #73's CLI has to tell "no scriptlet"
-  apart from "wrong scriptlet".
+  has no destination to name and because `cmd/verify-packages` has to tell "no
+  scriptlet" apart from "wrong scriptlet".
 - **`wrong_content`**, with `Path` **also empty** and a `Message` naming
   `packaging/postinstall.sh`, when the scriptlet's bytes are not that embedded
   source's. This is the one `wrong_content` finding that is not path-scoped;
@@ -1912,8 +1917,8 @@ Three rules keep the mode, config and content checks honest:
   from a real archive carries the shipped bytes verbatim, so a single added
   newline is reported like any other difference. A byte-compared entry whose
   `Content` is `nil` is reported too, since every embedded source is non-empty —
-  an extractor that failed to capture the bytes must not verify clean, or the
-  extractor bugs #73 will have to find become invisible.
+  an extractor that failed to capture the bytes must not verify clean, or
+  `packaging/extract`'s own bugs become invisible.
 
 A duplicate does not suppress the other checks for its destination: `Verify`
 evaluates the first entry installing there for mode, config designation and
@@ -2128,8 +2133,9 @@ of `.goreleaser.yaml`.
 **Portability: four tiers, and why they must not be blurred.** The one claim
 that holds without qualification across all of this work is: **no file added by
 the artifact-contract phase executes an external command.** That phase is #70's,
-and it added only files in `packaging/` itself; the extractors #73 has since
-added are a *separate package* and are tier (d) below. Below that, the four tiers
+and it added only files in `packaging/` itself; the extractors added since are a
+*separate package* and are tier (d) below, and `cmd/verify-packages` — which
+runs them — is not under `packaging/` at all. Below that, the four tiers
 differ, and a sentence true of one is false of another.
 
 - **(a) The contract model, `Verify`, and their behavioral tests** —
@@ -2181,9 +2187,11 @@ unchanged.
 
 - **Reading real `.deb`/`.rpm` files.** Nothing in `packaging/` itself opens an
   artifact. The extractors that populate a `Model` from a built `.deb` and from
-  a built `.rpm` now both exist, one directory down, in `packaging/extract`
-  (tier (d) above); the CLI that reports `Finding`s does not exist yet and
-  remains **#73**'s.
+  a built `.rpm` both exist one directory down, in `packaging/extract`
+  (tier (d) above), and the command that runs them and reports the resulting
+  `Finding`s is `cmd/verify-packages` (see "The command" below). Neither is
+  reachable from this package: `packaging/` imports neither, and the dependency
+  runs the other way.
 - **Building the packages.** A `make package` target and a CI packaging job are
   **#72**'s; this package is exercised by `go test` alone.
 - **On-disk state after a real install.** VM installs and verification of
@@ -2201,8 +2209,10 @@ and reuse the repo's dev container image.
 
 `packaging/extract` is a subpackage whose only job is to turn a real artifact on
 disk into a `packaging.Model`. At this commit it holds exactly two backends,
-`Deb` and `RPM`. There is no `cmd/verify-packages` and no
-`make verify-packages` target yet; both are still **#73**'s remaining work.
+`Deb` and `RPM`. The command that runs them, `cmd/verify-packages`, exists as of
+this commit and is described under "The command" below; there is still no
+`make verify-packages` target, and nothing in the repository invokes the command
+automatically.
 Nothing here decides whether a model is acceptable — `packaging.Verify` remains
 the sole source of `Finding`s, and moving one of its assertions down into an
 extractor would be a defect, because that separation is what keeps every
@@ -2577,6 +2587,113 @@ genuinely constructible. `packagingtest.BuildRPM`'s `t.Fatalf` on a non-nil
 empty `Postinstall` is what makes the case impossible to reintroduce for rpm by
 accident, and both the narrowing and its measurement are recorded in a comment
 on `TestRPMOnFixtureWithoutOptionalMetadata` as well as here.
+
+**The command** (`cmd/verify-packages/main.go`). This is what turns the two
+backends and `packaging.Verify` into something a person can run. It sits under
+`cmd/` because that is where every binary in this repository lives, and its
+non-product name says what it is: a repository tool, deliberately **not** added
+to `make build` and **not** given a `.goreleaser.yaml` `builds:` entry, so `bin/`
+still holds only `pilothouse` and `pilothoused` and no development tool can leak
+into a package. It is developer tooling in the strict sense used everywhere else
+in this document — it performs no privileged operation, registers no broker query
+or action, adds no capability, imports none of `internal/broker`,
+`internal/platform` or `internal/capability`, and is unreachable from either
+shipped binary. At this commit nothing invokes it automatically: there is no
+`make verify-packages` target and it is wired into neither `ci` nor `docker-ci`.
+
+*Shape.* `main` is one line, `os.Exit(run(context.Background(), defaultDeps(),
+os.Args[1:], os.Stdout, os.Stderr))`. `run` is the composing entry point and the
+function whose return value becomes the exit status. It takes a `deps` — an
+**ordered slice** of backends (`ext`, `label`, `extract`) plus the verification
+function — and `defaultDeps()` is the only thing production code constructs:
+`{".deb", "deb", extract.Deb}`, `{".rpm", "rpm", extract.RPM}`, and
+`packaging.Verify`. The slice is ordered rather than keyed because discovery
+order is a guarantee, not an accident; a map would leave it unspecified.
+`packaging.Verify` is named exactly once in non-test code, inside `defaultDeps`,
+so every verdict printed for a real artifact is that function's. The command
+invents no finding code and never compares a `Finding.Message` — it only prints
+one.
+
+*Discovery.* With no positional arguments, `run` globs the `-dir` directory
+(default `dist`) once per backend, **in backend order**, sorting each glob's
+matches and concatenating them: every `*.deb` in sorted order, then every
+`*.rpm` in sorted order. So `z.deb`, `a.deb` and `b.rpm` in one directory are
+reported as `a.deb`, `z.deb`, `b.rpm`, and a file matching neither glob is not an
+artifact. With positional arguments, those are the paths, in the order given, and
+`-dir` is not consulted at all.
+
+*Dispatch.* The format comes from the file extension, matched
+case-insensitively against `deps.backends`: `.deb` to `extract.Deb`, `.rpm` to
+`extract.RPM`. An extension no backend claims is an error naming the path and its
+extension — never a silently skipped file.
+
+*Output shape.* The report goes to standard output; standard error carries only
+the reasons no report could be produced (a bad flag, an unreadable directory, no
+artifacts). Per artifact, one header line naming the path, its format label and
+its finding count — `dist/pilothouse_1.0_amd64.deb (deb): 3 findings` — followed
+by one tab-indented line per finding carrying `Code`, `Path` and `Message`. A
+finding whose `Path` is empty, which is what a dependency mismatch or a missing
+scriptlet is, renders its path column as `-` rather than blank. An artifact whose
+extraction fails prints a failure line in place of a header, carrying the path,
+the format label and the extractor's error — including the
+`packaging/extract: <tool>: ` prefix — folded onto one line, and processing
+**continues** to the remaining artifacts, because one unreadable file must not
+hide the others' findings. A summary line closes every run.
+
+*Exit semantics.* Non-zero if any finding was reported or any artifact could not
+be extracted; zero only when every artifact was extracted and verified with no
+findings.
+
+*The empty-`dist/` message*, which is the output this command produces on a
+development host and inside the development image, since neither builds
+packages. It names the directory searched and both globs, names the two
+GoReleaser Pro workflows that are the only producers today
+(`.github/workflows/release.yml` on a tag, `.github/workflows/snapshot.yml` on
+`main`), and states in one line that this repository has no local packaging
+target yet and that `make package` arrives with **#72**. That target is named as
+future work and never as an instruction; the message names no `make` target that
+exists at this commit, so a reader is never pointed at something real that would
+not help them.
+
+*Its tests* (`cmd/verify-packages/main_test.go`) all drive `run` itself, never a
+reporting or dispatch helper, and all of them execute on **every** host with no
+packaging tool and no skip. The artifacts they stage are arbitrary bytes, so
+extraction is expected to fail, and the dispatch proof reads the
+`packaging/extract: <tool>: ` prefix rather than a bare tool name: the deb
+block must contain `packaging/extract: dpkg-deb: ` and not
+`packaging/extract: rpm`, and the rpm block the converse. That distinction is
+load-bearing — a bare `rpm` check would be satisfied by the filename `b.rpm`
+itself — and it holds in both environments, since a missing tool yields
+`ErrToolUnavailable` and a present one yields a parse failure, both carrying the
+prefix. Every substring assertion over a multi-artifact run is applied to the
+slice of output belonging to the artifact under test, from its line through the
+indented lines beneath it, never to the whole capture.
+
+One test, `TestRunExitStatusIsDerivedFromResults`, is the only place a `deps` is
+built by hand, and the reason is worth recording. Exit 0 is correct only for a
+package that satisfies the artifact contract, and no such package can be built
+here: a conforming synthetic fixture would have to restate `contract.go`'s tables
+inside a test, and the repository cannot build a real project package locally or
+in `make docker-ci` (`.goreleaser.yaml` uses a GoReleaser Pro block, and the dev
+image deliberately has no goreleaser). Asserting the clean path one level down,
+on a reporting helper, would leave `run`'s own return value asserted only on
+failures — where a `run` that returned 1 unconditionally would pass everything
+(`docs/agents/skills/test-the-composing-function-not-its-merge-helper.md`). So
+that table injects an extraction result and a verification result, and only
+those: a placeholder `Model` with a `verify` returning nothing gives exit 0 with
+the zero-finding summary and no failure text, for a `.deb` row and an `.rpm` row;
+two hand-written findings, one with an empty `Path`, give exit 1 with both
+rendered and the empty path shown as `-`; and a backend erroring on the first of
+two artifacts gives exit 1 with the second still processed. The injected backend
+records the path it was handed, so the clean rows cannot pass against a `run` that
+reports success without invoking a backend. The doubles carry no contract
+knowledge — the findings use invented codes that are none of the nine, and the
+models are the same `/opt/phx/…` placeholders the fixtures use. Everything a real
+artifact *can* demonstrate — discovery, dispatch, extraction failure — is asserted
+through `defaultDeps()`, which keeps the seam a seam and not a shim
+(`docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md`).
+The narrowing that remains, stated plainly: **no test asserts exit 0 for a real
+artifact**, because no conforming one can be produced here.
 
 ## Release workflow
 
