@@ -46,12 +46,15 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       --admin-group, PAM stack names) selected by
                       .goreleaser.yaml's nfpms overrides. postinstall.sh is the
                       single shared package scriptlet (deb postinst and rpm
-                      %post). units_test.go and postinstall_test.go form a
-                      test-only package (no exported surface): the first runs
-                      the real `systemd-analyze verify` against both broker
-                      units and asserts they differ in exactly one line, the
-                      second runs the real `shellcheck` against postinstall.sh
-                      and exercises it against a temporary root
+                      %post). units_test.go, postinstall_test.go, and
+                      goreleaser_config_test.go form a test-only package (no
+                      exported surface): the first runs the real
+                      `systemd-analyze verify` against both broker units and
+                      asserts they differ in exactly one line, the second runs
+                      the real `shellcheck` against postinstall.sh and
+                      exercises it against a temporary root, the third parses
+                      ../.goreleaser.yaml and asserts the nfpms packaging
+                      contract
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets
@@ -1397,6 +1400,31 @@ sysusers positional config path (relocated by `--root` instead) and the
 fallback account's home and shell values stay unprefixed. Nothing here runs
 privileged Go code or touches the broker socket — it is package-manager
 shell, invoked outside the running daemon.
+
+**Configuration-assertion test.** `packaging/goreleaser_config_test.go` parses
+`.goreleaser.yaml` with `gopkg.in/yaml.v3` — a direct module requirement as of
+this test — into a minimal set of structs covering only the `nfpms` shape this
+repository owns. It deliberately does **not** decode into GoReleaser's own
+`config.Project` type and performs no schema validation: that type cannot
+represent this repo's GoReleaser Pro `nightly` block, and the goal is to pin
+*this repository's* packaging contract, not GoReleaser's schema. Unknown keys
+are ignored, so `builds`, `archives`, `changelog`, `release`, and `nightly`
+parse and are discarded. What it pins: each format's override contains exactly
+one `/etc/pam.d/pilothouse` entry and exactly one
+`/usr/lib/systemd/system/pilothoused.service` entry, sourced from that
+format's own file, with the *other* format's PAM policy and unit asserted
+absent from the same list; both dependency lists match their six expected
+elements exactly when sorted (so an extra, missing, or duplicated element
+fails); both configuration directories and both env files carry the
+type/mode/owner/group above in both formats; `scripts.postinstall` is
+`./packaging/postinstall.sh`; `formats` is exactly `[deb, rpm]`; and no
+content entry in either format installs to `/run/pilothouse` or
+`/var/lib/pilothouse` or anything under them. The comparison helpers
+(`checkDependencies`, `checkNoSrc`, `checkNoSystemdManagedPaths`) return errors
+rather than asserting inline, so companion tests can mutate a *test-local deep
+copy* of the parsed data and prove each check actually fires — the real file is
+never written. The test needs no container: it only reads a YAML file from
+disk, so it runs under plain `make test` as well as `make docker-ci`.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
