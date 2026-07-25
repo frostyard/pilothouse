@@ -1922,12 +1922,19 @@ collide with `goreleaserConfig`, `nfpmEntry`, `contentEntry`, `fileInfo`,
 reused `goreleaserConfigPath` constant. It asserts the whole chain that makes
 `/usr/bin/<binary>` a contract destination in the first place: `builds[].binary`
 is exactly the two-element set `{pilothouse, pilothoused}`; `nfpms[0].bindir` is
-unset, so nFPM's `/usr/bin` default applies; `requirements(format)` contains
-exactly one requirement at `/usr/bin/pilothouse` and one at
-`/usr/bin/pilothoused` in **both** formats; and no override content entry in
-either format installs to `/usr/bin` or anything under it — which is what
-confirms the binaries are genuinely outside guard 1's reach rather than merely
-overlooked by it.
+unset, so nFPM's `/usr/bin` default applies; the **complete multiset** of
+`requirements(format)` destinations under `/usr/bin` equals the set the builds
+produce, in **both** formats; and no override content entry in either format
+installs to `/usr/bin` or anything under it — which is what confirms the
+binaries are genuinely outside guard 1's reach rather than merely overlooked by
+it.
+
+The multiset comparison is deliberate and the guard is wrong without it. Merely
+asserting that each expected binary has exactly one requirement leaves the check
+one-directional: guard 1 skips every `/usr/bin` row, so `contract.go` could gain
+an unsupported row such as `/usr/bin/extra` and pass both guards. Comparing the
+whole sorted set rejects a missing destination, a duplicate, and an extra one
+alike.
 
 Neither guard has a companion mutation test, and that is deliberate: the thing
 they guard is `contract.go` itself, so the way to demonstrate they fire is a

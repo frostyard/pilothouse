@@ -245,19 +245,34 @@ func TestBinaryDestinationsMatchBuilds(t *testing.T) {
 			reqs, known := requirements(pf.format)
 			require.Truef(t, known, "requirements(%q) must be known", pf.format)
 
+			// Compare the COMPLETE multiset of /usr/bin requirement
+			// destinations against the build-derived ones. Counting only the
+			// expected destinations would leave the guard one-directional:
+			// contract.go could gain an unsupported row such as
+			// /usr/bin/extra and still pass, because guard 1 skips every
+			// /usr/bin row and this guard would only have confirmed that the
+			// two real binaries are present. Multiset equality rejects a
+			// missing destination, a duplicate, and an extra one alike.
+			want := make([]string, 0, len(binaries))
 			for _, binary := range binaries {
-				dest := usrBinDir + "/" + binary
-
-				count := 0
-				for _, req := range reqs {
-					if req.dest == dest {
-						count++
-					}
-				}
-
-				require.Equalf(t, 1, count,
-					"requirements(%q) must contain exactly one requirement at %s", pf.format, dest)
+				want = append(want, usrBinDir+"/"+binary)
 			}
+
+			slices.Sort(want)
+
+			got := make([]string, 0, len(want))
+
+			for _, req := range reqs {
+				if underUsrBin(req.dest) {
+					got = append(got, req.dest)
+				}
+			}
+
+			slices.Sort(got)
+
+			require.Equalf(t, want, got,
+				"requirements(%q) must declare exactly the %s destinations the builds produce — no missing, duplicate, or extra rows",
+				pf.format, usrBinDir)
 
 			for i, live := range loadOverride(t, entry, pf.name).Contents {
 				require.Falsef(t, underUsrBin(live.Dst),
