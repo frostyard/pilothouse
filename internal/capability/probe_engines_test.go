@@ -160,7 +160,7 @@ func (f *fakeDockerClient) Close() error {
 
 func TestProbeDockerPresentOnSuccess(t *testing.T) {
 	fake := &fakeDockerClient{}
-	s := probeDocker(context.Background(), func() (dockerClient, error) { return fake, nil })
+	s := probeDocker(context.Background(), "unix:///var/run/docker.sock", func(string) (dockerClient, error) { return fake, nil })
 
 	assert.True(t, s.Has(Docker))
 	assert.ElementsMatch(t, []ID{Docker}, s.List())
@@ -169,7 +169,7 @@ func TestProbeDockerPresentOnSuccess(t *testing.T) {
 
 func TestProbeDockerAbsentOnPingError(t *testing.T) {
 	fake := &fakeDockerClient{err: errors.New("failed to connect to the docker API")}
-	s := probeDocker(context.Background(), func() (dockerClient, error) { return fake, nil })
+	s := probeDocker(context.Background(), "unix:///var/run/docker.sock", func(string) (dockerClient, error) { return fake, nil })
 
 	assert.False(t, s.Has(Docker))
 	assert.Empty(t, s.List())
@@ -177,7 +177,7 @@ func TestProbeDockerAbsentOnPingError(t *testing.T) {
 }
 
 func TestProbeDockerAbsentOnClientConstructionError(t *testing.T) {
-	s := probeDocker(context.Background(), func() (dockerClient, error) {
+	s := probeDocker(context.Background(), "unix:///var/run/docker.sock", func(string) (dockerClient, error) {
 		return nil, errors.New("unable to parse docker host")
 	})
 
@@ -185,34 +185,96 @@ func TestProbeDockerAbsentOnClientConstructionError(t *testing.T) {
 	assert.Empty(t, s.List())
 }
 
+func TestProbeDockerUsesConfiguredEndpoint(t *testing.T) {
+	// The configured endpoint -- not the ambient environment -- is what the
+	// client is constructed from, so DOCKER_HOST is set to a different value
+	// here to prove the constructor receives the flag's value verbatim.
+	t.Setenv("DOCKER_HOST", "unix:///env/should/be/ignored.sock")
+	var gotEndpoint string
+	fake := &fakeDockerClient{}
+	probeDocker(context.Background(), "unix:///custom/docker.sock", func(endpoint string) (dockerClient, error) {
+		gotEndpoint = endpoint
+		return fake, nil
+	})
+
+	assert.Equal(t, "unix:///custom/docker.sock", gotEndpoint)
+}
+
 func TestProbeDockerAppliesBoundedTimeout(t *testing.T) {
 	fake := &fakeDockerClient{}
 	start := time.Now()
-	probeDocker(context.Background(), func() (dockerClient, error) { return fake, nil })
+	probeDocker(context.Background(), "unix:///var/run/docker.sock", func(string) (dockerClient, error) { return fake, nil })
 
 	require.NotNil(t, fake.ctx)
 	assertBoundedEngineTimeout(t, fake.ctx, start)
 }
 
+func TestProbeDockerAbsentAndNeverConstructsClientWhenUnconfigured(t *testing.T) {
+	// The --docker flag defaults to empty. An unconfigured docker must be
+	// reported absent *without* the probe building a client or dialling --
+	// and that must hold even when the process environment carries a
+	// perfectly usable DOCKER_HOST, proving the capability no longer follows
+	// the SDK's implicit environment resolution. The injected constructor is
+	// wired to return a client whose Ping succeeds, so this test cannot pass
+	// merely because a dial was attempted and failed: the only way the Set
+	// stays empty is if the constructor is never reached at all.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	constructed := false
+	fake := &fakeDockerClient{}
+	s := probeDocker(context.Background(), "", func(string) (dockerClient, error) {
+		constructed = true
+		return fake, nil
+	})
+
+	assert.False(t, constructed, "an unconfigured docker endpoint must never construct a probe client")
+	assert.False(t, s.Has(Docker))
+	assert.Empty(t, s.List())
+}
+
+func TestProbeDockerExportedAbsentWhenUnconfigured(t *testing.T) {
+	// The same guard through the exported production entry point, with no
+	// injection at all, and with DOCKER_HOST set in the test process's
+	// environment.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	s := ProbeDocker(context.Background(), "")
+
+	assert.False(t, s.Has(Docker))
+	assert.Empty(t, s.List())
+}
+
+func TestProbeDockerUnconfiguredKeepsDockerOutOfComposedProbe(t *testing.T) {
+	// The guard through the production composition path: Probe's entry in
+	// probes passes Config.DockerEndpoint straight to ProbeDocker, so an
+	// empty Config.DockerEndpoint must leave Docker out of the composed Set
+	// even with DOCKER_HOST exported.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	s := Probe(context.Background(), Config{})
+
+	assert.False(t, s.Has(Docker))
+}
+
 func TestProbeDockerAbsentOnRealClientConstructionError(t *testing.T) {
-	// Real ProbeDocker (no fake): a malformed DOCKER_HOST fails at
+	// Real ProbeDocker (no fake): a malformed endpoint fails at
 	// dockerclient.New itself, before any Ping is attempted -- proving the
-	// construction-error branch is reachable through the real production
-	// path, not only through an injected fake.
-	t.Setenv("DOCKER_HOST", "not a valid host")
-	s := ProbeDocker(context.Background())
+	// endpoint-driven construction-error branch is reachable through the real
+	// production path, not only through an injected fake. DOCKER_HOST is set
+	// to a valid-looking value that would *succeed* construction, so this can
+	// only fail because the flag's endpoint (never the environment) is what
+	// the client is built from.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	s := ProbeDocker(context.Background(), "not a valid host")
 
 	assert.False(t, s.Has(Docker))
 	assert.Empty(t, s.List())
 }
 
 func TestProbeDockerAbsentOnRealUnreachableSocket(t *testing.T) {
-	// Real ProbeDocker against a DOCKER_HOST unix socket path that is
+	// Real ProbeDocker against a configured unix socket path that is
 	// guaranteed never to exist, independent of whatever docker daemon (if
-	// any) this test host actually has.
+	// any) this test host actually has: construction succeeds from the
+	// endpoint and the failure surfaces at the Ping call.
 	socket := filepath.Join(t.TempDir(), "missing-docker.sock")
-	t.Setenv("DOCKER_HOST", "unix://"+socket)
-	s := ProbeDocker(context.Background())
+	s := ProbeDocker(context.Background(), "unix://"+socket)
 
 	assert.False(t, s.Has(Docker))
 	assert.Empty(t, s.List())

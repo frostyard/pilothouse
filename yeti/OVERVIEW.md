@@ -430,14 +430,20 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. `updex` and Podman are additionally
-  gated on explicit configuration: `--updex` and `--podman-socket` both
-  default to empty, and an empty value makes `ProbeUpdex`/`ProbePodman`
-  report the capability absent without running any command or constructing
-  a client, so a host that merely happens to have `updex` on `PATH` or a
-  socket at the conventional path never enables the tool/engine. (Docker
-  and Incus still probe from fixed ambient inputs; giving them the same
-  explicit-configuration treatment is the rest of #64's work.) The resulting `capability.Set` is not
+  probing itself is never fatal. `updex`, Podman, and Docker are
+  additionally gated on explicit configuration: `--updex`,
+  `--podman-socket`, and `--docker` all default to empty, and an empty
+  value makes `ProbeUpdex`/`ProbePodman`/`ProbeDocker` report the
+  capability absent without running any command or constructing a client,
+  so a host that merely happens to have `updex` on `PATH`, a socket at the
+  conventional path, or `DOCKER_HOST` exported never enables the
+  tool/engine. Docker's non-empty endpoint is also the *only* input its
+  client is built from — `ProbeDocker` and `cmd/pilothoused`'s live client
+  both use `dockerclient.WithHost(endpoint)`, never `dockerclient.FromEnv`,
+  so the SDK's implicit `DOCKER_HOST`/default-socket resolution is never
+  consulted. (Incus still probes from a fixed ambient input — the default
+  local socket; giving it the same explicit-configuration treatment is the
+  rest of #64's work.) The resulting `capability.Set` is not
   cached or re-probed later; a daemon restart re-probes from scratch. It is
   advertised over the fixed, authenticated, non-admin
   `org.frostyard.pilothouse.capabilities.list` query
@@ -451,8 +457,11 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `registerIncus` are the first full conversions — each takes `caps
   capability.Set` and registers nothing for its engine when the
   corresponding capability is absent (an unreachable or misconfigured
-  engine, including a Docker client that fails to construct, is logged as
-  a warning, never a fatal `run()` error). `registerServices` and
+  engine, including a Docker client that fails to construct from a
+  configured `--docker` endpoint, is logged as a warning, never a fatal
+  `run()` error; an *unconfigured* engine — `--docker` left empty — is not
+  a warnable condition, so `connectDocker` returns nil silently and no
+  client is built). `registerServices` and
   `registerLogs` are the next conversions: `registerServices` guards
   `QueryServicesState` and every services lifecycle action on
   `caps.Has(capability.Systemd)`, and `QueryServicesJournal` separately on
@@ -1208,6 +1217,9 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   requires explicit configuration to enable)
 - `--podman-socket` (default empty — Podman requires explicit configuration
   to enable)
+- `--docker` endpoint, e.g. `unix:///var/run/docker.sock` (default empty —
+  Docker requires explicit configuration to enable; unset means no docker
+  client is constructed at all, in the probe or in `run()`)
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)

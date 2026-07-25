@@ -135,27 +135,42 @@ type dockerClient interface {
 	Close() error
 }
 
-// ProbeDocker probes the docker capability: present iff a
-// dockerclient.FromEnv-constructed client's Ping succeeds within
-// engineProbeTimeout. Unlike podman, docker client construction genuinely
-// can fail (e.g. a malformed DOCKER_HOST) -- that failure is treated as
-// "docker absent," never propagated as fatal, exactly like an unreachable
-// socket at Ping time.
-func ProbeDocker(ctx context.Context) Set {
-	return probeDocker(ctx, newDockerClient)
+// ProbeDocker probes the docker capability: present iff a client bound to
+// the configured --docker endpoint answers a Ping within
+// engineProbeTimeout. An empty endpoint means docker is not configured --
+// that flag defaults to empty -- so the capability is absent, no docker
+// client is constructed at all, and nothing is dialled: a host that merely
+// happens to export DOCKER_HOST, or to have a docker socket at the SDK's
+// implicit default path, must never enable the engine without explicit
+// pilothouse-level configuration. When an endpoint is configured, the
+// client is built from that endpoint alone (never dockerclient.FromEnv), so
+// the capability never follows the SDK's implicit environment resolution.
+// Unlike podman, docker client construction genuinely can fail (e.g. a
+// malformed endpoint) -- that failure is treated as "docker absent," never
+// propagated as fatal, exactly like an unreachable socket at Ping time.
+func ProbeDocker(ctx context.Context, endpoint string) Set {
+	return probeDocker(ctx, endpoint, newDockerClient)
 }
 
 // newDockerClient is the production docker client constructor: it builds a
-// client from the environment, the same way cmd/pilothoused already does.
-func newDockerClient() (dockerClient, error) {
-	return dockerclient.New(dockerclient.FromEnv)
+// client bound to the explicitly configured endpoint via
+// dockerclient.WithHost, the same way cmd/pilothoused now does. It
+// deliberately does not use dockerclient.FromEnv, so DOCKER_HOST and the
+// SDK's default socket can never enable docker on their own.
+func newDockerClient(endpoint string) (dockerClient, error) {
+	return dockerclient.New(dockerclient.WithHost(endpoint))
 }
 
 // probeDocker is the testable core of ProbeDocker: newClient is injected so
 // tests can exercise a client-construction error, a Ping failure, and a
-// Ping success without touching a real docker daemon.
-func probeDocker(ctx context.Context, newClient func() (dockerClient, error)) Set {
-	client, err := newClient()
+// Ping success without touching a real docker daemon. The empty-endpoint
+// guard lives here, ahead of newClient, so the injected constructor is
+// provably never reached when docker is unconfigured.
+func probeDocker(ctx context.Context, endpoint string, newClient func(string) (dockerClient, error)) Set {
+	if endpoint == "" {
+		return New()
+	}
+	client, err := newClient(endpoint)
 	if err != nil {
 		return New()
 	}

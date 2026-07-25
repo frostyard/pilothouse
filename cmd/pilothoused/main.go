@@ -58,6 +58,7 @@ func run() error {
 	var backupTimers stringListFlag
 	flag.Var(&backupTimers, "backup-timer", "exact systemd backup timer to monitor; repeatable")
 	definitionsRoot := flag.String("definitions-root", "", "custom root containing sysupdate definition directories")
+	dockerEndpoint := flag.String("docker", "", "Docker endpoint such as unix:///var/run/docker.sock; Docker stays disabled unless this is set")
 	var filesRoots files.RootFlags
 	flag.Var(filesRoots.Flag(false), "files-root", "read-only files root as id=absolute-path; repeatable")
 	flag.Var(filesRoots.Flag(true), "files-write-root", "writable files root as id=absolute-path; repeatable")
@@ -95,7 +96,7 @@ func run() error {
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
 	streamQueries := broker.NewStreamQueryRegistry()
-	caps := capability.Probe(context.Background(), capability.Config{PodmanSocket: *podmanSocket, Updex: *updex})
+	caps := capability.Probe(context.Background(), capability.Config{DockerEndpoint: *dockerEndpoint, PodmanSocket: *podmanSocket, Updex: *updex})
 	if err := registerCapabilities(queries, caps); err != nil {
 		return err
 	}
@@ -207,15 +208,8 @@ func run() error {
 	if err := registerPodman(actions, queries, podman.NewSystemManager(podmanClient), caps); err != nil {
 		return err
 	}
-	dockerClient, err := dockerclient.New(dockerclient.FromEnv)
-	if err != nil {
-		// Construction failure (e.g. a malformed DOCKER_HOST) is treated the
-		// same as an unreachable engine: the docker capability was already
-		// probed above (capability.Probe never fails fatally), so this is
-		// never a reason to abort daemon startup -- just leave docker
-		// unregistered.
-		logger.Warn("docker client unavailable; docker capability disabled", "error", err)
-	} else {
+	dockerClient := connectDocker(*dockerEndpoint, newDockerClient, logger)
+	if dockerClient != nil {
 		defer func() { _ = dockerClient.Close() }()
 		if err := registerDocker(actions, queries, docker.NewSystemManager(dockerClient), caps); err != nil {
 			return err
@@ -360,6 +354,40 @@ func connectSystemd(ctx context.Context, caps capability.Set, connect func(conte
 	client, err := connect(ctx)
 	if err != nil {
 		logger.Warn("systemd connection unavailable; systemd-backed managers disabled", "error", err)
+		return nil
+	}
+	return client
+}
+
+// newDockerClient is the production docker client constructor run() hands to
+// connectDocker: it binds the client to the explicitly configured --docker
+// endpoint via dockerclient.WithHost. It deliberately does not use
+// dockerclient.FromEnv, so DOCKER_HOST and the SDK's implicit default socket
+// can never supply the daemon's docker connection on their own -- mirroring
+// capability.ProbeDocker, which builds its probe client the same way.
+func newDockerClient(endpoint string) (*dockerclient.Client, error) {
+	return dockerclient.New(dockerclient.WithHost(endpoint))
+}
+
+// connectDocker builds the live docker client run() registers the Docker
+// surface against, but only when --docker names an explicit endpoint. An
+// empty endpoint means the operator never opted docker in: connect is not
+// called, no client is built, and nothing is logged -- an intentionally
+// unconfigured engine is not a warnable condition (the same reason
+// ProbeDocker reports the capability absent without dialling). When an
+// endpoint is configured, the client is built from that endpoint alone
+// (dockerclient.WithHost, never dockerclient.FromEnv, so DOCKER_HOST and
+// the SDK's implicit default socket can never enable docker on their own),
+// and a construction failure (e.g. a malformed endpoint) is treated exactly
+// like an unreachable engine: it is logged as a warning and returns nil, so
+// run() simply leaves docker unregistered instead of aborting startup.
+func connectDocker(endpoint string, connect func(string) (*dockerclient.Client, error), logger *slog.Logger) *dockerclient.Client {
+	if endpoint == "" {
+		return nil
+	}
+	client, err := connect(endpoint)
+	if err != nil {
+		logger.Warn("docker client unavailable; docker capability disabled", "error", err, "endpoint", endpoint)
 		return nil
 	}
 	return client

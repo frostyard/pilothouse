@@ -30,6 +30,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/podman"
 	"github.com/frostyard/pilothouse/internal/modules/services"
 	"github.com/frostyard/pilothouse/internal/modules/storage"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1472,6 +1473,87 @@ func TestConnectSystemdReturnsConnectionWhenCapabilityPresentAndConnectSucceeds(
 	}, logger)
 
 	assert.Same(t, want, client)
+}
+
+func TestConnectDockerNeverConstructsClientWhenEndpointUnset(t *testing.T) {
+	// --docker defaults to empty. With it unset, run() must not build a
+	// docker client at all -- so registerDocker is never reached with a live
+	// client -- and must not log a warning: an intentionally unconfigured
+	// engine is not a warnable condition. DOCKER_HOST is exported here to
+	// prove the ambient environment cannot resurrect the client, and the
+	// injected constructor is wired to succeed so this test cannot pass
+	// merely because a construction attempt failed.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	called := false
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+
+	client := connectDocker("", func(string) (*dockerclient.Client, error) {
+		called = true
+		return &dockerclient.Client{}, nil
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.False(t, called, "connect must never be invoked when --docker is unset")
+	assert.Empty(t, logged.String(), "an intentionally unconfigured docker engine must not log a warning")
+}
+
+func TestConnectDockerReturnsNilAndWarnsWhenConstructionFails(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+
+	client := connectDocker("not a valid host", func(string) (*dockerclient.Client, error) {
+		return nil, errors.New("unable to parse docker host")
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.Contains(t, logged.String(), "docker client unavailable")
+	assert.Contains(t, logged.String(), "level=WARN")
+}
+
+func TestConnectDockerReturnsClientBuiltFromConfiguredEndpoint(t *testing.T) {
+	// The configured endpoint -- not DOCKER_HOST -- is what the live client
+	// is built from, so the environment is set to a different value here.
+	t.Setenv("DOCKER_HOST", "unix:///env/should/be/ignored.sock")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	want := &dockerclient.Client{}
+	var gotEndpoint string
+
+	client := connectDocker("unix:///custom/docker.sock", func(endpoint string) (*dockerclient.Client, error) {
+		gotEndpoint = endpoint
+		return want, nil
+	}, logger)
+
+	assert.Same(t, want, client)
+	assert.Equal(t, "unix:///custom/docker.sock", gotEndpoint)
+}
+
+func TestConnectDockerRealConstructorBindsExplicitEndpoint(t *testing.T) {
+	// The production constructor run() passes to connectDocker, exercised
+	// directly: it must build from the explicit endpoint via
+	// dockerclient.WithHost, never dockerclient.FromEnv. DOCKER_HOST is set
+	// to a well-formed value that would construct successfully, so a
+	// malformed explicit endpoint can only fail if the endpoint is what the
+	// client is actually built from.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+
+	bad, err := newDockerClient("not a valid host")
+	require.Error(t, err)
+	assert.Nil(t, bad)
+
+	good, err := newDockerClient("unix:///custom/docker.sock")
+	require.NoError(t, err)
+	require.NotNil(t, good)
+	assert.Equal(t, "unix:///custom/docker.sock", good.DaemonHost())
+	require.NoError(t, good.Close())
+
+	// And through connectDocker itself, so the wiring run() actually uses is
+	// what's proven -- not just the constructor in isolation.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := connectDocker("unix:///custom/docker.sock", newDockerClient, logger)
+	require.NotNil(t, client)
+	assert.Equal(t, "unix:///custom/docker.sock", client.DaemonHost())
+	require.NoError(t, client.Close())
 }
 
 func TestBuildSystemdManagersSkipsConstructionWithoutClient(t *testing.T) {
