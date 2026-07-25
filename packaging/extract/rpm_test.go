@@ -16,11 +16,19 @@
 // with a message naming the missing tool and `make docker-ci`, while inside the
 // dev image —
 // which sets PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1 — the same call fails instead
-// of skipping. The three parser tables need no tool and execute on every host.
+// of skipping. The parser tables and the missing-tool row need no packaging tool
+// at all and execute on every host with no skip.
+//
+// Because this file is package extract rather than package extract_test, the
+// two exported names it drives are spelled unqualified: RPM is extract.RPM and
+// ErrToolUnavailable is extract.ErrToolUnavailable. They are the same symbols
+// an outside caller sees, reached through the same production code path — only
+// the package qualifier is absent, because a package cannot import itself.
 package extract
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -33,6 +41,12 @@ import (
 	"github.com/frostyard/pilothouse/internal/packagingtest"
 	"github.com/frostyard/pilothouse/packaging"
 )
+
+// rpmToolErrorPrefix is the literal prefix every error caused by running rpm
+// carries. It is written out by hand here rather than composed from rpmTool,
+// because it is a contract these tests exist to pin: a caller must be able to
+// recognise which tool failed from a token no artifact filename can forge.
+const rpmToolErrorPrefix = "packaging/extract: rpm: "
 
 // rpmFixturePostinstall is the %post body the happy-path fixture declares. It
 // carries NO trailing newline on purpose: rpm strips every trailing newline
@@ -420,6 +434,320 @@ func TestRPMPassesRPMsTrailingNewlineBehaviourThrough(t *testing.T) {
 				t.Errorf("Postinstall.Content = %q, want %q", model.Postinstall.Content, tc.want)
 			}
 		})
+	}
+}
+
+// rpmDegenerateSpec returns a fixture with every optional piece of metadata
+// left out: no Requires: line, nothing marked %config, and no %post section at
+// all. One of its files is named like a configuration file but is deliberately
+// NOT marked Config, so an extractor that guessed the designation from a path
+// instead of reading the RPMFILE_CONFIG bit would fail here rather than pass by
+// luck.
+func rpmDegenerateSpec() packagingtest.Spec {
+	return packagingtest.Spec{
+		Name:    "extractrpmdegenerate",
+		Version: "0.1.0",
+		Dirs: []packagingtest.Dir{
+			{Dest: "/opt/phx/data", Mode: 0o750},
+		},
+		Files: []packagingtest.File{
+			{Dest: "/opt/phx/plain.txt", Mode: 0o644, Content: []byte("plain\n")},
+			{Dest: "/opt/phx/etc/other.conf", Mode: 0o640, Content: []byte("key = value\n")},
+		},
+	}
+}
+
+// rpmDegenerateDests is the complete destination set rpmDegenerateSpec
+// produces, hand-written. rpm owns only what %files lists, so /opt, /opt/phx
+// and /opt/phx/etc are absent even though the payload installs through them —
+// the deliberate opposite of the deb fixture, whose archive carries every
+// intermediate directory. This is a statement about the rpm backend alone.
+var rpmDegenerateDests = []string{
+	"/opt/phx/data",
+	"/opt/phx/etc/other.conf",
+	"/opt/phx/plain.txt",
+}
+
+// TestRPMOnFixtureWithoutOptionalMetadata covers three degenerate rows at once
+// on one fixture, each with its own assertion: a package that ships no %post
+// yields a nil Postinstall, a package declaring no dependencies yields none AND
+// no error, and a package marking nothing %config yields Config false on every
+// entry.
+//
+// THE NARROWED CRITERION, recorded here rather than quietly omitted. This test
+// proves only the NIL side of the nil-versus-empty scriptlet distinction,
+// because the empty side is not a state an rpm artifact can represent.
+// Measured: an empty %post section builds, but records no body at all — `rpm -qp
+// --scripts` prints `postinstall program: /bin/sh` with no scriptlet header,
+// `%{POSTIN}` is `(none)`, and rpm's own presence marker
+// `%|POSTIN?{HAS}:{NONE}|` reads NONE. The rpm backend therefore correctly
+// reports such a package as nil, and the non-nil-but-empty Scriptlet case is
+// covered by the deb backend only, in
+// TestDebOnFixtureWithEmptyPostinstall (packaging/extract/deb_test.go), where a
+// zero-byte postinst member is genuinely constructible.
+// packagingtest.BuildRPM's own Fatalf on a non-nil empty Postinstall makes it
+// impossible to reintroduce the case here by accident.
+//
+// The dependency row is the measured one: rpmbuild writes three rpmlib(...)
+// capabilities into EVERY artifact, so the raw requires table is never empty
+// even for a package declaring nothing. The raw output is therefore asserted
+// non-empty alongside the empty Dependencies, which is what stops the emptiness
+// assertion from passing vacuously — an extractor that returned nothing at all
+// would satisfy the second half but not the first.
+func TestRPMOnFixtureWithoutOptionalMetadata(t *testing.T) {
+	requireRPMTools(t)
+
+	artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmDegenerateSpec())
+
+	model, err := RPM(t.Context(), artifact)
+	if err != nil {
+		t.Fatalf("RPM(%s) failed for a fixture declaring no dependency, no %%config file and no %%post; rpm answers each of those with empty output or the literal (none), so absence must not be a failure: %v", artifact, err)
+	}
+
+	// The load-bearing half of the nil-versus-empty distinction for this
+	// backend: shipping no scriptlet must stay distinguishable from shipping
+	// one, which is the distinction #70 gives a separate code to.
+	if model.Postinstall != nil {
+		t.Errorf("Postinstall = &{%q}, want nil for a fixture that ships no %%post section", model.Postinstall.Content)
+	}
+
+	// The same query RPM itself ran, over the same artifact. Its non-emptiness
+	// is what proves the provenance filter did the work below.
+	requires, err := runTool(t.Context(), rpmTool, "-qp", "--requires", artifact)
+	if err != nil {
+		t.Fatalf("rpm -qp --requires %s: %v", artifact, err)
+	}
+
+	if len(bytes.TrimSpace(requires)) == 0 {
+		t.Fatalf("the raw `rpm -qp --requires` output for %s is empty, so an empty Dependencies would prove nothing about the provenance filter; measured, rpmbuild writes three rpmlib(...) capabilities into every artifact", artifact)
+	}
+
+	// A nil slice and an empty one both satisfy this; what matters is that the
+	// rpmlib capabilities visible in the raw output above were filtered out, no
+	// dependency was invented, and err was nil.
+	if len(model.Dependencies) != 0 {
+		t.Errorf("Dependencies = %q, want none for a fixture declaring no dependency; the raw requires table was %q", model.Dependencies, requires)
+	}
+
+	// The destination set is pinned in both directions first, so the Config
+	// sweep below cannot pass vacuously over an empty or truncated entry list.
+	got := make(map[string]packaging.Entry, len(model.Entries))
+
+	for _, entry := range model.Entries {
+		got[entry.Dest] = entry
+	}
+
+	for _, dest := range rpmDegenerateDests {
+		if _, ok := got[dest]; !ok {
+			t.Errorf("Entries is missing destination %q", dest)
+		}
+	}
+
+	for dest := range got {
+		if !slices.Contains(rpmDegenerateDests, dest) {
+			t.Errorf("Entries contains unexpected destination %q", dest)
+		}
+	}
+
+	// With no %config directive, nothing is a configuration file — not even the
+	// entry whose name ends in .conf.
+	for _, entry := range model.Entries {
+		if entry.Config {
+			t.Errorf("%s: Config = true, want false for a fixture that marks nothing %%config", entry.Dest)
+		}
+	}
+}
+
+// rpmDeclaredInterpreter is the dependency the provenance fixture declares
+// explicitly. It is deliberately the same name rpmbuild derives from that
+// fixture's own %post interpreter — that collision is the whole point.
+const rpmDeclaredInterpreter = "/bin/sh"
+
+// rpmDeclaredInterpreterRawCount is how many times rpmDeclaredInterpreter
+// appears in the fixture's RAW `rpm -qp --requires` output: once as the
+// declared entry (flag word 0) and once as the entry rpmbuild generates from
+// the %post interpreter (flag word 1280, INTERP|SCRIPT_POST).
+const rpmDeclaredInterpreterRawCount = 2
+
+// TestRPMKeepsADeclaredInterpreterAndDropsTheGeneratedOne is this chunk's
+// centrepiece: the end-to-end proof that dependencies are reconciled by
+// PROVENANCE and never by name.
+//
+// The fixture BOTH declares `Requires: /bin/sh` AND ships a %post. Measured,
+// its raw `rpm -qp --requires` output contains TWO /bin/sh lines, whose
+// index-parallel flag words are 0 (the declared entry) and 1280
+// (INTERP|SCRIPT_POST, which rpmbuild derives from the scriptlet's interpreter
+// and adds even under `AutoReqProv: no`).
+//
+// Asserting that Dependencies contains /bin/sh EXACTLY ONCE discriminates all
+// three candidate implementations, which no other assertion in this package
+// does:
+//
+//   - a name-based filter — drop every entry called /bin/sh — yields 0
+//     occurrences, silently disarming a genuinely declared dependency;
+//   - an unfiltered pass-through yields 2 occurrences, reporting a dependency
+//     the package never declared;
+//   - only the flag-based filter yields 1.
+//
+// The raw count is asserted first so the exactly-once assertion cannot pass
+// vacuously: if rpmbuild ever stopped generating the interpreter requirement,
+// a do-nothing filter would satisfy "exactly once" while proving nothing, and
+// this test fails loudly instead.
+func TestRPMKeepsADeclaredInterpreterAndDropsTheGeneratedOne(t *testing.T) {
+	requireRPMTools(t)
+
+	spec := rpmHappySpec()
+	spec.Name = "extractrpmdeclaredinterpreter"
+	// The interpreter is declared in the MIDDLE of the list, because rpm does
+	// not preserve declaration order and nothing here may depend on it.
+	spec.Depends = []string{"alpha", rpmDeclaredInterpreter, "gamma >= 1"}
+
+	artifact := packagingtest.BuildRPM(t, t.TempDir(), spec)
+
+	requires, err := runTool(t.Context(), rpmTool, "-qp", "--requires", artifact)
+	if err != nil {
+		t.Fatalf("rpm -qp --requires %s: %v", artifact, err)
+	}
+
+	rawCount := 0
+
+	for _, line := range strings.Split(strings.TrimSuffix(string(requires), "\n"), "\n") {
+		if line == rpmDeclaredInterpreter {
+			rawCount++
+		}
+	}
+
+	if rawCount != rpmDeclaredInterpreterRawCount {
+		t.Fatalf("the raw `rpm -qp --requires` output for %s lists %q %d times, want %d (one declared, flag word 0; one generated from the %%post interpreter, flag word 1280). Without both, the exactly-once assertion below no longer discriminates a flag-based filter from no filter at all. Raw output:\n%s",
+			artifact, rpmDeclaredInterpreter, rawCount, rpmDeclaredInterpreterRawCount, requires)
+	}
+
+	model, err := RPM(t.Context(), artifact)
+	if err != nil {
+		t.Fatalf("RPM(%s): %v", artifact, err)
+	}
+
+	kept := 0
+
+	for _, dependency := range model.Dependencies {
+		if dependency == rpmDeclaredInterpreter {
+			kept++
+		}
+	}
+
+	if kept != 1 {
+		t.Errorf("Dependencies contains %q %d times, want exactly 1: 0 is what a name-based filter returns (hiding the declared dependency), 2 is what no filter returns (reporting one the package never declared), and 1 is what filtering on the RPMSENSE_INTERP and RPMSENSE_RPMLIB provenance bits returns. Dependencies = %q",
+			rpmDeclaredInterpreter, kept, model.Dependencies)
+	}
+
+	// The other declared dependencies are still there, so "exactly once" was not
+	// bought by discarding the requires table wholesale.
+	for _, want := range []string{"alpha", "gamma >= 1"} {
+		if !slices.Contains(model.Dependencies, want) {
+			t.Errorf("Dependencies = %q, missing the declared dependency %q", model.Dependencies, want)
+		}
+	}
+
+	// And nothing the builder wrote for its own payload format survived.
+	for _, dependency := range model.Dependencies {
+		if strings.HasPrefix(dependency, "rpmlib(") {
+			t.Errorf("Dependencies contains the builder-written capability %q", dependency)
+		}
+	}
+}
+
+// TestRPMOnUnreadableArtifact pins the error-text contract on the two ways an
+// artifact can be unreadable, and pins the model each returns. Both statements
+// are about the rpm backend alone.
+//
+// Both rows are cases where rpm ran and rejected the file, so neither may report
+// a missing tool, and neither may come back as a confidently empty model: a
+// zero-value Model would otherwise be indistinguishable from a genuinely broken
+// package whose every required path is absent.
+func TestRPMOnUnreadableArtifact(t *testing.T) {
+	// rpm is the only tool these rows reach: RPM's first query fails, so the
+	// payload is never extracted. It is still resolved through
+	// packagingtest.LookTool, so this test cannot silently skip inside the dev
+	// image.
+	if packagingtest.LookTool(t, rpmTool) == "" {
+		return
+	}
+
+	cases := []struct {
+		name string
+		// write is nil for the row whose artifact must not exist.
+		write []byte
+	}{
+		{
+			name:  "path does not exist",
+			write: nil,
+		},
+		{
+			// Arbitrary bytes carrying none of an rpm lead's magic. They are a
+			// fixed literal rather than drawn from a random source, so a failure
+			// here reproduces byte for byte on the next run.
+			name:  "not an rpm package",
+			write: []byte("\x00\x01\x02 these bytes are not an rpm \xff\xfe\n"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			artifact := filepath.Join(t.TempDir(), "artifact.rpm")
+
+			if tc.write != nil {
+				if err := os.WriteFile(artifact, tc.write, 0o644); err != nil {
+					t.Fatalf("write %s: %v", artifact, err)
+				}
+			}
+
+			model, err := RPM(t.Context(), artifact)
+			if err == nil {
+				t.Fatalf("RPM(%s) returned no error, want a failure", artifact)
+			}
+
+			if !reflect.DeepEqual(model, packaging.Model{}) {
+				t.Errorf("model = %+v, want the zero value", model)
+			}
+
+			if !strings.Contains(err.Error(), artifact) {
+				t.Errorf("error %q does not name the artifact %q", err, artifact)
+			}
+
+			// runTool adds this prefix to every tool failure unconditionally, so
+			// both rows carry it. It is the token no artifact filename can
+			// forge.
+			if !strings.Contains(err.Error(), rpmToolErrorPrefix) {
+				t.Errorf("error %q does not contain %q", err, rpmToolErrorPrefix)
+			}
+
+			if errors.Is(err, ErrToolUnavailable) {
+				t.Errorf("error %q reports ErrToolUnavailable, but rpm ran and rejected the artifact", err)
+			}
+		})
+	}
+}
+
+// TestRPMWithoutToolWrapsErrToolUnavailable exercises the missing-tool branch of
+// the rpm backend. It needs no packaging tool of its own, so it runs on every
+// host and never skips: emptying PATH is what makes the lookup fail, and rpm is
+// the first tool RPM reaches for.
+func TestRPMWithoutToolWrapsErrToolUnavailable(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	artifact := filepath.Join(t.TempDir(), "absent.rpm")
+
+	model, err := RPM(t.Context(), artifact)
+	if !errors.Is(err, ErrToolUnavailable) {
+		t.Fatalf("RPM(%s) = %v, want an error wrapping ErrToolUnavailable", artifact, err)
+	}
+
+	if !strings.HasPrefix(err.Error(), rpmToolErrorPrefix) {
+		t.Errorf("error %q does not start with %q", err, rpmToolErrorPrefix)
+	}
+
+	if !reflect.DeepEqual(model, packaging.Model{}) {
+		t.Errorf("model = %+v, want the zero value", model)
 	}
 }
 

@@ -2524,6 +2524,60 @@ of them skips with a message naming that tool and
 `PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` — the same call **fails** instead, which
 is what makes a green `make docker-ci` proof that they ran.
 
+**The declared-versus-generated `/bin/sh` row** is the end-to-end proof that
+rpm dependencies are reconciled by provenance and never by name, and it is a
+statement about the rpm backend alone. One fixture **both** declares
+`Requires: /bin/sh` **and** ships a `%post`. Measured, its raw
+`rpm -qp --requires` output lists `/bin/sh` **twice**, with index-parallel flag
+words `0` (declared) and `1280` (`INTERP|SCRIPT_POST`, which `rpmbuild` derives
+from the scriptlet's interpreter).
+`TestRPMKeepsADeclaredInterpreterAndDropsTheGeneratedOne` asserts that
+`Dependencies` contains `/bin/sh` **exactly once**, which discriminates all
+three candidate implementations: a name-based
+filter returns **0** occurrences and silently disarms a genuinely declared
+dependency, an unfiltered pass-through returns **2** and reports one the package
+never declared, and only the flag-based filter returns **1**. The raw count of
+two is asserted first, so that if `rpmbuild` ever stopped generating the
+interpreter requirement the row fails loudly instead of letting a do-nothing
+filter satisfy "exactly once" vacuously. The test also re-checks that `alpha`
+and `gamma >= 1` survived and that no `rpmlib(` capability did, so exactly-once
+cannot be bought by discarding the requires table wholesale.
+
+**What the rpm backend's degenerate and error rows pin.** Every sentence here is
+about `RPM`; none of it is a claim about `Deb` or about "the extractors".
+`TestRPMOnFixtureWithoutOptionalMetadata` builds one fixture with no
+`Requires:` line, nothing marked `%config` and no `%post` section, and makes
+three separate assertions on it: `Postinstall` is **nil**; `Dependencies` is
+empty **with a nil error**, asserted alongside a check that the raw
+`rpm -qp --requires` output for the *same* artifact was **not** empty — measured,
+`rpmbuild` writes three `rpmlib(...)` capabilities into every artifact, so that
+second check is what proves the provenance filter removed them rather than the
+assertion passing vacuously; and `Config` is false on **every** entry, including
+the one whose name ends in `.conf`, over a destination set pinned in both
+directions first so the sweep cannot run over an empty entry list.
+`TestRPMOnUnreadableArtifact` covers a path that does not exist and a file of
+arbitrary non-rpm bytes (a fixed literal, so a failure reproduces byte for
+byte): each returns a non-nil error and the **zero-value** `packaging.Model`,
+names the offending artifact path, carries the `packaging/extract: rpm: `
+prefix, and does **not** satisfy `errors.Is(err, ErrToolUnavailable)`, because
+`rpm` ran and rejected the file. `TestRPMWithoutToolWrapsErrToolUnavailable` is
+the converse: `t.Setenv("PATH", "")` makes the first `rpm` lookup fail, and the
+error both wraps `ErrToolUnavailable` and starts with that same prefix. That row
+needs no packaging tool, so it executes on **every** host and never skips.
+
+**The one rpm row that is narrowed rather than covered** is the non-nil-but-empty
+`Scriptlet`. An empty `%post` builds but records no body at all — measured,
+`rpm -qp --scripts` prints `postinstall program: /bin/sh` with no scriptlet
+header, `%{POSTIN}` is `(none)`, and rpm's own presence marker
+`%|POSTIN?{HAS}:{NONE}|` reads `NONE` — so the rpm backend correctly reports
+such a package as `nil`, and the empty-but-present side is proven for the **deb**
+backend only, by `TestDebOnFixtureWithEmptyPostinstall` in
+`packaging/extract/deb_test.go`, where a zero-byte `postinst` member is
+genuinely constructible. `packagingtest.BuildRPM`'s `t.Fatalf` on a non-nil
+empty `Postinstall` is what makes the case impossible to reintroduce for rpm by
+accident, and both the narrowing and its measurement are recorded in a comment
+on `TestRPMOnFixtureWithoutOptionalMetadata` as well as here.
+
 ## Release workflow
 
 `make bump` (backed by `scripts/bump.sh`) cuts a release: it requires a
