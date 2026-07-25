@@ -46,15 +46,19 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       --admin-group, PAM stack names) selected by
                       .goreleaser.yaml's nfpms overrides. postinstall.sh is the
                       single shared package scriptlet (deb postinst and rpm
-                      %post). units_test.go, postinstall_test.go, and
-                      goreleaser_config_test.go form a test-only package (no
-                      exported surface): the first runs the real
+                      %post). model.go and finding.go make this a real Go
+                      package with an exported surface: the artifact-contract
+                      model types and the finding vocabulary (see "Artifact
+                      contract model" below). units_test.go,
+                      postinstall_test.go, and goreleaser_config_test.go are
+                      its configuration-level tests: the first runs the real
                       `systemd-analyze verify` against both broker units and
                       asserts they differ in exactly one line, the second runs
                       the real `shellcheck` against postinstall.sh and
                       exercises it against a temporary root, the third parses
                       ../.goreleaser.yaml and asserts the nfpms packaging
-                      contract
+                      contract. finding_test.go pins the finding codes'
+                      string values
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets
@@ -1425,6 +1429,53 @@ rather than asserting inline, so companion tests can mutate a *test-local deep
 copy* of the parsed data and prove each check actually fires — the real file is
 never written. The test needs no container: it only reads a YAML file from
 disk, so it runs under plain `make test` as well as `make docker-ci`.
+
+### Artifact contract model (`packaging/model.go`, `packaging/finding.go`)
+
+The `packaging` directory is a real Go package as of this change, not only a
+home for tests. What exists at this commit is the vocabulary alone — the data
+types an artifact is described with, and the codes a violation is named by.
+
+**Model types** (`packaging/model.go`). `Format` is a string type with exactly
+two values, `FormatDeb` (`"deb"`) and `FormatRPM` (`"rpm"`). `Entry` describes
+one installed file: `Dest`, `Mode` (`fs.FileMode`), `Config` (whether the
+packaging metadata designates it a configuration file), `Content`, plus `Owner`
+and `Group`. `Scriptlet` holds a maintainer script's `Content`. `Model` ties
+them together: `Format`, `Entries`, `Dependencies`, and `Postinstall`, a
+`*Scriptlet` whose nil value is the representation of "this package ships no
+postinstall scriptlet" — a state the model keeps distinct from shipping a
+scriptlet with unexpected bytes. An extractor that populates a `Model` from a real
+`.deb`/`.rpm` is out of scope for this package.
+
+**M1 — owner and group are recorded, never asserted.** `Entry.Owner` and
+`Entry.Group` exist for the convenience of extractors that surface them and
+drive no assertion. An artifact cannot prove installed ownership: nfpm's DEB
+payload records numeric UID/GID 0 by construction (which is why #66 added the
+postinstall scriptlet described above), and the RPM equivalent is unconfirmed
+against a real nfpm build. Ownership on disk after installation is #67's to
+verify.
+
+**Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
+`Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
+package's tests and #73's planned CLI both key off it, so its value is part of
+the contract, and `packaging/finding_test.go` pins each value literally and
+asserts the nine are pairwise distinct. `Path` is the destination a finding
+concerns and is empty for findings that are not path-scoped. `Message` is
+human-readable and deliberately unstable; nothing may match on its wording.
+
+The nine codes are `missing_path`, `wrong_mode`, `wrong_content`,
+`missing_config_flag`, `dependency_mismatch`, `forbidden_path`,
+`duplicate_entry`, `missing_scriptlet`, and `unknown_format`. The last two are
+additions to the explicitly-minimal list in the issue: a missing scriptlet is
+not path-scoped, so reporting it as `missing_path` would require inventing a
+fake `Path`, and a code for an unrecognised `Format` is what keeps a zero-value
+`Model` from ever being accepted as satisfying the contract.
+
+**No verification function exists yet.** Nothing in this package reads a
+`Model` or emits a `Finding` at this commit; the codes are declared vocabulary
+with no producer. The `Verify` function that checks a `Model` against the
+contract described earlier in this section lands in the following change, and
+the assertions it makes are documented there as each one arrives.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
