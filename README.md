@@ -89,12 +89,12 @@ into the packaging contract model, and prints the contract findings for it. It
 exits non-zero if any artifact carries a finding or cannot be extracted.
 
 An empty or missing `dist/` is the normal state on a development host, because
-nothing here builds a package: GoReleaser Pro does that in CI, through
-`.github/workflows/release.yml` on a tag and `.github/workflows/snapshot.yml` on
-`main`. The target then fails with a message naming that directory, both
-workflows, and the fact that this repository has no local packaging target yet
-and that `make package` arrives with #72. That failure is the expected local
-outcome, not a defect to fix.
+nothing here builds a package by default: GoReleaser Pro does that in CI,
+through `.github/workflows/release.yml` on a tag and
+`.github/workflows/snapshot.yml` on `main`. The target then fails with a
+message naming that directory, both workflows, and `make package` as the local
+producer along with its goreleaser Pro requirement. That failure is the
+expected local outcome, not a defect to fix.
 
 ```bash
 make verify-packages
@@ -103,6 +103,19 @@ make verify-packages
 The target is deliberately not part of `make ci` or `make docker-ci`: those
 gates must stay green on a checkout with no built artifacts, so that local
 green still means CI green.
+
+`make package` is the local producer: it runs `goreleaser release --snapshot
+--clean`, which builds snapshot `.deb` and `.rpm` artifacts into `dist/`,
+publishes nothing and needs no tag. It requires the goreleaser Pro
+distribution at major version 2, which is deliberately not installed on this
+host or in the development image, so on a stock checkout it fails with an
+actionable message naming what was found, what is required, and
+<https://goreleaser.com/pro/>. Once artifacts exist in `dist/`, `make
+verify-packages` is the thing to run against them.
+
+```bash
+make package
+```
 
 ### Create a release
 
