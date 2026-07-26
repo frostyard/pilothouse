@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,16 +264,21 @@ func TestBrokerStreamQueryCancellationAndBackpressure(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	streamErr := make(chan error, 1)
 	go func() {
 		result, queryErr := client.StreamQuery(ctx, login.Token, "test.block", nil)
-		if queryErr == nil {
-			close(started)
-			<-closed
-			_ = result.Body.Close()
+		if queryErr != nil {
+			streamErr <- queryErr
+			return
 		}
+		close(started)
+		<-closed
+		_ = result.Body.Close()
 	}()
 	select {
 	case <-started:
+	case err := <-streamErr:
+		t.Fatalf("stream query failed: %v", err)
 	case <-time.After(time.Second):
 		t.Fatal("stream response did not begin")
 	}
@@ -286,13 +292,25 @@ func TestBrokerStreamQueryCancellationAndBackpressure(t *testing.T) {
 
 type cancellableBody struct {
 	io.Reader
+	once   sync.Once
 	closed chan<- struct{}
 }
 
+// Close reports the close by closing the channel rather than sending on it.
+//
+// The server closes this body more than once per request, and two goroutines
+// wait for the signal: the one driving StreamQuery and the test body itself. A
+// send — even a non-blocking one — is delivered to at most one waiter and is
+// dropped entirely when no waiter happens to be parked at that instant, so
+// whether every waiter observed the close depended on the number of Close calls
+// coinciding with the number of parked receivers. That held often enough to
+// pass on an idle machine and broke under CPU contention, which is what made
+// this test flaky.
+//
+// Closing the channel is a broadcast: every current and future receive
+// observes it, no matter how many waiters there are or when they arrive.
+// sync.Once keeps the repeated Close calls safe.
 func (b *cancellableBody) Close() error {
-	select {
-	case b.closed <- struct{}{}:
-	default:
-	}
+	b.once.Do(func() { close(b.closed) })
 	return nil
 }
