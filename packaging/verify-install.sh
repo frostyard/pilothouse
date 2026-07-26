@@ -12,7 +12,7 @@ set -eu
 # Usage:
 #   packaging/verify-install.sh <artifact-dir>
 #
-# At this commit the script performs six checks:
+# At this commit the script performs all eight checks:
 #
 #   1. Install the artifact through the container's own package manager, so
 #      the hand-written per-format `dependencies` lists in .goreleaser.yaml are
@@ -33,10 +33,37 @@ set -eu
 #   6. expect_linked - the cgo-linked binary's dynamic dependencies all
 #      resolve, which is what proves the declared libpam and libsystemd
 #      dependencies really satisfy it.
+#   7. Reinstalling the SAME artifact over the existing install succeeds, and
+#      checks 2 and 3 still hold afterward. The two check functions above are
+#      re-invoked rather than copied, so the reinstall is held to exactly the
+#      assertions the first install was held to.
+#   8. Removing the package succeeds and the post-removal state is asserted,
+#      per format. dpkg and rpm do not treat `type: config` files alike, so the
+#      expectations are per verb, not shared:
+#
+#        - Both formats: expect_removed paths (the binaries, both units and the
+#          sysusers file) are gone. Neither manager keeps non-config payload.
+#        - Debian `dpkg -r`: expect_conffile paths SURVIVE, because they are
+#          conffiles and a remove is not a purge.
+#        - Debian `dpkg -P`: the same conffiles are gone.
+#        - Fedora `rpm -e`: the same conffiles are gone, and no `.rpmsave` was
+#          left beside any of them. A `.rpmsave` would mean the postinstall
+#          modified a config file the package itself shipped.
+#        - Both formats: the `pilothouse` user and group still exist.
+#          systemd-sysusers created them and neither manager owns them, so a
+#          future change that starts deleting them is noticed here.
+#
+#      Whether /etc/pilothouse itself is pruned is deliberately NOT asserted:
+#      whether an empty directory that held surviving conffiles is removed
+#      varies between managers and versions, and it is not worth pinning. The
+#      two directories systemd's RuntimeDirectory=/StateDirectory= own are not
+#      mentioned anywhere in this script either - they are deliberately
+#      unpackaged, and a container has no running systemd to create them.
 #
 # Every expectation is written as one `expect_owner_mode <path> <owner>
-# <group> <mode>`, `expect_unit <path>` or `expect_linked <path>` call per line
-# with literal arguments, so the Go guard tests in
+# <group> <mode>`, `expect_unit <path>`, `expect_linked <path>`,
+# `expect_conffile <path>` or `expect_removed <path>` call per line with
+# literal arguments, so the Go guard tests in
 # packaging/verify_install_test.go can parse them deterministically.
 #
 # The first failed assertion aborts the whole run: every check calls fail(),
@@ -52,6 +79,16 @@ sysusers_conf=/usr/lib/sysusers.d/pilothouse.conf
 # at run time rather than from a per-distro table, so the check follows
 # whichever policy the format's override actually shipped.
 pam_policy=/etc/pam.d/pilothouse
+
+# package_name is the installed package's name, as .goreleaser.yaml's
+# `package_name` declares it. Check 8 hands it to the removal verbs; a Go guard
+# test keeps it equal to the live configuration.
+package_name=frostyard-pilothouse
+
+# rpmsave_search_dirs are the directories check 8 sweeps for a stray
+# `*.rpmsave` after an `rpm -e`: the two directories the packaged config files
+# live in.
+rpmsave_search_dirs='/etc/pilothouse /etc/pam.d'
 
 # pam_module_dir_candidates are the directories a distro may keep its PAM
 # modules in. The set is searched, not assumed: Debian-family hosts use a
@@ -271,6 +308,97 @@ expect_linked() {
         fail "$1 has unresolved dynamic dependencies:${unresolved}"
 }
 
+# expect_conffile and expect_removed each record one path for check 8. They
+# print rather than assert, because the same set is asserted differently at
+# different points of the removal sequence: a conffile is expected to survive a
+# `dpkg -r` and to be gone after a `dpkg -P` or an `rpm -e`. Keeping the sets as
+# one literal call per line lets the Go drift guards compare them against the
+# live .goreleaser.yaml in both directions.
+expect_conffile() {
+    printf '%s\n' "$1"
+}
+
+expect_removed() {
+    printf '%s\n' "$1"
+}
+
+# conffile_paths are the packaged `type: config` destinations - the files dpkg
+# treats as conffiles and rpm may save as `.rpmsave`.
+conffile_paths() {
+    expect_conffile /etc/pam.d/pilothouse
+    expect_conffile /etc/pilothouse/pilothouse.env
+    expect_conffile /etc/pilothouse/pilothoused.env
+}
+
+# removed_paths are every packaged destination that is neither config nor a
+# directory, plus the two build outputs. Neither manager keeps any of them, so
+# all of them must be gone after any removal verb.
+removed_paths() {
+    expect_removed /usr/bin/pilothouse
+    expect_removed /usr/bin/pilothoused
+    expect_removed /usr/lib/systemd/system/pilothouse.service
+    expect_removed /usr/lib/systemd/system/pilothoused.service
+    expect_removed /usr/lib/sysusers.d/pilothouse.conf
+}
+
+# check_removed_paths_gone asserts the non-config payload is gone after the
+# removal verb named by $1.
+check_removed_paths_gone() {
+    for path in $(removed_paths); do
+        [ ! -e "${path}" ] ||
+            fail "$1 left ${path} behind; it is not a config file and neither package manager keeps it"
+    done
+
+    printf 'verify-install: %s removed every non-config packaged path\n' "$1"
+}
+
+# check_conffiles_present asserts the conffiles SURVIVE the removal verb named
+# by $1. Only Debian's `dpkg -r` is expected to behave this way.
+check_conffiles_present() {
+    for path in $(conffile_paths); do
+        [ -e "${path}" ] ||
+            fail "$1 deleted the conffile ${path}; a remove that is not a purge must preserve it"
+    done
+
+    printf 'verify-install: %s preserved every conffile\n' "$1"
+}
+
+# check_conffiles_gone asserts the conffiles are gone after the removal verb
+# named by $1 - Debian's `dpkg -P` and Fedora's `rpm -e`.
+check_conffiles_gone() {
+    for path in $(conffile_paths); do
+        [ ! -e "${path}" ] ||
+            fail "$1 left the config file ${path} behind"
+    done
+
+    printf 'verify-install: %s removed every config file\n' "$1"
+}
+
+# check_no_rpmsave asserts no `.rpmsave` survives the removal verb named by $1.
+# One would mean the postinstall modified a config file the package shipped,
+# which is a defect worth catching here.
+check_no_rpmsave() {
+    # shellcheck disable=SC2086 # the candidate directories are a deliberate word-split list
+    saved=$(find ${rpmsave_search_dirs} -name '*.rpmsave' 2>/dev/null || true)
+
+    [ -z "${saved}" ] ||
+        fail "$1 left a .rpmsave behind, so the install modified a config file the package shipped:${saved}"
+
+    printf 'verify-install: %s left no .rpmsave file behind\n' "$1"
+}
+
+# check_account_survives_removal asserts the user and group outlive the removal
+# verb named by $1. systemd-sysusers created them and neither manager owns them,
+# so a future change that starts deleting them fails here.
+check_account_survives_removal() {
+    getent passwd "${removal_account}" >/dev/null ||
+        fail "$1 deleted the ${removal_account} user; neither package manager owns the account"
+    getent group "${removal_account}" >/dev/null ||
+        fail "$1 deleted the ${removal_account} group; neither package manager owns the account"
+
+    printf 'verify-install: the %s user and group survived %s\n' "${removal_account}" "$1"
+}
+
 if [ "$#" -ne 1 ]; then
     usage
     fail "exactly one operand is required: the directory holding the built artifacts"
@@ -352,5 +480,59 @@ printf 'verify-install: both installed unit files pass systemd-analyze verify\n'
 expect_linked /usr/bin/pilothoused
 
 printf 'verify-install: the cgo-linked binary resolves every dynamic dependency\n'
+
+# Check 7: reinstall the SAME artifact over the existing install, then re-invoke
+# checks 2 and 3. The functions are called again rather than their assertions
+# copied, so the reinstalled state is held to exactly the same contract.
+case "${format}" in
+    deb)
+        apt-get install -y --reinstall "${artifact}" ||
+            fail "apt-get install -y --reinstall of ${artifact} failed"
+        ;;
+    rpm)
+        dnf reinstall -y "${artifact}" ||
+            fail "dnf reinstall of ${artifact} failed"
+        ;;
+esac
+
+printf 'verify-install: reinstalled %s\n' "${artifact}"
+
+check_account
+check_owner_mode
+
+printf 'verify-install: the account and on-disk metadata survived the reinstall\n'
+
+# Check 8: removal, asserted per format. The account name is captured here
+# because the sysusers file it is read from goes away with the package.
+removal_account=$(sysusers_field name)
+
+case "${format}" in
+    deb)
+        # Debian, verb one: a remove is not a purge, so the conffiles stay.
+        dpkg -r "${package_name}" ||
+            fail "dpkg -r ${package_name} failed"
+        check_removed_paths_gone "dpkg -r"
+        check_conffiles_present "dpkg -r"
+        check_account_survives_removal "dpkg -r"
+
+        # Debian, verb two: purge operates on the removed-but-unpurged
+        # package, so no reinstall is needed between the two verbs.
+        dpkg -P "${package_name}" ||
+            fail "dpkg -P ${package_name} failed"
+        check_conffiles_gone "dpkg -P"
+        check_account_survives_removal "dpkg -P"
+        ;;
+    rpm)
+        # Fedora: erase removes unmodified config files outright.
+        rpm -e "${package_name}" ||
+            fail "rpm -e ${package_name} failed"
+        check_removed_paths_gone "rpm -e"
+        check_conffiles_gone "rpm -e"
+        check_no_rpmsave "rpm -e"
+        check_account_survives_removal "rpm -e"
+        ;;
+esac
+
+printf 'verify-install: post-removal state matches the %s expectations\n' "${format}"
 
 printf 'verify-install: all checks passed\n'

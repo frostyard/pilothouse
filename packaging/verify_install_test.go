@@ -548,3 +548,370 @@ func TestVerifyInstallLinkedBinariesMatchBuilds(t *testing.T) {
 			verifyInstallPath, static)
 	}
 }
+
+// installedConfigDir and installedPAMDir are the two directories the packaged
+// config files live in. Check 8 sweeps them for a stray `.rpmsave`; nothing in
+// the script may assert that the first one is itself pruned.
+const (
+	installedConfigDir = "/etc/pilothouse"
+	installedPAMDir    = "/etc/pam.d"
+)
+
+// removalSectionAnchor is the line that opens check 8. Every structural
+// assertion about the removal matrix runs against the lines after it, so the
+// `deb)`/`rpm)` case labels of the artifact-selection, install and reinstall
+// blocks cannot be mistaken for the removal block's.
+const removalSectionAnchor = "removal_account=$(sysusers_field name)"
+
+// expectConffileLine and expectRemovedLine match one `expect_conffile <path>` /
+// `expect_removed <path>` call with a literal argument. As with the c1 and c2
+// expectation regexps the anchors reject both the function's own definition and
+// a call carrying extra operands.
+var (
+	expectConffileLine = regexp.MustCompile(`^expect_conffile (/\S+)$`)
+	expectRemovedLine  = regexp.MustCompile(`^expect_removed (/\S+)$`)
+)
+
+// removalVerbLine matches one removal verb applied to the package name.
+var removalVerbLine = regexp.MustCompile(`^(dpkg -r|dpkg -P|rpm -e) "\$\{package_name\}" \|\|$`)
+
+// namedNFPMEntry and namedNFPMConfig decode only nfpms[0].package_name.
+// goreleaser_config_test.go's nfpmEntry does not carry that field and no
+// existing test file may be modified, so the removal guard declares its own.
+
+type namedNFPMEntry struct {
+	PackageName string `yaml:"package_name"`
+}
+
+type namedNFPMConfig struct {
+	NFPMs []namedNFPMEntry `yaml:"nfpms"`
+}
+
+// livePackageName reads nfpms[0].package_name out of the live configuration.
+func livePackageName(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(goreleaserConfigPath)
+	require.NoErrorf(t, err, "read %s", goreleaserConfigPath)
+
+	var cfg namedNFPMConfig
+	require.NoErrorf(t, yaml.Unmarshal(raw, &cfg), "parse %s", goreleaserConfigPath)
+	require.Lenf(t, cfg.NFPMs, 1, "%s must declare exactly one nfpms entry", goreleaserConfigPath)
+	require.NotEmptyf(t, cfg.NFPMs[0].PackageName, "%s must declare nfpms[0].package_name", goreleaserConfigPath)
+
+	return cfg.NFPMs[0].PackageName
+}
+
+// removalSection returns the script's effective lines from the removal anchor
+// onward.
+func removalSection(t *testing.T) []string {
+	t.Helper()
+
+	lines := effectiveLines(readVerifyInstall(t))
+
+	index := slices.Index(lines, removalSectionAnchor)
+	require.GreaterOrEqualf(t, index, 0,
+		"%s must open check 8 with %q so the guard can scope the removal matrix", verifyInstallPath, removalSectionAnchor)
+
+	return lines[index:]
+}
+
+// functionBody returns the effective lines between `name() {` and its closing
+// brace, so a guard can assert what a named check actually asserts rather than
+// that the script mentions it somewhere.
+func functionBody(t *testing.T, name string) []string {
+	t.Helper()
+
+	lines := effectiveLines(readVerifyInstall(t))
+
+	start := slices.Index(lines, name+"() {")
+	require.GreaterOrEqualf(t, start, 0, "%s must define %s()", verifyInstallPath, name)
+
+	end := slices.Index(lines[start:], "}")
+	require.Greaterf(t, end, 0, "%s must close %s()", verifyInstallPath, name)
+
+	return lines[start+1 : start+end]
+}
+
+// TestVerifyInstallReinstallsAndRepeatsTheAccountAndOwnershipChecks is check
+// 7's guard. The reinstall must go through the package manager's own reinstall
+// verb applied to the SAME artifact, and checks 2 and 3 must then be
+// RE-INVOKED — the same functions called a second time, not a second copy of
+// their assertions.
+func TestVerifyInstallReinstallsAndRepeatsTheAccountAndOwnershipChecks(t *testing.T) {
+	lines := effectiveLines(readVerifyInstall(t))
+	joined := strings.Join(lines, "\n")
+
+	require.Contains(t, joined, `apt-get install -y --reinstall "${artifact}"`,
+		"%s must reinstall the same deb artifact through apt-get", verifyInstallPath)
+	require.Contains(t, joined, `dnf reinstall -y "${artifact}"`,
+		"%s must reinstall the same rpm artifact through dnf", verifyInstallPath)
+
+	for _, check := range []string{"check_account", "check_owner_mode"} {
+		invocations := 0
+
+		for _, line := range lines {
+			if line == check {
+				invocations++
+			}
+		}
+
+		require.Greaterf(t, invocations, 1,
+			"%s must invoke %s more than once (once after install, once after the reinstall), got %d invocation(s)",
+			verifyInstallPath, check, invocations)
+	}
+}
+
+// TestVerifyInstallPackageNameMatchesGoreleaserConfig keeps the name the
+// removal verbs operate on equal to the live configuration's package_name. A
+// rename there would otherwise leave check 8 removing a package that does not
+// exist.
+func TestVerifyInstallPackageNameMatchesGoreleaserConfig(t *testing.T) {
+	require.Containsf(t, effectiveLines(readVerifyInstall(t)), "package_name="+livePackageName(t),
+		"%s must remove the package %s declares as package_name", verifyInstallPath, goreleaserConfigPath)
+}
+
+// overrideDestinations returns the live destinations of the given format's
+// override that satisfy keep, rejecting a duplicate declaration.
+func overrideDestinations(t *testing.T, format string, keep func(contentEntry) bool) []string {
+	t.Helper()
+
+	var destinations []string
+
+	for _, entry := range loadOverride(t, loadNFPMEntry(t), format).Contents {
+		if !keep(entry) {
+			continue
+		}
+
+		require.NotContainsf(t, destinations, entry.Dst,
+			"%s declares %s twice in the %s override", goreleaserConfigPath, entry.Dst, format)
+		destinations = append(destinations, entry.Dst)
+	}
+
+	sort.Strings(destinations)
+
+	return destinations
+}
+
+// TestVerifyInstallConffilesMatchGoreleaserConfig is the bidirectional drift
+// guard for the conffile set. The paths the script treats as conffiles must be
+// exactly the destinations the live ../.goreleaser.yaml marks `type: config`,
+// in both directions and in both overrides: a stray expectation line fails it,
+// and a newly marked config file with no expectation line fails it too.
+func TestVerifyInstallConffilesMatchGoreleaserConfig(t *testing.T) {
+	script := scriptPaths(t, expectConffileLine)
+	require.NotEmpty(t, script, "%s must declare expect_conffile expectations", verifyInstallPath)
+
+	for _, format := range []string{"deb", "rpm"} {
+		t.Run(format, func(t *testing.T) {
+			packaged := overrideDestinations(t, format, func(entry contentEntry) bool {
+				return entry.Type == "config"
+			})
+
+			require.Equalf(t, packaged, script,
+				"the conffiles %s expects must be exactly the %s destinations %s marks `type: config`",
+				verifyInstallPath, format, goreleaserConfigPath)
+		})
+	}
+}
+
+// TestVerifyInstallRemovedPathsMatchGoreleaserConfig is the bidirectional drift
+// guard for the non-config set: exactly the live packaged destinations that are
+// neither `type: config` nor `type: dir`, plus the two /usr/bin build outputs.
+// Directories are excluded because whether an emptied packaged directory is
+// pruned is deliberately not pinned, and config files because their fate
+// depends on the removal verb.
+func TestVerifyInstallRemovedPathsMatchGoreleaserConfig(t *testing.T) {
+	script := scriptPaths(t, expectRemovedLine)
+	require.NotEmpty(t, script, "%s must declare expect_removed expectations", verifyInstallPath)
+
+	cgoEnabled, cgoDisabled := binaryDestinationsByCGO(t)
+	binaries := append(slices.Clone(cgoEnabled), cgoDisabled...)
+	require.NotEmptyf(t, binaries, "%s must declare builds", goreleaserConfigPath)
+
+	for _, format := range []string{"deb", "rpm"} {
+		t.Run(format, func(t *testing.T) {
+			packaged := overrideDestinations(t, format, func(entry contentEntry) bool {
+				return entry.Type != "config" && entry.Type != "dir"
+			})
+
+			want := append(slices.Clone(packaged), binaries...)
+			sort.Strings(want)
+
+			require.Equalf(t, want, script,
+				"the paths %s expects to be gone after removal must be exactly the non-config, non-dir %s destinations in %s plus the %s build outputs",
+				verifyInstallPath, format, goreleaserConfigPath, usrBinDir)
+		})
+	}
+}
+
+// removalCell is one cell of the format x verb x expectation matrix resolution
+// 9 specifies.
+type removalCell struct {
+	format string
+	verb   string
+	// want are the check invocations that must follow this verb.
+	want []string
+	// forbidden are the check invocations that must NOT follow it, so a cell
+	// cannot pass by asserting the opposite of what it should.
+	forbidden []string
+	// why records the measured behaviour the cell encodes.
+	why string
+}
+
+// removalMatrix enumerates every cell rather than spot-checking one. dpkg and
+// rpm disagree about config files on removal, so each verb carries its own row.
+var removalMatrix = []removalCell{
+	{
+		format:    "deb",
+		verb:      `dpkg -r "${package_name}"`,
+		want:      []string{`check_removed_paths_gone "dpkg -r"`, `check_conffiles_present "dpkg -r"`, `check_account_survives_removal "dpkg -r"`},
+		forbidden: []string{`check_conffiles_gone "dpkg -r"`, `check_no_rpmsave "dpkg -r"`},
+		why:       "a dpkg remove is not a purge: the conffiles survive it, everything else goes",
+	},
+	{
+		format:    "deb",
+		verb:      `dpkg -P "${package_name}"`,
+		want:      []string{`check_conffiles_gone "dpkg -P"`, `check_account_survives_removal "dpkg -P"`},
+		forbidden: []string{`check_conffiles_present "dpkg -P"`, `check_no_rpmsave "dpkg -P"`},
+		why:       "a purge takes the conffiles the remove kept, and it runs on the removed-but-unpurged package so no reinstall is needed between the verbs",
+	},
+	{
+		format:    "rpm",
+		verb:      `rpm -e "${package_name}"`,
+		want:      []string{`check_removed_paths_gone "rpm -e"`, `check_conffiles_gone "rpm -e"`, `check_no_rpmsave "rpm -e"`, `check_account_survives_removal "rpm -e"`},
+		forbidden: []string{`check_conffiles_present "rpm -e"`},
+		why:       "rpm erases an unmodified config file outright; a .rpmsave would mean the postinstall modified a config file the package shipped",
+	},
+}
+
+// TestVerifyInstallRemovalMatrix is check 8's structural guard. It walks the
+// full format x verb x expectation matrix: every verb appears exactly once, in
+// its own format's branch, followed by exactly the assertions resolution 9
+// specifies for it and by none of the assertions that would contradict them.
+func TestVerifyInstallRemovalMatrix(t *testing.T) {
+	section := removalSection(t)
+
+	var verbOrder []string
+
+	segments := make(map[string][]string)
+
+	for index, line := range section {
+		match := removalVerbLine.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		verb := match[1] + ` "${package_name}"`
+		require.NotContainsf(t, verbOrder, verb, "%s runs %s more than once", verifyInstallPath, verb)
+		verbOrder = append(verbOrder, verb)
+		segments[verb] = section[index:]
+	}
+
+	// Every later verb's lines are a suffix of an earlier verb's, so each
+	// segment is trimmed at the next verb.
+	for index, verb := range verbOrder {
+		if index+1 < len(verbOrder) {
+			next := slices.IndexFunc(segments[verb][1:], func(line string) bool {
+				return strings.HasPrefix(line, verbOrder[index+1])
+			})
+			require.GreaterOrEqualf(t, next, 0, "%s must run %s after %s", verifyInstallPath, verbOrder[index+1], verb)
+			segments[verb] = segments[verb][:next+1]
+		}
+	}
+
+	require.Lenf(t, verbOrder, len(removalMatrix), "%s must run exactly the %d removal verbs the matrix enumerates, got %v",
+		verifyInstallPath, len(removalMatrix), verbOrder)
+
+	debBranch := slices.Index(section, "deb)")
+	rpmBranch := slices.Index(section, "rpm)")
+	require.GreaterOrEqual(t, debBranch, 0, "%s must remove the deb in its own case branch", verifyInstallPath)
+	require.Greaterf(t, rpmBranch, debBranch, "%s must remove the rpm in its own case branch", verifyInstallPath)
+
+	for _, cell := range removalMatrix {
+		t.Run(cell.format+"/"+strings.Fields(cell.verb)[1], func(t *testing.T) {
+			segment, ok := segments[cell.verb]
+			require.Truef(t, ok, "%s must run `%s` (%s)", verifyInstallPath, cell.verb, cell.why)
+
+			verbIndex := slices.IndexFunc(section, func(line string) bool {
+				return strings.HasPrefix(line, cell.verb)
+			})
+
+			switch cell.format {
+			case "deb":
+				require.Truef(t, verbIndex > debBranch && verbIndex < rpmBranch,
+					"%s must run `%s` inside the deb branch of the removal case", verifyInstallPath, cell.verb)
+			case "rpm":
+				require.Greaterf(t, verbIndex, rpmBranch,
+					"%s must run `%s` inside the rpm branch of the removal case", verifyInstallPath, cell.verb)
+			}
+
+			for _, want := range cell.want {
+				require.Containsf(t, segment, want,
+					"after `%s`, %s must assert %s: %s", cell.verb, verifyInstallPath, want, cell.why)
+			}
+
+			for _, forbidden := range cell.forbidden {
+				require.NotContainsf(t, segment, forbidden,
+					"after `%s`, %s must not assert %s: %s", cell.verb, verifyInstallPath, forbidden, cell.why)
+			}
+		})
+	}
+}
+
+// TestVerifyInstallRemovalChecksAssertTheRightPolarity pins what each check
+// invoked by the matrix actually does, so a cell cannot be satisfied by a
+// correctly named function whose body asserts the opposite.
+func TestVerifyInstallRemovalChecksAssertTheRightPolarity(t *testing.T) {
+	for _, tc := range []struct {
+		function string
+		want     string
+	}{
+		{function: "check_removed_paths_gone", want: `[ ! -e "${path}" ] ||`},
+		{function: "check_conffiles_present", want: `[ -e "${path}" ] ||`},
+		{function: "check_conffiles_gone", want: `[ ! -e "${path}" ] ||`},
+		{function: "check_no_rpmsave", want: `[ -z "${saved}" ] ||`},
+	} {
+		t.Run(tc.function, func(t *testing.T) {
+			require.Containsf(t, functionBody(t, tc.function), tc.want,
+				"%s's %s must assert %q", verifyInstallPath, tc.function, tc.want)
+		})
+	}
+
+	body := functionBody(t, "check_account_survives_removal")
+
+	for _, want := range []string{
+		`getent passwd "${removal_account}" >/dev/null ||`,
+		`getent group "${removal_account}" >/dev/null ||`,
+	} {
+		require.Containsf(t, body, want,
+			"%s must assert the account outlives removal (%q): systemd-sysusers created it and neither manager owns it",
+			verifyInstallPath, want)
+	}
+
+	require.Containsf(t, functionBody(t, "check_no_rpmsave"), `saved=$(find ${rpmsave_search_dirs} -name '*.rpmsave' 2>/dev/null || true)`,
+		"%s must sweep the packaged config directories for a stray .rpmsave", verifyInstallPath)
+	require.Containsf(t, effectiveLines(readVerifyInstall(t)), `rpmsave_search_dirs='`+installedConfigDir+" "+installedPAMDir+`'`,
+		"%s must sweep exactly %s and %s for a .rpmsave", verifyInstallPath, installedConfigDir, installedPAMDir)
+}
+
+// TestVerifyInstallNeverAssertsTheConfigDirectoryIsPruned is the negative
+// guard for resolution 9's explicit non-goal. Whether an emptied
+// /etc/pilothouse is removed varies between managers and versions, so the
+// script must never assert its absence — only the absence of files INSIDE it.
+func TestVerifyInstallNeverAssertsTheConfigDirectoryIsPruned(t *testing.T) {
+	for _, line := range effectiveLines(readVerifyInstall(t)) {
+		require.NotRegexpf(t, regexp.MustCompile(`\[ ! -[edf] "?`+regexp.QuoteMeta(installedConfigDir)+`"? \]`), line,
+			"%s must never assert that %s itself is pruned: %s", verifyInstallPath, installedConfigDir, line)
+	}
+
+	for _, expectation := range scriptPaths(t, expectRemovedLine) {
+		require.NotEqualf(t, installedConfigDir, expectation,
+			"%s must not expect %s itself to be removed", verifyInstallPath, installedConfigDir)
+	}
+
+	for _, expectation := range scriptPaths(t, expectConffileLine) {
+		require.NotEqualf(t, installedConfigDir, expectation,
+			"%s must not treat %s itself as a conffile", verifyInstallPath, installedConfigDir)
+	}
+}

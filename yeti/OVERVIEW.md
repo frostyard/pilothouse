@@ -2264,7 +2264,7 @@ exactly one amd64 artifact of that format (`*_amd64.deb` / `*.x86_64.rpm`) must
 be present — zero or several is a failure naming what was found. arm64 install
 validation is out of scope.
 
-**What it checks at this commit** — checks 1 through 6 only:
+**What it checks at this commit** — all eight checks:
 
 1. **Install through the distro package manager.** `apt-get update` then
    `apt-get install -y <artifact>` for deb, `dnf install -y <artifact>` for rpm.
@@ -2305,6 +2305,64 @@ validation is out of scope.
    `.goreleaser.yaml` builds it with `CGO_ENABLED=0`, so it is static and `ldd`
    exits non-zero for it for a reason that has nothing to do with the
    dependency lists.
+7. **Reinstall.** The **same** artifact is installed over the existing install
+   — `apt-get install -y --reinstall <artifact>` for deb, `dnf reinstall -y
+   <artifact>` for rpm — and then `check_account` and `check_owner_mode` are
+   **re-invoked**. They are called a second time, not copied: the reinstalled
+   state is held to exactly the assertions the first install was held to, so a
+   postinstall that only repairs ownership on a fresh install fails here.
+8. **Removal, asserted per format.** Each format runs its removal verbs in one
+   uninterrupted sequence, so no reinstall is needed between dpkg's two verbs
+   (`dpkg -P` operates on a removed-but-unpurged package). The account name is
+   captured before the first verb, because the sysusers file it is read from
+   goes away with the package. `check_removed_paths_gone`,
+   `check_conffiles_present`, `check_conffiles_gone`, `check_no_rpmsave` and
+   `check_account_survives_removal` are the named assertions, each taking the
+   verb it follows so the failure message names it.
+
+**The removal matrix, and why each cell reads the way it does.** dpkg and rpm
+do not treat a `type: config` file alike on removal. The behaviour below was
+measured in the two pinned images with a minimal package carrying one marked
+config file, and the script asserts exactly it:
+
+| | dpkg `remove` (`dpkg -r`) | dpkg `purge` (`dpkg -P`) | rpm `erase` (`rpm -e`) |
+|---|---|---|---|
+| unmodified config file | **survives** | removed | **removed** |
+| modified config file | **survives** | removed | **saved as `.rpmsave`** |
+
+- **Non-config payload, both formats.** `/usr/bin/pilothouse`,
+  `/usr/bin/pilothoused`, both units under `/usr/lib/systemd/system` and
+  `/usr/lib/sysusers.d/pilothouse.conf` must be **gone**. Neither manager keeps
+  non-config payload, so a survivor means the package claimed ownership of a
+  file it did not actually own.
+- **Debian `dpkg -r`: the three conffiles survive.** `/etc/pam.d/pilothouse`
+  and both env files are `type: config`, and a remove is not a purge — dpkg
+  deliberately keeps local edits available for a reinstall. Asserting their
+  **presence** is what pins that they really were registered as conffiles: a
+  package that shipped them as ordinary files would delete them here and fail.
+- **Debian `dpkg -P`: the same three are gone.** Covering both verbs rather
+  than only the gentler one is the point; a purge that left a conffile behind
+  would leave stale credentials-adjacent configuration on an uninstalled host.
+- **Fedora `rpm -e`: the same three are gone, and no `.rpmsave` survives.**
+  rpm erases an *unmodified* config file outright, so their absence is the
+  correct expectation. The `.rpmsave` sweep over `/etc/pilothouse` and
+  `/etc/pam.d` is the interesting half: rpm only writes a `.rpmsave` when the
+  file's on-disk content diverged from what the package shipped, so a hit means
+  the postinstall scriptlet modified a config file its own package shipped —
+  a real defect, and invisible to every static check.
+- **The account survives both managers.** `systemd-sysusers` creates the
+  `pilothouse` user and group from the shipped sysusers file during the
+  postinstall; neither dpkg nor rpm owns them, so neither removes them. The
+  script asserts they still resolve through `getent` after every verb, so a
+  future change that starts deleting the account — orphaning any file still
+  owned by its uid — is noticed here rather than on a user's machine.
+- **`/etc/pilothouse`'s own pruning is deliberately not pinned.** Whether an
+  emptied directory that held surviving conffiles is removed varies between
+  managers and versions and carries no user-visible consequence, so asserting
+  it either way would be a flaky claim about implementation detail rather than
+  about this package. The script asserts only about files *inside* it, and a
+  guard test enforces that: no `[ ! -e /etc/pilothouse ]`-shaped assertion, and
+  `/etc/pilothouse` may appear in neither expectation set.
 
 **Why `systemd-analyze verify` is Layer A work.** It is a parser: it validates
 unit *files* offline, resolving them under the filesystem it is pointed at, and
@@ -2323,14 +2381,18 @@ check follow whichever policy the format's override shipped, which is why the
 script contains no stack name, no module name and no multiarch module path.
 
 Checks 2 and 3 are shell **functions** rather than inline code, so each is a
-single named unit that can be invoked more than once.
+single named unit that can be invoked more than once — which check 7 does.
 
 **Expectation-line convention.** Every expected ownership value, every
-verified unit path and the cgo-linked binary path is written as one
-`expect_owner_mode <path> <owner> <group> <mode>`, `expect_unit <path>` or
-`expect_linked <path>` call per line with literal arguments, so the Go guards
+verified unit path, the cgo-linked binary path and both removal sets are
+written as one `expect_owner_mode <path> <owner> <group> <mode>`,
+`expect_unit <path>`, `expect_linked <path>`, `expect_conffile <path>` or
+`expect_removed <path>` call per line with literal arguments, so the Go guards
 can parse the script's expectations deterministically instead of matching
-free-form shell.
+free-form shell. `expect_conffile` and `expect_removed` *print* their path
+rather than asserting on it, because the same set is asserted with opposite
+polarity at different points of the removal sequence; the assertion functions
+iterate over `conffile_paths` and `removed_paths` and decide the polarity.
 
 **Go guards** (`packaging/verify_install_test.go`, tier (c) above). Per the
 spec, no Go test executes the script — it needs a package manager and a
@@ -2373,10 +2435,44 @@ Checks 4 through 6 add four more guards, all of them text-only:
   local types decoding `builds[].binary` and `builds[].env`, because
   `drift_test.go`'s `buildTarget` decodes `binary` alone.
 
+Checks 7 and 8 add five more guards, all still text-only:
+
+- `TestVerifyInstallReinstallsAndRepeatsTheAccountAndOwnershipChecks` requires
+  both reinstall verbs on the same `${artifact}` and counts the bare
+  `check_account` / `check_owner_mode` invocation lines: each must appear more
+  than once, so a chunk that re-asserted the ownership rules by copying them
+  instead of re-invoking the function fails.
+- `TestVerifyInstallConffilesMatchGoreleaserConfig` and
+  `TestVerifyInstallRemovedPathsMatchGoreleaserConfig` are the two further
+  **bidirectional** drift guards, run against both overrides. The first
+  requires set equality between the script's `expect_conffile` paths and the
+  live config's `type: config` destinations. The second requires set equality
+  between the script's `expect_removed` paths and the live destinations that
+  are neither `type: config` nor `type: dir`, plus the two `/usr/bin` build
+  outputs. Directories are excluded because pruning is deliberately unpinned,
+  and config files because their fate depends on the removal verb.
+- `TestVerifyInstallRemovalMatrix` is the structural guard over check 8, and it
+  enumerates the matrix as data — format × verb × expectation — rather than
+  spot-checking one cell. It scopes itself to the lines after the
+  `removal_account=` anchor so the earlier `deb)`/`rpm)` case labels cannot be
+  mistaken for the removal block's, splits those lines into one segment per
+  verb, and requires each verb to appear exactly once, inside its own format's
+  branch, followed by exactly the assertions its row lists and by **none** of
+  the assertions that would contradict them (so `check_conffiles_gone` after
+  `dpkg -r`, or `check_conffiles_present` after `dpkg -P`/`rpm -e`, fails).
+- `TestVerifyInstallRemovalChecksAssertTheRightPolarity` reads each of those
+  check functions' bodies and pins what they actually assert (`[ -e … ]` versus
+  `[ ! -e … ]`, the `.rpmsave` sweep, both `getent` calls), so a matrix cell
+  cannot be satisfied by a correctly named function that asserts the opposite.
+- `TestVerifyInstallNeverAssertsTheConfigDirectoryIsPruned` is the negative
+  guard for the deliberate non-goal, and
+  `TestVerifyInstallPackageNameMatchesGoreleaserConfig` keeps the name the
+  removal verbs operate on equal to the live `package_name`.
+
 **Nothing invokes the script yet.** At this commit no make target and no CI job
 runs it; wiring it into a make target and into
-`.github/workflows/packaging.yml` is later work. This commit's script covers
-checks 1 through 6.
+`.github/workflows/packaging.yml` is later work. This commit's script performs
+all eight checks.
 
 ### Artifact extraction (`packaging/extract`)
 
