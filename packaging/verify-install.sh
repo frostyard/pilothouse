@@ -70,9 +70,16 @@ set -eu
 # which exits non-zero immediately.
 
 # sysusers_conf is the installed sysusers declaration. It is the live source of
-# truth for the account this script checks; nothing about the account is
-# hardcoded here.
+# truth for the account's PROPERTIES -- home, shell, GECOS -- which are asserted
+# against whatever the installed file declares rather than a hardcoded table.
+#
+# The account's NAME is the one thing that is not taken on trust. The packaging
+# contract is specifically that a `pilothouse` user and group exist after
+# install, so the name is pinned here and the declaration is checked against it.
+# Parsing the name and then validating whatever came back would let a package
+# that declared some other valid system account pass every property assertion.
 sysusers_conf=/usr/lib/sysusers.d/pilothouse.conf
+expected_account=pilothouse
 
 # pam_policy is the INSTALLED PAM policy. Like the sysusers file it is the live
 # source of truth: check 4 derives both of its expectation lists from this file
@@ -151,6 +158,9 @@ check_account() {
     account=$(sysusers_field name)
     [ -n "${account}" ] ||
         fail "${sysusers_conf} declares no user line"
+
+    [ "${account}" = "${expected_account}" ] ||
+        fail "${sysusers_conf} declares user '${account}', expected '${expected_account}'"
 
     passwd_entry=$(getent passwd "${account}") ||
         fail "user ${account} does not exist after install"
@@ -453,6 +463,11 @@ case "${format}" in
     deb)
         apt-get update ||
             fail "apt-get update failed"
+        # ${artifact} is absolute, which is what makes apt treat it as a local
+        # file rather than a package name: the rule is that the operand
+        # contains a slash. Repository dependency resolution still happens --
+        # verified by installing a local .deb whose dependency was absent and
+        # watching apt fetch it from the archive.
         apt-get install -y "${artifact}" ||
             fail "apt-get install of ${artifact} failed"
         ;;
@@ -504,9 +519,11 @@ check_owner_mode
 
 printf 'verify-install: the account and on-disk metadata survived the reinstall\n'
 
-# Check 8: removal, asserted per format. The account name is captured here
-# because the sysusers file it is read from goes away with the package.
-removal_account=$(sysusers_field name)
+# Check 8: removal, asserted per format. The removal assertions name the pinned
+# account directly: check 2 has already proved the installed declaration
+# declares exactly this user, and the sysusers file it would otherwise be
+# re-read from goes away with the package.
+removal_account="${expected_account}"
 
 case "${format}" in
     deb)

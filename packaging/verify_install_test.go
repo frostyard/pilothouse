@@ -183,6 +183,30 @@ func TestVerifyInstallAccountCheckReadsTheInstalledSysusersFile(t *testing.T) {
 		"%s must assert the account's primary group is the pilothouse group", verifyInstallPath)
 }
 
+// TestVerifyInstallAccountCheckPinsTheAccountName enforces the one thing check
+// 2 must NOT take from the installed file on trust. Every other account
+// property is deliberately parsed from the shipped sysusers declaration, so
+// without this pin the check degenerates into "some valid system account
+// exists and is self-consistent" -- a package declaring an entirely different
+// user would satisfy every remaining assertion.
+func TestVerifyInstallAccountCheckPinsTheAccountName(t *testing.T) {
+	joined := strings.Join(effectiveLines(readVerifyInstall(t)), "\n")
+
+	require.Containsf(t, joined, "expected_account=pilothouse",
+		"%s must pin the expected account name", verifyInstallPath)
+
+	require.Containsf(t, joined, `[ "${account}" = "${expected_account}" ] ||`,
+		"%s must assert the declared account name is the expected one", verifyInstallPath)
+
+	require.Containsf(t, joined, `removal_account="${expected_account}"`,
+		"%s must assert removal against the pinned account, not a re-parse of a file the removal deletes",
+		verifyInstallPath)
+
+	require.NotContainsf(t, joined, "removal_account=$(sysusers_field name)",
+		"%s must not re-derive the removal account from the declaration being removed",
+		verifyInstallPath)
+}
+
 // TestVerifyInstallReadsOwnershipFromTheFilesystem enforces that check 3 reads
 // owner, group and mode with stat from the installed filesystem, never from
 // package metadata.
@@ -561,7 +585,7 @@ const (
 // assertion about the removal matrix runs against the lines after it, so the
 // `deb)`/`rpm)` case labels of the artifact-selection, install and reinstall
 // blocks cannot be mistaken for the removal block's.
-const removalSectionAnchor = "removal_account=$(sysusers_field name)"
+const removalSectionAnchor = `removal_account="${expected_account}"`
 
 // expectConffileLine and expectRemovedLine match one `expect_conffile <path>` /
 // `expect_removed <path>` call with a literal argument. As with the c1 and c2

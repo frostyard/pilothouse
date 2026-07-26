@@ -2278,8 +2278,12 @@ validation is out of scope.
    hand-written per-format `dependencies` lists in `.goreleaser.yaml` resolve
    against the distro's real repositories.
 2. **`check_account()`** — the `pilothouse` user and group exist afterward and
-   match the **installed** sysusers declaration. The home directory, shell and
-   GECOS are parsed out of `/usr/lib/sysusers.d/pilothouse.conf` on the
+   match the **installed** sysusers declaration. The account *name* is pinned:
+   the script asserts the installed declaration declares exactly `pilothouse`,
+   because the packaging contract is about that specific account and a file
+   declaring some other valid system account must not pass. The account's
+   *properties* are not pinned — home directory, shell and GECOS are parsed out
+   of `/usr/lib/sysusers.d/pilothouse.conf` on the
    installed filesystem (the live source of truth, not a hardcoded copy of
    `packaging/pilothouse.sysusers`) and compared against
    `getent passwd pilothouse` / `getent group pilothouse`; the account's primary
