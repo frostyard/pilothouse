@@ -97,7 +97,7 @@ docker-fmt: docker-image ## Format Go source files in Docker
 docker-lint: docker-image ## Run golangci-lint in Docker
 	$(DOCKER_RUN) golangci-lint run
 
-ci: generate ## Run every gate CI runs (lint, vuln, tidy, vet, fmt, test, race, build)
+ci: generate ## Run every CI gate that runs without credentials (lint, vuln, tidy, vet, fmt, test, race, build); the packaging.yml gate needs GORELEASER_KEY and cannot run here
 	@echo "==> go mod tidy check" && go mod tidy -diff
 	@echo "==> go vet" && go vet ./...
 	@echo "==> format check" && $(MAKE) format-check
@@ -108,7 +108,7 @@ ci: generate ## Run every gate CI runs (lint, vuln, tidy, vet, fmt, test, race, 
 	@echo "==> build" && $(MAKE) build
 	@echo "all CI gates passed"
 
-docker-ci: docker-image ## Run every CI gate inside the development image
+docker-ci: docker-image ## Run every CI gate that runs without credentials inside the development image; the packaging.yml gate needs GORELEASER_KEY and cannot run here
 	$(DOCKER_RUN) make ci
 
 bump-preflight: ## Verify that main is clean and synchronized

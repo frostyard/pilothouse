@@ -238,9 +238,11 @@ func backendFor(backends []backend, path string) (backend, bool) {
 // printNoArtifacts explains an empty search, which is the normal outcome on a
 // development host and inside the development image.
 //
-// Everything it says is true at this commit. The two workflows named are the
-// only things that publish a package: .github/workflows/release.yml runs
-// GoReleaser Pro on a tag and .github/workflows/snapshot.yml runs it on main.
+// Everything it says is true at this commit. The three workflows named are the
+// CI producers of a package: .github/workflows/release.yml runs GoReleaser Pro
+// on a tag, .github/workflows/snapshot.yml runs it on main, and
+// .github/workflows/packaging.yml runs it on pushes and pull requests targeting
+// main, where it verifies the artifacts and publishes nothing.
 // The local producer is `make package`, which builds a snapshot into dist/ but
 // requires the goreleaser Pro distribution, so it does not succeed on a stock
 // development host or in the development image — the message says so rather
@@ -253,7 +255,7 @@ func printNoArtifacts(stderr io.Writer, dir string, backends []backend) {
 
 	printf(stderr, "%s: no package artifacts found in %s: searched %s\n",
 		toolName, dir, strings.Join(patterns, " and "))
-	printf(stderr, "%s: GoReleaser Pro builds them in CI: .github/workflows/release.yml on a tag, .github/workflows/snapshot.yml on main.\n",
+	printf(stderr, "%s: GoReleaser Pro builds them in CI: .github/workflows/release.yml on a tag, .github/workflows/snapshot.yml on main, .github/workflows/packaging.yml on pushes and pull requests targeting main.\n",
 		toolName)
 	printf(stderr, "%s: locally, `make package` builds them into dist/, but it requires goreleaser Pro, which is not installed on a stock development host or in the development image, so it will not succeed there.\n",
 		toolName)

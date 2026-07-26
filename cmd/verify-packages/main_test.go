@@ -109,8 +109,8 @@ func writeArtifact(t *testing.T, dir, name string) string {
 // search prints. That is the expected outcome on this host and in the
 // development image, so this message is the command's most-seen output.
 //
-// It has to be accurate at this commit: the two workflows named are the only
-// producers that publish, and `make package` is the local producer that really
+// It has to be accurate at this commit: the three workflows named are the CI
+// producers, and `make package` is the local producer that really
 // exists but requires goreleaser Pro, so the message has to carry that
 // requirement rather than reading as an instruction that would simply fail.
 //
@@ -133,6 +133,7 @@ func TestRunWithNoArtifactsExplainsWhereTheyComeFrom(t *testing.T) {
 		dir,
 		".github/workflows/release.yml",
 		".github/workflows/snapshot.yml",
+		".github/workflows/packaging.yml",
 		"make package",
 		"goreleaser Pro",
 	} {

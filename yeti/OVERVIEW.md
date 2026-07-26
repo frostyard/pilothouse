@@ -2656,9 +2656,10 @@ findings.
 *The empty-`dist/` message*, which is the output this command produces on a
 development host and inside the development image, since neither builds
 packages by default. It names the directory searched and both globs, names the
-two GoReleaser Pro workflows that are the only publishing producers
+three GoReleaser Pro workflows that are the CI producers
 (`.github/workflows/release.yml` on a tag, `.github/workflows/snapshot.yml` on
-`main`), and states in one line that `make package` is the local producer that
+`main`, and `.github/workflows/packaging.yml` on pushes and pull requests
+targeting `main`), and states in one line that `make package` is the local producer that
 builds them into `dist/` but requires goreleaser Pro, which is not installed on
 a stock development host or in the development image, so it will not succeed
 there. Every `make` target the message names is really defined in this
@@ -2674,15 +2675,19 @@ non-obvious target and listed in `.PHONY` because it produces no file of its
 own. It is **deliberately absent from `ci` and from `docker-ci`**, and that
 absence is the point rather than an oversight: `dist/` is empty on this host and
 in the development image, so the target fails there by design, printing the
-empty-`dist/` message above — the searched directory and both globs, both
+empty-`dist/` message above — the searched directory and both globs, all three
 GoReleaser Pro workflows, and, on one line, that `make package` is the local
 producer that fills `dist/` but requires goreleaser Pro, absent here and in the
 development image. Wiring it
 into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
-gate CI runs, and local green means CI green" promise that `AGENTS.md` and
-`README.md` both make — CI has no packaging step either, so a gate that failed
-here would be reporting on something CI never does. An agent or developer who
+CI gate that runs without credentials, and local green means the credential-free
+gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
+*does* run a packaging gate now — `.github/workflows/packaging.yml`, which
+builds the artifacts and runs `make verify-packages` against them — but that
+gate needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution, so
+it cannot run locally at all, and it is the single named exception to the
+mirror-CI promise rather than something `ci` could reproduce. An agent or developer who
 runs `make verify-packages` on a checkout with nothing built should read the
 failure as the expected outcome, not as a defect to fix; the target becomes
 useful once a build has put real artifacts in `dist/`. The exclusion is meant to
@@ -2721,6 +2726,47 @@ reason alongside the required-version statement and
 <https://goreleaser.com/pro/>, then exits non-zero **before** any goreleaser
 subcommand runs. Failing that guard is the expected outcome on a development
 host and in the development image.
+
+*The CI packaging gate* is `.github/workflows/packaging.yml` (workflow name
+`Packaging`). It triggers on `push` to `main` and on `pull_request` targeting
+`main` — no tag trigger, no `workflow_run` — holds `permissions: contents:
+read` because it publishes nothing, installs the packaging and cgo build
+dependencies (`rpm` **and** `cpio` explicitly, since Noble's `rpm` package does
+not depend on `cpio` and no ambient runner tool may be relied on, plus the
+`libpam0g-dev`/`libsystemd-dev` headers and the `gcc-aarch64-linux-gnu` cross
+toolchain the arm64 cgo `pilothoused` build needs), runs
+`goreleaser/goreleaser-action@v7` with the Pro distribution and the existing
+`~> v2` constraint on `release --snapshot --clean`, then asserts and verifies
+what came out.
+
+It is a **separate file** from `.github/workflows/test.yml` because GitHub does
+not hand repository secrets to a run triggered by a fork's pull request: a job
+needing `GORELEASER_KEY` inside `test.yml` would fail for every fork
+contributor, and `test.yml` must stay green for them and must gain no
+`GORELEASER_KEY` dependency. Instead the single job carries
+`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
+so a fork pull request **skips** the job — neutral, never failed — and never
+receives the key. `GORELEASER_KEY` is the only secret the job takes; there is
+no `GITHUB_TOKEN`, because `--snapshot` publishes nothing and needs no tag.
+
+It is also a separate file from `.github/workflows/snapshot.yml`, which is a
+publisher rather than a gate: snapshot.yml runs after `Tests` succeeds on
+`main`, so it never sees a pull request, and it publishes the rolling `dev`
+pre-release. The consequence is that a push to `main` **builds the packages
+twice** — once here, verified and published nowhere, and once in snapshot.yml,
+published. That double build is deliberate and must not be optimized away:
+a gate chained to the publisher could not block a pull request, and a gate
+sharing a run with the publisher could not fail without breaking publication.
+Adding verification to the publishing path is a separate follow-up, not part of
+this workflow.
+
+Each format's presence is asserted by its **own** step — one `ls dist/*.deb`,
+one `ls dist/*.rpm` — so a build that produced only one of them fails on its
+own. A single `upload-artifact` step globbing both with
+`if-no-files-found: error` would succeed with just one format present, which is
+why the uploads are two steps as well, each with `if-no-files-found: error`.
+Between the assertions and the uploads the job runs `make verify-packages`,
+not `continue-on-error`, so any contract finding fails the job.
 
 *Its tests* live in two files, split by what they need from the host, and every
 test in both drives `run` itself, never a reporting or dispatch helper.
