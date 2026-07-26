@@ -238,12 +238,15 @@ func backendFor(backends []backend, path string) (backend, bool) {
 // printNoArtifacts explains an empty search, which is the normal outcome on a
 // development host and inside the development image.
 //
-// Everything it says is true at this commit. The two workflows named are the
-// only things that build a package today: .github/workflows/release.yml runs
-// GoReleaser Pro on a tag and .github/workflows/snapshot.yml runs it on main.
-// There is no local packaging target, so the message names none that exists —
-// it names `make package` only as future work, arriving with #72, which is the
-// one thing a reader in this situation needs to know.
+// Everything it says is true at this commit. The three workflows named are the
+// CI producers of a package: .github/workflows/release.yml runs GoReleaser Pro
+// on a tag, .github/workflows/snapshot.yml runs it on main, and
+// .github/workflows/packaging.yml runs it on pushes and pull requests targeting
+// main, where it verifies the artifacts and publishes nothing.
+// The local producer is `make package`, which builds a snapshot into dist/ but
+// requires the goreleaser Pro distribution, so it does not succeed on a stock
+// development host or in the development image — the message says so rather
+// than pointing a reader at a target that will only fail for them unexplained.
 func printNoArtifacts(stderr io.Writer, dir string, backends []backend) {
 	patterns := make([]string, 0, len(backends))
 	for _, b := range backends {
@@ -252,9 +255,9 @@ func printNoArtifacts(stderr io.Writer, dir string, backends []backend) {
 
 	printf(stderr, "%s: no package artifacts found in %s: searched %s\n",
 		toolName, dir, strings.Join(patterns, " and "))
-	printf(stderr, "%s: GoReleaser Pro builds them in CI: .github/workflows/release.yml on a tag, .github/workflows/snapshot.yml on main.\n",
+	printf(stderr, "%s: GoReleaser Pro builds them in CI: .github/workflows/release.yml on a tag, .github/workflows/snapshot.yml on main, .github/workflows/packaging.yml on pushes and pull requests targeting main.\n",
 		toolName)
-	printf(stderr, "%s: this repository has no local packaging target yet; `make package` arrives with #72.\n",
+	printf(stderr, "%s: locally, `make package` builds them into dist/, but it requires goreleaser Pro, which is not installed on a stock development host or in the development image, so it will not succeed there.\n",
 		toolName)
 }
 

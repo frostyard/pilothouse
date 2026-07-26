@@ -1,4 +1,4 @@
-.PHONY: build generate run test race fmt format-check lint bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages
+.PHONY: build generate run test race fmt format-check lint package bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages
 
 GO ?= go
 GOFMT ?= gofmt
@@ -97,7 +97,7 @@ docker-fmt: docker-image ## Format Go source files in Docker
 docker-lint: docker-image ## Run golangci-lint in Docker
 	$(DOCKER_RUN) golangci-lint run
 
-ci: generate ## Run every gate CI runs (lint, vuln, tidy, vet, fmt, test, race, build)
+ci: generate ## Run every CI gate that runs without credentials (lint, vuln, tidy, vet, fmt, test, race, build); the packaging.yml gate needs GORELEASER_KEY and cannot run here
 	@echo "==> go mod tidy check" && go mod tidy -diff
 	@echo "==> go vet" && go vet ./...
 	@echo "==> format check" && $(MAKE) format-check
@@ -108,7 +108,7 @@ ci: generate ## Run every gate CI runs (lint, vuln, tidy, vet, fmt, test, race, 
 	@echo "==> build" && $(MAKE) build
 	@echo "all CI gates passed"
 
-docker-ci: docker-image ## Run every CI gate inside the development image
+docker-ci: docker-image ## Run every CI gate that runs without credentials inside the development image; the packaging.yml gate needs GORELEASER_KEY and cannot run here
 	$(DOCKER_RUN) make ci
 
 bump-preflight: ## Verify that main is clean and synchronized
@@ -166,7 +166,35 @@ docker-next-version: ## Calculate the next version with pinned svu
 		svu next
 
 docker-tools-check: docker-image ## Verify release and packaging tools are executable in Docker
-	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2cpio cpio; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
+	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2archive tar; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
+
+package: ## Build snapshot .deb/.rpm into dist/ with goreleaser Pro v2 (publishes nothing, needs no tag)
+	@set -u; \
+	required='make package: the goreleaser Pro distribution at major version 2 is required; see https://goreleaser.com/pro/'; \
+	if ! command -v goreleaser >/dev/null 2>&1; then \
+		printf '%s\n%s\n' 'make package: goreleaser was not found on PATH.' "$$required" >&2; \
+		exit 1; \
+	fi; \
+	if ! banner=$$(goreleaser --version 2>&1); then \
+		printf '%s\n%s\n' 'make package: the goreleaser version could not be determined: `goreleaser --version` failed.' "$$required" >&2; \
+		exit 1; \
+	fi; \
+	if ! printf '%s\n' "$$banner" | grep -qE '(^|[^-[:alnum:]])goreleaser-pro([^-[:alnum:]]|$$)'; then \
+		printf '%s\n%s\n' 'make package: the goreleaser found on PATH is not the Pro distribution.' "$$required" >&2; \
+		exit 1; \
+	fi; \
+	found=$$(printf '%s\n' "$$banner" | sed -n 's/^GitVersion:[[:space:]]*v\{0,1\}\([^[:space:]][^[:space:]]*\).*/\1/p' | head -n 1); \
+	major=$${found%%.*}; \
+	case "$$major" in \
+	''|*[!0-9]*) \
+		printf 'make package: the goreleaser version could not be determined from `goreleaser --version` (GitVersion: %s).\n%s\n' "$${found:-<absent>}" "$$required" >&2; \
+		exit 1;; \
+	esac; \
+	if [ "$$major" != "2" ]; then \
+		printf 'make package: the goreleaser Pro binary on PATH reports version %s, whose major version is %s.\n%s\n' "$$found" "$$major" "$$required" >&2; \
+		exit 1; \
+	fi
+	goreleaser release --snapshot --clean
 
 verify-packages: ## Report contract findings for built .deb/.rpm artifacts in dist/ (outside ci; fails when dist/ is empty)
 	$(GO) run ./cmd/$@

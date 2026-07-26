@@ -11,8 +11,8 @@
 // by calling RPM, by the parent packaging package, or by re-running the fixture
 // builder's own logic.
 //
-// The fixture-backed tests resolve every tool they need — rpmbuild, rpm, rpm2cpio
-// and cpio — through packagingtest.LookTool, so on a host without them they skip
+// The fixture-backed tests resolve every tool they need — rpmbuild, rpm, rpm2archive
+// and tar — through packagingtest.LookTool, so on a host without them they skip
 // with a message naming the missing tool and `make docker-ci`, while inside the
 // dev image —
 // which sets PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1 — the same call fails instead
@@ -118,9 +118,9 @@ const rpmBulkPayloadSize = 4 << 20
 // buffer several times over.
 //
 // The content is trivially compressible, which does NOT weaken the test:
-// rpm2cpio writes the cpio stream UNCOMPRESSED, so the artifact's own
-// compression shrinks the file on disk while the pipe still carries
-// rpmBulkPayloadSize bytes.
+// rpm2archive runs with -n, so it writes the tar stream UNCOMPRESSED and the
+// artifact's own compression shrinks the file on disk while the pipe still
+// carries rpmBulkPayloadSize bytes.
 func rpmBulkSpec() packagingtest.Spec {
 	spec := rpmHappySpec()
 	spec.Name = "extractrpmbulkfixture"
@@ -135,11 +135,11 @@ func rpmBulkSpec() packagingtest.Spec {
 	return spec
 }
 
-// rpmBogusCpioOption is an option no cpio implements. cpio rejects it and exits
+// rpmBogusTarOption is an option no tar implements. tar rejects it and exits
 // non-zero before reading a byte of its input, which is a failure no privilege
 // level can turn into a success — unlike a directory made unwritable with
 // chmod, which root and CAP_DAC_OVERRIDE ignore.
-const rpmBogusCpioOption = "--pilothouse-not-an-option"
+const rpmBogusTarOption = "--pilothouse-not-an-option"
 
 // rpmPipeDeadline bounds how long the pipe-failure rows may take. Measured, the
 // row below returns in under a tenth of a second, so this is more than two
@@ -156,10 +156,10 @@ const rpmbuildTool = "rpmbuild"
 
 // requireRPMTools resolves every tool a fixture-backed test needs BEFORE the
 // test builds anything: rpmbuild builds the artifact, and RPM then runs rpm,
-// rpm2cpio and cpio over it.
+// rpm2archive and tar over it.
 //
 // Resolving all four up front is what makes the skip message name the tool that
-// is actually missing. A host carrying rpmbuild but no cpio would otherwise
+// is actually missing. A host carrying rpmbuild but no tar would otherwise
 // build a fixture, reach the extractor and fail with a tool error where a skip
 // is the honest outcome. Inside the dev image, which sets
 // PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1, the same call fails instead of skipping,
@@ -167,7 +167,7 @@ const rpmbuildTool = "rpmbuild"
 func requireRPMTools(t *testing.T) {
 	t.Helper()
 
-	for _, tool := range []string{rpmbuildTool, rpmTool, rpm2cpioTool, cpioTool} {
+	for _, tool := range []string{rpmbuildTool, rpmTool, rpm2archiveTool, tarTool} {
 		if packagingtest.LookTool(t, tool) == "" {
 			return
 		}
@@ -759,7 +759,7 @@ func TestRPMWithoutToolWrapsErrToolUnavailable(t *testing.T) {
 //
 // Every row fails for a reason the operating system gives the same answer to
 // for every user — a file that is not an rpm, a directory that does not exist,
-// an option cpio does not implement. None simulates a denial with chmod, which
+// an option tar does not implement. None simulates a denial with chmod, which
 // root and CAP_DAC_OVERRIDE ignore and which would therefore make the required
 // failure a property of who ran the test.
 //
@@ -769,16 +769,16 @@ func TestRPMWithoutToolWrapsErrToolUnavailable(t *testing.T) {
 // buffer left to write. See
 // docs/agents/skills/piped-subprocess-pairs-need-concurrent-wait.md.
 //
-// The happy-path test above is the other side of the same contract: cpio writes
-// its `2 blocks` progress line to standard error on SUCCESS, so a successful
-// extraction proves that stderr output alone is never the verdict.
+// The happy-path test above is the other side of the same contract: a
+// successful extraction proves that a tool's exit status, not any output it
+// happens to write, is the verdict.
 func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 	t.Run("source half exits non-zero", func(t *testing.T) {
-		if packagingtest.LookTool(t, rpm2cpioTool) == "" {
+		if packagingtest.LookTool(t, rpm2archiveTool) == "" {
 			return
 		}
 
-		if packagingtest.LookTool(t, cpioTool) == "" {
+		if packagingtest.LookTool(t, tarTool) == "" {
 			return
 		}
 
@@ -792,7 +792,7 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 			t.Fatalf("rpmExtractPayload returned no error for a file that is not an rpm")
 		}
 
-		if want := "packaging/extract: " + rpm2cpioTool + ": "; !strings.Contains(err.Error(), want) {
+		if want := "packaging/extract: " + rpm2archiveTool + ": "; !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not carry the prefix %q", err, want)
 		}
 	})
@@ -802,7 +802,7 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 
 		artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmHappySpec())
 
-		// A destination directory that does not exist, so cpio's chdir fails
+		// A destination directory that does not exist, so tar's chdir fails
 		// and the SECOND half is the only one that failed. ENOENT is the same
 		// answer for every user, which a mode-denied directory is not: root and
 		// any process holding CAP_DAC_OVERRIDE write into one anyway, so a
@@ -816,7 +816,7 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 			t.Fatalf("rpmExtractPayload returned no error when extracting into %s, which does not exist", missing)
 		}
 
-		if want := "packaging/extract: " + cpioTool + ": "; !strings.Contains(err.Error(), want) {
+		if want := "packaging/extract: " + tarTool + ": "; !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not carry the prefix %q", err, want)
 		}
 	})
@@ -826,31 +826,38 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 
 		artifact := packagingtest.BuildRPM(t, t.TempDir(), rpmBulkSpec())
 
-		// cpio rejects the option and exits BEFORE reading a byte, which no
-		// privilege level can turn into a success. rpm2cpio meanwhile has a
-		// payload far larger than a pipe buffer still to write — rpm2cpio
-		// writes the cpio stream UNCOMPRESSED, so the artifact's own
+		// tar rejects the option and exits BEFORE reading a byte, which no
+		// privilege level can turn into a success. rpm2archive meanwhile has a
+		// payload far larger than a pipe buffer still to write — it runs with
+		// -n, so it writes the tar stream UNCOMPRESSED and the artifact's own
 		// compression cannot shrink it below one. That is the shape that used
 		// to hang here forever: a producer blocked on a full pipe nobody will
 		// read, reaped before the consumer whose status explains it.
+		file, err := os.Open(artifact)
+		if err != nil {
+			t.Fatalf("open %s: %v", artifact, err)
+		}
+
+		defer func() { _ = file.Close() }()
+
 		done := make(chan error, 1)
 
 		go func() {
 			done <- runPipe(t.Context(), t.TempDir(),
-				pipeCommand{name: rpm2cpioTool, args: []string{artifact}},
-				pipeCommand{name: cpioTool, args: []string{rpmBogusCpioOption}},
+				pipeCommand{name: rpm2archiveTool, args: []string{"-n", "-"}, stdin: file},
+				pipeCommand{name: tarTool, args: []string{rpmBogusTarOption}},
 			)
 		}()
 
 		select {
 		case err := <-done:
 			if err == nil {
-				t.Fatalf("runPipe returned no error when %s rejected %s", cpioTool, rpmBogusCpioOption)
+				t.Fatalf("runPipe returned no error when %s rejected %s", tarTool, rpmBogusTarOption)
 			}
 
 			// The consumer's status is the root cause: the producer's own
 			// failure here is a broken pipe it took because the consumer left.
-			if want := "packaging/extract: " + cpioTool + ": "; !strings.Contains(err.Error(), want) {
+			if want := "packaging/extract: " + tarTool + ": "; !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not carry the prefix %q", err, want)
 			}
 		case <-time.After(rpmPipeDeadline):

@@ -24,8 +24,15 @@ git:
     - continuous
 
 snapshot:
-  # Use a static version template that doesn't require parsing existing tags
-  version_template: "{{ .ShortCommit }}-snapshot"
+  # Use a static version template that doesn't require parsing existing tags.
+  #
+  # The leading 0.0.0 is load-bearing: a Debian version must begin with a
+  # digit, and .ShortCommit is hex, so a bare "{{ .ShortCommit }}-snapshot"
+  # produces an invalid version whenever the commit starts with a-f. That is
+  # about three builds in eight, which made the packaging gate fail as a
+  # function of the commit hash rather than of the code. dpkg-deb builds such a
+  # package without complaint and then refuses to parse it back.
+  version_template: "0.0.0-{{ .ShortCommit }}-snapshot"
 
 gomod:
   proxy: false

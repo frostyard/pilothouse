@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -108,11 +109,14 @@ func writeArtifact(t *testing.T, dir, name string) string {
 // search prints. That is the expected outcome on this host and in the
 // development image, so this message is the command's most-seen output.
 //
-// It has to be accurate at this commit: the two workflows named are the only
-// producers that exist, and the one target it names, `make package`, is named
-// as future work arriving with #72 — never as something to run now. The two
-// literals must share a line, so the target cannot drift out of the message
-// while the issue number survives.
+// It has to be accurate at this commit: the three workflows named are the CI
+// producers, and `make package` is the local producer that really
+// exists but requires goreleaser Pro, so the message has to carry that
+// requirement rather than reading as an instruction that would simply fail.
+//
+// The target check is deliberately not a hardcoded name list: every `make
+// <target>` the message names is looked up in the repository's own Makefile,
+// so the message can never point a reader at a target that does not exist.
 func TestRunWithNoArtifactsExplainsWhereTheyComeFrom(t *testing.T) {
 	t.Parallel()
 
@@ -129,38 +133,82 @@ func TestRunWithNoArtifactsExplainsWhereTheyComeFrom(t *testing.T) {
 		dir,
 		".github/workflows/release.yml",
 		".github/workflows/snapshot.yml",
+		".github/workflows/packaging.yml",
 		"make package",
-		"#72",
+		"goreleaser Pro",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not mention %q:\n%s", want, out)
 		}
 	}
 
-	tied := false
+	// No issue reference belongs in this message any more: `make package`
+	// exists, so the message states what it needs rather than pointing at an
+	// open issue. The check is on the shape, not on one issue number, so a
+	// different one cannot creep back in.
+	if issue := regexp.MustCompile(`#\d+`).FindString(out); issue != "" {
+		t.Errorf("output still frames packaging as future work, referencing issue %s:\n%s", issue, out)
+	}
 
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "make package") && strings.Contains(line, "#72") {
-			tied = true
+	// The companion half of the same requirement: the message may only name a
+	// make target that is really defined, checked against the live Makefile
+	// rather than against a second copy of the expected target list.
+	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
 
-			break
+	named := namedMakeTargets(out)
+	if len(named) == 0 {
+		t.Fatalf("output names no make target, so the target check proves nothing:\n%s", out)
+	}
+
+	for _, target := range named {
+		if !makeRuleDefined(string(makefile), target) {
+			t.Errorf("message names `make %s`, which the repository Makefile does not define:\n%s", target, out)
+		}
+	}
+}
+
+// namedMakeTargets extracts every target named as `make <target>` in out.
+func namedMakeTargets(out string) []string {
+	targets := make([]string, 0, 1)
+
+	for _, field := range strings.Split(out, "make ")[1:] {
+		end := strings.IndexFunc(field, func(r rune) bool { return !isTargetRune(r) })
+		if end < 0 {
+			end = len(field)
+		}
+
+		if end > 0 {
+			targets = append(targets, field[:end])
 		}
 	}
 
-	if !tied {
-		t.Errorf("no single line carries both %q and %q:\n%s", "make package", "#72", out)
-	}
+	return targets
+}
 
-	// The companion half of the same requirement: naming `make package` as
-	// future work is required, but pointing a reader at a target that exists
-	// today would send them somewhere that cannot help.
-	for _, line := range strings.Split(out, "\n") {
-		for _, field := range strings.Split(line, "make ")[1:] {
-			if !strings.HasPrefix(field, "package") {
-				t.Errorf("message names a make target other than the future `make package`: %q", line)
-			}
+// isTargetRune reports whether r may appear in a make target name.
+func isTargetRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	case r == '-', r == '_', r == '.':
+		return true
+	default:
+		return false
+	}
+}
+
+// makeRuleDefined reports whether makefile carries a `<target>:` rule.
+func makeRuleDefined(makefile, target string) bool {
+	for _, line := range strings.Split(makefile, "\n") {
+		if strings.HasPrefix(line, target+":") {
+			return true
 		}
 	}
+
+	return false
 }
 
 // TestRunDiscoversAndDispatchesBothExtensions is the discovery and dispatch

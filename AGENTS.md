@@ -26,7 +26,7 @@ Run `make build`, `make test`, `make fmt`, and `make lint` before handing off ch
 
 If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
 
-`make verify-packages` reports the packaging contract's findings for built `.deb` and `.rpm` artifacts in `dist/`; it sits outside `make ci` and `make docker-ci` on purpose, and it fails by design when `dist/` is empty, which is the normal state on a development host and in the development image.
+`make verify-packages` reports the packaging contract's findings for built `.deb` and `.rpm` artifacts in `dist/`; it sits outside `make ci` and `make docker-ci` on purpose, and it fails by design when `dist/` is empty, which is the normal state on a development host and in the development image. `make package` is the local producer that fills `dist/` — it runs `goreleaser release --snapshot --clean`, requires the goreleaser Pro distribution at major version 2, which is not installed on this host or in the development image, and it too sits outside `make ci` and `make docker-ci`.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
@@ -53,12 +53,22 @@ guides.
 
 ## One command mirrors CI
 
-**make ci / make docker-ci** runs every gate CI runs — tidy check, vet,
-format check, lint, govulncheck, tests, race, build — in CI's order. Run it
-before pushing; if it is green locally, CI will be green. `docker-ci` is
-the containerized equivalent for hosts without Go/PAM/systemd headers or
-golangci-lint. Automated harnesses (the mill's deep gate) use this same
-target, so agents and CI can never disagree about what "passing" means.
+**make ci / make docker-ci** runs every CI gate that runs without
+credentials — tidy check, vet, format check, lint, govulncheck, tests, race,
+build — in CI's order. Run it before pushing; if it is green locally, the
+credential-free gates will be green in CI. `docker-ci` is the containerized
+equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
+Automated harnesses (the mill's deep gate) use this same target, so agents
+and CI can never disagree about what "passing" means for the credential-free
+gates.
+
+The single exception is `.github/workflows/packaging.yml`, the packaging
+gate: it builds the `.deb` and `.rpm` artifacts and verifies them, and it
+cannot run locally because it needs the `GORELEASER_KEY` secret and the
+goreleaser Pro distribution, neither of which is available on a development
+host or in the development image. Once artifacts exist in `dist/`,
+`make verify-packages` is the local tool for the package contracts that gate
+checks.
 
 ## Learned agent skills
 

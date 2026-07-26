@@ -18,11 +18,29 @@ import (
 )
 
 // The three external tools the rpm backend runs. rpm answers every metadata
-// question; rpm2cpio and cpio together produce the payload bytes.
+// question; rpm2archive and tar together produce the payload bytes.
+//
+// rpm2archive rather than the older rpm2cpio, because rpm2cpio cannot read a
+// package nfpm produced — which is every package this repository ships.
+// nfpm writes RPMTAG_ARCHIVESIZE as the sum of the member file sizes, while
+// rpmbuild writes the size of the whole uncompressed cpio archive. rpm 4.18's
+// rpm2cpio validates the bytes it emitted against that tag and exits 1 when
+// they disagree, after emitting a complete and perfectly valid cpio stream and
+// without writing a word to stderr. Against a goreleaser artifact it therefore
+// fails with a bare "exit status 1" while nothing is actually wrong with the
+// payload. rpm2archive reads the same packages without complaint, ships in the
+// same rpm package, and is upstream's supported replacement.
+//
+// No unit-test fixture reproduces that shape, because every fixture here is
+// built by rpmbuild, which writes the tag the other way — that is exactly why
+// the bug survived until a real artifact met the verifier. The regression guard
+// is .github/workflows/packaging.yml, which runs `make verify-packages` over
+// the actual goreleaser output on every push and pull request to main: a
+// revert to rpm2cpio turns that gate red immediately.
 const (
-	rpmTool      = "rpm"
-	rpm2cpioTool = "rpm2cpio"
-	cpioTool     = "cpio"
+	rpmTool         = "rpm"
+	rpm2archiveTool = "rpm2archive"
+	tarTool         = "tar"
 )
 
 // rpmFileTableQuery is the one query that produces the whole file table.
@@ -138,9 +156,9 @@ const (
 //     rpmRequireFlagsQuery the index-parallel provenance flag word of each.
 //   - rpmPostinstallQuery produces the postinstall body behind a presence
 //     marker.
-//   - `rpm2cpio <rpm>` piped into `cpio -idm --no-absolute-filenames` produces
-//     the payload bytes. The pipe is wired in Go, so no shell is involved and
-//     both exit statuses are checked.
+//   - `rpm2archive -n -` reading the artifact on standard input, piped into
+//     `tar -x --no-same-owner`, produces the payload bytes. The pipe is wired
+//     in Go, so no shell is involved and both exit statuses are checked.
 //
 // Entries are exactly the paths the package owns. rpm owns only what its
 // `%files` section lists, so a package rooted at /opt/phx/… and /usr/bin/…
@@ -387,10 +405,23 @@ func rpmLines(raw []byte) []string {
 }
 
 // rpmExtractPayload extracts the artifact's payload into dir.
+//
+// The artifact is opened here and handed to rpm2archive on standard input,
+// with `-` as its operand, for two reasons: rpm2archive given a path writes
+// <path>.tgz beside it, which would leave a stray file in the directory being
+// verified, and `-n` then makes it emit an uncompressed tar so neither side of
+// the pipe spends time on a gzip round trip.
 func rpmExtractPayload(ctx context.Context, artifact, dir string) error {
+	file, err := os.Open(artifact)
+	if err != nil {
+		return fmt.Errorf("packaging/extract: open %s: %w", artifact, err)
+	}
+
+	defer func() { _ = file.Close() }()
+
 	return runPipe(ctx, dir,
-		pipeCommand{name: rpm2cpioTool, args: []string{artifact}},
-		pipeCommand{name: cpioTool, args: []string{"-idm", "--no-absolute-filenames"}},
+		pipeCommand{name: rpm2archiveTool, args: []string{"-n", "-"}, stdin: file},
+		pipeCommand{name: tarTool, args: []string{"-x", "--no-same-owner"}},
 	)
 }
 
@@ -423,9 +454,16 @@ func rpmReadContent(entries []packaging.Entry, payloadDir string) error {
 }
 
 // pipeCommand names one half of a two-process pipe.
+//
+// stdin, when non-nil, becomes src's standard input. It exists because
+// rpm2archive writes <artifact>.tgz beside its input when handed a path, which
+// would mutate the very directory being verified; reading the artifact on
+// standard input with `-` makes it write to standard output instead and leaves
+// dist/ untouched.
 type pipeCommand struct {
-	name string
-	args []string
+	name  string
+	args  []string
+	stdin *os.File
 }
 
 // runPipe runs src with its standard output connected to dst's standard input,
@@ -473,6 +511,10 @@ func runPipe(ctx context.Context, dir string, src, dst pipeCommand) error {
 	srcCmd := exec.CommandContext(ctx, srcPath, src.args...)
 	dstCmd := exec.CommandContext(ctx, dstPath, dst.args...)
 	dstCmd.Dir = dir
+
+	if src.stdin != nil {
+		srcCmd.Stdin = src.stdin
+	}
 
 	var srcStderr, dstStderr bytes.Buffer
 

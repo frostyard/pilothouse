@@ -1,0 +1,114 @@
+# .github/workflows/packaging.yml
+#
+# The packaging gate: it builds the .deb and .rpm artifacts with GoReleaser Pro
+# and checks them against the repository's artifact contract, so a packaging
+# regression fails a pull request instead of shipping.
+#
+# Why this is its own file, and not a job in .github/workflows/test.yml:
+# this job needs the GORELEASER_KEY secret, and GitHub does not hand repository
+# secrets to a workflow run triggered by a pull request from a fork. A job
+# added to test.yml would therefore fail for every fork contributor, and
+# test.yml must stay green for them. Keeping the credential-dependent gate in
+# its own file lets that whole file skip on fork pull requests while the rest
+# of the gates keep running.
+#
+# Why this is not .github/workflows/snapshot.yml either: snapshot.yml is a
+# publisher, not a gate. It runs after Tests succeeds on main, so it never sees
+# a pull request, and it runs `release --nightly --clean`, which publishes the
+# rolling `dev` pre-release. This file runs `release --snapshot --clean`, which
+# publishes nothing, needs no tag and needs no GITHUB_TOKEN.
+#
+# That means a push to main builds the packages twice: once here, verified and
+# published nowhere, and once in snapshot.yml, unverified and published to the
+# `dev` tag. That double build is deliberate. Do not "optimize" it away by
+# chaining this workflow to snapshot.yml or by moving verification into the
+# publishing path: a gate that runs only after a merge cannot block a pull
+# request, and a gate that shares a run with a publisher cannot fail without
+# also breaking publication.
+name: Packaging
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: Build and verify packages
+    runs-on: ubuntu-latest
+    # Fork pull requests never receive GORELEASER_KEY, so skip the job for them
+    # rather than failing it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      # nfpm's rpm packager shells out to rpm-family tools, and Noble's `rpm`
+      # package does not depend on `cpio`, so both are installed explicitly
+      # instead of relying on whatever the runner image happens to carry.
+      # pilothoused links libpam and libsystemd via cgo, and .goreleaser.yaml
+      # builds it for amd64 and arm64, so the aarch64 cross toolchain and the
+      # arm64 headers are installed too.
+      - name: Install packaging and build dependencies
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Pin the runner's existing repositories to amd64 so apt does not try
+          # to fetch arm64 from mirrors that don't serve it (e.g. 404s from
+          # security.ubuntu.com).
+          sudo sed -i 's|^Types: deb|Types: deb\nArchitectures: amd64|' /etc/apt/sources.list.d/ubuntu.sources
+          # Provide arm64 packages from ports.ubuntu.com.
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security
+          Components: main universe
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y rpm cpio gcc-aarch64-linux-gnu libpam0g-dev libsystemd-dev libpam0g-dev:arm64 libsystemd-dev:arm64
+
+      - name: Build packages with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser-pro
+          version: "~> v2"
+          args: release --snapshot --clean
+        env:
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+      # Each format is asserted on its own, so a build that produced only one of
+      # them fails here instead of passing a single glob that matched the other.
+      - name: Assert a .deb was built
+        run: ls -l dist/*.deb
+
+      - name: Assert an .rpm was built
+        run: ls -l dist/*.rpm
+
+      - name: Verify the artifact contract
+        run: make verify-packages
+
+      - name: Upload deb packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: packages-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Upload rpm packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: packages-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
