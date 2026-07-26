@@ -72,6 +72,17 @@ dump_guest_unit_diagnostics() {
     done
 }
 
+# dump_pre_reboot_diagnostics prints both units' state BEFORE the guest is
+# rebooted, unconditionally and on a run that is still healthy. It is not a
+# failure path: a guest that never comes back from the reboot cannot be asked
+# anything afterwards, and the host-side console log alone would leave the
+# pre-reboot unit state unrecorded. Dumping it while the guest is still there
+# is what makes that case diagnosable.
+dump_pre_reboot_diagnostics() {
+    diagnostics_log "dumping both units' state before the reboot is issued, so a guest that never returns still leaves evidence of what it looked like"
+    dump_guest_unit_diagnostics
+}
+
 # dump_failure_diagnostics is the whole discriminator. It is a no-op on a
 # successful exit and runs at most once.
 dump_failure_diagnostics() {

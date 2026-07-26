@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -2071,4 +2072,440 @@ func TestVMCheckJournalTakesNoJournalctlOutputAsEvidence(t *testing.T) {
 				strings.Contains(line, "$message"),
 			"%s uses the daemon's line in `%s`, outside the assertion over the broker's response", vmCheckJournalPath, line)
 	}
+}
+
+// The reboot-posture half of the harness (c7). vmCapturePreRebootPath records
+// the pre-reboot state and plants the sentinel; vmCheckRebootPosturePath is the
+// post-reboot half. Everything below reads them as text.
+const (
+	vmCapturePreRebootPath   = vmGuestDir + "/capture-pre-reboot.sh"
+	vmCheckRebootPosturePath = vmGuestDir + "/check-reboot-posture.sh"
+
+	// vmRuntimeDirectory is the broker unit's RuntimeDirectory= — destroyed and
+	// recreated — and vmStateDirectory its StateDirectory=, which persists;
+	// vmAuditDatabase is the durable database inside the latter.
+	vmRuntimeDirectory = "/run/pilothouse"
+	vmStateDirectory   = "/var/lib/pilothouse"
+	vmAuditDatabase    = "/var/lib/pilothouse/audit.db"
+)
+
+// vmRuntimeInodeIdentifiers derives, from the harness itself, every identifier
+// that carries `/run/pilothouse`'s own inode. It is derived rather than
+// enumerated on purpose: a hand-written list of the three spellings the scripts
+// happen to use today would be evaded by the very edit the guard exists to
+// catch, since an inode-inequality assertion introduced under a fresh name
+// (`before_runtime_inode`, `after_runtime_inode`) would name nothing on the
+// list.
+//
+// The seed is any assignment whose right-hand side reads the runtime directory
+// and which either reads an inode (`stat` with `%i`) or is named for one. The
+// set is then closed under aliasing: any assignment whose right-hand side
+// expands an identifier already in the set joins it, which is what pulls in the
+// state file's recorded `PRE_REBOOT_RUNTIME_DIRECTORY_INODE` and would pull in
+// any renamed copy of it.
+func vmRuntimeInodeIdentifiers(t *testing.T) []string {
+	t.Helper()
+
+	var (
+		assignment    = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+		runtimeRef    = regexp.MustCompile(`\$\{?RUNTIME_DIRECTORY\b|` + regexp.QuoteMeta(vmRuntimeDirectory))
+		inodeRead     = regexp.MustCompile(`stat\b[^|]*%i`)
+		identifiers   = map[string]bool{}
+		assignments   [][]string
+		expandsMember = func(rhs string) bool {
+			for identifier := range identifiers {
+				if regexp.MustCompile(`\$\{?` + regexp.QuoteMeta(identifier) + `\b`).MatchString(rhs) {
+					return true
+				}
+			}
+
+			return false
+		}
+	)
+
+	for _, path := range vmHarnessFiles(t) {
+		for _, line := range vmRawCodeLines(readVMHarnessFile(t, path)) {
+			match := assignment.FindStringSubmatch(line)
+			if match == nil {
+				continue
+			}
+
+			assignments = append(assignments, match)
+
+			named := strings.Contains(strings.ToLower(match[1]), "inode")
+			if runtimeRef.MatchString(match[2]) && (named || inodeRead.MatchString(match[2])) {
+				identifiers[match[1]] = true
+			}
+		}
+	}
+
+	for changed := true; changed; {
+		changed = false
+
+		for _, match := range assignments {
+			if identifiers[match[1]] || !expandsMember(match[2]) {
+				continue
+			}
+
+			identifiers[match[1]] = true
+			changed = true
+		}
+	}
+
+	// The derivation must not be allowed to degrade into an empty set: the
+	// runtime directory's inode is read on both sides of the reboot and
+	// recorded in between, so fewer than three identifiers means the harness
+	// stopped spelling the read in a way this guard can follow, which is itself
+	// a drift worth failing on.
+	names := make([]string, 0, len(identifiers))
+	for identifier := range identifiers {
+		names = append(names, identifier)
+	}
+
+	sort.Strings(names)
+	require.GreaterOrEqualf(t, len(names), 3,
+		"the guard derived only %v as carrying %s's inode; it must find the pre-reboot reading, the recorded value and the post-reboot reading, or it is no longer able to see the assertion it forbids",
+		names, vmRuntimeDirectory)
+
+	return names
+}
+
+// vmQueryCapabilitiesID reads the capability query id from the daemon's own API
+// declaration, so a rename there fails this guard rather than leaving the guest
+// scripts asking for something nothing answers.
+func vmQueryCapabilitiesID(t *testing.T) string {
+	t.Helper()
+
+	api, err := os.ReadFile(vmBrokerAPIPath)
+	require.NoErrorf(t, err, "read %s", vmBrokerAPIPath)
+
+	declaration := vmQueryCapabilitiesDeclaration.FindStringSubmatch(string(api))
+	require.NotNilf(t, declaration, "%s must declare QueryCapabilities", vmBrokerAPIPath)
+
+	return declaration[1]
+}
+
+// TestVMRebootCapabilitySetComesFromTheAuthenticatedBrokerRoute pins where the
+// compared capability set comes from on BOTH sides of the reboot: a login over
+// the broker's Unix socket followed by the capability query, which is the
+// daemon's own answer — not the web console's rendering of it, which is a view
+// of the set rather than the set. It also pins the empty case: a query that
+// fails, or that answers an empty set, is a failure on either side, so an empty
+// answer can never be compared equal against another empty answer.
+func TestVMRebootCapabilitySetComesFromTheAuthenticatedBrokerRoute(t *testing.T) {
+	queryID := vmQueryCapabilitiesID(t)
+
+	for _, path := range []string{vmCapturePreRebootPath, vmCheckRebootPosturePath} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			script := readVMHarnessFile(t, path)
+
+			require.Equalf(t, queryID, vmShellConstant(t, path, script, "CAPABILITY_QUERY_ID"),
+				"%s must send the query id %s declares as QueryCapabilities", path, vmBrokerAPIPath)
+
+			require.Containsf(t, script, "\nload_credentials\n",
+				"%s must read the delivered credentials through load_credentials", path)
+			require.Containsf(t, script, "\nbroker_login\n",
+				"%s must authenticate over the broker's Unix socket before it queries", path)
+			require.Containsf(t, script, `broker_query "$CAPABILITY_QUERY_ID" >"$capability_response"`,
+				"%s must run the capability query through broker_query, with a redirection rather than a command substitution, so the session variables survive", path)
+
+			// The web console is a view of the capability set, not the set.
+			for _, forbidden := range []string{"web_curl", "WEB_BASE_URL"} {
+				require.NotContainsf(t, script, forbidden,
+					"%s must not infer the capability set from the web console (%s): the set is what the broker answers over the authenticated direct route", path, forbidden)
+			}
+
+			require.Containsf(t, script, `[ "$capability_count" -gt 0 ] ||`,
+				"%s must fail when the capability query answers an EMPTY set; an empty answer recorded or accepted here would compare equal against another empty one and prove nothing", path)
+			require.Containsf(t, script, `[ -n "$capability_ids" ] ||`,
+				"%s must fail when the normalised capability id list is empty", path)
+			require.Containsf(t, script, `jq -er '.capabilities | sort | join(" ")'`,
+				"%s must normalise the capability ids by sorting them, so the comparison across the reboot cannot fail on ordering alone", path)
+		})
+	}
+
+	// The comparison itself, and the direction of it: the post-reboot set must
+	// equal the recorded pre-reboot one, and a difference must name the
+	// assertion.
+	check := readVMHarnessFile(t, vmCheckRebootPosturePath)
+	require.Contains(t, check, `[ "$capability_ids" = "$PRE_REBOOT_CAPABILITY_IDS" ] ||`,
+		"%s must compare the post-reboot capability set for equality with the recorded pre-reboot one", vmCheckRebootPosturePath)
+	require.Contains(t, check, `fail "the capability set changed across the reboot`,
+		"%s must name the assertion when the capability set differs across the reboot", vmCheckRebootPosturePath)
+
+	capture := readVMHarnessFile(t, vmCapturePreRebootPath)
+	require.Contains(t, capture, "PRE_REBOOT_CAPABILITY_IDS='$capability_ids'",
+		"%s must record the normalised capability ids into the state file the post-reboot half reads", vmCapturePreRebootPath)
+}
+
+// TestVMRebootStateFileIsStagedCredentialFreeAndRetrievable pins the transport
+// of the pre-reboot state: written into the administrator-writable staging
+// directory, chowned to the one login identity so the orchestrator retrieves it
+// with no escalation, and carrying no credential — it is printed into the job
+// log, which nothing secret may reach.
+func TestVMRebootStateFileIsStagedCredentialFreeAndRetrievable(t *testing.T) {
+	capture := readVMHarnessFile(t, vmCapturePreRebootPath)
+	check := readVMHarnessFile(t, vmCheckRebootPosturePath)
+	orchestrator := readVMHarnessFile(t, vmOrchestratorPath)
+
+	basename := vmShellConstant(t, vmCapturePreRebootPath, capture, "PRE_REBOOT_STATE_BASENAME")
+	require.NotEmpty(t, basename, "%s must name the state file it writes", vmCapturePreRebootPath)
+
+	require.Equalf(t, basename, vmShellConstant(t, vmCheckRebootPosturePath, check, "PRE_REBOOT_STATE_BASENAME"),
+		"%s must read back the same state file %s writes", vmCheckRebootPosturePath, vmCapturePreRebootPath)
+	require.Equalf(t, basename, vmShellConstant(t, vmOrchestratorPath, orchestrator, "PRE_REBOOT_STATE_BASENAME"),
+		"%s must retrieve the same state file %s writes", vmOrchestratorPath, vmCapturePreRebootPath)
+
+	for _, path := range []string{vmCapturePreRebootPath, vmCheckRebootPosturePath} {
+		script := readVMHarnessFile(t, path)
+		require.Containsf(t, script, `STAGING_DIRECTORY="$(dirname "$0")/.."`,
+			"%s must resolve the staging directory from its own staged path", path)
+		require.Containsf(t, script, `PRE_REBOOT_STATE_FILE="$STAGING_DIRECTORY/$PRE_REBOOT_STATE_BASENAME"`,
+			"%s must place the state file inside the staging directory", path)
+	}
+
+	require.Contains(t, capture, `chown "$PH_ADMIN_USER" "$PRE_REBOOT_STATE_FILE"`,
+		"%s must give the state file to the administrator account: the orchestrator retrieves it as that one login identity and cannot escalate to read it", vmCapturePreRebootPath)
+
+	// The state file's contents, read out of the heredoc that writes it. A
+	// credential here would be printed into the job log.
+	const opener = "<<STATE\n"
+
+	start := strings.Index(capture, opener)
+	require.GreaterOrEqual(t, start, 0, "%s must write the state file from a heredoc", vmCapturePreRebootPath)
+
+	body := capture[start+len(opener):]
+	end := strings.Index(body, "\nSTATE\n")
+	require.GreaterOrEqual(t, end, 0, "%s: the state file heredoc is not terminated", vmCapturePreRebootPath)
+
+	for _, forbidden := range []string{"PASSWORD", "PASSWD", "TOKEN", "SECRET", "PH_ROOT", "BROKER_SESSION"} {
+		require.NotContainsf(t, body[:end], forbidden,
+			"%s writes %s into the state file, which is retrieved and printed into the job log; the state file carries no credential", vmCapturePreRebootPath, forbidden)
+	}
+
+	// The retrieval is an ordinary guest_copy in the retrieval direction: the
+	// staged file is the source and the job workspace the destination. It needs
+	// no escalation precisely because of the chown above, and it fails by name
+	// rather than leaving the post-reboot half with nothing to compare against.
+	retrieve := shellFunctionBody(t, vmOrchestratorPath, orchestrator, "retrieve_pre_reboot_state")
+	require.Contains(t, vmUnquote(retrieve), "guest_copy ~/vm-boot/$PRE_REBOOT_STATE_BASENAME $retrieved",
+		"%s: the state file must be retrieved from the staging directory with an ordinary guest_copy, as the administrator account", vmOrchestratorPath)
+	require.NotContains(t, retrieve, "sudo",
+		"%s: retrieving the state file must need no escalation; it is the login account's own file", vmOrchestratorPath)
+	require.Contains(t, retrieve, "orchestrator_fail \"assertion failed: could not retrieve",
+		"%s: a failed retrieval must fail by name", vmOrchestratorPath)
+
+	// guest_copy must actually be able to retrieve, or the call above would be
+	// a copy in the wrong direction that silently overwrote the staged file.
+	copyBody := shellFunctionBody(t, vmSSHLibPath, readVMHarnessFile(t, vmSSHLibPath), "guest_copy")
+	require.Contains(t, copyBody, `"$target:$source" "$destination"`,
+		"%s: guest_copy must support the retrieval direction, guest source to host destination", vmSSHLibPath)
+	require.Contains(t, copyBody, `"$source" "$target:$destination"`,
+		"%s: guest_copy must still support the staging direction, host source to guest destination", vmSSHLibPath)
+	require.Contains(t, copyBody, `[ "$guest_ends" -ne 1 ]`,
+		"%s: guest_copy must require exactly one end to be a guest path, so a host-to-host or guest-to-guest call fails by name instead of copying locally", vmSSHLibPath)
+}
+
+// TestVMRebootPostureDriftGuard is the drift guard for the two directories,
+// and it checks BOTH directions. It fails if the sentinel-absence proof or the
+// runtime directory's recreation-metadata check is removed; it fails if
+// audit.db's inode-EQUALITY assertion is removed; and it fails if an
+// inode-INEQUALITY assertion on /run/pilothouse ever appears.
+//
+// The asymmetry is principled rather than an oversight. `/run` is a fresh
+// tmpfs on every boot whose inode counter restarts, so correct behaviour can
+// legitimately reuse the same number and an inequality assertion there could
+// fail on correct behaviour; `/var/lib` is the guest's persistent root
+// filesystem, where an inode number is a durable identity, so an equality
+// assertion there is sound. Only the sound direction is asserted.
+func TestVMRebootPostureDriftGuard(t *testing.T) {
+	capture := readVMHarnessFile(t, vmCapturePreRebootPath)
+	check := readVMHarnessFile(t, vmCheckRebootPosturePath)
+
+	// The sentinel is planted inside the runtime directory and its path is
+	// recorded, so the post-reboot half asserts the absence of the exact file
+	// this run created.
+	sentinel := vmShellConstant(t, vmCapturePreRebootPath, capture, "SENTINEL_PATH")
+	require.Truef(t, strings.HasPrefix(sentinel, vmRuntimeDirectory+"/"),
+		"%s: the sentinel (%s) must live inside %s, or it proves nothing about that directory being destroyed",
+		vmCapturePreRebootPath, sentinel, vmRuntimeDirectory)
+	require.Contains(t, capture, `: >"$SENTINEL_PATH" ||`,
+		"%s must create the sentinel before the reboot and fail by name if it cannot", vmCapturePreRebootPath)
+	require.Contains(t, capture, "PRE_REBOOT_SENTINEL_PATH='$SENTINEL_PATH'",
+		"%s must record the sentinel's path into the state file", vmCapturePreRebootPath)
+
+	// Direction 1: the destroyed-and-recreated group, both halves, neither
+	// accepted alone.
+	require.Contains(t, check, `[ ! -e "$PRE_REBOOT_SENTINEL_PATH" ] ||`,
+		"%s must assert the pre-reboot sentinel is ABSENT: a surviving directory still carries its contents, and this is the only mandatory discriminator between a recreated %s and one that was never touched",
+		vmCheckRebootPosturePath, vmRuntimeDirectory)
+	require.Contains(t, check, "fail \"the pre-reboot sentinel $PRE_REBOOT_SENTINEL_PATH still exists after the reboot",
+		"%s must name the assertion when the sentinel survives", vmCheckRebootPosturePath)
+	require.Contains(t, check, `[ -d "$RUNTIME_DIRECTORY" ] ||`,
+		"%s must assert %s EXISTS AGAIN after the reboot: sentinel absence alone also holds for a directory that never came back",
+		vmCheckRebootPosturePath, vmRuntimeDirectory)
+	require.Contains(t, check, `expect_owner_mode "$RUNTIME_DIRECTORY" root pilothouse 750`,
+		"%s must assert the recreated %s carries owner root, group pilothouse and mode 0750: absence alone is not the whole group",
+		vmCheckRebootPosturePath, vmRuntimeDirectory)
+	require.Equalf(t, vmRuntimeDirectory, vmShellConstant(t, vmCheckRebootPosturePath, check, "RUNTIME_DIRECTORY"),
+		"%s must assert about %s", vmCheckRebootPosturePath, vmRuntimeDirectory)
+
+	// Direction 2: the state directory persists, proven by owner/group/mode
+	// and by audit.db's inode EQUALITY.
+	require.Equalf(t, vmStateDirectory, vmShellConstant(t, vmCheckRebootPosturePath, check, "STATE_DIRECTORY"),
+		"%s must assert about %s", vmCheckRebootPosturePath, vmStateDirectory)
+	require.Equalf(t, vmAuditDatabase, vmShellConstant(t, vmCheckRebootPosturePath, check, "AUDIT_DATABASE"),
+		"%s must assert about %s", vmCheckRebootPosturePath, vmAuditDatabase)
+	require.Contains(t, check, `expect_owner_mode "$STATE_DIRECTORY" root pilothouse 750`,
+		"%s must assert %s still carries owner root, group pilothouse and mode 0750", vmCheckRebootPosturePath, vmStateDirectory)
+	require.Contains(t, capture, `audit_database_inode="$(stat -c '%i' "$AUDIT_DATABASE")"`,
+		"%s must record %s's inode before the reboot", vmCapturePreRebootPath, vmAuditDatabase)
+	require.Contains(t, check, `[ "$post_reboot_audit_database_inode" = "$PRE_REBOOT_AUDIT_DATABASE_INODE" ] ||`,
+		"%s must assert %s's inode is UNCHANGED across the reboot: this is the only inode assertion in the harness, and it is the sound direction of the instrument, on persistent on-disk storage",
+		vmCheckRebootPosturePath, vmAuditDatabase)
+	require.Contains(t, check, "fail \"$AUDIT_DATABASE's inode changed across the reboot",
+		"%s must name the assertion when the audit database's inode changes", vmCheckRebootPosturePath)
+
+	// Direction 3: no assertion anywhere in the harness may require
+	// /run/pilothouse's inode to differ — or to match, or to be readable. It is
+	// printed and compared with nothing.
+	//
+	// The identifiers are derived from the harness rather than listed here, so
+	// an inode-inequality assertion introduced under any name — including one
+	// read inline, without a variable at all — is caught: the inline form is
+	// matched directly, and every named form is either seeded by its own read or
+	// pulled in by the alias closure.
+	identifiers := vmRuntimeInodeIdentifiers(t)
+	inlineRead := regexp.MustCompile(`stat\b[^|]*%i[^|]*(\$\{?RUNTIME_DIRECTORY\b|` + regexp.QuoteMeta(vmRuntimeDirectory) + `)`)
+
+	for _, path := range vmHarnessFiles(t) {
+		for _, line := range vmRawCodeLines(readVMHarnessFile(t, path)) {
+			named := inlineRead.MatchString(line)
+
+			for _, identifier := range identifiers {
+				if regexp.MustCompile(`\b` + regexp.QuoteMeta(identifier) + `\b`).MatchString(line) {
+					named = true
+
+					break
+				}
+			}
+
+			if !named {
+				continue
+			}
+
+			for _, comparison := range []string{"-ne", "!=", "-eq", " = "} {
+				require.NotContainsf(t, line, comparison,
+					"%s compares %s's inode in `%s`: /run is a per-boot tmpfs whose inode numbers may legitimately repeat, so an inequality could fail on correct behaviour and an equality would be wrong outright; the inode is diagnostic context only",
+					path, vmRuntimeDirectory, line)
+			}
+
+			require.NotContainsf(t, line, "fail ",
+				"%s makes %s's inode decide a pass or a fail in `%s`; it may be recorded and printed, and nothing more",
+				path, vmRuntimeDirectory, line)
+			require.Falsef(t, strings.HasPrefix(line, "[ "),
+				"%s tests %s's inode in `%s`; it takes part in no pass/fail decision", path, vmRuntimeDirectory, line)
+		}
+	}
+
+	// The converse of "diagnostic": it IS recorded and IS printed, so a failure
+	// of either half of the group above can be diagnosed.
+	require.Contains(t, capture, "PRE_REBOOT_RUNTIME_DIRECTORY_INODE='$runtime_directory_inode'",
+		"%s must record %s's inode as diagnostic context", vmCapturePreRebootPath, vmRuntimeDirectory)
+	require.Contains(t, check, "guest_log \"diagnostic context only: $RUNTIME_DIRECTORY inode was",
+		"%s must print both inodes as diagnostic context, so a failing assertion above can be diagnosed", vmCheckRebootPosturePath)
+}
+
+// TestVMCheckRebootPostureEnablesOrStartsNothing pins the claim the post-reboot
+// check exists to make: both units came back BY THEMSELVES. A `systemctl
+// enable` or `systemctl start` anywhere in that script would be the check
+// manufacturing the state it asserts. The bounded wait is a wait for systemd to
+// finish, not an intervention, and a unit that never arrives fails by name.
+func TestVMCheckRebootPostureEnablesOrStartsNothing(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckRebootPosturePath)
+
+	for _, forbidden := range []string{"systemctl enable", "systemctl start", "systemctl restart", "enable --now"} {
+		require.NotContainsf(t, script, forbidden,
+			"%s must issue no `%s` after the reboot: the units were enabled once before it, and that they returned unaided is the whole claim of this check", vmCheckRebootPosturePath, forbidden)
+	}
+
+	require.Equal(t, "pilothoused.service", vmShellConstant(t, vmCheckRebootPosturePath, script, "BROKER_UNIT"),
+		"%s must assert about the broker's unit", vmCheckRebootPosturePath)
+	require.Equal(t, "pilothouse.service", vmShellConstant(t, vmCheckRebootPosturePath, script, "WEB_UNIT"),
+		"%s must assert about the web console's unit", vmCheckRebootPosturePath)
+
+	wait := shellFunctionBody(t, vmCheckRebootPosturePath, script, "wait_for_unit_active")
+	require.Contains(t, wait, `systemctl is-active --quiet "$unit"`,
+		"%s: unit state must be read as a status test, not parsed out of output", vmCheckRebootPosturePath)
+	require.Contains(t, wait, `[ "$waited" -lt "$UNIT_ACTIVATION_TIMEOUT_SECONDS" ]`,
+		"%s: the wait for a unit to return must be bounded by a named constant", vmCheckRebootPosturePath)
+	require.Contains(t, wait, "fail \"$unit did not return to active within",
+		"%s: a unit that never returns must fail by name, with that same bound", vmCheckRebootPosturePath)
+
+	code := strings.Join(vmCodeLines(script), "\n")
+	broker := strings.Index(code, "wait_for_unit_active $BROKER_UNIT")
+	web := strings.Index(code, "wait_for_unit_active $WEB_UNIT")
+	require.GreaterOrEqual(t, broker, 0, "%s must wait for the broker unit to return", vmCheckRebootPosturePath)
+	require.GreaterOrEqual(t, web, 0, "%s must wait for the web unit to return", vmCheckRebootPosturePath)
+	require.Less(t, broker, web,
+		"%s must wait for the broker unit first: the web unit Requires= it", vmCheckRebootPosturePath)
+
+	// The check cannot be green against the boot that captured the state.
+	require.Contains(t, script, `[ "$boot_id" != "$PRE_REBOOT_BOOT_ID" ] ||`,
+		"%s must prove from inside the guest that it is running on a different boot than the capture", vmCheckRebootPosturePath)
+
+	// No pre-reboot audit RECORD is required to be readable: the persistence
+	// proof is the database file's identity, not its contents.
+	for _, forbidden := range []string{"audit.list", "audit.query", "audit_record", "sqlite"} {
+		require.NotContainsf(t, script, forbidden,
+			"%s must not require a pre-reboot audit record to be readable (%s): %s's inode is the persistence proof", vmCheckRebootPosturePath, forbidden, vmAuditDatabase)
+	}
+}
+
+// TestVMOrchestratorCapturesAndDumpsBeforeItReboots pins the order of the
+// reboot half, and above all what happens BEFORE the reboot is issued. A guest
+// that never comes back cannot be asked anything afterwards, so the pre-reboot
+// state is captured, retrieved and printed and both units' status and journals
+// are dumped while the guest is still there.
+func TestVMOrchestratorCapturesAndDumpsBeforeItReboots(t *testing.T) {
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+	main := vmUnquote(shellFunctionBody(t, vmOrchestratorPath, script, "main"))
+
+	order := []string{
+		vmGuestScriptInvocation + "check-journal.sh",
+		vmGuestScriptInvocation + "capture-pre-reboot.sh",
+		"retrieve_pre_reboot_state",
+		"dump_pre_reboot_diagnostics",
+		"reboot_guest",
+		vmGuestScriptInvocation + "check-reboot-posture.sh",
+	}
+
+	previous := -1
+
+	for _, step := range order {
+		at := strings.Index(main, step)
+		require.GreaterOrEqualf(t, at, 0, "%s: main must call `%s`", vmOrchestratorPath, step)
+		require.Greaterf(t, at, previous,
+			"%s: the reboot half must run in order; `%s` is out of place — everything that leaves evidence must happen before the reboot is issued",
+			vmOrchestratorPath, step)
+
+		previous = at
+	}
+
+	// The pre-reboot dump is both units, from the live guest, through the
+	// existing collector rather than a second one that could drift from it.
+	diagnostics := readVMHarnessFile(t, vmDiagnosticsLibPath)
+	dump := shellFunctionBody(t, vmDiagnosticsLibPath, diagnostics, "dump_pre_reboot_diagnostics")
+	require.Contains(t, dump, "dump_guest_unit_diagnostics",
+		"%s: the pre-reboot dump must reuse the collector that covers BOTH units", vmDiagnosticsLibPath)
+	require.Contains(t, dump, "diagnostics_log",
+		"%s: the pre-reboot dump must announce itself; a silent dump is the failure mode this file exists to prevent", vmDiagnosticsLibPath)
+
+	// reboot_guest is what makes the post-reboot check unable to pass against
+	// the pre-reboot sshd. The full ordering guard lives in
+	// TestVMSSHWaitsAreBoundedAndOrdered; this is the part the reboot half
+	// depends on directly.
+	reboot := shellFunctionBody(t, vmSSHLibPath, readVMHarnessFile(t, vmSSHLibPath), "reboot_guest")
+	require.Less(t, strings.Index(reboot, "wait_for_ssh_gone"), strings.Index(reboot, "\n    wait_for_ssh\n"),
+		"%s: reboot_guest must wait for the pre-reboot sshd to become unreachable BEFORE waiting for sshd to return, or the post-reboot checks could be answered by the sshd that was about to die", vmSSHLibPath)
 }

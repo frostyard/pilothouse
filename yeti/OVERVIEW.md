@@ -106,11 +106,14 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       lifecycle) and diagnostics.sh (the failure-time discriminator).
                       guest/ is the single directory holding every guest-side script:
                       the sourced, non-executable lib.sh plus install-package.sh,
-                      check-activation.sh, check-pam.sh and check-journal.sh;
+                      check-activation.sh, check-pam.sh, check-journal.sh,
+                      capture-pre-reboot.sh and check-reboot-posture.sh;
                       every executed one is committed 100755 and invoked as
                       `sudo -n sh ~/vm-boot/guest/<name>.sh`. At this commit a run
-                      ends once the daemon has read a line it emitted itself back
-                      through the broker's journal query, and no workflow
+                      ends once the guest has come back from a real reboot with both
+                      units active unaided, the same capability set, a destroyed and
+                      recreated /run/pilothouse and a persisted /var/lib/pilothouse,
+                      and no workflow
                       job invokes any of it; packaging/vm_harness_test.go guards it structurally
                       without executing it (see the three "Booted-VM harness"
                       sections below)
@@ -2576,13 +2579,14 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 Layer B (#67) — installing the artifacts on a **booted** host with real
 systemd — is under construction. **At this commit the harness boots a guest,
 installs the package, activates both units, authenticates a real non-root
-administrator through PAM and reads the daemon's own journal record back
-through the broker**, and no workflow job invokes any of it: what exists
+administrator through PAM, reads the daemon's own journal record back
+through the broker and proves the posture that survives a real guest
+reboot**, and no workflow job invokes any of it: what exists
 is image acquisition (this section), the boot mechanism ("Booted-VM harness:
 credentials, seed, boot and SSH") and the orchestrator, the guest scripts and
 the diagnostics that drive them ("Booted-VM harness: the orchestrator, guest
-staging and diagnostics"). What Layer B is still meant to *prove* — the
-reboot posture — lives in the issue, not yet in the tree.
+staging and diagnostics"). What Layer B still lacks is the CI job that runs
+any of it, which lives in the issue, not yet in the tree.
 
 This section covers the pinning table and the host-side fetcher:
 
@@ -2689,7 +2693,13 @@ instead of being discovered broken on a failing one.
 **`ssh.sh` — one identity, explicit escalation, bounded waits.** `guest_run`
 and `guest_copy` address the guest as the administrator account read back from
 `creds.env` (never `root@`), `guest_sudo` escalates with `sudo -n`, and
-`wait_for_ssh` polls within the explicit `SSH_READY_TIMEOUT`. `reboot_guest`
+`wait_for_ssh` polls within the explicit `SSH_READY_TIMEOUT`. `guest_copy`
+carries **both** directions through one function — staging a host file into the
+guest, and retrieving a staged guest file back to the job workspace — and
+requires **exactly one** of its two paths to be a guest path, recognised by its
+leading `~`: that keeps a single audited site where a guest end of a copy is
+constructed, and makes a host-to-host or guest-to-guest call fail by name
+instead of copying locally. `reboot_guest`
 issues the reboot through `guest_sudo` and then waits for the **pre-reboot**
 sshd to stop answering (`SSH_GONE_TIMEOUT`) before waiting for sshd to return,
 so a readiness check cannot be satisfied by the daemon that is about to die.
@@ -2743,17 +2753,19 @@ followed by `.pub`, since the public key is not a credential.
 ### Booted-VM harness: the orchestrator, guest staging and diagnostics (`test/vm/vm-boot-test.sh`, `test/vm/lib/diagnostics.sh`, `test/vm/guest/`)
 
 The harness's first end-to-end runnable path. **At this commit a run ends once
-the daemon has read a line it emitted itself back through the broker's journal
-query**: the reboot posture is not implemented yet, and no workflow invokes any
-of this — the CI job lands later.
+the guest has come back from a real reboot with its posture proven** (see
+"Reboot posture" below); no workflow invokes any of this — the CI job lands
+later.
 
 **`test/vm/vm-boot-test.sh` is the one entry point**, taking
 `--family debian|fedora` and `--artifact-dir <dir>`; any other family is
 rejected by name rather than defaulted. It fetches and verifies the pinned
 image, builds the seed, boots, gates on serial-console output, waits for sshd,
 probes escalation, creates the staging directory, selects the artifact, stages
-the artifact/guest scripts/`creds.env`, installs the credentials privileged and
-runs the guest bootstrap.
+the artifact/guest scripts/`creds.env`, installs the credentials privileged,
+runs the guest bootstrap and the activation, PAM and journal checks, and
+finally captures the pre-reboot posture, reboots the guest and runs the
+post-reboot check.
 
 **One guest identity, staged files, explicit escalation.** The only SSH identity
 in the guest is the administrator account cloud-init created. That account
@@ -2943,8 +2955,73 @@ searched-for line against `internal/broker/api.go` and
 `cmd/pilothoused/main.go`. The guards read the script as text and, as
 everywhere else here, never execute it.
 
-**At this commit the harness run ends there.** The reboot posture is not
-implemented yet, the guest's SELinux audit posture is #80's, and no workflow
+**Reboot posture: what a real reboot proves, and the one inode assertion the
+harness makes.** `guest/capture-pre-reboot.sh` and
+`guest/check-reboot-posture.sh` are the two halves of the run's last stage. The
+capture reads the capability set through the **direct authenticated broker
+route** (`broker_login` over the Unix socket, then `broker_query` for
+`QueryCapabilities`) — never from the web console, which renders a *view* of the
+set rather than the set — plants a **sentinel** file inside `/run/pilothouse`,
+and records `/var/lib/pilothouse/audit.db`'s inode, both directories'
+owner/group/mode and the boot id into `~/vm-boot/pre-reboot-state.env`. That
+file is written as root into the administrator-writable staging directory and
+`chown`ed to the one login account, so the orchestrator retrieves it with an
+ordinary `guest_copy` in the retrieval direction and no escalation; it carries
+**no credential** and is printed into the job log.
+
+The orchestrator retrieves and prints that state and dumps `systemctl status`
+and `journalctl` for both units (`dump_pre_reboot_diagnostics`) **before** it
+issues the reboot: a guest that never comes back cannot be asked anything
+afterwards, and this is the evidence that case is diagnosed from alongside the
+continuous serial console log. `reboot_guest` then waits for the **pre-reboot
+sshd to stop answering** before waiting for sshd to return, and compares boot
+ids, so no post-reboot check can be answered by the sshd that was about to die;
+the post-reboot script re-reads `/proc/sys/kernel/random/boot_id` and fails if
+it matches the recorded one.
+
+`check-reboot-posture.sh` then asserts four things and **enables or starts
+nothing** — that both units returned *unaided* is the whole claim, so unit state
+is read with `is-active` inside a bounded wait, the only other `systemctl` verb
+in the file is the `status` of its own failure dump, and a guard scans the file
+(comments included) for any enable-or-start form:
+
+| Claim | How it is proven |
+| --- | --- |
+| Both units active again | `systemctl is-active --quiet`, broker first, bounded by `UNIT_ACTIVATION_TIMEOUT_SECONDS`, dumping that unit's status and journal on expiry |
+| Capability set unchanged | the same authenticated broker route, sorted ids compared for equality; a query that fails **or answers an empty set** is a failure on **either** side, so an empty answer can never compare equal against another empty answer |
+| `/run/pilothouse` **destroyed and recreated** | the pre-reboot **sentinel is absent** *and* the directory exists again as `root:pilothouse` `0750` — one assertion group, neither half accepted alone |
+| `/var/lib/pilothouse` **persisted** | same owner/group/mode *and* `audit.db`'s inode **unchanged** |
+
+The sentinel is the discriminator because a directory that survived a reboot
+still carries its contents and one systemd recreated from `RuntimeDirectory=`
+cannot. Absence alone would also hold for a directory that never came back, and
+correct-looking metadata alone would also hold for a directory that was never
+touched — hence one group.
+
+**`/run/pilothouse`'s own inode is recorded and printed, and asserted nowhere.**
+`/run` is a fresh tmpfs on every boot whose inode counter restarts, so correct
+behaviour can legitimately reuse the same number: requiring the inode to
+**differ** is an assertion that could fail on correct behaviour, and requiring it
+to match would be wrong outright. It exists only as context for whichever half
+of the group fails. The asymmetry with `audit.db` is principled rather than an
+oversight: inode **equality** on the guest's persistent root filesystem, where an
+inode number is a durable identity, is sound, and that is the harness's **only**
+inode assertion. No pre-reboot audit *record* is required to be readable — the
+database file's identity is the persistence proof.
+
+`packaging/vm_harness_test.go` guards that shape in **both** directions: it fails
+if the sentinel-absence proof or the recreation-metadata check is removed, fails
+if `audit.db`'s inode-equality assertion is removed, and fails if an
+inode-**inequality** assertion on `/run/pilothouse` ever appears — the last one by
+scanning every file under `test/vm` for any line that names the runtime
+directory's inode and takes part in a comparison, a `fail` or a `[` test. The
+identifiers it looks for are **derived from the harness**, not listed in the
+test: any variable assigned from a `stat`-`%i` read of the runtime directory, and
+anything aliased from one, joins the set, so an inequality reintroduced under a
+fresh name — or written inline with no variable at all — is still caught.
+
+**At this commit the harness run ends there.** The guest's SELinux audit
+posture, image-based hosts and sysext delivery are #80's, and no workflow
 invokes any of this.
 
 **`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at

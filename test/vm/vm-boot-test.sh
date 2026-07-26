@@ -39,7 +39,24 @@
 #      `sudo -n sh ~/vm-boot/guest/check-journal.sh`, which asks the broker's
 #      own journal query for the daemon's unit over the authenticated socket
 #      route and asserts a line the daemon itself emitted comes back in the
-#      response.
+#      response;
+#  13. capture the pre-reboot posture as
+#      `sudo -n sh ~/vm-boot/guest/capture-pre-reboot.sh`, which records the
+#      capability set from the authenticated broker route, plants the sentinel
+#      inside /run/pilothouse and records audit.db's inode into a state file in
+#      the staging directory;
+#  14. retrieve that state file into the run workspace and print it, then dump
+#      `systemctl status` and `journalctl` for both units — all BEFORE the
+#      reboot is issued, so a guest that never returns still leaves evidence of
+#      its pre-reboot state in the job log;
+#  15. reboot the guest with `reboot_guest`, which waits for the PRE-REBOOT
+#      sshd to stop answering before it waits for sshd to return, so no later
+#      check can be satisfied by the sshd that was about to die;
+#  16. run the post-reboot checks as
+#      `sudo -n sh ~/vm-boot/guest/check-reboot-posture.sh`, which asserts both
+#      units are active again unaided, the capability set is unchanged,
+#      /run/pilothouse was destroyed and recreated, and /var/lib/pilothouse
+#      persisted.
 #
 # The harness has exactly ONE SSH identity in the guest: the administrator
 # account cloud-init created. That account cannot write /root, cannot install
@@ -48,9 +65,10 @@
 # guest-bound destination is inside ~/vm-boot, and every guest script runs as
 # `sudo -n sh <staged path>`.
 #
-# At this commit the run ends once the daemon has read a line it emitted itself
-# back through the broker's journal query: the reboot posture lands in a later
-# commit.
+# At this commit the run ends once the guest has come back from a real reboot
+# with both units active unaided, the same capability set, a destroyed and
+# recreated /run/pilothouse and a persisted /var/lib/pilothouse. Nothing in the
+# tree invokes this script yet; the CI job lands later.
 #
 # Every tilde path in this file is deliberately quoted: it is transmitted
 # literally and expanded by the GUEST's shell, because ~/vm-boot is the
@@ -80,6 +98,12 @@ GUEST_SCRIPT_DIR="$HARNESS_DIR/guest"
 # image survives between families and runs.
 VM_RUN_DIR="${VM_RUN_DIR:-${RUNNER_TEMP:-/tmp}/pilothouse-vm-boot}"
 VM_IMAGE_CACHE_DIR="${VM_IMAGE_CACHE_DIR:-${RUNNER_TEMP:-/tmp}/pilothouse-vm-images}"
+
+# PRE_REBOOT_STATE_BASENAME is the file capture-pre-reboot.sh writes into the
+# staging directory and check-reboot-posture.sh reads back from it after the
+# reboot. Both guest scripts declare the same basename, and a guard test holds
+# the three declarations identical.
+PRE_REBOOT_STATE_BASENAME="pre-reboot-state.env"
 
 orchestrator_log() {
     printf 'vm-boot-test: %s\n' "$*"
@@ -251,6 +275,31 @@ install_guest_credentials() {
     orchestrator_log "installed the credentials as /root/.pilothouse-vm-creds (0600) and removed the staged copy"
 }
 
+# retrieve_pre_reboot_state brings the state file capture-pre-reboot.sh wrote
+# back to the runner and prints it. It is an ordinary guest_copy in the
+# retrieval direction: the file lives in the staging directory and was chowned
+# to the administrator account, so the harness's one login identity reads it
+# with no escalation. The staging fence constrains the GUEST end of a copy,
+# which here is the source; the destination is necessarily a host path.
+#
+# It carries no credential — a capability id list, a sentinel path, two inode
+# numbers and three ownership triples — so it is printed into the job log,
+# where it is the evidence for the reboot even if the guest never returns.
+# shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+retrieve_pre_reboot_state() {
+    local retrieved="$VM_WORKSPACE/$PRE_REBOOT_STATE_BASENAME"
+
+    if ! guest_copy "~/vm-boot/$PRE_REBOOT_STATE_BASENAME" "$retrieved"; then
+        orchestrator_fail "assertion failed: could not retrieve ~/vm-boot/$PRE_REBOOT_STATE_BASENAME from the guest; capture-pre-reboot.sh writes it into the staging directory and gives it to the administrator account precisely so this copy needs no escalation"
+    fi
+
+    [ -s "$retrieved" ] ||
+        orchestrator_fail "assertion failed: the retrieved pre-reboot state file is empty; there is nothing for the post-reboot check to compare against"
+
+    orchestrator_log "retrieved the pre-reboot state into $retrieved:"
+    cat "$retrieved"
+}
+
 main() {
     parse_arguments "$@"
 
@@ -289,7 +338,26 @@ main() {
     # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
     guest_run sudo -n sh '~/vm-boot/guest/check-journal.sh'
 
-    orchestrator_log "$FAMILY guest booted, package installed, both units active, the broker answering on its socket, PAM authenticating a real non-root administrator and the daemon reading its own journal record back through the broker"
+    # The reboot half. The pre-reboot posture is captured, retrieved and
+    # printed, and both units' state is dumped, BEFORE the reboot is issued: a
+    # guest that never comes back cannot be asked anything afterwards, and this
+    # is the evidence that case is diagnosed from, alongside the continuous
+    # serial console log.
+    # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+    guest_run sudo -n sh '~/vm-boot/guest/capture-pre-reboot.sh'
+
+    retrieve_pre_reboot_state
+    dump_pre_reboot_diagnostics
+
+    # reboot_guest waits for the PRE-REBOOT sshd to stop answering before it
+    # waits for sshd to return, and compares boot ids, so nothing below can be
+    # satisfied by the sshd that was about to die.
+    reboot_guest
+
+    # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+    guest_run sudo -n sh '~/vm-boot/guest/check-reboot-posture.sh'
+
+    orchestrator_log "$FAMILY guest booted, package installed, both units active, the broker answering on its socket, PAM authenticating a real non-root administrator, the daemon reading its own journal record back through the broker, and the reboot posture proven: both units active unaided, the capability set unchanged, /run/pilothouse destroyed and recreated and /var/lib/pilothouse persisted"
 }
 
 main "$@"

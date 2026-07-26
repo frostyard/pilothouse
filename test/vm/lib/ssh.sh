@@ -116,20 +116,49 @@ guest_sudo() {
     guest_run sudo -n "$@"
 }
 
-# guest_copy <local-path> <remote-path> copies a file to the guest as the
-# administrator account.
+# guest_copy <source> <destination> copies one file between the runner and the
+# guest as the administrator account, in either direction. Exactly one of the
+# two paths names the guest, and it is recognised by its leading `~`: every
+# guest-side path in this harness is inside the administrator's `~/vm-boot`
+# staging directory, and no host-side path the harness constructs is written
+# that way. Requiring exactly one keeps a single function — and therefore a
+# single audited site where a guest destination or source is built — for both
+# directions, and turns a host-to-host or guest-to-guest call into an immediate,
+# named failure instead of a silent local copy.
+#
+# The retrieval direction is what brings the pre-reboot state file back to the
+# job workspace. Its host-side end is necessarily outside the staging directory;
+# the staging fence constrains the guest end of a copy, which is why exactly one
+# `~` path is required rather than none or two.
 guest_copy() {
     if [ "$#" -ne 2 ]; then
-        ssh_fail "usage: guest_copy <local-path> <remote-path>"
+        ssh_fail "usage: guest_copy <source> <destination>"
     fi
 
     local key="${VM_SSH_KEY:-}"
     [ -n "$key" ] || ssh_fail "VM_SSH_KEY is unset: generate_credentials must run first"
 
+    local source="$1" destination="$2"
+
+    local guest_ends=0
+    case "$source" in '~'*) guest_ends=$((guest_ends + 1)) ;; esac
+    case "$destination" in '~'*) guest_ends=$((guest_ends + 1)) ;; esac
+
+    if [ "$guest_ends" -ne 1 ]; then
+        ssh_fail "usage: guest_copy <source> <destination>: exactly one end must be a guest path under the staging directory, written with a leading tilde, but ${guest_ends} were"
+    fi
+
     local target
     target="$(guest_target)"
 
-    scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$1" "$target:$2"
+    case "$source" in
+    '~'*)
+        scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$target:$source" "$destination"
+        ;;
+    *)
+        scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$source" "$target:$destination"
+        ;;
+    esac
 }
 
 # guest_answers_ssh reports whether the guest answers a trivial command now.
