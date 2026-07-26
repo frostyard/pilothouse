@@ -40,3 +40,10 @@ allowlist = ["docs/agents/skills/", "AGENTS.md"]
 # Big multi-module specs (like the bootc capability work) need more plan
 # review rounds to converge.
 plan_rounds = 6
+# Guard-test-heavy chunks need more revise rounds than the default 2. The VM
+# harness work (#67) is mostly contract tests that assert properties of shell
+# scripts, and their characteristic defect — a guard whose scope is narrower
+# than the invariant it claims — is invisible in a passing run and surfaces
+# only in review. Two chunks in a row exhausted the default and terminated
+# with real, specific objections still outstanding.
+review_rounds = 4
