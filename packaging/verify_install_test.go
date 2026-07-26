@@ -418,18 +418,18 @@ func TestVerifyInstallPAMCheckReadsTheInstalledPolicy(t *testing.T) {
 
 // TestVerifyInstallPAMCheckRejectsAnEmptyParse asserts the explicit emptiness
 // guard: a policy that yields no stacks or no modules is a failure, so a
-// mis-parse cannot pass vacuously by asserting nothing at all. The guard is
-// asserted by parsing the script text; nothing here executes it.
+// mis-parse cannot pass vacuously by asserting nothing at all. Each guard's
+// fallback must be `fail` itself — a guard whose right-hand side is anything
+// else (a `true`, a log line) aborts nothing. The guard is asserted by parsing
+// the script text; nothing here executes it.
 func TestVerifyInstallPAMCheckRejectsAnEmptyParse(t *testing.T) {
 	joined := strings.Join(effectiveLines(readVerifyInstall(t)), "\n")
 
-	for _, list := range []string{"stacks", "modules"} {
-		require.Containsf(t, joined, `[ -n "${`+list+`}" ] ||`,
-			"%s must fail when the installed policy yields no %s", verifyInstallPath, list)
+	for _, list := range []string{"stacks", "modules", "module_dirs"} {
+		guard := regexp.MustCompile(`\[ -n "\$\{` + list + `\}" \] \|\|\n?\s*fail `)
+		require.Regexpf(t, guard, joined,
+			"%s must call fail when the installed policy yields no %s", verifyInstallPath, list)
 	}
-
-	require.Contains(t, joined, `[ -n "${module_dirs}" ] ||`,
-		"%s must fail when no PAM module directory is found", verifyInstallPath)
 }
 
 // TestVerifyInstallVerifiesUnitsWithSystemdAnalyze is check 5's structural
@@ -574,6 +574,12 @@ var (
 
 // removalVerbLine matches one removal verb applied to the package name.
 var removalVerbLine = regexp.MustCompile(`^(dpkg -r|dpkg -P|rpm -e) "\$\{package_name\}" \|\|$`)
+
+// removalCheckLine matches one `check_<name> "<verb>"` assertion invoked after
+// a removal verb. The matrix guard collects every one of them per segment and
+// compares the complete list against the cell's want, so an unexpected or
+// duplicated assertion fails the cell exactly as a missing one does.
+var removalCheckLine = regexp.MustCompile(`^check_\w+ "[^"]*"$`)
 
 // namedNFPMEntry and namedNFPMConfig decode only nfpms[0].package_name.
 // goreleaser_config_test.go's nfpmEntry does not carry that field and no
@@ -846,10 +852,17 @@ func TestVerifyInstallRemovalMatrix(t *testing.T) {
 					"%s must run `%s` inside the rpm branch of the removal case", verifyInstallPath, cell.verb)
 			}
 
-			for _, want := range cell.want {
-				require.Containsf(t, segment, want,
-					"after `%s`, %s must assert %s: %s", cell.verb, verifyInstallPath, want, cell.why)
+			var asserted []string
+
+			for _, line := range segment {
+				if removalCheckLine.MatchString(line) {
+					asserted = append(asserted, line)
+				}
 			}
+
+			require.Equalf(t, cell.want, asserted,
+				"after `%s`, %s must assert exactly %v and nothing else: %s",
+				cell.verb, verifyInstallPath, cell.want, cell.why)
 
 			for _, forbidden := range cell.forbidden {
 				require.NotContainsf(t, segment, forbidden,

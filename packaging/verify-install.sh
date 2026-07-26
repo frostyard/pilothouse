@@ -215,7 +215,9 @@ pam_stacks() {
 
 # pam_modules prints every PAM module the installed policy names, as a bare
 # file name. A module may be written with a directory prefix, so the leading
-# path is stripped before the name is matched.
+# path is stripped before the name is matched. The name may also contain
+# hyphens or dots, so those are accepted too: every module the policy names
+# must be checked, not only the ones spelled with word characters.
 pam_modules() {
     awk '
         { sub(/#.*/, "") }
@@ -223,7 +225,7 @@ pam_modules() {
             for (i = 1; i <= NF; i++) {
                 token = $i
                 sub(/^.*\//, "", token)
-                if (token ~ /^pam_[A-Za-z0-9_]+\.so$/) { print token }
+                if (token ~ /^pam_[A-Za-z0-9_.-]+\.so$/) { print token }
             }
         }
     ' "${pam_policy}" | sort -u
