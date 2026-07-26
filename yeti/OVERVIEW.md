@@ -56,19 +56,26 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       --admin-group, PAM stack names) selected by
                       .goreleaser.yaml's nfpms overrides. postinstall.sh is the
                       single shared package scriptlet (deb postinst and rpm
-                      %post). model.go, finding.go, contract.go and verify.go
+                      %post). verify-install.sh is the install-validation
+                      script that runs inside a distro container; it is not a
+                      packaged file. model.go, finding.go, contract.go and
+                      verify.go
                       make this a real Go package with an exported surface: the
                       artifact-contract model types, the finding vocabulary,
                       the embedded repository sources with the per-format
                       requirement table, dependency lists and forbidden
                       systemd-managed roots, and Verify (see
                       "Artifact contract model" below). units_test.go,
-                      postinstall_test.go, and goreleaser_config_test.go are
-                      its configuration-level tests: the first runs the real
+                      postinstall_test.go, verify_install_test.go and
+                      goreleaser_config_test.go are its configuration-level
+                      tests: the first runs the real
                       `systemd-analyze verify` against both broker units and
                       asserts they differ in exactly one line, the second runs
                       the real `shellcheck` against postinstall.sh and
-                      exercises it against a temporary root, the third parses
+                      exercises it against a temporary root, the third guards
+                      verify-install.sh (the install-validation shell script,
+                      see "Install validation" below) without ever executing
+                      it, the fourth parses
                       ../.goreleaser.yaml and asserts the nfpms packaging
                       contract. finding_test.go pins the finding codes'
                       string values and verify_test.go holds the
@@ -1670,8 +1677,10 @@ package proves ownership the only way an artifact can: by asserting that the
 package **ships exactly that script**, present and byte-for-byte. A package
 whose payload claimed `root:pilothouse` would prove nothing; a package that
 ships the scriptlet whose behavior is already pinned proves everything the
-artifact is capable of proving. On-disk ownership after a real install remains
-#67's to verify.
+artifact is capable of proving. On-disk ownership after a real install is
+asserted outside this Go package, by `packaging/verify-install.sh`
+("Install validation" below); ownership on a booted host remains #67's to
+verify.
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
@@ -2151,17 +2160,26 @@ differ, and a sentence true of one is false of another.
   time; every expected byte comes from the FS compiled into the test binary.
   `grep -nE 'os\.ReadFile|os\.Open|os\.Stat|os/exec|exec\.Command'` over those
   six files prints nothing.
-- **(b) The drift guards** — `packaging/drift_test.go`. This file **does** read
-  the live `../.goreleaser.yaml` from the working tree, deliberately: a guard
-  compared against an embedded snapshot could not detect drift at all. It is
-  the single named exception, it reads that one path and nothing else, and it
-  still runs **no external command** — so it runs under a plain
-  `go test ./packaging/` on any machine with the repository checked out.
-- **(c) The pre-existing configuration-level tests** —
-  `packaging/units_test.go` and `packaging/postinstall_test.go`. These **do**
-  exec external tools: `systemd-analyze` (`units_test.go`), and `shellcheck`
+- **(b) The drift guards** — `packaging/drift_test.go`, plus
+  `goreleaser_config_test.go` (which declares the `goreleaserConfigPath`
+  constant and the loader they share) and the drift guard in
+  `verify_install_test.go`. These files **do** read the live
+  `../.goreleaser.yaml` from the working tree, deliberately: a guard
+  compared against an embedded snapshot could not detect drift at all. Reading
+  the live config is the named exception, they read that one path plus, in
+  `verify_install_test.go`'s case, `verify-install.sh` itself, and
+  `drift_test.go` and `goreleaser_config_test.go` still run **no external
+  command** — so they run under a plain `go test ./packaging/` on any machine
+  with the repository checked out.
+- **(c) The pre-existing configuration-level tests and the install-script
+  guards** — `packaging/units_test.go`, `packaging/postinstall_test.go` and
+  `packaging/verify_install_test.go`. These **do** exec external tools:
+  `systemd-analyze` (`units_test.go`), `shellcheck`
   plus `/bin/sh` (`postinstall_test.go`, which runs the real scriptlet against a
-  `t.TempDir()`). The two optional tools are resolved with `exec.LookPath` and
+  `t.TempDir()`), and `shellcheck` again (`verify_install_test.go`, which only
+  lints `verify-install.sh` — it never executes it, because that script needs a
+  package manager and a network). The optional tools are resolved with
+  `exec.LookPath` and
   their tests **skip with an explanatory message** when the tool is absent from
   `PATH`; `/bin/sh` is invoked directly, as a POSIX shell is assumed present.
   The skipping is exactly why **`make docker-ci` remains the full gate** — the
@@ -2171,9 +2189,9 @@ differ, and a sentence true of one is false of another.
   and the only tier here whose *non-test* code runs an external command: `Deb`
   invokes `dpkg-deb` three times, and `RPM` runs four `rpm -qp` queries plus one
   `rpm2cpio`-into-`cpio` pipe. It is a subpackage precisely so the
-  guarantee below stays exactly true — the glob is **not** recursive, so
-  `packaging/extract/*.go` is outside it and it still lists exactly the same two
-  files it always did. Its tool-dependent tests resolve every tool through
+  guarantee below stays scoped to `packaging/*.go` — the glob is **not**
+  recursive, so `packaging/extract/*.go` is outside it and tier (d) added
+  nothing to that listing. Its tool-dependent tests resolve every tool through
   `internal/packagingtest.LookTool`, so they skip with an explicit reason on a
   host without it and **fail** rather than skip inside `make docker-ci`; the deb
   missing-tool test drives `PATH=""`, and the internal tables over the
@@ -2185,9 +2203,11 @@ Because of (c), no sentence anywhere may claim that the `packaging` package's
 *whole test suite* runs no external command, nor that the contract tests *as a
 group* operate only over embedded bytes — the drift guards do not. Claims have
 to name the tier they describe. `grep -lE 'os/exec|exec\.Command' packaging/*.go`
-listing exactly `units_test.go` and `postinstall_test.go` is the mechanical form
-of the global guarantee, and adding tier (d) left that listing byte-for-byte
-unchanged.
+listing exactly `postinstall_test.go`, `units_test.go` and
+`verify_install_test.go` is the mechanical form of the global guarantee;
+adding tier (d) left that listing byte-for-byte unchanged, and the
+install-validation guards in `verify_install_test.go` are the one addition
+since.
 
 **Still out of scope for this package.**
 
@@ -2201,8 +2221,11 @@ unchanged.
 - **Building the packages.** `make package` builds them locally with goreleaser
   Pro, and the CI packaging job is **#72**'s; this package is exercised by
   `go test` alone.
-- **On-disk state after a real install.** VM installs and verification of
-  installed ownership are **#67**'s — see M1 above for why an artifact cannot
+- **On-disk state after a real install.** No Go code in this package installs
+  anything. The container-level install checks live in the shell script
+  `packaging/verify-install.sh` ("Install validation" below), which this
+  package's Go tests only read as text; VM installs and booted-host
+  verification are **#67**'s — see M1 above for why an artifact cannot
   prove ownership and why `Entry.Owner`/`Entry.Group` therefore drive no
   assertion.
 
@@ -2211,6 +2234,89 @@ unchanged.
 unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.
+
+### Install validation (`packaging/verify-install.sh`)
+
+`packaging/verify-install.sh` is **Layer A** of package validation: a single
+POSIX `sh` script that runs **inside a target distro container image, as root**,
+against a directory of built artifacts. It is not a packaged file — it is not
+in `contract.go`'s `//go:embed` set, not named by any `packaging.Verify` table,
+and not an nfpm content entry in `.goreleaser.yaml`. It exists because the
+static artifact contract above reads bytes out of a `.deb`/`.rpm`; only a real
+install can show what the package manager and the postinstall scriptlet
+actually produce on disk.
+
+**Container-only, by construction.** The script never requires systemd as PID 1,
+never drives a service manager, never restarts a machine, and never depends on
+an enforcing SELinux policy; anything needing a booted host is Layer B (#67).
+It also never asserts `/run/pilothouse` or `/var/lib/pilothouse`: those are
+deliberately unpackaged because systemd's `RuntimeDirectory=`/`StateDirectory=`
+own them, and a container has no running systemd to create them.
+
+**Shape.** `set -eu` is the first effective line, and `fail()` prints
+`verify-install: <message>` to standard error and exits 1, so the **first**
+failed assertion aborts the run. Usage is
+`packaging/verify-install.sh <artifact-dir>` with no default: a missing or
+non-directory operand is an actionable failure that prints the usage. The
+package format is detected from the container's own package manager (`apt-get`
+→ deb, `dnf` → rpm, neither → failure), never from an artifact's file name, and
+exactly one amd64 artifact of that format (`*_amd64.deb` / `*.x86_64.rpm`) must
+be present — zero or several is a failure naming what was found. arm64 install
+validation is out of scope.
+
+**What it checks at this commit** — checks 1 through 3 only:
+
+1. **Install through the distro package manager.** `apt-get update` then
+   `apt-get install -y <artifact>` for deb, `dnf install -y <artifact>` for rpm.
+   Never a bare `dpkg -i`/`rpm -i`: the point of this check is that the
+   hand-written per-format `dependencies` lists in `.goreleaser.yaml` resolve
+   against the distro's real repositories.
+2. **`check_account()`** — the `pilothouse` user and group exist afterward and
+   match the **installed** sysusers declaration. The home directory, shell and
+   GECOS are parsed out of `/usr/lib/sysusers.d/pilothouse.conf` on the
+   installed filesystem (the live source of truth, not a hardcoded copy of
+   `packaging/pilothouse.sysusers`) and compared against
+   `getent passwd pilothouse` / `getent group pilothouse`; the account's primary
+   group must be `pilothouse` and its uid must be in the system range (< 1000).
+3. **`check_owner_mode()`** — on-disk owner, group and mode read with
+   `stat -c '%U %G %04a'` from the installed filesystem, never from package
+   metadata, for `/etc/pilothouse` (`root:pilothouse 0750`),
+   `/etc/pilothouse/storage/credentials` (`root:root 0700`), and both env files
+   (`root:pilothouse 0640`).
+
+Checks 2 and 3 are shell **functions** rather than inline code so a later chunk
+can re-invoke them after a reinstall.
+
+**Expectation-line convention.** Every expected ownership value is written as
+one `expect_owner_mode <path> <owner> <group> <mode>` call per line with
+literal arguments, so the Go guards can parse the script's expectations
+deterministically instead of matching free-form shell.
+
+**Go guards** (`packaging/verify_install_test.go`, tier (c) above). Per the
+spec, no Go test executes the script — it needs a package manager and a
+network. The tests read the script as text: the script is executable and starts
+with `#!/bin/sh`; `set -eu` is its first effective line;
+`shellcheck --shell=sh` is clean (skipped with an explanatory message naming
+`.docker/Dockerfile` when `shellcheck` is absent, so it really runs under
+`make docker-ci`); the install goes through the package manager and not a bare
+installer; the account check reads the installed sysusers file and hardcodes
+none of its values; ownership is read with `stat`; no booted-host command
+(`systemctl`, `reboot`, `setenforce`, `getenforce`, `systemd-run`) appears; and
+neither systemd-managed path is mentioned.
+`TestVerifyInstallOwnerModeExpectationsMatchGoreleaserConfig` is a
+**bidirectional** drift guard: it reads the live `../.goreleaser.yaml` and
+requires set equality, in both directions and for **both** the deb and rpm
+overrides, between the script's `expect_owner_mode` destinations and the
+content entries carrying a `file_info` block — an unauthorized expectation line
+and a dropped packaged entry both fail it.
+
+**Nothing invokes the script yet.** At this commit no make target and no CI job
+runs it; wiring it into a make target and into
+`.github/workflows/packaging.yml` is later work. The remaining checks the spec
+names — PAM stacks and modules, `systemd-analyze verify` of the shipped units,
+`pilothoused`'s dynamic-linkage resolution, reinstall, and removal — are not
+implemented here yet either; this commit's script covers checks 1 through 3 and
+nothing else.
 
 ### Artifact extraction (`packaging/extract`)
 
