@@ -59,7 +59,8 @@ build — in CI's order. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
 Automated harnesses (the mill's deep gate) use this same target, so agents
-and CI can never disagree about what "passing" means.
+and CI can never disagree about what "passing" means for the credential-free
+gates.
 
 The single exception is `.github/workflows/packaging.yml`, the packaging
 gate: it builds the `.deb` and `.rpm` artifacts and verifies them, and it
