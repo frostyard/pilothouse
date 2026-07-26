@@ -1348,10 +1348,10 @@ list in `cmd/pilothouse/main.go`, not just registered in
 
 ### Packaging test fixtures (`internal/packagingtest`)
 
-`internal/packagingtest` is an ordinary Go package — its files carry no
-`_test.go` suffix — whose only consumers are test files. It exists because the
-two helpers below are needed by the tests of more than one package, and an
-unexported helper living in a `_test.go` file is unreachable from another
+`internal/packagingtest` is an ordinary Go package — its implementation files
+carry no `_test.go` suffix — whose only consumers are test files. It exists
+because the helpers below are needed by the tests of more than one package, and
+an unexported helper living in a `_test.go` file is unreachable from another
 package. It sits under `internal/` because it ships in no binary, and it imports
 nothing else in this repository, so it can hold no knowledge of any packaging
 contract: a fixture it builds describes only what its caller declared.
@@ -1447,11 +1447,15 @@ declaration can be built in both formats. Everything is scoped to scratch space
 inside `outDir`: a throwaway `_topdir` holding the generated spec file, the
 staged payload tree and `rpmbuild`'s own working directories. The spec file
 declares `%global debug_package %{nil}`, `AutoReqProv: no` and
-`BuildArch: noarch`, so the package holds exactly the declared payload and
-exactly the declared dependencies — with one exception outside the builder's
-control: a `%post` section makes rpm require `/bin/sh` even under
-`AutoReqProv: no`. Each `Depends` element becomes one `Requires:` line
-verbatim. `%files` emits `%dir %attr(<mode>, <owner>, <group>)` per `Dir` and
+`BuildArch: noarch`, so the package holds exactly the declared payload, and
+every declared dependency appears verbatim. The requires set is not limited to
+the declared ones: outside the builder's control rpm also records the
+`rpmlib(...)` capabilities `rpmbuild` writes into every artifact, plus
+`/bin/sh` whenever a `%post` section is present — both even under
+`AutoReqProv: no`. A caller asserting on requires therefore checks each
+declared entry is present, not that the set is exactly the declared one. Each
+`Depends` element becomes one `Requires:` line verbatim. `%files` emits
+`%dir %attr(<mode>, <owner>, <group>)` per `Dir` and
 `%attr(...)` per `File`, prefixed with `%config` where declared, so rpm records
 each entry's mode and ownership from the declaration rather than from the build
 account — measured to hold when building as an unnamed uid 1000 with

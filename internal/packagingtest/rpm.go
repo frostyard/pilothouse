@@ -34,9 +34,13 @@ const (
 //
 // The generated spec file declares `%global debug_package %{nil}`,
 // `AutoReqProv: no` and `BuildArch: noarch`, so the package holds exactly the
-// payload and exactly the dependencies the Spec asked for — with one exception
-// outside this builder's control: a `%post` section makes rpm add `/bin/sh` to
-// the package's requires even under `AutoReqProv: no`.
+// payload the Spec asked for, and every dependency the Spec asked for appears
+// verbatim. The requires set is NOT limited to the declared ones, though: rpm
+// records entries of its own outside this builder's control — the `rpmlib(...)`
+// capabilities rpmbuild writes into every artifact, and `/bin/sh` whenever a
+// `%post` section is present, both even under `AutoReqProv: no`. A caller
+// asserting on requires therefore checks that each declared entry is present,
+// not that the set is exactly the declared one.
 //
 // Ownership. `%files` emits `%attr(<mode>, <owner>, <group>)` per entry, with
 // DefaultOwner and DefaultGroup substituted for an empty Dir.Owner, Dir.Group,
@@ -197,7 +201,7 @@ func rpmSpec(s Spec, tree string) string {
 	b.WriteString("\n%install\n")
 	b.WriteString("rm -rf \"%{buildroot}\"\n")
 	b.WriteString("mkdir -p \"%{buildroot}\"\n")
-	b.WriteString("cp -a \"" + tree + "/.\" \"%{buildroot}/\"\n")
+	b.WriteString("cp -a " + rpmShellOperand(tree+"/.") + " \"%{buildroot}/\"\n")
 
 	// A nil Postinstall emits no %post section at all; a declared body is
 	// written verbatim. BuildRPM has already rejected an empty one.
@@ -221,6 +225,21 @@ func rpmSpec(s Spec, tree string) string {
 	}
 
 	return b.String()
+}
+
+// rpmShellOperand renders p as a single shell word for a spec file's own
+// script sections.
+//
+// Two parsers see the string, so both have to be escaped for. rpmbuild expands
+// `%` macros in a script section before the shell ever runs it, and `%%` is the
+// spec-file escape for a literal `%`; the shell then sees single quotes, inside
+// which every remaining metacharacter — `$`, a backtick, a backslash, a double
+// quote, whitespace — is literal. An embedded single quote is the one character
+// single quoting cannot carry, so each one is rendered by closing the quoted
+// run, emitting a backslash-escaped quote, and reopening — the usual shell
+// idiom, spelled out in the replacement below.
+func rpmShellOperand(p string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(p, "'", `'\''`), "%", "%%") + "'"
 }
 
 // rpmAttr renders one %attr(...) directive, substituting DefaultOwner and

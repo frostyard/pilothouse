@@ -190,14 +190,6 @@ func TestRunDiscoversAndDispatchesBothExtensions(t *testing.T) {
 
 	out := stdout + stderr
 
-	if !strings.Contains(out, deb) {
-		t.Errorf("output does not report %s:\n%s", deb, out)
-	}
-
-	if !strings.Contains(out, rpm) {
-		t.Errorf("output does not report %s:\n%s", rpm, out)
-	}
-
 	if strings.Contains(out, decoy) {
 		t.Errorf("output reports the non-artifact %s:\n%s", decoy, out)
 	}
@@ -206,6 +198,10 @@ func TestRunDiscoversAndDispatchesBothExtensions(t *testing.T) {
 		t.Errorf("summary does not report exactly 2 artifacts:\n%s", out)
 	}
 
+	// Each artifact's presence is proved by locating its own report block, not
+	// by a substring check against the whole capture: the other artifact's
+	// block could satisfy a page-wide Contains without this one being reported
+	// at all. artifactBlock fails the test when no block starts with the path.
 	debBlock := artifactBlock(t, out, deb)
 	if !strings.Contains(debBlock, "packaging/extract: dpkg-deb: ") {
 		t.Errorf("the %s block does not name the deb backend's tool:\n%s", deb, debBlock)

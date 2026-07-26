@@ -169,7 +169,7 @@ docker-tools-check: docker-image ## Verify release and packaging tools are execu
 	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2cpio cpio; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
 
 verify-packages: ## Report contract findings for built .deb/.rpm artifacts in dist/ (outside ci; fails when dist/ is empty)
-	$(GO) run ./cmd/verify-packages
+	$(GO) run ./cmd/$@
 
 test-bump: ## Test release orchestration without publishing
 	bash scripts/bump_test.sh
