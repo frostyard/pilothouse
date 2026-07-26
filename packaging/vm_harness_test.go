@@ -692,10 +692,24 @@ func TestVMSSHWaitsAreBoundedAndOrdered(t *testing.T) {
 		"%s: wait_for_ssh_gone must be bounded by SSH_GONE_TIMEOUT", vmSSHLibPath)
 	require.Contains(t, gone, "assertion failed: the pre-reboot sshd was still answering",
 		"%s: wait_for_ssh_gone must name the failing assertion on expiry", vmSSHLibPath)
+	require.Contains(t, gone, `[ "$misses" -ge "$SSH_GONE_CONFIRMATIONS" ]`,
+		"%s: wait_for_ssh_gone must require consecutive unanswered probes; one transient refusal against a guest that never rebooted would otherwise end the wait", vmSSHLibPath)
 
 	reboot := shellFunctionBody(t, vmSSHLibPath, script, "reboot_guest")
 	require.Contains(t, reboot, "guest_sudo systemctl reboot",
 		"%s: reboot_guest must issue the reboot through the escalation wrapper, which passes -n", vmSSHLibPath)
+
+	require.NotContains(t, reboot, "|| true",
+		"%s: reboot_guest must not discard the reboot command's status; a rejected non-interactive escalation would then be indistinguishable from the expected disconnect and would surface as a misleading shutdown timeout", vmSSHLibPath)
+	require.NotContains(t, reboot, ">/dev/null 2>&1",
+		"%s: reboot_guest must capture the reboot command's output so a real failure can be reported with its stderr", vmSSHLibPath)
+	require.Contains(t, reboot, `[ "$status" -ne 0 ] && [ "$status" -ne 255 ]`,
+		"%s: reboot_guest must treat only the connection-drop status as the expected symptom and fail on every other non-zero status", vmSSHLibPath)
+
+	require.Contains(t, reboot, `[ "$after" = "$before" ]`,
+		"%s: reboot_guest must compare the guest's boot_id across the reboot; the SSH probes alone cannot distinguish a real reboot from an sshd that merely restarted", vmSSHLibPath)
+	require.Contains(t, script, "/proc/sys/kernel/random/boot_id",
+		"%s must read the guest's boot_id, which changes on every boot, as the deterministic proof that the machine restarted", vmSSHLibPath)
 
 	away := strings.Index(reboot, "wait_for_ssh_gone")
 	back := strings.Index(reboot, "\n    wait_for_ssh\n")
@@ -703,6 +717,9 @@ func TestVMSSHWaitsAreBoundedAndOrdered(t *testing.T) {
 	require.GreaterOrEqual(t, back, 0, "%s: reboot_guest must wait for sshd to return", vmSSHLibPath)
 	require.Less(t, away, back,
 		"%s: reboot_guest must wait for the pre-reboot sshd to go away BEFORE waiting for sshd to return", vmSSHLibPath)
+
+	require.Less(t, back, strings.Index(reboot, `[ "$after" = "$before" ]`),
+		"%s: reboot_guest must compare boot_id only after the guest is reachable again", vmSSHLibPath)
 }
 
 // vmCredentialAssignment matches an assignment whose name ends in `password` or
@@ -746,8 +763,44 @@ func TestVMHarnessContainsNoCredentialLiteral(t *testing.T) {
 
 			require.NotRegexpf(t, regexp.MustCompile(`(?i)(echo|printf)[^\n]*\$\{?[A-Za-z_]*(PASSWORD|PASSWD)`),
 				content, "%s must never print a password", path)
-			require.NotRegexpf(t, regexp.MustCompile(`(?i)(echo|printf|cat)[^\n]*id_ed25519[^.\n]*$`),
-				content, "%s must never print the private key", path)
+			requireNoPrivateKeyPrint(t, path, content)
 		})
+	}
+}
+
+// vmPrintsSomething matches a command that writes to stdout, and
+// vmPrivateKeyRef matches either spelling of the harness private key: the
+// literal filename or the variable the scripts actually use. The public key
+// beside it is not a credential, so a reference followed by `.pub` is exempt.
+var (
+	vmPrintsSomething = regexp.MustCompile(`(?i)\b(echo|printf|cat)\b`)
+	vmPrivateKeyRef   = regexp.MustCompile(`(?i)(id_ed25519|\$\{?VM_SSH_KEY\}?)`)
+)
+
+// requireNoPrivateKeyPrint fails when a line both invokes a printing command
+// and names the private key. It scans line by line rather than matching the
+// whole file: an anchored pattern only matches at end of text without (?m),
+// so a single trailing-anchor regex silently passes every occurrence that is
+// not the last thing in the file.
+func requireNoPrivateKeyPrint(t *testing.T, path, content string) {
+	t.Helper()
+
+	for number, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if !vmPrintsSomething.MatchString(line) {
+			continue
+		}
+
+		for _, match := range vmPrivateKeyRef.FindAllStringIndex(line, -1) {
+			rest := line[match[1]:]
+			if strings.HasPrefix(rest, ".pub") || strings.HasPrefix(rest, `}.pub`) {
+				continue
+			}
+
+			t.Fatalf("%s:%d must never print the private key: %s",
+				path, number+1, strings.TrimSpace(line))
+		}
 	}
 }

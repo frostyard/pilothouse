@@ -40,6 +40,12 @@ SSH_READY_TIMEOUT="${SSH_READY_TIMEOUT:-300}"
 # reboot would never actually be observed.
 SSH_GONE_TIMEOUT="${SSH_GONE_TIMEOUT:-120}"
 
+# SSH_GONE_CONFIRMATIONS is how many consecutive unanswered probes count as
+# the pre-reboot sshd being gone. One is not enough: a single transient
+# refusal against a guest that never rebooted would end the wait, and the
+# readiness check that follows would be satisfied by that same sshd.
+SSH_GONE_CONFIRMATIONS="${SSH_GONE_CONFIRMATIONS:-3}"
+
 # GUEST_SSH_OPTS are the transport options every connection shares. The guest
 # is a throwaway VM reachable only through a loopback port forward, and its
 # host key is generated on first boot, so host-key persistence is off;
@@ -150,15 +156,24 @@ wait_for_ssh() {
 }
 
 # wait_for_ssh_gone polls until the guest stops answering, bounded by
-# SSH_GONE_TIMEOUT.
+# SSH_GONE_TIMEOUT. A single failed probe is not enough: a transient refusal
+# on a guest that never rebooted would satisfy a one-shot check, and
+# wait_for_ssh would then be satisfied by the very sshd that was supposed to
+# die. SSH_GONE_CONFIRMATIONS consecutive failures are required, and the
+# counter resets the moment the guest answers again.
 wait_for_ssh_gone() {
     ssh_log "waiting up to ${SSH_GONE_TIMEOUT}s for the pre-reboot sshd to go away"
 
-    local waited=0
+    local waited=0 misses=0
     while [ "$waited" -lt "$SSH_GONE_TIMEOUT" ]; do
-        if ! guest_answers_ssh; then
-            ssh_log "pre-reboot sshd stopped answering after ${waited}s"
-            return 0
+        if guest_answers_ssh; then
+            misses=0
+        else
+            misses=$((misses + 1))
+            if [ "$misses" -ge "$SSH_GONE_CONFIRMATIONS" ]; then
+                ssh_log "pre-reboot sshd stopped answering after ${waited}s (${misses} consecutive probes)"
+                return 0
+            fi
         fi
 
         sleep 2
@@ -168,16 +183,50 @@ wait_for_ssh_gone() {
     ssh_fail "assertion failed: the pre-reboot sshd was still answering ${SSH_GONE_TIMEOUT}s after the reboot was issued"
 }
 
+# guest_boot_id prints the guest's current boot identifier. It changes on
+# every boot, so comparing it across a reboot is a deterministic proof that
+# the machine actually restarted — one that cannot be satisfied by a
+# still-running pre-reboot sshd no matter how the probes fall.
+guest_boot_id() {
+    guest_run cat /proc/sys/kernel/random/boot_id
+}
+
 # reboot_guest reboots the guest and returns when it is reachable again. The
 # reboot is issued through guest_sudo, which passes -n, because the one login
-# identity is the administrator account and not root. The connection dies with
-# the guest, so a non-zero status from the reboot command itself is expected
-# and is not evidence of anything; the pair of waits below is.
+# identity is the administrator account and not root.
+#
+# The reboot command's status is NOT discarded. A successful reboot kills the
+# connection under ssh, which reports that as 255; that one status is the
+# expected symptom. Every other non-zero status means the command did not
+# dispatch at all — a rejected non-interactive escalation being the likely
+# one — and is reported with the remote stderr instead of being left to
+# surface later as a misleading "sshd never went away" timeout.
 reboot_guest() {
-    ssh_log "rebooting the guest"
-    guest_sudo systemctl reboot >/dev/null 2>&1 || true
+    local before
+    before="$(guest_boot_id)"
+    before="${before//[$'\r\n']/}"
+    [ -n "$before" ] || ssh_fail "could not read the guest's boot_id before rebooting"
+
+    ssh_log "rebooting the guest (boot_id ${before})"
+
+    local output status=0
+    output="$(guest_sudo systemctl reboot 2>&1)" || status=$?
+
+    if [ "$status" -ne 0 ] && [ "$status" -ne 255 ]; then
+        ssh_fail "reboot command failed with status ${status} before the guest could restart: ${output}"
+    fi
 
     wait_for_ssh_gone
     wait_for_ssh
-    ssh_log "guest is back after the reboot"
+
+    local after
+    after="$(guest_boot_id)"
+    after="${after//[$'\r\n']/}"
+    [ -n "$after" ] || ssh_fail "could not read the guest's boot_id after the reboot"
+
+    if [ "$after" = "$before" ]; then
+        ssh_fail "assertion failed: boot_id is unchanged (${after}); the guest answered ssh but never rebooted"
+    fi
+
+    ssh_log "guest is back after the reboot (boot_id ${before} -> ${after})"
 }

@@ -2676,6 +2676,30 @@ and `guest_copy` address the guest as the administrator account read back from
 issues the reboot through `guest_sudo` and then waits for the **pre-reboot**
 sshd to stop answering (`SSH_GONE_TIMEOUT`) before waiting for sshd to return,
 so a readiness check cannot be satisfied by the daemon that is about to die.
+
+Three things keep that sequence from passing without proving a reboot, and each
+closes a hole the SSH probes cannot close by themselves:
+
+- **The reboot command's status is not discarded.** A successful reboot kills
+  the connection, which ssh reports as 255; that one status is the expected
+  symptom. Any other non-zero status means the command never dispatched — a
+  rejected escalation being the likely cause — and `reboot_guest` fails
+  immediately carrying the remote stderr. The blanket `>/dev/null 2>&1 || true`
+  this replaced made a rejected escalation indistinguishable from the expected
+  disconnect, and the wait loop then reported the real failure as a shutdown
+  timeout.
+- **Disappearance requires `SSH_GONE_CONFIRMATIONS` consecutive unanswered
+  probes** (default 3), with the counter reset the moment the guest answers.
+  A single transient refusal against a guest that never rebooted would
+  otherwise end the wait, after which `wait_for_ssh` would be satisfied by the
+  very sshd that was supposed to die.
+- **The guest's `boot_id` is compared across the reboot.** `guest_boot_id`
+  reads `/proc/sys/kernel/random/boot_id`, which the kernel regenerates on
+  every boot; `reboot_guest` captures it before and after and fails if it is
+  unchanged. This is the only assertion here that cannot be satisfied by an
+  sshd that merely restarted, and it cannot fail on a genuine reboot, so it is
+  immune to how the probes happen to fall.
+
 The endpoint it dials, `VM_SSH_HOST`/`VM_SSH_PORT`, is declared with the same
 `:-` default in both `ssh.sh` and `vm.sh` — the library that forwards it — so
 the two can be sourced in either order; a guard test holds the two
@@ -2687,7 +2711,17 @@ non-executable, both family branches must exist, the `NOPASSWD` grant must be
 present *and* no password-prompting escalation form may appear anywhere in the
 library directory, no file under `test/vm` may contain a key blob, a PEM block,
 a literal password value or the string `root@`, and no file may disable KVM or
-introduce an offline image-editing step.
+introduce an offline image-editing step. It also pins the three reboot
+invariants above by text, so a regression to the suppressed form fails the unit
+suite rather than waiting for a VM run to misreport it.
+
+Two of those guards are worth calling out because their earlier forms passed
+without proving anything. The private-key print check scans **line by line**: a
+single regex anchored with `$` and no `(?m)` matches only at end of file, so it
+silently permitted every occurrence that was not the last thing in the file.
+It also matches both spellings of the key — the literal `id_ed25519` and the
+`$VM_SSH_KEY` variable the scripts actually use — while exempting a reference
+followed by `.pub`, since the public key is not a credential.
 
 ### Artifact extraction (`packaging/extract`)
 
