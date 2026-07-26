@@ -105,11 +105,13 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       plus the serial console channel), ssh.sh (the guest's SSH
                       lifecycle) and diagnostics.sh (the failure-time discriminator).
                       guest/ is the single directory holding every guest-side script:
-                      the sourced, non-executable lib.sh plus install-package.sh;
+                      the sourced, non-executable lib.sh plus install-package.sh
+                      and check-activation.sh;
                       every executed one is committed 100755 and invoked as
                       `sudo -n sh ~/vm-boot/guest/<name>.sh`. At this commit a run
-                      ends once the package is installed, and no workflow job invokes
-                      any of it; packaging/vm_harness_test.go guards it structurally
+                      ends once both units are active and the broker answers an
+                      unauthenticated query on its socket with 401, and no workflow
+                      job invokes any of it; packaging/vm_harness_test.go guards it structurally
                       without executing it (see the three "Booted-VM harness"
                       sections below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
@@ -2252,8 +2254,9 @@ since.
   `.github/workflows/packaging.yml`'s `install` job in CI. **Layer B** — VM
   installs and booted-host verification, anything needing systemd as PID 1 or
   an enforcing SELinux policy — is **#67**'s; its harness is under construction
-  in `test/vm` (it boots a guest and installs the package, and asserts nothing
-  about the running system yet) and no CI job runs it; see M1 above
+  in `test/vm` (it boots a guest, installs the package, starts both units and
+  asserts the systemd-created directories, the broker socket's ownership and
+  mode, and that the broker is live) and no CI job runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
   `Entry.Group` therefore drive no assertion.
 
@@ -2736,9 +2739,9 @@ followed by `.pub`, since the public key is not a credential.
 ### Booted-VM harness: the orchestrator, guest staging and diagnostics (`test/vm/vm-boot-test.sh`, `test/vm/lib/diagnostics.sh`, `test/vm/guest/`)
 
 The harness's first end-to-end runnable path. **At this commit a run ends once
-the package is installed**: enabling the units, the directory and socket
-assertions, the PAM flows, the journal read-back and the reboot posture are not
-implemented yet, and no workflow invokes any of this — the CI job lands later.
+both units are active and the broker is answering on its socket**: the PAM
+flows, the journal read-back and the reboot posture are not implemented yet,
+and no workflow invokes any of this — the CI job lands later.
 
 **`test/vm/vm-boot-test.sh` is the one entry point**, taking
 `--family debian|fedora` and `--artifact-dir <dir>`; any other family is
@@ -2814,6 +2817,33 @@ reinstall and removal are asserted there, against these same artifacts. The
 Fedora guest is SELinux-**enforcing** and stays that way: `setenforce` and
 `permissive` appear nowhere in the harness, so an install that policy would
 break fails the gate rather than being worked around.
+
+`guest/check-activation.sh` runs next, and is the first check that asserts
+anything about the running system. It **enables and starts** both units itself
+(`systemctl enable --now`) rather than asserting they are already active:
+`packaging/postinstall.sh` contains no `systemctl` call, so installing the
+package deliberately starts nothing, and asserting otherwise would assert a
+behaviour the packaging does not have. Each unit is then waited for under one
+named constant, `UNIT_ACTIVATION_TIMEOUT_SECONDS`, and on expiry the script
+prints **that unit's own** `systemctl status` and `journalctl -u` before failing
+by name — both processes log to their own unit's journal, so naming the other
+one would pass vacuously. With both units active it asserts `/run/pilothouse`
+and `/var/lib/pilothouse` are `root:pilothouse` mode `0750` — the state
+systemd's `RuntimeDirectory=`/`StateDirectory=` create, which is exactly the
+check no container can make and therefore the one #77 does not attempt — and
+`/run/pilothouse/broker.sock` is `root:pilothouse` mode `0660`. Liveness is
+proved by an **unauthenticated** `POST` to
+`/v1/queries/org.frostyard.pilothouse.capabilities.list` over that socket,
+bounded by `BROKER_PROBE_TIMEOUT_SECONDS`, which must answer **exactly `401`**
+with a JSON `error` body: every broker query calls `authorize()` first, so a
+`401` can only come from a server that accepted the connection and parsed the
+request, while a refused connection, a stale socket file, a hang, a `200` or
+any other status fails. The authenticated capability list needs a session token
+and is not attempted here.
+
+**At this commit the harness run ends there.** The PAM flows, the journal
+read-back and the reboot posture are not implemented yet, the guest's SELinux
+audit posture is #80's, and no workflow invokes any of this.
 
 **`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at
 the moment of failure**, not on whether it ever did. `install_failure_diagnostics`

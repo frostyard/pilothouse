@@ -26,7 +26,11 @@
 #   6. select the arch-qualified artifact — exactly one — from --artifact-dir;
 #   7. stage the artifact, the guest scripts and creds.env into that directory;
 #   8. install the credentials privileged into /root and remove the staged copy;
-#   9. run the guest bootstrap as `sudo -n sh ~/vm-boot/guest/install-package.sh`.
+#   9. run the guest bootstrap as `sudo -n sh ~/vm-boot/guest/install-package.sh`;
+#  10. run the activation checks as
+#      `sudo -n sh ~/vm-boot/guest/check-activation.sh`, which enables and
+#      starts both units, asserts the systemd-created directories and the
+#      broker socket, and proves the broker is live.
 #
 # The harness has exactly ONE SSH identity in the guest: the administrator
 # account cloud-init created. That account cannot write /root, cannot install
@@ -35,9 +39,9 @@
 # guest-bound destination is inside ~/vm-boot, and every guest script runs as
 # `sudo -n sh <staged path>`.
 #
-# At this commit the run ends after the package is installed: enabling the
-# units, the directory and socket assertions, the PAM flows, the journal
-# read-back and the reboot posture all land in later commits.
+# At this commit the run ends once both units are active and the broker is
+# answering on its socket: the PAM flows, the journal read-back and the reboot
+# posture all land in later commits.
 #
 # Every tilde path in this file is deliberately quoted: it is transmitted
 # literally and expanded by the GUEST's shell, because ~/vm-boot is the
@@ -267,7 +271,10 @@ main() {
     # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
     guest_run sudo -n sh '~/vm-boot/guest/install-package.sh'
 
-    orchestrator_log "$FAMILY guest booted and the package is installed"
+    # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+    guest_run sudo -n sh '~/vm-boot/guest/check-activation.sh'
+
+    orchestrator_log "$FAMILY guest booted, package installed, both units active and the broker answering on its socket"
 }
 
 main "$@"

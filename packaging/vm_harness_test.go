@@ -1499,7 +1499,102 @@ func TestVMInstallPackageInstallsTheStagedArtifact(t *testing.T) {
 	}
 }
 
-// TestVMHarnessNeverWeakensSELinuxOrRetainsArtifacts pins two negatives across
+// vmBrokerAPIPath is the broker's wire-contract declaration. The capability
+// query id the guest probe sends is read out of it as text rather than
+// imported: this package must stay free of run-time dependencies on the
+// daemon's packages, and reading the declaration keeps the guard honest
+// against the live source of truth instead of a second copy of the string.
+const vmBrokerAPIPath = "../internal/broker/api.go"
+
+var vmQueryCapabilitiesDeclaration = regexp.MustCompile(`QueryCapabilities\s*=\s*"([^"]+)"`)
+
+func vmCapabilityQueryID(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(vmBrokerAPIPath)
+	require.NoErrorf(t, err, "read %s", vmBrokerAPIPath)
+
+	match := vmQueryCapabilitiesDeclaration.FindStringSubmatch(string(raw))
+	require.NotNilf(t, match, "%s must declare QueryCapabilities", vmBrokerAPIPath)
+
+	return match[1]
+}
+
+// TestVMCheckActivationEnablesWaitsAndProbesTheBroker pins the activation
+// check's substance as text; nothing here executes it. The mode, dialect,
+// require_root and `sudo -n sh` invocation-form guards above already cover the
+// file because they are discovered on disk, so this test covers only what is
+// specific to this script: it starts the units itself (the packaging
+// deliberately starts nothing), waits under one named timeout constant and
+// dumps that unit's own diagnostics on expiry, asserts the systemd-created
+// directories and the socket, and proves the broker is live with an
+// unauthenticated capability query that must answer exactly 401.
+func TestVMCheckActivationEnablesWaitsAndProbesTheBroker(t *testing.T) {
+	path := filepath.Join(vmGuestDir, "check-activation.sh")
+	script := readVMHarnessFile(t, path)
+
+	// The units are started here because packaging/postinstall.sh contains no
+	// systemctl call: asserting they are already active would assert a
+	// behaviour the packaging does not have.
+	require.Contains(t, script, `systemctl enable --now "$unit"`,
+		"%s must enable and start each unit itself; the package deliberately starts nothing", path)
+	require.Contains(t, script, `BROKER_UNIT="pilothoused.service"`,
+		"%s must activate the broker unit", path)
+	require.Contains(t, script, `WEB_UNIT="pilothouse.service"`,
+		"%s must activate the web unit", path)
+	for _, unit := range []string{`enable_and_wait_for_unit "$BROKER_UNIT"`, `enable_and_wait_for_unit "$WEB_UNIT"`} {
+		require.Containsf(t, script, unit, "%s must wait for %s", path, unit)
+	}
+
+	// One named timeout constant, stated once and reported by that same name
+	// when it expires, with the failing unit's OWN status and journal — both
+	// processes log to their own unit's journal, so naming the other one would
+	// pass vacuously.
+	require.Contains(t, script, "UNIT_ACTIVATION_TIMEOUT_SECONDS=",
+		"%s must state its activation timeout as a named constant", path)
+	require.Contains(t, script, `[ "$waited" -lt "$UNIT_ACTIVATION_TIMEOUT_SECONDS" ]`,
+		"%s must bound its wait by that named constant", path)
+	require.Contains(t, script, `fail "$unit did not reach active within ${UNIT_ACTIVATION_TIMEOUT_SECONDS}s"`,
+		"%s must fail naming the unit and the timeout it exceeded", path)
+
+	dump := shellFunctionBody(t, path, script, "dump_unit_diagnostics")
+	require.Contains(t, dump, `systemctl status "$dump_unit"`,
+		"%s: the expiry dump must print that unit's own systemctl status", path)
+	require.Contains(t, dump, `journalctl --unit "$dump_unit"`,
+		"%s: the expiry dump must print that unit's own journal", path)
+
+	wait := shellFunctionBody(t, path, script, "enable_and_wait_for_unit")
+	require.Less(t, strings.Index(wait, "dump_unit_diagnostics"), strings.Index(wait, "did not reach active"),
+		"%s: the diagnostics must be printed before the timeout failure, not after the script has exited", path)
+
+	// The systemd-created directories and the socket. expect_owner_mode
+	// compares `stat -c '%U %G %a'`, which prints 0750 as 750 and 0660 as 660.
+	for _, assertion := range []string{
+		"expect_owner_mode /run/pilothouse root pilothouse 750",
+		"expect_owner_mode /var/lib/pilothouse root pilothouse 750",
+		`expect_owner_mode "$BROKER_SOCKET" root pilothouse 660`,
+	} {
+		require.Containsf(t, script, assertion,
+			"%s must assert the ownership and mode systemd's RuntimeDirectory=/StateDirectory= and the broker declare: `%s`", path, assertion)
+	}
+
+	// Liveness: the request is unauthenticated and the expected answer is
+	// exactly 401 with a JSON error body — not a capability list, and not
+	// merely non-200, because a refusal or a hang must fail.
+	require.Contains(t, script, `CAPABILITY_QUERY_ID="`+vmCapabilityQueryID(t)+`"`,
+		"%s must use the capability query id internal/broker/api.go declares", path)
+	require.Contains(t, script, `broker_curl "/v1/queries/$CAPABILITY_QUERY_ID"`,
+		"%s must probe the broker over its Unix socket", path)
+	require.Contains(t, script, `--max-time "$BROKER_PROBE_TIMEOUT_SECONDS"`,
+		"%s must bound the probe, so a socket that never answers fails instead of hanging", path)
+	require.Contains(t, script, `[ "$probe_status" = "401" ] ||`,
+		"%s must require exactly 401: a 200 or any other status is a failure", path)
+	require.Contains(t, script, `jq -er '.error' <"$probe_body"`,
+		"%s must require a JSON body carrying an error field", path)
+	require.NotContains(t, script, "Authorization:",
+		"%s: the liveness probe is deliberately unauthenticated", path)
+}
+
 // the whole harness. The Fedora guest boots SELinux-enforcing and stays that
 // way — a failing install is a real failure, not something to be worked around
 // by relaxing the policy — and nothing the run produces is uploaded: the disks,
