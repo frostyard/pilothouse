@@ -204,6 +204,15 @@ package: ## Build snapshot .deb/.rpm into dist/ with goreleaser Pro v2 (publishe
 verify-packages: ## Report contract findings for built .deb/.rpm artifacts in dist/ (outside ci; fails when dist/ is empty)
 	$(GO) run ./cmd/$@
 
+# verify-package-install pins two container details that are easy to drop and
+# hard to debug. --platform linux/amd64 is required because both digest-pinned
+# references are multi-architecture image indexes (the Debian one carries 15
+# architectures); on an ARM host Docker would otherwise select the ARM variant
+# and try to install amd64 artifacts into the wrong userland. --user 0:0 is
+# required because `docker run` honours an image's configured USER, while
+# installing packages, creating the service account and reading PAM stacks all
+# need root; an INSTALL_IMAGE declaring a non-root USER would fail confusingly
+# instead of validating anything.
 verify-package-install: ## Install the built .deb/.rpm inside INSTALL_IMAGE and validate the result (outside ci; needs Docker, the network and artifacts in ARTIFACT_DIR)
 	@if [ -z '$(INSTALL_IMAGE)' ]; then \
 		printf '%s\n' 'make verify-package-install: INSTALL_IMAGE is unset and this target assumes no image.' 'A container image reference is required; these two are the digest-pinned images this validation targets:' '  make verify-package-install INSTALL_IMAGE=debian:12@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc' '  make verify-package-install INSTALL_IMAGE=fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814' >&2; \
@@ -214,6 +223,8 @@ verify-package-install: ## Install the built .deb/.rpm inside INSTALL_IMAGE and 
 		exit 1; \
 	fi
 	$(DOCKER) run --rm \
+		--platform linux/amd64 \
+		--user 0:0 \
 		--mount "type=bind,source=$(CURDIR)/packaging,target=/packaging,readonly" \
 		--mount "type=bind,source=$(abspath $(ARTIFACT_DIR)),target=/artifacts,readonly" \
 		--workdir / \
