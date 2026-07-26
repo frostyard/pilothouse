@@ -794,7 +794,14 @@ func TestVMHarnessContainsNoCredentialLiteral(t *testing.T) {
 					continue
 				}
 
-				require.Truef(t, strings.HasPrefix(match[2], "$") || strings.HasPrefix(match[2], `"$`),
+				// A shell expansion (`$VAR`, `"$VAR"`) and a jq environment
+				// lookup (`env.VAR`) are both run-time references to a value
+				// generated in the job workspace. A literal is anything else.
+				fromRuntimeVariable := strings.HasPrefix(match[2], "$") ||
+					strings.HasPrefix(match[2], `"$`) ||
+					strings.HasPrefix(match[2], "env.")
+
+				require.Truef(t, fromRuntimeVariable,
 					"%s assigns `%s` a literal value; every credential must come from a run-time generated variable", path, match[0])
 			}
 
@@ -1613,5 +1620,310 @@ func TestVMHarnessNeverWeakensSELinuxOrRetainsArtifacts(t *testing.T) {
 			require.NotContainsf(t, content, forbidden,
 				"%s must not upload anything (%s): disks, seeds, logs and credentials stay in the job workspace", path, forbidden)
 		}
+	}
+}
+
+// vmCheckPamPath is the guest-side PAM check. Everything below reads it as
+// text; nothing here executes it, and nothing here re-derives its assertions
+// from the file itself.
+const vmCheckPamPath = vmGuestDir + "/check-pam.sh"
+
+// TestVMGuestDirectRouteSendsItsOwnRemote pins the reusable authenticated
+// direct-socket helper in guest/lib.sh, and above all the one value that keeps
+// it out of the web flows' way. The broker keys its login lockout on
+// lower(username) + NUL + remote and answers 429 BEFORE Authenticate is called,
+// so if the direct route reused the web process's remote — 127.0.0.1, the peer
+// host of a loopback request — a wrong-password check on the web surface could
+// throttle a direct login of the same account and a status assertion would
+// then be about the limiter rather than about PAM.
+func TestVMGuestDirectRouteSendsItsOwnRemote(t *testing.T) {
+	script := readVMHarnessFile(t, vmGuestLibPath)
+
+	remote := regexp.MustCompile(`BROKER_REMOTE="\$\{BROKER_REMOTE:-([^}"]+)\}"`).FindStringSubmatch(script)
+	require.NotNilf(t, remote, "%s must declare a default BROKER_REMOTE for the direct broker route", vmGuestLibPath)
+
+	// The web process's remote is the host part of the address the console
+	// listens on, read from the same library rather than restated here.
+	webBase := regexp.MustCompile(`WEB_BASE_URL="\$\{WEB_BASE_URL:-http://([^:/}"]+)`).FindStringSubmatch(script)
+	require.NotNilf(t, webBase, "%s must declare the web console's base URL", vmGuestLibPath)
+
+	require.NotEqualf(t, webBase[1], remote[1],
+		"%s: the direct broker route's remote (%q) must differ from the web process's remote (%q), or the two surfaces share a lockout key",
+		vmGuestLibPath, remote[1], webBase[1])
+	require.NotEqualf(t, "127.0.0.1", remote[1],
+		"%s: the direct broker route's remote must not be 127.0.0.1, which is what the web process sends", vmGuestLibPath)
+
+	login := shellFunctionBody(t, vmGuestLibPath, script, "broker_login")
+	require.Contains(t, login, "broker_curl /v1/login",
+		"%s: broker_login must post to /v1/login over the broker's Unix socket", vmGuestLibPath)
+	require.Contains(t, login, "remote: env.BROKER_REMOTE",
+		"%s: broker_login must send BROKER_REMOTE as the request's remote", vmGuestLibPath)
+	require.Contains(t, login, `[ "$broker_login_status" = "200" ] ||`,
+		"%s: broker_login must require exactly 200; a 429 is the lockout answering before Authenticate and is never a pass", vmGuestLibPath)
+	require.Contains(t, login, "429",
+		"%s: broker_login must name the 429 case in the assertion it fails with", vmGuestLibPath)
+	require.Contains(t, login, `BROKER_SESSION_TOKEN="$(jq -er '.token'`,
+		"%s: broker_login must take the session token from the response", vmGuestLibPath)
+
+	query := shellFunctionBody(t, vmGuestLibPath, script, "broker_query")
+	require.Contains(t, query, `broker_curl "/v1/queries/$broker_query_id"`,
+		"%s: broker_query must post to /v1/queries/{id}", vmGuestLibPath)
+	require.Contains(t, query, `"Authorization: Bearer " + env.BROKER_SESSION_TOKEN`,
+		"%s: broker_query must carry the token broker_login returned", vmGuestLibPath)
+	require.Contains(t, query, `[ "$broker_query_status" = "200" ] ||`,
+		"%s: broker_query must require exactly 200 for an authenticated caller", vmGuestLibPath)
+
+	// The privilege the 0660 root:pilothouse socket needs comes from the
+	// script running as root under `sudo -n sh`, which require_root proves —
+	// not from an inner escalation per request.
+	for name, body := range map[string]string{"broker_login": login, "broker_query": query} {
+		require.NotContainsf(t, body, "sudo",
+			"%s: %s must carry no inner escalation; the whole script already runs as root", vmGuestLibPath, name)
+	}
+}
+
+// TestVMCheckPamConsumesCredentialsAndGeneratesNone pins the settled decision
+// that credential generation happens once, on the host, in the job workspace:
+// the guest side only consumes what cloud-init delivered.
+func TestVMCheckPamConsumesCredentialsAndGeneratesNone(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+
+	require.Contains(t, script, "\nload_credentials\n",
+		"%s must source the delivered credentials file through load_credentials", vmCheckPamPath)
+
+	for _, generator := range []string{"openssl", "urandom", "pwgen", "ssh-keygen"} {
+		require.NotContainsf(t, script, generator,
+			"%s must generate no credential (%s): every credential is generated on the host, in the job workspace, and delivered by cloud-init", vmCheckPamPath, generator)
+	}
+}
+
+// TestVMCheckPamProvesTheInstalledAdministratorGroup pins the check that this
+// whole tier exists for on the packaging side: `--admin-group sudo` on Debian
+// and `--admin-group wheel` on Fedora is the single token by which the two
+// unit files differ, and it is read back out of the INSTALLED unit rather than
+// from the repository copy.
+func TestVMCheckPamProvesTheInstalledAdministratorGroup(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+
+	installed := shellFunctionBody(t, vmCheckPamPath, script, "installed_admin_group")
+	require.Contains(t, installed, `systemctl cat "$BROKER_UNIT"`,
+		"%s must read the --admin-group token out of the installed unit, not out of a repository copy", vmCheckPamPath)
+	require.Contains(t, installed, "--admin-group",
+		"%s must extract the --admin-group token", vmCheckPamPath)
+
+	expected := shellFunctionBody(t, vmCheckPamPath, script, "expected_admin_group")
+	require.Contains(t, expected, `debian) printf '%s\n' 'sudo' ;;`,
+		"%s must expect `sudo` on Debian", vmCheckPamPath)
+	require.Contains(t, expected, `fedora) printf '%s\n' 'wheel' ;;`,
+		"%s must expect `wheel` on Fedora", vmCheckPamPath)
+	require.Contains(t, expected, `*) fail "unknown guest os ID`,
+		"%s must reject any other family by name rather than defaulting", vmCheckPamPath)
+
+	require.Contains(t, script, `[ "$declared_group" = "$expected_group" ] ||`,
+		"%s must assert the installed unit's group is the family's group", vmCheckPamPath)
+	require.Contains(t, script, `admin_groups="$(id -nG "$PH_ADMIN_USER")" ||`,
+		"%s must read the cloud-init-created administrator's group membership", vmCheckPamPath)
+	require.Contains(t, script, `printf '%s\n' "$admin_groups" | tr ' ' '\n' | grep -qx "$declared_group" ||`,
+		"%s must assert the administrator is a member of the group the installed unit declares", vmCheckPamPath)
+}
+
+// TestVMCheckPamRunsTheThreeLoginsInOrderWithExactStatuses pins the flow the
+// spec is most exacting about. The three attempts run success first, then the
+// two failures, and each asserts ONE specific status: a failed attempt arms a
+// per-username+remote lockout that answers 429 before Authenticate is ever
+// called, so "any non-success status" would pass vacuously against a request
+// that never reached PAM.
+func TestVMCheckPamRunsTheThreeLoginsInOrderWithExactStatuses(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+
+	// The login form is fetched first: POST /login rejects a missing csrf
+	// field with 403, so a bare POST would fail for the wrong reason. There is
+	// no pre-login cookie: --cookie-jar anywhere here would be a second thing
+	// this flow depended on that the server does not set.
+	require.Contains(t, script, `csrf_value="$(sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' "$login_page" | head -n 1)"`,
+		"%s must extract the hidden csrf input value from GET /login", vmCheckPamPath)
+
+	for _, line := range vmRawCodeLines(script) {
+		require.NotContainsf(t, line, "--cookie",
+			"%s runs `%s`: there is no pre-login cookie to carry, because the session cookie is set only after authentication succeeds", vmCheckPamPath, line)
+	}
+
+	login := shellFunctionBody(t, vmCheckPamPath, script, "web_login")
+	for _, field := range []string{`--data-urlencode "csrf@$1"`, `--data-urlencode "username@$2"`, `--data-urlencode "password@$3"`} {
+		require.Containsf(t, login, field,
+			"%s: the login POST must carry %s", vmCheckPamPath, field)
+	}
+
+	order := []string{
+		`login_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/username" "$WORK_DIR/admin-secret")"`,
+		`[ "$login_status" = "303" ] ||`,
+		`wrong_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/username" "$WORK_DIR/wrong-secret")"`,
+		`[ "$wrong_status" = "401" ] ||`,
+		`root_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/root-username" "$WORK_DIR/root-secret")"`,
+		`[ "$root_status" = "401" ] ||`,
+	}
+
+	previous := -1
+
+	for _, step := range order {
+		at := strings.Index(script, step)
+		require.GreaterOrEqualf(t, at, 0, "%s must run `%s`", vmCheckPamPath, step)
+		require.Greaterf(t, at, previous,
+			"%s must attempt the successful login first, then the wrong password, then root; `%s` is out of place", vmCheckPamPath, step)
+
+		previous = at
+	}
+
+	// Each status is compared exactly once, for equality with one code. An
+	// inequality test against a success code would be the "any non-success
+	// status" acceptance the spec forbids.
+	for _, status := range []string{"login_status", "wrong_status", "root_status"} {
+		require.Equalf(t, 1, strings.Count(script, `[ "$`+status+`" = "`),
+			"%s must compare $%s for equality with exactly one expected status", vmCheckPamPath, status)
+		require.NotContainsf(t, script, `"$`+status+`" != `,
+			"%s must not accept `$%s` merely being something other than a success code", vmCheckPamPath, status)
+	}
+
+	// A 429 must fail the test with a named assertion on both surfaces where
+	// the limiter could answer instead of PAM.
+	for _, status := range []string{"login_status", "wrong_status"} {
+		at := strings.Index(script, `[ "$`+status+`" = "`)
+		require.GreaterOrEqualf(t, at, 0, "%s must assert an exact status for $%s", vmCheckPamPath, status)
+		require.Containsf(t, script[at:min(at+900, len(script))], "429",
+			"%s: the assertion on $%s must name the 429 case as a failure rather than treating it as a pass", vmCheckPamPath, status)
+	}
+
+	// The wrong password is derived from the real one, so it cannot
+	// accidentally be the account's password.
+	require.Contains(t, script, `wrong_secret="$PH_ADMIN_PASSWORD-definitely-not-the-password"`,
+		"%s must derive the wrong password from the real one so it is certainly wrong", vmCheckPamPath)
+
+	// Root is tried with its VALID generated password: a locked or
+	// password-less root would be refused by PAM before Pilothouse saw it.
+	require.Contains(t, script, `FORM_VALUE="$PH_ROOT_PASSWORD"`,
+		"%s must attempt the root login with the valid generated root password", vmCheckPamPath)
+}
+
+// TestVMCheckPamBoundsBothJournalAssertionsWithCursors pins the two journal
+// assertions a status code cannot carry, each on the unit that actually
+// emitted the record, each bounded by a cursor captured immediately before the
+// request it is about, and each matched on the record's parsed JSON msg field
+// rather than on a substring of the line.
+func TestVMCheckPamBoundsBothJournalAssertionsWithCursors(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+
+	records := shellFunctionBody(t, vmCheckPamPath, script, "journal_records_since")
+	require.Contains(t, records, `journalctl --unit "$1" --after-cursor "$2"`,
+		"%s: every journal search must be bounded by the cursor captured for it", vmCheckPamPath)
+	require.Contains(t, records, "fromjson",
+		"%s: journal records must be parsed as the JSON the process emitted, so assertions match a field and not a substring", vmCheckPamPath)
+
+	// A POSIX sh pipeline reports only its last command's status, so reading
+	// the journal and parsing it must be two checked steps: `journalctl | jq
+	// >out || fail` would turn a failed read into an empty record set and let
+	// the negative assertion below pass vacuously.
+	require.NotContains(t, records, "journalctl --unit \"$1\" --after-cursor \"$2\" --no-pager --output json |",
+		"%s: the journal read must be checked on its own, not through a pipeline whose status is jq's", vmCheckPamPath)
+
+	// "Immediately before" is asserted literally: the cursor capture is the
+	// statement directly preceding the POST it bounds.
+	code := vmCodeLines(script)
+
+	for cursor, post := range map[string]string{
+		"login_cursor=$(journal_cursor)": "login_status=$(web_login ",
+		"root_cursor=$(journal_cursor)":  "root_status=$(web_login ",
+	} {
+		at := -1
+
+		for index, line := range code {
+			if line == cursor {
+				at = index
+
+				break
+			}
+		}
+
+		require.GreaterOrEqualf(t, at, 0, "%s must capture `%s`", vmCheckPamPath, cursor)
+		require.Lessf(t, at+1, len(code), "%s must post the login after capturing `%s`", vmCheckPamPath, cursor)
+		require.Truef(t, strings.HasPrefix(code[at+1], post),
+			"%s: `%s` must be captured immediately before the login POST it bounds, but the next statement is `%s`",
+			vmCheckPamPath, cursor, code[at+1])
+	}
+
+	// The negative assertion is on the WEB unit: refreshCapabilities logs from
+	// internal/web, so searching the broker's journal would find nothing no
+	// matter what happened, and the 303 alone proves nothing because the error
+	// is swallowed.
+	require.Contains(t, script, `REFRESH_CAPABILITIES_MESSAGE="refresh capabilities"`,
+		"%s must name the warning refreshCapabilities emits", vmCheckPamPath)
+	require.Contains(t, script, `journal_records_since "$WEB_UNIT" "$login_cursor"`,
+		"%s must search the WEB unit's journal for the refresh-capabilities warning", vmCheckPamPath)
+	require.Contains(t, script, `[.[] | select(.msg == \"$REFRESH_CAPABILITIES_MESSAGE\")] | length`,
+		"%s must match the parsed msg field for the refresh-capabilities record", vmCheckPamPath)
+	require.Contains(t, script, `[ "$refresh_hits" = "0" ] ||`,
+		"%s must count the matching records, so a jq that failed outright cannot look like `no such record`", vmCheckPamPath)
+	require.Contains(t, script, "sleep \"$JOURNAL_SETTLE_SECONDS\"",
+		"%s must let the journal settle before asserting a record is absent", vmCheckPamPath)
+
+	// The positive assertion is on the BROKER unit, and all three fields
+	// matter: the message proves Resolve ran (so PAM returned nil), user=root
+	// names the account, and the error text is unique to the UID-zero branch.
+	require.Contains(t, script, `ROOT_REJECTION_MESSAGE="authenticated account rejected"`,
+		"%s must name the broker's rejection record", vmCheckPamPath)
+	require.Contains(t, script, `ROOT_REJECTION_ERROR="direct root login is disabled"`,
+		"%s must name the error text unique to the UID-zero branch", vmCheckPamPath)
+	require.Contains(t, script, `journal_records_since "$BROKER_UNIT" "$root_cursor"`,
+		"%s must search the BROKER unit's journal for the root rejection", vmCheckPamPath)
+	require.Contains(t, script, `[.[] | select(.msg == \"$ROOT_REJECTION_MESSAGE\" and .user == \"root\" and ((.error // \"\") | contains(\"$ROOT_REJECTION_ERROR\")))] | length`,
+		"%s must match msg, user and error on the parsed record, not a substring of the line", vmCheckPamPath)
+	require.Contains(t, script, `[ -n "$root_record_found" ] ||`,
+		"%s must fail by name when the broker logged no such record", vmCheckPamPath)
+}
+
+// TestVMCheckPamProvesTheAdminGroupFunctionally pins the direct-route half:
+// the administrator's session identity is asserted to be admin over the
+// authenticated broker route, so the family's administrator group is proved by
+// what it does and not only by comparing two strings.
+func TestVMCheckPamProvesTheAdminGroupFunctionally(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+
+	require.Contains(t, script, "\nbroker_login\n",
+		"%s must call broker_login directly; a command substitution would discard the session variables it sets", vmCheckPamPath)
+	require.Contains(t, script, `[ "$BROKER_SESSION_ADMIN" = "true" ] ||`,
+		"%s must assert the administrator's session identity is admin", vmCheckPamPath)
+	require.Contains(t, script, `[ "$BROKER_SESSION_USERNAME" = "$PH_ADMIN_USER" ] ||`,
+		"%s must assert the session identity names the administrator account", vmCheckPamPath)
+	require.Contains(t, script, `CAPABILITY_QUERY_ID="`+vmCapabilityQueryID(t)+`"`,
+		"%s must use the capability query id internal/broker/api.go declares", vmCheckPamPath)
+	require.Contains(t, script, `broker_query "$CAPABILITY_QUERY_ID"`,
+		"%s must exercise the second half of the direct route with a real query", vmCheckPamPath)
+}
+
+// TestVMCheckPamRemovesTheRootPasswordLast pins the cleanup. Root's password
+// existed only so the refusal could be proved against a real password; both
+// commands succeed because the script runs as root, which is also why no step
+// in it assumes an SSH login as root — the guest has no such identity.
+func TestVMCheckPamRemovesTheRootPasswordLast(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckPamPath)
+	code := vmCodeLines(script)
+
+	removal := []string{"passwd -d root ||", "usermod -L root ||"}
+
+	for _, command := range removal {
+		at := strings.Index(script, command)
+		require.GreaterOrEqualf(t, at, 0, "%s must run `%s`", vmCheckPamPath, command)
+		require.Greaterf(t, at, strings.Index(script, `[ "$root_status" = "401" ] ||`),
+			"%s must remove the root password only after the root login has been asserted", vmCheckPamPath)
+	}
+
+	tail := strings.Join(code[max(0, len(code)-8):], "\n")
+	for _, command := range removal {
+		require.Containsf(t, tail, command,
+			"%s must remove the root password at the end of the script, not somewhere in the middle", vmCheckPamPath)
+	}
+
+	for _, line := range vmRawCodeLines(script) {
+		require.NotContainsf(t, line, "ssh ",
+			"%s runs `%s`: it assumes no SSH login of any kind — it runs inside the guest, as root, under `sudo -n sh`", vmCheckPamPath, line)
 	}
 }

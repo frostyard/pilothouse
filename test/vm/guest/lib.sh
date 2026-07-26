@@ -37,6 +37,20 @@ GUEST_CREDENTIALS_FILE="${GUEST_CREDENTIALS_FILE:-/root/.pilothouse-vm-creds}"
 BROKER_SOCKET="${BROKER_SOCKET:-/run/pilothouse/broker.sock}"
 WEB_BASE_URL="${WEB_BASE_URL:-http://127.0.0.1:8888}"
 
+# BROKER_REMOTE is the `remote` the harness sends with a DIRECT broker login,
+# and it is deliberately not 127.0.0.1. The broker keys its login lockout on
+# lower(username) + "\0" + remote, and the web console sends the request's own
+# peer host, which on loopback is 127.0.0.1. Reusing that value here would put
+# the harness's direct logins in the same lockout bucket as the web flows, so a
+# wrong-password check on one surface could answer 429 on the other before
+# Authenticate was ever called. A distinct token keeps the two buckets apart.
+BROKER_REMOTE="${BROKER_REMOTE:-vm-boot-harness}"
+
+# BROKER_REQUEST_TIMEOUT_SECONDS bounds every direct broker request. A socket
+# that accepts a connection and then never answers must fail by name rather
+# than hang the run until the job's own limit.
+BROKER_REQUEST_TIMEOUT_SECONDS="${BROKER_REQUEST_TIMEOUT_SECONDS:-30}"
+
 # fail is the ONLY failure path in the guest. It names the assertion that
 # failed and exits non-zero, which under `set -e` aborts the calling script at
 # the first failure.
@@ -116,4 +130,116 @@ web_curl() {
     shift
 
     curl --silent --show-error "$@" "${WEB_BASE_URL}${web_path}"
+}
+
+# broker_login authenticates over the broker's Unix socket and is the first
+# half of the harness's reusable AUTHENTICATED direct route: POST /v1/login
+# with a JSON body of username, password and remote, then POST /v1/queries/{id}
+# with the returned token (broker_query, below). The socket is mode 0660 owned
+# root:pilothouse, so the caller must be privileged — it is, because the whole
+# script runs as root under `sudo -n sh`, which require_root proves.
+#
+# The credentials are read from BROKER_LOGIN_USERNAME and
+# BROKER_LOGIN_PASSWORD, which the caller sets from the loaded credentials.
+# They are never command-line arguments: the request body is built by jq from
+# the environment of that one jq process and handed to curl as a file.
+#
+# On success it sets BROKER_SESSION_TOKEN, BROKER_SESSION_USERNAME and
+# BROKER_SESSION_ADMIN for the caller, so it must be called directly and never
+# through a command substitution, which would discard all three.
+broker_login() {
+    [ -n "${BROKER_LOGIN_USERNAME-}" ] ||
+        fail "broker_login needs BROKER_LOGIN_USERNAME set to the account to authenticate as"
+    [ -n "${BROKER_LOGIN_PASSWORD-}" ] ||
+        fail "broker_login needs BROKER_LOGIN_PASSWORD set to that account's credential"
+
+    broker_login_request="$(mktemp)"
+    broker_login_body="$(mktemp)"
+    chmod 0600 "$broker_login_request" "$broker_login_body"
+
+    BROKER_LOGIN_USERNAME="$BROKER_LOGIN_USERNAME" \
+        BROKER_LOGIN_PASSWORD="$BROKER_LOGIN_PASSWORD" \
+        BROKER_REMOTE="$BROKER_REMOTE" \
+        jq -nc '{username: env.BROKER_LOGIN_USERNAME, password: env.BROKER_LOGIN_PASSWORD, remote: env.BROKER_REMOTE}' \
+        >"$broker_login_request" ||
+        fail "could not build the direct broker login request for $BROKER_LOGIN_USERNAME"
+
+    broker_login_status="$(
+        broker_curl /v1/login \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data-binary @"$broker_login_request" \
+            --max-time "$BROKER_REQUEST_TIMEOUT_SECONDS" \
+            --output "$broker_login_body" \
+            --write-out '%{http_code}'
+    )" || fail "POST /v1/login over $BROKER_SOCKET did not complete within ${BROKER_REQUEST_TIMEOUT_SECONDS}s"
+
+    rm -f "$broker_login_request"
+
+    [ "$broker_login_status" = "200" ] ||
+        fail "POST /v1/login for $BROKER_LOGIN_USERNAME returned HTTP $broker_login_status, expected exactly 200; a 429 is the per-username+remote lockout answering before Authenticate was called, which is a failure of this check and never a pass"
+
+    BROKER_SESSION_TOKEN="$(jq -er '.token' <"$broker_login_body")" ||
+        fail "the broker login response for $BROKER_LOGIN_USERNAME carries no token"
+    # shellcheck disable=SC2034 # read by the calling guest script, not here
+    BROKER_SESSION_USERNAME="$(jq -er '.session.identity.username' <"$broker_login_body")" ||
+        fail "the broker login response for $BROKER_LOGIN_USERNAME carries no session.identity.username"
+    # shellcheck disable=SC2034 # read by the calling guest script, not here
+    BROKER_SESSION_ADMIN="$(jq -er '.session.identity.admin | tostring' <"$broker_login_body")" ||
+        fail "the broker login response for $BROKER_LOGIN_USERNAME carries no session.identity.admin"
+
+    rm -f "$broker_login_body"
+}
+
+# broker_query <query-id> [parameters-json] is the second half of the direct
+# route: POST /v1/queries/{id} carrying the token broker_login returned, with a
+# JSON parameters object. It prints the query's `result` on standard output and
+# fails by name on any status other than 200.
+#
+# The bearer token goes to curl in a header FILE rather than as an argument, so
+# no session credential lands in the guest's process table.
+broker_query() {
+    [ "$#" -ge 1 ] || fail "usage: broker_query <query-id> [parameters-json]"
+    [ -n "${BROKER_SESSION_TOKEN-}" ] ||
+        fail "broker_query needs a session: call broker_login first"
+
+    broker_query_id="$1"
+    broker_query_parameters="${2:-}"
+    [ -n "$broker_query_parameters" ] || broker_query_parameters='{}'
+
+    broker_query_request="$(mktemp)"
+    broker_query_header="$(mktemp)"
+    broker_query_body="$(mktemp)"
+    chmod 0600 "$broker_query_request" "$broker_query_header" "$broker_query_body"
+
+    BROKER_QUERY_PARAMETERS="$broker_query_parameters" \
+        jq -nc '{parameters: (env.BROKER_QUERY_PARAMETERS | fromjson)}' \
+        >"$broker_query_request" ||
+        fail "could not build the $broker_query_id request from parameters $broker_query_parameters"
+
+    BROKER_SESSION_TOKEN="$BROKER_SESSION_TOKEN" \
+        jq -nj '"Authorization: Bearer " + env.BROKER_SESSION_TOKEN' \
+        >"$broker_query_header" ||
+        fail "could not build the authorization header for $broker_query_id"
+
+    broker_query_status="$(
+        broker_curl "/v1/queries/$broker_query_id" \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header @"$broker_query_header" \
+            --data-binary @"$broker_query_request" \
+            --max-time "$BROKER_REQUEST_TIMEOUT_SECONDS" \
+            --output "$broker_query_body" \
+            --write-out '%{http_code}'
+    )" || fail "POST /v1/queries/$broker_query_id over $BROKER_SOCKET did not complete within ${BROKER_REQUEST_TIMEOUT_SECONDS}s"
+
+    rm -f "$broker_query_request" "$broker_query_header"
+
+    [ "$broker_query_status" = "200" ] ||
+        fail "POST /v1/queries/$broker_query_id returned HTTP $broker_query_status, expected exactly 200 for an authenticated caller"
+
+    jq -e '.result' <"$broker_query_body" ||
+        fail "the $broker_query_id response carries no result field"
+
+    rm -f "$broker_query_body"
 }

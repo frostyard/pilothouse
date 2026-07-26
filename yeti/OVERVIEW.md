@@ -105,12 +105,12 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       plus the serial console channel), ssh.sh (the guest's SSH
                       lifecycle) and diagnostics.sh (the failure-time discriminator).
                       guest/ is the single directory holding every guest-side script:
-                      the sourced, non-executable lib.sh plus install-package.sh
-                      and check-activation.sh;
+                      the sourced, non-executable lib.sh plus install-package.sh,
+                      check-activation.sh and check-pam.sh;
                       every executed one is committed 100755 and invoked as
                       `sudo -n sh ~/vm-boot/guest/<name>.sh`. At this commit a run
-                      ends once both units are active and the broker answers an
-                      unauthenticated query on its socket with 401, and no workflow
+                      ends once PAM has authenticated a real non-root administrator
+                      end to end through the running stack, and no workflow
                       job invokes any of it; packaging/vm_harness_test.go guards it structurally
                       without executing it (see the three "Booted-VM harness"
                       sections below)
@@ -2254,9 +2254,10 @@ since.
   `.github/workflows/packaging.yml`'s `install` job in CI. **Layer B** — VM
   installs and booted-host verification, anything needing systemd as PID 1 or
   an enforcing SELinux policy — is **#67**'s; its harness is under construction
-  in `test/vm` (it boots a guest, installs the package, starts both units and
+  in `test/vm` (it boots a guest, installs the package, starts both units,
   asserts the systemd-created directories, the broker socket's ownership and
-  mode, and that the broker is live) and no CI job runs it; see M1 above
+  mode, that the broker is live, and that PAM authenticates a real non-root
+  administrator through the running stack) and no CI job runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
   `Entry.Group` therefore drive no assertion.
 
@@ -2571,14 +2572,15 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 ### Booted-VM harness: pinned image acquisition (`test/vm/images.env`, `test/vm/lib/images.sh`)
 
 Layer B (#67) — installing the artifacts on a **booted** host with real
-systemd — is under construction. **At this commit the harness boots a guest and
-installs the package, but asserts nothing about a running system**, and no
-workflow job invokes any of it: what exists is image acquisition (this section),
-the boot mechanism ("Booted-VM harness: credentials, seed, boot and SSH") and
-the orchestrator that drives them ("Booted-VM harness: the orchestrator, guest
-staging and diagnostics"). Everything Layer B is meant to *prove* — activation,
-the systemd-created directories, the live broker socket, PAM, the journal
-read-back and the reboot posture — still lives in the issue, not in the tree.
+systemd — is under construction. **At this commit the harness boots a guest,
+installs the package, activates both units and authenticates a real non-root
+administrator through PAM**, and no workflow job invokes any of it: what exists
+is image acquisition (this section), the boot mechanism ("Booted-VM harness:
+credentials, seed, boot and SSH") and the orchestrator, the guest scripts and
+the diagnostics that drive them ("Booted-VM harness: the orchestrator, guest
+staging and diagnostics"). What Layer B is still meant to *prove* — the
+journal read-back through the broker and the reboot posture — lives in the
+issue, not yet in the tree.
 
 This section covers the pinning table and the host-side fetcher:
 
@@ -2841,9 +2843,80 @@ request, while a refused connection, a stale socket file, a hang, a `200` or
 any other status fails. The authenticated capability list needs a session token
 and is not attempted here.
 
-**At this commit the harness run ends there.** The PAM flows, the journal
-read-back and the reboot posture are not implemented yet, the guest's SELinux
-audit posture is #80's, and no workflow invokes any of this.
+`guest/check-pam.sh` runs next and is the reason this tier exists: no container
+can run `pam_authenticate` against a live daemon. It **consumes** the
+credentials cloud-init delivered — it sources `/root/.pilothouse-vm-creds` and
+generates nothing; `openssl`, `/dev/urandom` and `pwgen` appear nowhere in it —
+and starts by reading the `--admin-group` token out of the **installed**
+`pilothoused.service` (through `systemctl cat`, so it is the file the package
+put on *this* guest), asserting it is `sudo` on Debian and `wheel` on Fedora and
+that the cloud-init-created administrator is a member of it. That single token
+is the only difference between the two packages' broker units.
+
+Then three logins against the web console on `127.0.0.1:8888`, in this order,
+each asserting **one exact status**:
+
+1. `GET /login` for the hidden `csrf` input value — `POST /login` rejects a
+   missing `csrf` field with `403`, so a bare POST would fail for the wrong
+   reason — then the form POST with `csrf`, username and password, expecting
+   exactly **`303`**. There is no pre-login cookie to carry: the session cookie
+   is set only after authentication succeeds.
+2. The same administrator with a wrong password (derived from the real one so
+   it is certainly wrong), expecting exactly **`401`**.
+3. `root`, with its **valid** cloud-init-set password, expecting exactly
+   **`401`**. A locked or password-less root would be refused by PAM before
+   Pilothouse ever saw it, which would pass while proving nothing.
+
+**A `429` is a failure of this check, never a pass.** One failed attempt arms a
+per-`username`+`remote` lockout that answers `429` *before* `Authenticate` is
+called, so the success comes first (it also clears the entry) and every
+assertion names one expected status rather than accepting "any non-success".
+
+Two of the claims cannot be carried by a status code at all, so each is proved
+from the journal, bounded by a cursor captured **immediately before** the
+request it is about, and matched on the record's **parsed JSON `msg` field**
+rather than on a substring of the line:
+
+- After the successful login, **no** record past that cursor in
+  `journalctl -u pilothouse.service` may have `msg == "refresh capabilities"`.
+  The web process runs the broker's capability query on the administrator's
+  behalf right after login, but `refreshCapabilities` swallows its error and
+  logs that warning, so the `303` alone proves nothing about the query. The
+  record comes from `internal/web`, so this is the **web** unit's journal;
+  searching the broker's would find nothing whatever happened.
+- After the root attempt, a record past its cursor in
+  `journalctl -u pilothoused.service` must have
+  `msg == "authenticated account rejected"`, `user == "root"` and an `error`
+  containing `direct root login is disabled`. Both PAM stacks run an *account*
+  phase whose rejection produces the identical `401`, so the status cannot tell
+  the UID-zero refusal apart from it; that message is emitted only on the
+  `Resolve` path — reached only after `Authenticate` returned nil — and that
+  error text is unique to the UID-zero branch. This is the **broker's** journal,
+  the opposite unit from the check above.
+
+The chunk also adds the reusable **authenticated direct-socket helper** in
+`guest/lib.sh`: `broker_login` posts `/v1/login` with a JSON `username`,
+`password` and `remote`, then `broker_query` posts `/v1/queries/{id}` with the
+returned bearer token. Its `remote` is `vm-boot-harness`, deliberately **not**
+the web process's `127.0.0.1`: the broker keys its lockout on
+`lower(username) + NUL + remote`, so a shared value would let the wrong-password
+attempt above throttle a direct login of the same account and turn a status
+assertion into a statement about the limiter. The `0660 root:pilothouse` socket
+needs privilege, and that privilege comes from the whole script running as root
+under `sudo -n sh` (which `require_root` proves) — not from an inner `sudo` per
+request. `check-pam.sh` uses the helper once, to assert the administrator's
+`session.identity.admin` is `true`, which proves the family's administrator
+group **functionally** rather than by string comparison, and then runs the
+capability query as an authenticated caller. Credentials reach `curl` through
+files (`--data-urlencode name@file`, `--header @file`, `--data-binary @file`)
+built by `jq` from the environment, so no credential and no session token lands
+in the guest's process table. Finally the generated root password is removed
+(`passwd -d root`, `usermod -L root`), which succeeds because the script runs as
+root; nothing in it assumes an SSH login as root, which the guest does not have.
+
+**At this commit the harness run ends there.** The journal read-back and the
+reboot posture are not implemented yet, the guest's SELinux audit posture is
+#80's, and no workflow invokes any of this.
 
 **`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at
 the moment of failure**, not on whether it ever did. `install_failure_diagnostics`
@@ -2868,8 +2941,13 @@ evidence, so it is reported by name (`not created: the run failed before
 start_vm launched qemu`) instead of passed over. `stop_vm` is already a no-op
 when `QEMU_PID` is unset, so the same early-failure path unwinds cleanly.
 
-`packaging/vm_harness_test.go` grew the matching guards, still executing nothing
-but `shellcheck` (`--shell=bash` for the orchestrator and the host libraries,
+`packaging/vm_harness_test.go` grew the matching guards — including, for the PAM
+check, the login order and the one exact status per attempt, the cursor captured
+as the statement *immediately* before each POST it bounds, the parsed-field
+journal matches on the unit that actually emitted the record, the absence of any
+credential generator, and the direct route's `remote` differing from the web
+process's `127.0.0.1` — still executing nothing but `shellcheck` (`--shell=bash`
+for the orchestrator and the host libraries,
 `--shell=sh` for the guest files). They discover the guest scripts **on disk**
 rather than from a hand-kept list, so a script added later cannot escape the
 mode, dialect, `require_root` and invocation-form checks; they enumerate every

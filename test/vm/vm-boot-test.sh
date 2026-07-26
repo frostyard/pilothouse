@@ -30,7 +30,11 @@
 #  10. run the activation checks as
 #      `sudo -n sh ~/vm-boot/guest/check-activation.sh`, which enables and
 #      starts both units, asserts the systemd-created directories and the
-#      broker socket, and proves the broker is live.
+#      broker socket, and proves the broker is live;
+#  11. run the PAM checks as `sudo -n sh ~/vm-boot/guest/check-pam.sh`, which
+#      proves the installed unit's administrator group, authenticates a real
+#      non-root administrator end to end and proves both negatives from the
+#      journal.
 #
 # The harness has exactly ONE SSH identity in the guest: the administrator
 # account cloud-init created. That account cannot write /root, cannot install
@@ -39,9 +43,9 @@
 # guest-bound destination is inside ~/vm-boot, and every guest script runs as
 # `sudo -n sh <staged path>`.
 #
-# At this commit the run ends once both units are active and the broker is
-# answering on its socket: the PAM flows, the journal read-back and the reboot
-# posture all land in later commits.
+# At this commit the run ends once PAM has authenticated a real non-root
+# administrator end to end: the journal read-back and the reboot posture land
+# in later commits.
 #
 # Every tilde path in this file is deliberately quoted: it is transmitted
 # literally and expanded by the GUEST's shell, because ~/vm-boot is the
@@ -274,7 +278,10 @@ main() {
     # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
     guest_run sudo -n sh '~/vm-boot/guest/check-activation.sh'
 
-    orchestrator_log "$FAMILY guest booted, package installed, both units active and the broker answering on its socket"
+    # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+    guest_run sudo -n sh '~/vm-boot/guest/check-pam.sh'
+
+    orchestrator_log "$FAMILY guest booted, package installed, both units active, the broker answering on its socket and PAM authenticating a real non-root administrator"
 }
 
 main "$@"
