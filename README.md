@@ -48,8 +48,12 @@ native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
 CI. The single exception is `.github/workflows/packaging.yml`, the packaging
 gate, which cannot run locally because it needs the `GORELEASER_KEY` secret
-and the goreleaser Pro distribution; `make verify-packages` is the local tool
-for the package contracts it checks, once artifacts exist in `dist/`.
+and the goreleaser Pro distribution. That gate does more than read the
+artifacts: it also installs them on pinned Debian and Fedora containers, so
+it needs Docker and network access on top of the credentials, and it stays
+outside `make ci` and `make docker-ci` by construction. `make verify-packages`
+and `make verify-package-install` are the local tools for the contracts it
+checks, once artifacts exist in `dist/`.
 
 Go 1.26 or newer is required.
 
@@ -110,7 +114,9 @@ The target is deliberately not part of `make ci` or `make docker-ci`: those
 gates must stay green on a checkout with no built artifacts, so that local
 green still means the credential-free CI gates will be green. The one CI gate
 they do not mirror is `.github/workflows/packaging.yml`, which builds the
-artifacts and runs this same verification in CI; it cannot run locally because
+artifacts, runs this same verification in CI, and then installs those same
+artifacts on pinned Debian and Fedora containers with
+`make verify-package-install`. It cannot run locally because
 it needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution.
 
 `make package` is the local producer: it runs `goreleaser release --snapshot
@@ -125,6 +131,56 @@ verify-packages` is the thing to run against them.
 ```bash
 make package
 ```
+
+### Verify package installation
+
+`make verify-package-install` is the install-side sibling of `make
+verify-packages`: instead of reading bytes out of an artifact, it installs the
+artifact inside a real distro userland and asserts what the package manager and
+the postinstall scriptlet actually produced. It runs
+`packaging/verify-install.sh` inside a container image, as root, with only
+`packaging/` and the artifact directory bind-mounted read-only.
+
+Two variables drive it:
+
+- `INSTALL_IMAGE` — the container image reference. There is no default; an
+  unset value fails with a message naming the two digest-pinned images this
+  validation targets,
+  `debian:12@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc`
+  and
+  `fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814`.
+- `ARTIFACT_DIR` — the directory of built artifacts, defaulting to `dist`.
+
+```bash
+make verify-package-install \
+  INSTALL_IMAGE=debian:12@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc
+```
+
+The script performs eight checks, each of them something the static payload
+contract cannot see: that the hand-written per-format `dependencies` lists
+resolve against the distro's real repositories; that the `pilothouse` user and
+group exist afterward and match the installed sysusers declaration; that the
+on-disk owner, group and mode of the configuration directories and env files
+are right on the installed filesystem rather than in package metadata; that
+every stack and module the installed PAM policy names exists on that distro;
+that the distro's own `systemd-analyze verify` accepts both installed units;
+that the cgo-linked binary's dynamic dependencies all resolve; that reinstalling
+the same artifact succeeds with the account and ownership assertions still
+holding; and that removal leaves the per-format state each manager promises
+(conffiles surviving `dpkg -r` and gone after `dpkg -P`, no `.rpmsave` after
+`rpm -e`, the account surviving both).
+
+Like `make verify-packages`, it is deliberately outside `make ci` and `make
+docker-ci`, and for a stronger version of the same reason: it needs artifacts
+that a stock checkout does not have, plus Docker and network access — check 1's
+whole point is dependency resolution against the distro's real repositories.
+
+CI runs this exact target. `.github/workflows/packaging.yml`'s `install` job
+depends on the build-and-verify job, downloads the artifacts it uploaded, and
+runs `make verify-package-install` once per image across a two-entry matrix —
+the pinned Debian image with the `.deb`, the pinned Fedora image with the
+`.rpm`. That is why the packaging gate is not a payload-only check, and why it
+stays outside `make ci` / `make docker-ci`.
 
 ### Create a release
 
