@@ -2655,10 +2655,33 @@ future work and never as an instruction; the message names no `make` target that
 exists at this commit, so a reader is never pointed at something real that would
 not help them.
 
-*Its tests* (`cmd/verify-packages/main_test.go`) all drive `run` itself, never a
-reporting or dispatch helper, and all of them execute on **every** host with no
-packaging tool and no skip. The artifacts they stage are arbitrary bytes, so
-extraction is expected to fail, and the dispatch proof reads the
+*Its tests* live in two files, split by what they need from the host, and every
+test in both drives `run` itself, never a reporting or dispatch helper.
+`main_test.go` holds the cells that execute on **every** host with no packaging
+tool and no skip: discovery over a mixed directory, dispatch by the
+`packaging/extract: <tool>: ` error prefix, the unsupported extension, the
+missing artifact path, the empty-`dist/` message and the injected clean-path
+table. `integration_test.go` holds the cells that need a real synthetic artifact
+— an explicit `.deb`, an explicit `.rpm`, and one discovered directory holding
+one of each beside a decoy — and those are **deep-gated**: they build their
+fixtures with `internal/packagingtest`, which resolves every tool through
+`packagingtest.LookTool`, so on a host without `rpmbuild`/`rpm`/`rpm2cpio`/`cpio`
+the `.rpm` and mixed cells skip naming the missing tool, while `make docker-ci`
+sets `PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` and the same lookup **fails** there
+instead. A green `docker-ci` is therefore proof those three cells ran. All of
+them go through `run(ctx, defaultDeps(), …)` — real artifact in, `extract.Deb` or
+`extract.RPM` out, `packaging.Verify` deciding — and none injects a backend or a
+verification result, which is what keeps the hand-built `deps` below bounded to
+the outcomes a real artifact cannot produce. A placeholder fixture cannot satisfy
+the artifact contract, so each block carries real `Verify` findings; the
+assertions are structural — the block names its file, carries its own format
+label, lists at least one finding, shows no extraction-failure text, and (for the
+`.rpm`) contains no `dpkg-deb` text — plus membership of every printed `Code` in
+a hand-written literal of the nine codes, so an invented code fails. No test
+there asserts the wording of a finding.
+
+The artifacts `main_test.go` stages are arbitrary bytes, so extraction is
+expected to fail there, and its dispatch proof reads the
 `packaging/extract: <tool>: ` prefix rather than a bare tool name: the deb
 block must contain `packaging/extract: dpkg-deb: ` and not
 `packaging/extract: rpm`, and the rpm block the converse. That distinction is
