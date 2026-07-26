@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // verifyInstallPath is the install-validation script this file guards. It is
@@ -324,5 +326,225 @@ func TestVerifyInstallOwnerModeExpectationsMatchGoreleaserConfig(t *testing.T) {
 					verifyInstallPath, script[dst], dst, goreleaserConfigPath, config[dst], format)
 			}
 		})
+	}
+}
+
+// installedPAMPolicy is the installed PAM policy check 4 must derive both of
+// its expectation lists from, instead of hardcoding a per-distro table.
+const installedPAMPolicy = "/etc/pam.d/pilothouse"
+
+// packagedUnitPrefix is the directory both nfpm overrides install unit files
+// into. The unit drift guard compares the script's expectations against
+// exactly the live destinations under it.
+const packagedUnitPrefix = "/usr/lib/systemd/system"
+
+// perDistroPAMLiterals are the stack names, module names and multiarch module
+// directory a per-distro table would have to spell out. Check 4 derives all of
+// them from the installed policy at run time, so none may appear in the script.
+var perDistroPAMLiterals = []string{
+	"common-auth",
+	"common-account",
+	"password-auth",
+	"pam_nologin.so",
+	"x86_64-linux-gnu/security",
+	"aarch64-linux-gnu/security",
+}
+
+// expectUnitLine matches one `expect_unit <path>` call with a literal
+// argument. As with expectOwnerModeLine the anchors reject both the function's
+// own definition and a call with extra operands.
+var expectUnitLine = regexp.MustCompile(`^expect_unit (/\S+)$`)
+
+// expectLinkedLine matches one `expect_linked <path>` call with a literal
+// argument.
+var expectLinkedLine = regexp.MustCompile(`^expect_linked (/\S+)$`)
+
+// scriptPaths collects the literal path argument of every line of the script
+// matching pattern, rejecting a duplicate expectation.
+func scriptPaths(t *testing.T, pattern *regexp.Regexp) []string {
+	t.Helper()
+
+	var paths []string
+
+	for _, line := range effectiveLines(readVerifyInstall(t)) {
+		match := pattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		require.NotContainsf(t, paths, match[1], "%s expects %s twice", verifyInstallPath, match[1])
+		paths = append(paths, match[1])
+	}
+
+	sort.Strings(paths)
+
+	return paths
+}
+
+// TestVerifyInstallPAMCheckReadsTheInstalledPolicy is check 4's structural
+// guard. The check must name the installed policy and must contain no literal
+// stack name, module name or multiarch module directory: every expectation is
+// parsed out of whichever policy the format's override actually shipped.
+func TestVerifyInstallPAMCheckReadsTheInstalledPolicy(t *testing.T) {
+	script := readVerifyInstall(t)
+
+	require.Containsf(t, script, installedPAMPolicy,
+		"%s must read the PAM expectations from the installed %s", verifyInstallPath, installedPAMPolicy)
+
+	for _, source := range []string{"packaging/pilothouse.pam", "packaging/rpm/pilothouse.pam"} {
+		require.NotContainsf(t, script, source,
+			"%s must parse the INSTALLED policy, not the repository source %s", verifyInstallPath, source)
+	}
+
+	for _, literal := range perDistroPAMLiterals {
+		require.NotContainsf(t, script, literal,
+			"%s must not hardcode the per-distro PAM expectation %q: check 4 derives it from %s at run time",
+			verifyInstallPath, literal, installedPAMPolicy)
+	}
+
+	joined := strings.Join(effectiveLines(script), "\n")
+
+	for _, want := range []string{
+		"check_pam() {",
+		"pam_stacks() {",
+		"pam_modules() {",
+		"pam_module_dirs() {",
+		`[ -f "/etc/pam.d/${stack}" ]`,
+		`[ -f "${dir}/${module}" ]`,
+	} {
+		require.Containsf(t, joined, want, "%s must contain %q", verifyInstallPath, want)
+	}
+}
+
+// TestVerifyInstallPAMCheckRejectsAnEmptyParse asserts the explicit emptiness
+// guard: a policy that yields no stacks or no modules is a failure, so a
+// mis-parse cannot pass vacuously by asserting nothing at all. The guard is
+// asserted by parsing the script text; nothing here executes it.
+func TestVerifyInstallPAMCheckRejectsAnEmptyParse(t *testing.T) {
+	joined := strings.Join(effectiveLines(readVerifyInstall(t)), "\n")
+
+	for _, list := range []string{"stacks", "modules"} {
+		require.Containsf(t, joined, `[ -n "${`+list+`}" ] ||`,
+			"%s must fail when the installed policy yields no %s", verifyInstallPath, list)
+	}
+
+	require.Contains(t, joined, `[ -n "${module_dirs}" ] ||`,
+		"%s must fail when no PAM module directory is found", verifyInstallPath)
+}
+
+// TestVerifyInstallVerifiesUnitsWithSystemdAnalyze is check 5's structural
+// guard: the units are validated with the distro's own offline validator, and
+// never by driving a service manager — which a container has none of.
+func TestVerifyInstallVerifiesUnitsWithSystemdAnalyze(t *testing.T) {
+	joined := strings.Join(effectiveLines(readVerifyInstall(t)), "\n")
+
+	require.Contains(t, joined, `systemd-analyze verify "$1"`,
+		"%s must validate the installed units with systemd-analyze verify", verifyInstallPath)
+
+	require.NotRegexpf(t, regexp.MustCompile(`(^|[^-a-z])systemctl`), joined,
+		"%s must never use systemctl: systemd-analyze verify is offline, systemctl needs PID 1", verifyInstallPath)
+}
+
+// TestVerifyInstallUnitExpectationsMatchGoreleaserConfig is the bidirectional
+// drift guard for check 5: the set of paths the script verifies equals the set
+// of destinations under /usr/lib/systemd/system the live ../.goreleaser.yaml
+// packages, in both directions and for both overrides. A newly packaged unit
+// with no expectation line fails it, and a stray expectation line does too.
+func TestVerifyInstallUnitExpectationsMatchGoreleaserConfig(t *testing.T) {
+	script := scriptPaths(t, expectUnitLine)
+	require.NotEmpty(t, script, "%s must declare expect_unit expectations", verifyInstallPath)
+
+	entry := loadNFPMEntry(t)
+
+	for _, format := range []string{"deb", "rpm"} {
+		t.Run(format, func(t *testing.T) {
+			var packaged []string
+
+			for _, content := range loadOverride(t, entry, format).Contents {
+				if content.Dst == packagedUnitPrefix || strings.HasPrefix(content.Dst, packagedUnitPrefix+"/") {
+					require.NotContainsf(t, packaged, content.Dst,
+						"%s packages %s twice in the %s override", goreleaserConfigPath, content.Dst, format)
+					packaged = append(packaged, content.Dst)
+				}
+			}
+
+			sort.Strings(packaged)
+
+			require.Equalf(t, packaged, script,
+				"the units %s verifies must be exactly the %s destinations %s packages under %s",
+				verifyInstallPath, format, goreleaserConfigPath, packagedUnitPrefix)
+		})
+	}
+}
+
+// The types below model only what the linkage guard needs from
+// .goreleaser.yaml's builds section: each build's binary name and its env
+// block. drift_test.go's buildTarget decodes `binary` alone and no existing
+// test file may be modified, so this guard declares its own local types with
+// non-colliding names.
+
+type cgoBuildTarget struct {
+	Binary string   `yaml:"binary"`
+	Env    []string `yaml:"env"`
+}
+
+type cgoBuildsConfig struct {
+	Builds []cgoBuildTarget `yaml:"builds"`
+}
+
+// binaryDestinationsByCGO parses the live config and returns the /usr/bin
+// destinations of the builds that enable cgo and of those that disable it.
+func binaryDestinationsByCGO(t *testing.T) (enabled, disabled []string) {
+	t.Helper()
+
+	raw, err := os.ReadFile(goreleaserConfigPath)
+	require.NoErrorf(t, err, "read %s", goreleaserConfigPath)
+
+	var cfg cgoBuildsConfig
+	require.NoErrorf(t, yaml.Unmarshal(raw, &cfg), "parse %s", goreleaserConfigPath)
+	require.NotEmptyf(t, cfg.Builds, "%s must declare builds", goreleaserConfigPath)
+
+	for _, build := range cfg.Builds {
+		require.NotEmpty(t, build.Binary, "every build must name a binary")
+
+		dest := usrBinDir + "/" + build.Binary
+
+		switch {
+		case slices.Contains(build.Env, "CGO_ENABLED=1"):
+			enabled = append(enabled, dest)
+		case slices.Contains(build.Env, "CGO_ENABLED=0"):
+			disabled = append(disabled, dest)
+		default:
+			t.Fatalf("build %q declares neither CGO_ENABLED=1 nor CGO_ENABLED=0; %s cannot classify it", build.Binary, verifyInstallPath)
+		}
+	}
+
+	sort.Strings(enabled)
+	sort.Strings(disabled)
+
+	return enabled, disabled
+}
+
+// TestVerifyInstallLinkedBinariesMatchBuilds is the bidirectional drift guard
+// for check 6. The set of paths the script runs ldd against must equal the set
+// of /usr/bin destinations of the live config's cgo-enabled builds — today
+// exactly /usr/bin/pilothoused — so flipping the other binary to cgo forces
+// its addition here. The converse fact is asserted too: no build that disables
+// cgo may appear, because ldd exits non-zero on a static binary and requiring
+// it to succeed would fail the gate for a reason unrelated to the dependency
+// lists.
+func TestVerifyInstallLinkedBinariesMatchBuilds(t *testing.T) {
+	script := scriptPaths(t, expectLinkedLine)
+	enabled, disabled := binaryDestinationsByCGO(t)
+
+	require.NotEmptyf(t, enabled, "%s must declare at least one cgo-enabled build", goreleaserConfigPath)
+	require.Equalf(t, enabled, script,
+		"the binaries %s runs ldd against must be exactly the %s destinations of the CGO_ENABLED=1 builds in %s",
+		verifyInstallPath, usrBinDir, goreleaserConfigPath)
+
+	for _, static := range disabled {
+		require.NotContainsf(t, script, static,
+			"%s must not run ldd against %s: it is built with CGO_ENABLED=0, so ldd exits non-zero for it",
+			verifyInstallPath, static)
 	}
 }

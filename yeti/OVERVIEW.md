@@ -2264,7 +2264,7 @@ exactly one amd64 artifact of that format (`*_amd64.deb` / `*.x86_64.rpm`) must
 be present — zero or several is a failure naming what was found. arm64 install
 validation is out of scope.
 
-**What it checks at this commit** — checks 1 through 3 only:
+**What it checks at this commit** — checks 1 through 6 only:
 
 1. **Install through the distro package manager.** `apt-get update` then
    `apt-get install -y <artifact>` for deb, `dnf install -y <artifact>` for rpm.
@@ -2283,14 +2283,54 @@ validation is out of scope.
    metadata, for `/etc/pilothouse` (`root:pilothouse 0750`),
    `/etc/pilothouse/storage/credentials` (`root:root 0700`), and both env files
    (`root:pilothouse 0640`).
+4. **`check_pam()`** — every stack and every module the **installed**
+   `/etc/pam.d/pilothouse` names exists on that distro. Both lists are parsed
+   out of the installed policy at run time: the stacks are the operands of
+   `@include` lines plus the files named by an `include`/`substack` control
+   value, and the modules are every `pam_*.so` token (directory prefix
+   stripped). Each stack must exist as `/etc/pam.d/<name>`, and each module
+   must exist in one of the candidate module directories — `/lib/security`,
+   `/lib64/security`, `/usr/lib/security`, `/usr/lib64/security` and
+   `/usr/lib/*-linux-gnu/security` — which are **searched**, not selected by
+   distro family. A policy that yields zero stacks or zero modules is an
+   explicit failure, so a mis-parse cannot pass vacuously.
+5. **`expect_unit()`** — `systemd-analyze verify` is run against both
+   **installed** unit paths, `/usr/lib/systemd/system/pilothouse.service` and
+   `/usr/lib/systemd/system/pilothoused.service`; a non-zero exit is a failure.
+   `packaging/units_test.go` is the precedent for the invocation.
+6. **`expect_linked()`** — `ldd /usr/bin/pilothoused` must succeed and no line
+   of its output may contain `not found`. This is the check that proves the
+   declared libpam and libsystemd dependencies actually satisfy the cgo-linked
+   binary. `/usr/bin/pilothouse` is deliberately **not** checked:
+   `.goreleaser.yaml` builds it with `CGO_ENABLED=0`, so it is static and `ldd`
+   exits non-zero for it for a reason that has nothing to do with the
+   dependency lists.
+
+**Why `systemd-analyze verify` is Layer A work.** It is a parser: it validates
+unit *files* offline, resolving them under the filesystem it is pointed at, and
+never contacts PID 1. Starting, enabling or querying a unit does need a running
+service manager, so it stays Layer B (#67) — which is why `systemctl` appears
+nowhere in the script and `systemd-analyze` does.
+
+**Why the PAM expectations are derived, not tabulated.** The two formats ship
+different policies (`packaging/pilothouse.pam` for deb,
+`packaging/rpm/pilothouse.pam` for rpm), naming different stacks, and the
+distro families keep their modules in different directories. A per-distro table
+in the script would be a second copy of the packaging contract that could drift
+from the shipped policy silently, and it would still say nothing about the
+policy the package actually installed. Reading the installed file makes the
+check follow whichever policy the format's override shipped, which is why the
+script contains no stack name, no module name and no multiarch module path.
 
 Checks 2 and 3 are shell **functions** rather than inline code so a later chunk
 can re-invoke them after a reinstall.
 
-**Expectation-line convention.** Every expected ownership value is written as
-one `expect_owner_mode <path> <owner> <group> <mode>` call per line with
-literal arguments, so the Go guards can parse the script's expectations
-deterministically instead of matching free-form shell.
+**Expectation-line convention.** Every expected ownership value, every
+verified unit path and the cgo-linked binary path is written as one
+`expect_owner_mode <path> <owner> <group> <mode>`, `expect_unit <path>` or
+`expect_linked <path>` call per line with literal arguments, so the Go guards
+can parse the script's expectations deterministically instead of matching
+free-form shell.
 
 **Go guards** (`packaging/verify_install_test.go`, tier (c) above). Per the
 spec, no Go test executes the script — it needs a package manager and a
@@ -2310,13 +2350,34 @@ overrides, between the script's `expect_owner_mode` destinations and the
 content entries carrying a `file_info` block — an unauthorized expectation line
 and a dropped packaged entry both fail it.
 
+Checks 4 through 6 add four more guards, all of them text-only:
+
+- `TestVerifyInstallPAMCheckReadsTheInstalledPolicy` requires the script to
+  name `/etc/pam.d/pilothouse` and to contain neither repository PAM source nor
+  any per-distro literal (`common-auth`, `common-account`, `password-auth`,
+  `pam_nologin.so`, a multiarch `…-linux-gnu/security` path), so the
+  expectations can only be derived at run time.
+- `TestVerifyInstallPAMCheckRejectsAnEmptyParse` pins the emptiness guards on
+  the parsed stack list, module list and discovered module directories.
+- `TestVerifyInstallVerifiesUnitsWithSystemdAnalyze` pins that check 5 calls
+  `systemd-analyze verify` and that `systemctl` appears nowhere.
+- `TestVerifyInstallUnitExpectationsMatchGoreleaserConfig` and
+  `TestVerifyInstallLinkedBinariesMatchBuilds` are the two further
+  **bidirectional** drift guards. The first requires set equality between the
+  script's `expect_unit` paths and the live config's destinations under
+  `/usr/lib/systemd/system`, for both overrides. The second requires set
+  equality between the script's `expect_linked` paths and the `/usr/bin`
+  destinations of the live `builds` entries whose `env` contains
+  `CGO_ENABLED=1` — today exactly `/usr/bin/pilothoused` — and asserts the
+  converse too: no `CGO_ENABLED=0` build may appear there. It declares its own
+  local types decoding `builds[].binary` and `builds[].env`, because
+  `drift_test.go`'s `buildTarget` decodes `binary` alone.
+
 **Nothing invokes the script yet.** At this commit no make target and no CI job
 runs it; wiring it into a make target and into
 `.github/workflows/packaging.yml` is later work. The remaining checks the spec
-names — PAM stacks and modules, `systemd-analyze verify` of the shipped units,
-`pilothoused`'s dynamic-linkage resolution, reinstall, and removal — are not
-implemented here yet either; this commit's script covers checks 1 through 3 and
-nothing else.
+names — reinstall and removal — are not implemented here either; this commit's
+script covers checks 1 through 6 and nothing else.
 
 ### Artifact extraction (`packaging/extract`)
 
