@@ -476,9 +476,9 @@ type pipeCommand struct {
 // runTool produces, naming which half failed.
 //
 // What each half wrote to standard error is folded into the error and is read
-// for NOTHING else. cpio writes its `2 blocks` progress line there on SUCCESS,
-// so treating a non-empty standard error as a failure would fail every correct
-// extraction.
+// for NOTHING else. A producer in this pipe can write progress chatter there on
+// SUCCESS, so treating a non-empty standard error as a failure would fail every
+// correct extraction.
 //
 // The pipe is an os.Pipe rather than srcCmd.StdoutPipe(), and BOTH parent
 // copies of it are closed as soon as both children are running. That is what

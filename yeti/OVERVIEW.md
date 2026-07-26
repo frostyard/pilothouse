@@ -86,7 +86,7 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       a packaging.Model from a real artifact on disk. At this
                       commit it holds two backends: Deb, which shells out to
                       dpkg-deb, and RPM, which shells out to rpm and to
-                      rpm2cpio piped into cpio. Its command-line entry point is
+                      rpm2archive piped into tar. Its command-line entry point is
                       cmd/verify-packages, which `make verify-packages` runs;
                       that target stays outside `ci`/`docker-ci`, so nothing
                       runs either automatically. Being a separate package is what keeps
@@ -108,7 +108,7 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       which exposes the variable's name as
                       `packagingtest.RequireEnv`. `make
                       docker-tools-check` asserts the whole set — it resolves
-                      `dpkg-deb`, `rpm`, `rpmbuild`, `rpm2cpio` and `cpio` and
+                      `dpkg-deb`, `rpm`, `rpmbuild`, `rpm2archive` and `tar` and
                       prints the flag's value, alongside the `svu` and
                       `golangci-lint` checks it has always run — and stays
                       outside `ci`/`docker-ci`
@@ -2188,7 +2188,7 @@ differ, and a sentence true of one is false of another.
 - **(d) The extractors** — `packaging/extract/`. A **different package**,
   and the only tier here whose *non-test* code runs an external command: `Deb`
   invokes `dpkg-deb` three times, and `RPM` runs four `rpm -qp` queries plus one
-  `rpm2cpio`-into-`cpio` pipe. It is a subpackage precisely so the
+  `rpm2archive`-into-`tar` pipe. It is a subpackage precisely so the
   guarantee below stays scoped to `packaging/*.go` — the glob is **not**
   recursive, so `packaging/extract/*.go` is outside it and tier (d) added
   nothing to that listing. Its tool-dependent tests resolve every tool through
@@ -2654,17 +2654,27 @@ cached between them:
   dependency text at all.
 - `rpm -qp --qf '%|POSTIN?{HAS\n%{POSTIN}}:{NONE\n}|' <rpm>` for the postinstall
   body behind a tag-presence marker.
-- `rpm2cpio <rpm>` piped into `cpio -idm --no-absolute-filenames` for the
-  payload bytes. The pipe is wired **in Go**, so no shell is invoked and
-  **both** exit statuses are the verdict — a shell pipeline would report only
-  the last one. `cpio` writes its `2 blocks` progress line to standard error on
-  *success*, so standard error is folded into an error message and is read for
-  nothing else.
+- `rpm2archive -n -` reading the artifact on standard input, piped into
+  `tar -x --no-same-owner` for the payload bytes. The pipe is wired **in Go**,
+  so no shell is invoked and **both** exit statuses are the verdict — a shell
+  pipeline would report only the last one. Standard error is folded into an
+  error message and is read for nothing else.
+
+  **Why `rpm2archive` and not the older `rpm2cpio`:** nfpm writes
+  `RPMTAG_ARCHIVESIZE` as the sum of the file *content* bytes, while `rpmbuild`
+  writes the size of the whole uncompressed archive. rpm 4.18's `rpm2cpio`
+  validates the bytes it emitted against that tag and exits 1 when they
+  disagree — *after* emitting a complete, perfectly valid stream. Every fixture
+  here is built by `rpmbuild`, so the disagreement only ever appears against a
+  real nfpm artifact, which is exactly what the packaging gate feeds it.
+  `rpm2archive` reads both without complaint. Reverting to `rpm2cpio` turns
+  that gate red immediately.
 
 **The pipe uses `os.Pipe`, not `StdoutPipe`, and waits on both halves at
 once.** This is a correctness requirement, not a style choice. `StdoutPipe`
 leaves the *parent* holding the read end, and an earlier implementation waited
-on `rpm2cpio` before `cpio`: when `cpio` exited early, `rpm2cpio` kept writing
+on the producer before the consumer: when the consumer exited early, the
+producer kept writing
 into a full pipe, and because this process still held a reader it never took
 `SIGPIPE` — so the wait never returned and extraction hung forever with no
 deadline. Both ends are now `*os.File`, handed straight to the children with no
@@ -2801,11 +2811,11 @@ that test is the standing guard against reintroducing a report-anchored parse,
 which returns a truncated body for exactly that fixture. A third pair of
 fixtures pins the trailing-newline behaviour in both directions. The pipe helper
 gets its own three rows, each required to surface as an error carrying the
-failing half's `packaging/extract: <tool>: ` prefix: `rpm2cpio` against a file
+failing half's `packaging/extract: <tool>: ` prefix: `rpm2archive` against a file
 that is not an rpm (the source half exits non-zero), a real artifact extracted
 into a directory that does not exist (the destination half never starts), and a
 real artifact whose payload is deliberately larger than any pipe buffer piped
-into a `cpio` given an option it does not implement (**the destination half
+into a `tar` given an option it does not implement (**the destination half
 exits before draining the pipe**). That last row is the deadlock guard: it is
 the case a sequential `Wait` hangs on forever — measured, it does not return,
 and the row's own 30-second deadline fails it rather than letting the test
@@ -2818,13 +2828,14 @@ asserts a property of whoever ran the test rather than of the code (see
 `docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md`);
 a file that is not an rpm, a path that does not exist and an unimplemented
 option get the same answer for every user. The happy path is the other side of
-that contract, proving `cpio`'s `2 blocks` on standard error is not treated as a
+that contract, proving a producer's progress chatter on standard error is not
+treated as a
 failure. The four table-driven tables — the file-table line parser, the whole
 file-table output, the dependency-pairing function with the *measured* flag words
 `0`, `12`, `1280` and `16777226`, and the postinstall presence-marker parser —
 need no tool and execute on **every** host. Every fixture-backed test resolves
 *all four* of its tools through `packagingtest.LookTool` before it builds
-anything — `rpmbuild`, `rpm`, `rpm2cpio` and `cpio` — so a host missing any one
+anything — `rpmbuild`, `rpm`, `rpm2archive` and `tar` — so a host missing any one
 of them skips with a message naming that tool and
 `make docker-ci`, while inside the dev image — which sets
 `PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` — the same call **fails** instead, which
@@ -3066,7 +3077,7 @@ table. `integration_test.go` holds the cells that need a real synthetic artifact
 — an explicit `.deb`, an explicit `.rpm`, and one discovered directory holding
 one of each beside a decoy — and those are **deep-gated**: they build their
 fixtures with `internal/packagingtest`, which resolves every tool through
-`packagingtest.LookTool`, so on a host without `rpmbuild`/`rpm`/`rpm2cpio`/`cpio`
+`packagingtest.LookTool`, so on a host without `rpmbuild`/`rpm`/`rpm2archive`/`tar`
 the `.rpm` and mixed cells skip naming the missing tool, while `make docker-ci`
 sets `PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` and the same lookup **fails** there
 instead. A green `docker-ci` is therefore proof those three cells ran. All of
