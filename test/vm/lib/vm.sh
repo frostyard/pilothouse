@@ -60,10 +60,26 @@ vm_fail() {
 
 # dump_boot_diagnostics prints everything the host knows about a guest that
 # cannot be asked anything: the serial console and QEMU's stderr.
+#
+# Both sections are ALWAYS printed, even when the variable naming the log is
+# still unset. Diagnostics are armed before the guest is created, so a failure
+# during image verification, seed creation or overlay creation reaches this
+# function before start_vm has exported either path; skipping an empty path
+# would leave that failure with no output at all, which is the silent-dump
+# failure mode the diagnostics discriminator exists to prevent. An absent log
+# is itself evidence — it says the run died before QEMU was started — so it is
+# reported by name rather than passed over.
 dump_boot_diagnostics() {
-    local log
-    for log in "${QEMU_CONSOLE_LOG:-}" "${QEMU_STDERR_LOG:-}"; do
-        [ -n "$log" ] || continue
+    local variable log
+    for variable in QEMU_CONSOLE_LOG QEMU_STDERR_LOG; do
+        log="${!variable-}"
+
+        if [ -z "$log" ]; then
+            printf '===== %s =====\n' "$variable" >&2
+            printf '(not created: the run failed before start_vm launched qemu)\n' >&2
+            continue
+        fi
+
         printf '===== %s =====\n' "$log" >&2
         if [ -f "$log" ]; then
             cat "$log" >&2

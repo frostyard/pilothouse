@@ -609,8 +609,12 @@ func TestVMWaitForConsoleBootIsAFunctionalGate(t *testing.T) {
 		"%s: both failure paths of wait_for_console_boot must dump the console log and QEMU's stderr", vmVMLibPath)
 
 	dump := shellFunctionBody(t, vmVMLibPath, script, "dump_boot_diagnostics")
-	require.Contains(t, dump, `"${QEMU_CONSOLE_LOG:-}" "${QEMU_STDERR_LOG:-}"`,
+	require.Contains(t, dump, "for variable in QEMU_CONSOLE_LOG QEMU_STDERR_LOG",
 		"%s: the host-side dump must cover the console log and QEMU's stderr", vmVMLibPath)
+	require.Contains(t, dump, "(not created: the run failed before start_vm launched qemu)",
+		"%s: the host-side dump must print a section for a log whose path is not set yet; diagnostics are armed before start_vm, so skipping an unset path would leave an early failure with no output at all", vmVMLibPath)
+	require.NotContains(t, dump, `[ -n "$log" ] || continue`,
+		"%s: the host-side dump must not skip a log whose path is unset; an absent log is evidence that the run died before qemu started", vmVMLibPath)
 
 	// The gate is only a gate if the boot path runs it, and it is only useful
 	// before the SSH wait: a guest that never comes up makes the SSH timeout
@@ -842,26 +846,33 @@ func requireNoPrivateKeyPrint(t *testing.T, path, content string) {
 // test/vm/guest except the sourced lib.sh. The set is discovered on disk rather
 // than hand-kept, so a script added by a later change cannot escape the mode,
 // dialect, require-root and invocation-form guards below.
+//
+// The walk is RECURSIVE. A single-level os.ReadDir would let
+// test/vm/guest/subdir/new.sh escape every one of those guards while this
+// helper still reported success, which is precisely the silent gap a
+// discovered-on-disk set exists to close.
 func vmGuestScripts(t *testing.T) []string {
 	t.Helper()
 
-	entries, err := os.ReadDir(vmGuestDir)
-	require.NoErrorf(t, err, "read %s", vmGuestDir)
-
 	var scripts []string
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sh") {
-			continue
+	require.NoError(t, filepath.WalkDir(vmGuestDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 
-		path := filepath.Join(vmGuestDir, entry.Name())
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sh") {
+			return nil
+		}
+
 		if path == filepath.FromSlash(vmGuestLibPath) {
-			continue
+			return nil
 		}
 
 		scripts = append(scripts, path)
-	}
+
+		return nil
+	}))
 
 	require.NotEmptyf(t, scripts, "%s must hold at least one guest script", vmGuestDir)
 
@@ -1188,39 +1199,132 @@ func TestVMOrchestratorStagesCredentialsPrivileged(t *testing.T) {
 	}
 }
 
+// vmRawCodeLines returns the script's non-comment, non-blank lines with their
+// original quoting intact. vmCodeLines strips quotes, which is right for
+// comparing a call against a pinned form but destroys the only thing that
+// distinguishes a real invocation from the same words inside a string literal.
+func vmRawCodeLines(script string) []string {
+	var code []string
+
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		code = append(code, trimmed)
+	}
+
+	return code
+}
+
+// vmQuotedAt reports whether the byte at position sits inside a quoted string.
+func vmQuotedAt(line string, position int) bool {
+	var single, double bool
+
+	for index, char := range line {
+		if index >= position {
+			break
+		}
+
+		switch char {
+		case '\'':
+			if !double {
+				single = !single
+			}
+		case '"':
+			if !single {
+				double = !double
+			}
+		}
+	}
+
+	return single || double
+}
+
+// vmInvokes reports whether line actually calls name, as opposed to merely
+// naming it inside a string. A usage message such as
+// `ssh_fail "usage: guest_copy <local> <remote>"` mentions the function
+// without calling it, and a guard that cannot tell the two apart either
+// reports a phantom violation or has to be narrowed until it stops covering
+// the files that matter.
+func vmInvokes(line, name string) bool {
+	for index := 0; index < len(line); {
+		offset := strings.Index(line[index:], name+" ")
+		if offset < 0 {
+			return false
+		}
+
+		at := index + offset
+		if !vmQuotedAt(line, at) {
+			return true
+		}
+
+		index = at + len(name)
+	}
+
+	return false
+}
+
 // TestVMOrchestratorCopiesOnlyIntoTheStagingDirectory pins the fence around
 // every guest-bound copy. The one SSH identity is the administrator account, so
 // each guest_copy must name exactly one guest-side path and that path must be
 // inside the staging directory; the host-side side of the copy is the job
 // workspace and is deliberately unconstrained.
+//
+// The scan covers EVERY file in the harness, not just the orchestrator. A
+// fence checked only on the one script that happens to call guest_copy today
+// is not a fence: any library under test/vm/lib could call the same primitive,
+// and the invariant is phrased harness-wide.
 func TestVMOrchestratorCopiesOnlyIntoTheStagingDirectory(t *testing.T) {
-	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
-		if !strings.Contains(line, "guest_copy ") {
-			continue
+	for _, path := range vmHarnessFiles(t) {
+		t.Run(strings.TrimPrefix(path, vmHarnessDir+"/"), func(t *testing.T) {
+			for _, line := range vmRawCodeLines(readVMHarnessFile(t, path)) {
+				if !vmInvokes(line, "guest_copy") {
+					continue
+				}
+
+				staged := 0
+
+				for _, field := range strings.Fields(vmUnquote(line)) {
+					if !strings.HasPrefix(field, "~") {
+						continue
+					}
+
+					require.Truef(t, strings.HasPrefix(field, vmGuestStagingDir+"/"),
+						"%s: `%s` addresses the guest path %q, which is outside the staging directory %s",
+						path, line, field, vmGuestStagingDir)
+
+					staged++
+				}
+
+				require.Equalf(t, 1, staged,
+					"%s: `%s` must name exactly one guest-side path, inside %s", path, line, vmGuestStagingDir)
+			}
+		})
+	}
+
+	// scp is allowed in exactly one place: inside guest_copy itself, which is
+	// the single site where a guest destination is constructed. Anywhere else
+	// in the harness it is a way around the fence above.
+	for _, path := range vmHarnessFiles(t) {
+		body := readVMHarnessFile(t, path)
+
+		exempt := map[string]bool{}
+		if path == filepath.FromSlash(vmSSHLibPath) {
+			for _, line := range vmRawCodeLines(shellFunctionBody(t, vmSSHLibPath, body, "guest_copy")) {
+				exempt[line] = true
+			}
 		}
 
-		staged := 0
-
-		for _, field := range strings.Fields(line) {
-			if !strings.HasPrefix(field, "~") {
+		for _, line := range vmRawCodeLines(body) {
+			if !vmInvokes(line, "scp") || exempt[line] {
 				continue
 			}
 
-			require.Truef(t, strings.HasPrefix(field, vmGuestStagingDir+"/"),
-				"%s: `%s` addresses the guest path %q, which is outside the staging directory %s",
-				vmOrchestratorPath, line, field, vmGuestStagingDir)
-
-			staged++
+			t.Fatalf("%s runs `%s`: every copy must go through guest_copy, which is the one place a guest destination is constructed",
+				path, line)
 		}
-
-		require.Equalf(t, 1, staged,
-			"%s: `%s` must name exactly one guest-side path, inside %s", vmOrchestratorPath, line, vmGuestStagingDir)
-	}
-
-	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
-		require.NotContainsf(t, line, "scp ",
-			"%s runs `%s`: every copy must go through guest_copy, which is the one place a guest destination is constructed",
-			vmOrchestratorPath, line)
 	}
 
 	// The one login identity is the administrator account, so no command

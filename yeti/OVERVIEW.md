@@ -2827,6 +2827,17 @@ command that does not complete is reported by name rather than swallowed, and
 the guest is stopped only *after* the dump — a dump from a killed guest is not a
 dump. Everything goes to the job log; nothing is uploaded.
 
+The unreachable branch prints **both** host-side sections unconditionally, even
+when the variables naming them are still unset. Diagnostics are armed *before*
+the guest is created, so a failure during image verification, seed creation or
+overlay creation reaches `dump_boot_diagnostics` before `start_vm` has exported
+either path. Skipping an empty path — the obvious reading of "dump the log if
+we have one" — left exactly those failures with no output at all, which is the
+silent-dump failure mode this file exists to prevent. An absent log is itself
+evidence, so it is reported by name (`not created: the run failed before
+start_vm launched qemu`) instead of passed over. `stop_vm` is already a no-op
+when `QEMU_PID` is unset, so the same early-failure path unwinds cleanly.
+
 `packaging/vm_harness_test.go` grew the matching guards, still executing nothing
 but `shellcheck` (`--shell=bash` for the orchestrator and the host libraries,
 `--shell=sh` for the guest files). They discover the guest scripts **on disk**
@@ -2840,6 +2851,26 @@ architectures, which is the case an unqualified glob would silently get wrong;
 and they pin the credential path's three steps in order. The `sudo -n` scan that
 previously covered `test/vm/lib` now covers **every** file under `test/vm`,
 since the orchestrator is where the escalations actually happen.
+
+**Scope is the recurring defect in these guards, and it is invisible from the
+test result** — a guard checking the wrong file set still passes, so nothing
+fails until the gap is exploited. Two instances are worth remembering. Guest
+scripts are enumerated with `filepath.WalkDir`, not `os.ReadDir`: the
+single-level listing skipped directories, so `test/vm/guest/subdir/new.sh`
+escaped the mode, shebang, `require_root`, shellcheck and invocation guards
+simultaneously. And the staging-directory fence is applied to **every** file
+under `test/vm`, not only `vm-boot-test.sh`: the invariant is phrased
+harness-wide, and any library could call `guest_copy` or reach for `scp`
+directly. `scp` is permitted at exactly one site — inside `guest_copy`, the one
+place a guest destination is constructed — and that exemption is expressed as
+the function's own body rather than as a whole-file pass.
+
+Widening those scans required distinguishing a call from a mention: the fence
+now matches `guest_copy`/`scp` only outside string literals, because
+`ssh_fail "usage: guest_copy <local> <remote>"` names the function without
+calling it. Without that, widening the scan produces a phantom violation, and
+the tempting fix — re-narrowing the guard until it goes quiet — is what left
+the fence covering one file in the first place.
 
 ### Artifact extraction (`packaging/extract`)
 
