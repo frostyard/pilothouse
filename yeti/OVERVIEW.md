@@ -2469,10 +2469,36 @@ Checks 7 and 8 add five more guards, all still text-only:
   `TestVerifyInstallPackageNameMatchesGoreleaserConfig` keeps the name the
   removal verbs operate on equal to the live `package_name`.
 
-**Nothing invokes the script yet.** At this commit no make target and no CI job
-runs it; wiring it into a make target and into
-`.github/workflows/packaging.yml` is later work. This commit's script performs
-all eight checks.
+**How the script is invoked.** `make verify-package-install` is the one thing
+in the repository that runs it, as of this commit. The target takes two
+variables: `INSTALL_IMAGE`, the container image reference, with **no default**,
+and `ARTIFACT_DIR`, the directory of built artifacts, defaulting to `dist`. An
+unset `INSTALL_IMAGE` is an actionable failure naming both digest-pinned
+references (`debian:12@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc`
+and `fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814`),
+following `make package`'s precedent of failing with what was found and what is
+required rather than silently picking a distro family; a missing
+`ARTIFACT_DIR` fails the same way, naming `make package` as the local producer.
+
+The recipe writes out an explicit `$(DOCKER) run --rm` and deliberately does
+**not** reuse the `DOCKER_RUN` macro. That macro is wrong here in three
+independent ways: it pins the host UID/GID (installs need root inside the
+container), it bind-mounts the whole workspace (only `packaging/` and the
+artifact directory should be visible, both read-only), and it hardcodes
+`$(DOCKER_IMAGE)`, the development image, when the image under test is the
+parameter. Network access is left enabled on purpose — check 1 exists to
+resolve dependencies against the distro's real repositories.
+
+Like `verify-packages` and `package`, the target is **deliberately absent from
+`ci` and from `docker-ci`** (`make -n ci | grep verify-package-install` prints
+nothing): it depends on artifacts a stock checkout does not have, and
+additionally on Docker and the network. **No CI job calls it yet** — the
+`.github/workflows/packaging.yml` job that will is later work.
+
+`make help` was added in the same commit. The Makefile has annotated targets
+with `## description` since long before, but nothing printed them; `help` is a
+minimal `awk` over `$(MAKEFILE_LIST)` that prints every such annotation, and
+both `verify-package-install` and `help` are listed in `.PHONY`.
 
 ### Artifact extraction (`packaging/extract`)
 

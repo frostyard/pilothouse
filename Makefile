@@ -1,4 +1,4 @@
-.PHONY: build generate run test race fmt format-check lint package bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages
+.PHONY: build generate run test race fmt format-check lint package bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages verify-package-install help
 
 GO ?= go
 GOFMT ?= gofmt
@@ -15,6 +15,11 @@ SVU_VERSION ?= v3.4.1
 DOCKER ?= docker
 DOCKER_IMAGE ?= pilothouse-dev:go$(GO_VERSION)
 DOCKER_CACHE_PREFIX ?= pilothouse
+# INSTALL_IMAGE is the container image `verify-package-install` installs the
+# built artifacts inside. It has no default on purpose: the target refuses to
+# assume a distro family and names the two digest-pinned references instead.
+INSTALL_IMAGE ?=
+ARTIFACT_DIR ?= dist
 DOCKER_RUN = $(DOCKER) run --rm \
 	--user "$(shell id -u):$(shell id -g)" \
 	--env HOME=/tmp \
@@ -198,6 +203,25 @@ package: ## Build snapshot .deb/.rpm into dist/ with goreleaser Pro v2 (publishe
 
 verify-packages: ## Report contract findings for built .deb/.rpm artifacts in dist/ (outside ci; fails when dist/ is empty)
 	$(GO) run ./cmd/$@
+
+verify-package-install: ## Install the built .deb/.rpm inside INSTALL_IMAGE and validate the result (outside ci; needs Docker, the network and artifacts in ARTIFACT_DIR)
+	@if [ -z '$(INSTALL_IMAGE)' ]; then \
+		printf '%s\n' 'make verify-package-install: INSTALL_IMAGE is unset and this target assumes no image.' 'A container image reference is required; these two are the digest-pinned images this validation targets:' '  make verify-package-install INSTALL_IMAGE=debian:12@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc' '  make verify-package-install INSTALL_IMAGE=fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814' >&2; \
+		exit 1; \
+	fi
+	@if [ ! -d '$(ARTIFACT_DIR)' ]; then \
+		printf '%s\n' 'make verify-package-install: the artifact directory $(ARTIFACT_DIR) does not exist; `make package` is the local producer that fills dist/.' >&2; \
+		exit 1; \
+	fi
+	$(DOCKER) run --rm \
+		--mount "type=bind,source=$(CURDIR)/packaging,target=/packaging,readonly" \
+		--mount "type=bind,source=$(abspath $(ARTIFACT_DIR)),target=/artifacts,readonly" \
+		--workdir / \
+		$(INSTALL_IMAGE) \
+		/packaging/verify-install.sh /artifacts
+
+help: ## Print every target that carries a description comment
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 test-bump: ## Test release orchestration without publishing
 	bash scripts/bump_test.sh
