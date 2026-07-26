@@ -166,7 +166,7 @@ docker-next-version: ## Calculate the next version with pinned svu
 		svu next
 
 docker-tools-check: docker-image ## Verify release and packaging tools are executable in Docker
-	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2cpio cpio; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
+	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2archive tar; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
 
 package: ## Build snapshot .deb/.rpm into dist/ with goreleaser Pro v2 (publishes nothing, needs no tag)
 	@set -u; \
