@@ -91,7 +91,16 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       that target stays outside `ci`/`docker-ci`, so nothing
                       runs either automatically. Being a separate package is what keeps
                       the parent's run-time-inert guarantee mechanically true
-                      (see "Artifact extraction" below)
+                       (see "Artifact extraction" below)
+test/vm/              host side of the booted-VM harness (Layer B, #67). At this
+                      commit it holds only the image-acquisition half: images.env,
+                      the single pinning site recording each distro family's cloud
+                      image URL, checksum algorithm and digest, and lib/images.sh,
+                      the sourced (non-executable) bash library whose fetch_image
+                      downloads and verifies against that pin. Nothing here boots a
+                      VM or is invoked by any workflow yet; packaging/vm_harness_test.go
+                      guards it structurally without executing it (see "Booted-VM
+                      harness: pinned image acquisition" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
@@ -2542,6 +2551,53 @@ never derived from the workflow under test.
 with `## description` since long before, but nothing printed them; `help` is a
 minimal `awk` over `$(MAKEFILE_LIST)` that prints every such annotation, and
 both `verify-package-install` and `help` are listed in `.PHONY`.
+
+### Booted-VM harness: pinned image acquisition (`test/vm/images.env`, `test/vm/lib/images.sh`)
+
+Layer B (#67) — installing the artifacts on a **booted** host with real
+systemd — is under construction. **At this commit only the image-acquisition
+half exists**: nothing here boots a VM, installs a package, or asserts anything
+about a running system, and no workflow job invokes any of it. Everything Layer B
+is meant to prove still lives in the issue, not in the tree.
+
+What landed is the pinning table and the host-side fetcher:
+
+- **`test/vm/images.env`** is the *single* pinning site. Per distro family it
+  records three values — the image URL, the checksum algorithm and the digest:
+  Debian 12 `genericcloud` amd64 from the dated
+  `cloud.debian.org/images/cloud/bookworm/20260722-2547/` directory under
+  **SHA-512**, and Fedora 42 `Cloud-Base-Generic` x86_64 from the
+  `dl.fedoraproject.org/pub/archive/...` path under **SHA-256**. The algorithm
+  differs per family because each digest is the distributor's own published
+  value (Debian's `SHA512SUMS`, Fedora's `Fedora-Cloud-42-1.1-x86_64-CHECKSUM`);
+  a digest computed here would pin nothing. Fedora 42 is archived — the
+  non-archive `releases/42/...` path 404s and must not be "fixed" back. Both
+  entries are amd64/x86_64 only, matching the two container images the install
+  matrix already uses, and both paths are immutable: a `latest`-style URL would
+  move out from under the digest.
+- **`test/vm/lib/images.sh`** is a **sourced** bash library (no shebang, `set
+  -euo pipefail`, committed non-executable) exposing
+  `fetch_image <family> <cache-dir>`. It reads the family's row from
+  `images.env`, downloads over HTTPS into the cache directory, and dispatches to
+  `sha256sum`/`sha512sum` per the declared algorithm. A mismatch prints **both**
+  the expected and the actual digest and exits non-zero; a file already in the
+  cache is re-verified before it is reused, so a truncated or tampered copy
+  cannot be handed to a caller. On success the verified path is the function's
+  only standard output — progress and failures go to standard error.
+
+**`packaging/vm_harness_test.go`** guards this from the existing `packaging` Go
+package, alongside `verify_install_test.go`, because this is Layer B of the same
+packaging verification chain. The guards are structural and **never execute the
+harness**: the only process any of them spawns is `shellcheck` (`--shell=bash`,
+skip-if-absent, the same runner shape `verify_install_test.go` uses). They parse
+`images.env` as text rather than sourcing it, assert both families' rows and the
+two literal image references, and assert the properties that make a pin worth
+anything — HTTPS, no `latest` path segment, and a digest whose hex length matches
+its declared algorithm (128 for SHA-512, 64 for SHA-256). They also open the
+executed-versus-sourced mode discipline that later harness scripts extend:
+`lib/images.sh` is sourced, so `Mode().Perm()&0o111` must be zero — the same
+instrument `verify_install_test.go` uses in the opposite direction for the
+executed install-validation script.
 
 ### Artifact extraction (`packaging/extract`)
 
