@@ -106,11 +106,11 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       lifecycle) and diagnostics.sh (the failure-time discriminator).
                       guest/ is the single directory holding every guest-side script:
                       the sourced, non-executable lib.sh plus install-package.sh,
-                      check-activation.sh and check-pam.sh;
+                      check-activation.sh, check-pam.sh and check-journal.sh;
                       every executed one is committed 100755 and invoked as
                       `sudo -n sh ~/vm-boot/guest/<name>.sh`. At this commit a run
-                      ends once PAM has authenticated a real non-root administrator
-                      end to end through the running stack, and no workflow
+                      ends once the daemon has read a line it emitted itself back
+                      through the broker's journal query, and no workflow
                       job invokes any of it; packaging/vm_harness_test.go guards it structurally
                       without executing it (see the three "Booted-VM harness"
                       sections below)
@@ -2256,8 +2256,10 @@ since.
   an enforcing SELinux policy — is **#67**'s; its harness is under construction
   in `test/vm` (it boots a guest, installs the package, starts both units,
   asserts the systemd-created directories, the broker socket's ownership and
-  mode, that the broker is live, and that PAM authenticates a real non-root
-  administrator through the running stack) and no CI job runs it; see M1 above
+  mode, that the broker is live, that PAM authenticates a real non-root
+  administrator through the running stack, and that the daemon reads a record
+  it emitted itself back through the broker's journal query) and no CI job
+  runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
   `Entry.Group` therefore drive no assertion.
 
@@ -2573,14 +2575,14 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 
 Layer B (#67) — installing the artifacts on a **booted** host with real
 systemd — is under construction. **At this commit the harness boots a guest,
-installs the package, activates both units and authenticates a real non-root
-administrator through PAM**, and no workflow job invokes any of it: what exists
+installs the package, activates both units, authenticates a real non-root
+administrator through PAM and reads the daemon's own journal record back
+through the broker**, and no workflow job invokes any of it: what exists
 is image acquisition (this section), the boot mechanism ("Booted-VM harness:
 credentials, seed, boot and SSH") and the orchestrator, the guest scripts and
 the diagnostics that drive them ("Booted-VM harness: the orchestrator, guest
 staging and diagnostics"). What Layer B is still meant to *prove* — the
-journal read-back through the broker and the reboot posture — lives in the
-issue, not yet in the tree.
+reboot posture — lives in the issue, not yet in the tree.
 
 This section covers the pinning table and the host-side fetcher:
 
@@ -2741,9 +2743,9 @@ followed by `.pub`, since the public key is not a credential.
 ### Booted-VM harness: the orchestrator, guest staging and diagnostics (`test/vm/vm-boot-test.sh`, `test/vm/lib/diagnostics.sh`, `test/vm/guest/`)
 
 The harness's first end-to-end runnable path. **At this commit a run ends once
-both units are active and the broker is answering on its socket**: the PAM
-flows, the journal read-back and the reboot posture are not implemented yet,
-and no workflow invokes any of this — the CI job lands later.
+the daemon has read a line it emitted itself back through the broker's journal
+query**: the reboot posture is not implemented yet, and no workflow invokes any
+of this — the CI job lands later.
 
 **`test/vm/vm-boot-test.sh` is the one entry point**, taking
 `--family debian|fedora` and `--artifact-dir <dir>`; any other family is
@@ -2914,9 +2916,36 @@ in the guest's process table. Finally the generated root password is removed
 (`passwd -d root`, `usermod -L root`), which succeeds because the script runs as
 root; nothing in it assumes an SSH login as root, which the guest does not have.
 
-**At this commit the harness run ends there.** The journal read-back and the
-reboot posture are not implemented yet, the guest's SELinux audit posture is
-#80's, and no workflow invokes any of this.
+`guest/check-journal.sh` runs last and proves the daemon built with the
+`sdjournal` tag reads the journal **back** on a booted host. It reuses the
+authenticated direct route — `broker_login`, then `broker_query` — to run the
+broker's own journal-backed read surface, `QueryServicesJournal`
+(`org.frostyard.pilothouse.services.journal` in `internal/broker/api.go`,
+registered behind `Systemd` **and** `Journald`) with the `unit` parameter its
+handler in `cmd/pilothoused/main.go` reads, for `pilothoused.service`.
+`broker_query` fails by name on anything other than **exactly `200`**, and the
+assertion is then made on the **response body**: the answer must be about that
+unit, `entries` must be the array `services.Journal` declares and must be
+non-empty (a `200` carrying nothing read back fails on its own name), and some
+returned entry's `message` must contain `privileged broker listening` — the
+line the *daemon itself* logs on a successful listen, emitted when
+`check-activation.sh` started it and so comfortably inside the reader's
+one-hour window. The matching entries' own `unit` field is checked too, so the
+record's provenance comes from `_SYSTEMD_UNIT` rather than from the query's
+parameter.
+
+**Finding that line in `journalctl` output is explicitly not accepted as
+evidence** — that would prove systemd logged it, not that the daemon can read
+it back — so `check-journal.sh` reads no log for itself: it invokes neither
+`journalctl` nor `systemctl`, and a guard in `packaging/vm_harness_test.go`
+enforces that alongside grounding the query id, the parameter name and the
+searched-for line against `internal/broker/api.go` and
+`cmd/pilothoused/main.go`. The guards read the script as text and, as
+everywhere else here, never execute it.
+
+**At this commit the harness run ends there.** The reboot posture is not
+implemented yet, the guest's SELinux audit posture is #80's, and no workflow
+invokes any of this.
 
 **`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at
 the moment of failure**, not on whether it ever did. `install_failure_diagnostics`

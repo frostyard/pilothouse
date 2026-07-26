@@ -34,7 +34,12 @@
 #  11. run the PAM checks as `sudo -n sh ~/vm-boot/guest/check-pam.sh`, which
 #      proves the installed unit's administrator group, authenticates a real
 #      non-root administrator end to end and proves both negatives from the
-#      journal.
+#      journal;
+#  12. run the journald read-back as
+#      `sudo -n sh ~/vm-boot/guest/check-journal.sh`, which asks the broker's
+#      own journal query for the daemon's unit over the authenticated socket
+#      route and asserts a line the daemon itself emitted comes back in the
+#      response.
 #
 # The harness has exactly ONE SSH identity in the guest: the administrator
 # account cloud-init created. That account cannot write /root, cannot install
@@ -43,9 +48,9 @@
 # guest-bound destination is inside ~/vm-boot, and every guest script runs as
 # `sudo -n sh <staged path>`.
 #
-# At this commit the run ends once PAM has authenticated a real non-root
-# administrator end to end: the journal read-back and the reboot posture land
-# in later commits.
+# At this commit the run ends once the daemon has read a line it emitted itself
+# back through the broker's journal query: the reboot posture lands in a later
+# commit.
 #
 # Every tilde path in this file is deliberately quoted: it is transmitted
 # literally and expanded by the GUEST's shell, because ~/vm-boot is the
@@ -281,7 +286,10 @@ main() {
     # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
     guest_run sudo -n sh '~/vm-boot/guest/check-pam.sh'
 
-    orchestrator_log "$FAMILY guest booted, package installed, both units active, the broker answering on its socket and PAM authenticating a real non-root administrator"
+    # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's
+    guest_run sudo -n sh '~/vm-boot/guest/check-journal.sh'
+
+    orchestrator_log "$FAMILY guest booted, package installed, both units active, the broker answering on its socket, PAM authenticating a real non-root administrator and the daemon reading its own journal record back through the broker"
 }
 
 main "$@"

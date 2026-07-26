@@ -1927,3 +1927,148 @@ func TestVMCheckPamRemovesTheRootPasswordLast(t *testing.T) {
 			"%s runs `%s`: it assumes no SSH login of any kind — it runs inside the guest, as root, under `sudo -n sh`", vmCheckPamPath, line)
 	}
 }
+
+// vmCheckJournalPath is the guest-side journald read-back. Everything below
+// reads it as text; nothing here executes it.
+const vmCheckJournalPath = vmGuestDir + "/check-journal.sh"
+
+// vmDaemonMainPath is where the privileged daemon's queries are registered and
+// where the line the read-back looks for is emitted. Like vmBrokerAPIPath it is
+// read as text, so the guard is grounded in the live source rather than in a
+// second copy of the string.
+const vmDaemonMainPath = "../cmd/pilothoused/main.go"
+
+var (
+	// vmQueryServicesJournalDeclaration extracts the journal query's id from
+	// the broker's wire contract, and vmJournalHandlerParameter extracts the
+	// parameter key its handler actually reads. The spec requires both to be
+	// grounded against the source at implementation time rather than assumed.
+	vmQueryServicesJournalDeclaration = regexp.MustCompile(`QueryServicesJournal\s*=\s*"([^"]+)"`)
+	vmJournalHandlerParameter         = regexp.MustCompile(`manager\.Journal\(ctx, parameters\["([^"]+)"\]\)`)
+)
+
+// vmShellConstant reads a top-level `NAME="value"` assignment out of a shell
+// script, so a guard can compare what the script actually sends against the Go
+// declaration it must agree with.
+func vmShellConstant(t *testing.T, path, script, name string) string {
+	t.Helper()
+
+	match := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `="([^"]*)"$`).FindStringSubmatch(script)
+	require.NotNilf(t, match, "%s must declare %s", path, name)
+
+	return match[1]
+}
+
+// TestVMCheckJournalQueriesTheBrokersDeclaredJournalSurface pins the read-back
+// to the surface the daemon really exposes: the query id comes out of
+// internal/broker/api.go and the parameter key out of the handler in
+// cmd/pilothoused/main.go, so a rename on either side fails this guard instead
+// of leaving the guest script asking for something nothing answers.
+func TestVMCheckJournalQueriesTheBrokersDeclaredJournalSurface(t *testing.T) {
+	api, err := os.ReadFile(vmBrokerAPIPath)
+	require.NoErrorf(t, err, "read %s", vmBrokerAPIPath)
+
+	declaration := vmQueryServicesJournalDeclaration.FindStringSubmatch(string(api))
+	require.NotNilf(t, declaration, "%s must declare QueryServicesJournal", vmBrokerAPIPath)
+
+	main, err := os.ReadFile(vmDaemonMainPath)
+	require.NoErrorf(t, err, "read %s", vmDaemonMainPath)
+
+	parameter := vmJournalHandlerParameter.FindStringSubmatch(string(main))
+	require.NotNilf(t, parameter,
+		"%s must register a QueryServicesJournal handler reading the unit from its parameters", vmDaemonMainPath)
+
+	script := readVMHarnessFile(t, vmCheckJournalPath)
+
+	require.Equalf(t, declaration[1], vmShellConstant(t, vmCheckJournalPath, script, "JOURNAL_QUERY_ID"),
+		"%s must send the query id %s declares as QueryServicesJournal", vmCheckJournalPath, vmBrokerAPIPath)
+	require.Equalf(t, parameter[1], vmShellConstant(t, vmCheckJournalPath, script, "JOURNAL_UNIT_PARAMETER"),
+		"%s must name the parameter the handler in %s reads", vmCheckJournalPath, vmDaemonMainPath)
+	require.Equalf(t, "pilothoused.service", vmShellConstant(t, vmCheckJournalPath, script, "BROKER_UNIT"),
+		"%s must read back the journal of the daemon's own unit", vmCheckJournalPath)
+
+	// The authenticated direct socket route from guest/lib.sh, reused rather
+	// than reimplemented: the journal query is not answered for an
+	// unauthenticated caller.
+	require.Contains(t, script, "\nbroker_login\n",
+		"%s must authenticate over the broker socket before it queries", vmCheckJournalPath)
+	require.Contains(t, script, `broker_query "$JOURNAL_QUERY_ID" "$journal_parameters" >"$journal_response"`,
+		"%s must run the journal query through broker_query, with a redirection rather than a command substitution, so the session variables survive", vmCheckJournalPath)
+
+	// The exact-status assertion the call above relies on lives in the shared
+	// helper, and is re-read here rather than assumed: anything other than 200
+	// must fail by name.
+	lib := readVMHarnessFile(t, vmGuestLibPath)
+	query := shellFunctionBody(t, vmGuestLibPath, lib, "broker_query")
+	require.Contains(t, query, `[ "$broker_query_status" = "200" ] ||`,
+		"%s: broker_query must assert exactly 200, which is the status %s depends on", vmGuestLibPath, vmCheckJournalPath)
+}
+
+// TestVMCheckJournalAssertsTheDaemonsOwnLineInTheBrokerResponse pins the claim
+// this check exists to make. The record searched for is one the DAEMON emitted
+// — the guard reads the phrase out of the script and requires
+// cmd/pilothoused/main.go to log it — and the search runs over the entries the
+// BROKER returned, on the response shape services.Journal declares.
+func TestVMCheckJournalAssertsTheDaemonsOwnLineInTheBrokerResponse(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckJournalPath)
+	message := vmShellConstant(t, vmCheckJournalPath, script, "DAEMON_STARTUP_MESSAGE")
+
+	main, err := os.ReadFile(vmDaemonMainPath)
+	require.NoErrorf(t, err, "read %s", vmDaemonMainPath)
+	require.Containsf(t, string(main), `logger.Info("`+message+`"`,
+		"%s searches for %q, which %s must actually log: a line the harness planted would prove nothing about the daemon reading the journal back",
+		vmCheckJournalPath, message, vmDaemonMainPath)
+
+	require.Contains(t, script, `startup_hits="$(`,
+		"%s must count the matching entries rather than rely on a command's exit status, which cannot tell a failed search from an empty one", vmCheckJournalPath)
+	require.Contains(t, script, `'[.entries[] | select((.message // "") | contains($message))] | length' \`,
+		"%s must match on the message field of the entries the broker returned", vmCheckJournalPath)
+	require.Contains(t, script, `<"$journal_response"`,
+		"%s must run that search over the broker's response body", vmCheckJournalPath)
+	require.Contains(t, script, `[ "$startup_hits" != "0" ] ||`,
+		"%s must fail when no returned entry carries the daemon's own line", vmCheckJournalPath)
+	require.Contains(t, script, "fail \"none of the $entry_count entries",
+		"%s must name the assertion it failed", vmCheckJournalPath)
+
+	// A 200 carrying an empty entries array would satisfy a bare status
+	// assertion while proving nothing was read back, so it fails separately
+	// and by its own name.
+	require.Contains(t, script, `[ "$entry_count" -gt 0 ] ||`,
+		"%s must fail when the query answers with no entries at all", vmCheckJournalPath)
+	require.Contains(t, script, `jq -e '.entries | type == "array"'`,
+		"%s must require the response's entries to be the array services.Journal declares", vmCheckJournalPath)
+}
+
+// TestVMCheckJournalTakesNoJournalctlOutputAsEvidence is the negative half, and
+// the reason the check is written the way it is: a line found in `journalctl`
+// output proves systemd logged it, not that the sdjournal-tagged daemon can
+// read it back. The daemon-emitted-line assertion must therefore be made
+// against the broker's response and against nothing else, so this script reads
+// no log for itself at all.
+func TestVMCheckJournalTakesNoJournalctlOutputAsEvidence(t *testing.T) {
+	script := readVMHarnessFile(t, vmCheckJournalPath)
+
+	for _, line := range vmRawCodeLines(script) {
+		require.Falsef(t, vmInvokes(line, "journalctl"),
+			"%s runs `%s`: journal output this script read for itself is not evidence that the daemon read its own record back", vmCheckJournalPath, line)
+		require.Falsef(t, vmInvokes(line, "systemctl"),
+			"%s runs `%s`: the read-back is asserted on the broker's response, not on anything systemd reports", vmCheckJournalPath, line)
+	}
+
+	message := vmShellConstant(t, vmCheckJournalPath, script, "DAEMON_STARTUP_MESSAGE")
+
+	// Every code line mentioning the daemon's line is either the constant
+	// itself, a jq argument binding it, or an assertion/report over the
+	// broker's response.
+	for _, line := range vmRawCodeLines(script) {
+		if !strings.Contains(line, message) {
+			continue
+		}
+
+		require.Truef(t,
+			strings.HasPrefix(line, "DAEMON_STARTUP_MESSAGE=") ||
+				strings.Contains(line, "$DAEMON_STARTUP_MESSAGE") ||
+				strings.Contains(line, "$message"),
+			"%s uses the daemon's line in `%s`, outside the assertion over the broker's response", vmCheckJournalPath, line)
+	}
+}
