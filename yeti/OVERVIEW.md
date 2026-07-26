@@ -93,14 +93,19 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       the parent's run-time-inert guarantee mechanically true
                        (see "Artifact extraction" below)
 test/vm/              host side of the booted-VM harness (Layer B, #67). At this
-                      commit it holds only the image-acquisition half: images.env,
-                      the single pinning site recording each distro family's cloud
-                      image URL, checksum algorithm and digest, and lib/images.sh,
-                      the sourced (non-executable) bash library whose fetch_image
-                      downloads and verifies against that pin. Nothing here boots a
-                      VM or is invoked by any workflow yet; packaging/vm_harness_test.go
+                      commit it holds the image-acquisition and boot halves, all as
+                      sourced (non-executable) bash libraries: images.env, the single
+                      pinning site recording each distro family's cloud image URL,
+                      checksum algorithm and digest, lib/images.sh (fetch and verify
+                      against that pin), lib/cloudinit.sh (generate the run-time
+                      credentials into a 0700 workspace and emit the NoCloud seed),
+                      lib/vm.sh (QEMU/KVM boot of a qcow2 overlay plus the serial
+                      console channel) and lib/ssh.sh (the guest's SSH lifecycle).
+                      There is still no orchestrator, no guest-side assertion and no
+                      workflow job, so nothing here runs; packaging/vm_harness_test.go
                       guards it structurally without executing it (see "Booted-VM
-                      harness: pinned image acquisition" below)
+                      harness: pinned image acquisition" and "Booted-VM harness:
+                      credentials, seed, boot and SSH" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
@@ -2555,12 +2560,14 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 ### Booted-VM harness: pinned image acquisition (`test/vm/images.env`, `test/vm/lib/images.sh`)
 
 Layer B (#67) — installing the artifacts on a **booted** host with real
-systemd — is under construction. **At this commit only the image-acquisition
-half exists**: nothing here boots a VM, installs a package, or asserts anything
-about a running system, and no workflow job invokes any of it. Everything Layer B
-is meant to prove still lives in the issue, not in the tree.
+systemd — is under construction. **At this commit nothing here installs a
+package or asserts anything about a running system**, and no workflow job
+invokes any of it: what exists is image acquisition (this section) and the boot
+mechanism ("Booted-VM harness: credentials, seed, boot and SSH" below).
+Everything Layer B is meant to *prove* still lives in the issue, not in the
+tree.
 
-What landed is the pinning table and the host-side fetcher:
+This section covers the pinning table and the host-side fetcher:
 
 - **`test/vm/images.env`** is the *single* pinning site. Per distro family it
   records three values — the image URL, the checksum algorithm and the digest:
@@ -2598,6 +2605,89 @@ executed-versus-sourced mode discipline that later harness scripts extend:
 `lib/images.sh` is sourced, so `Mode().Perm()&0o111` must be zero — the same
 instrument `verify_install_test.go` uses in the opposite direction for the
 executed install-validation script.
+
+### Booted-VM harness: credentials, seed, boot and SSH (`test/vm/lib/cloudinit.sh`, `vm.sh`, `ssh.sh`)
+
+The second half of Layer B's host side. **At this commit it is still only
+mechanism**: three sourced bash libraries that can create a guest and talk to
+it. Nothing installs a package, asserts anything about a running system, or is
+invoked by any workflow — the orchestrator that calls these functions, the
+guest-side assertion scripts and the CI job all land later.
+
+**`cloudinit.sh` — every credential is generated here, on the host, at run
+time.** `create_run_workspace` makes the per-run directory with mode `0700`;
+`generate_credentials` writes into it, and only into it, an ed25519 keypair
+(`ssh-keygen -t ed25519 -N ''`) and two passwords (`openssl rand`, falling back
+to `/dev/urandom`; never a literal), recording them in `creds.env` as
+`PH_ADMIN_USER`, `PH_ADMIN_PASSWORD` and `PH_ROOT_PASSWORD`. No guest-side
+command generates anything. Every function that touches a credential disables
+shell tracing first, and nothing echoes a password or a private key, so no
+generated value can reach a job log.
+
+`write_cloud_init_seed` takes the **family** as an argument and emits the
+NoCloud `meta-data`/`user-data`; `build_seed_iso` packs them into a `cidata`
+volume. `create_seed` runs the three in order and is called **directly**, never
+through a command substitution: it publishes `VM_SSH_KEY`, `VM_CREDS_ENV` and
+`VM_SEED_ISO` as exported variables, and a subshell would discard all three.
+The seed declares exactly **one** login account, the administrator,
+with the generated public key, `sudo: ['ALL=(ALL) NOPASSWD:ALL']`, and the
+administrator group its own package expects — `sudo` on Debian, `wheel` on
+Fedora, the single token by which the two unit files differ. Both the
+administrator's and root's generated passwords are set through cloud-init's
+`chpasswd:` module with `expire: false`, so root carries a *valid* password
+later checks can be run against.
+
+Root gets **no** authorized key and SSH root login is not enabled: stock cloud
+images restrict it, enabling it would make the guest less stock, and the
+harness needs root's password to be set and later removed under its own
+control. Everything that needs privilege escalates instead — which is why the
+`NOPASSWD` grant is load-bearing rather than a convenience. Guest commands are
+non-interactive with no TTY, so an escalation that prompted would hang; `sudo
+-n` turns the same situation into an immediate, named failure.
+
+The seed also builds the half of the serial-console channel that does not
+depend on the guest's kernel command line: a
+`/etc/systemd/journald.conf.d/99-console.conf` drop-in
+(`ForwardToConsole=yes`, `MaxLevelConsole=info`, `TTYPath=/dev/ttyS0`) and
+cloud-init's `output: {all: '| tee -a /dev/console'}`.
+
+**`vm.sh` — boot, without touching the image.** `create_overlay` builds a qcow2
+overlay in the run workspace with `qemu-img create -F qcow2 -b <base>`, so the
+pinned base downloaded by `images.sh` is read-only input and is never rewritten;
+there is deliberately no offline image-editing step, because rewriting the
+guest's disk or kernel command line would make it no longer stock (Fedora
+likewise stays SELinux-enforcing). `start_vm` runs `qemu-system-x86_64` with
+`-accel kvm` (never software emulation), `-display none`, a file chardev bound
+to `-serial`, and user-mode networking forwarding a loopback port to the guest's
+sshd; it exports `QEMU_CONSOLE_LOG` and `QEMU_STDERR_LOG`, the only two things a
+guest that never answers leaves behind.
+
+`wait_for_console_boot` is what makes that channel a **gate** rather than a
+hope: it polls the console log for a boot marker and, on `CONSOLE_BOOT_TIMEOUT`
+expiry, exits non-zero naming the assertion and dumping both logs. `boot_guest`
+calls it **before** `wait_for_ssh`, so a run whose serial log receives no output
+cannot pass — the diagnostics channel is proven working on every green run
+instead of being discovered broken on a failing one.
+
+**`ssh.sh` — one identity, explicit escalation, bounded waits.** `guest_run`
+and `guest_copy` address the guest as the administrator account read back from
+`creds.env` (never `root@`), `guest_sudo` escalates with `sudo -n`, and
+`wait_for_ssh` polls within the explicit `SSH_READY_TIMEOUT`. `reboot_guest`
+issues the reboot through `guest_sudo` and then waits for the **pre-reboot**
+sshd to stop answering (`SSH_GONE_TIMEOUT`) before waiting for sshd to return,
+so a readiness check cannot be satisfied by the daemon that is about to die.
+The endpoint it dials, `VM_SSH_HOST`/`VM_SSH_PORT`, is declared with the same
+`:-` default in both `ssh.sh` and `vm.sh` — the library that forwards it — so
+the two can be sourced in either order; a guard test holds the two
+declarations identical so the dialled and forwarded endpoints cannot drift.
+
+`packaging/vm_harness_test.go` guards all three as text and by file mode, and
+still executes nothing but `shellcheck`: every file under `test/vm/lib` must be
+non-executable, both family branches must exist, the `NOPASSWD` grant must be
+present *and* no password-prompting escalation form may appear anywhere in the
+library directory, no file under `test/vm` may contain a key blob, a PEM block,
+a literal password value or the string `root@`, and no file may disable KVM or
+introduce an offline image-editing step.
 
 ### Artifact extraction (`packaging/extract`)
 
