@@ -2322,8 +2322,8 @@ policy the package actually installed. Reading the installed file makes the
 check follow whichever policy the format's override shipped, which is why the
 script contains no stack name, no module name and no multiarch module path.
 
-Checks 2 and 3 are shell **functions** rather than inline code so a later chunk
-can re-invoke them after a reinstall.
+Checks 2 and 3 are shell **functions** rather than inline code, so each is a
+single named unit that can be invoked more than once.
 
 **Expectation-line convention.** Every expected ownership value, every
 verified unit path and the cgo-linked binary path is written as one
@@ -2375,9 +2375,8 @@ Checks 4 through 6 add four more guards, all of them text-only:
 
 **Nothing invokes the script yet.** At this commit no make target and no CI job
 runs it; wiring it into a make target and into
-`.github/workflows/packaging.yml` is later work. The remaining checks the spec
-names — reinstall and removal — are not implemented here either; this commit's
-script covers checks 1 through 6 and nothing else.
+`.github/workflows/packaging.yml` is later work. This commit's script covers
+checks 1 through 6.
 
 ### Artifact extraction (`packaging/extract`)
 

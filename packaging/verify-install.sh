@@ -105,8 +105,8 @@ expect_equal() {
 }
 
 # check_account is check 2: the account exists and reproduces the installed
-# sysusers declaration. It is a function because a later reinstall check
-# re-invokes it.
+# sysusers declaration. It is a function so the whole check is one named unit
+# that can be invoked more than once.
 check_account() {
     [ -f "${sysusers_conf}" ] ||
         fail "${sysusers_conf} is missing after install"
@@ -153,8 +153,8 @@ expect_owner_mode() {
     fi
 }
 
-# check_owner_mode is check 3. Like check_account it is a function because a
-# later reinstall check re-invokes it.
+# check_owner_mode is check 3. Like check_account it is a function so the whole
+# check is one named unit that can be invoked more than once.
 check_owner_mode() {
     expect_owner_mode /etc/pilothouse root pilothouse 0750
     expect_owner_mode /etc/pilothouse/storage/credentials root root 0700

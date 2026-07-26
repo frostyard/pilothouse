@@ -38,9 +38,9 @@ func readVerifyInstall(t *testing.T) string {
 	return string(raw)
 }
 
-// TestVerifyInstallIsAnExecutablePOSIXShellScript pins the two properties the
-// make target and CI job that will invoke the script depend on: it is
-// executable, and it is a POSIX sh script.
+// TestVerifyInstallIsAnExecutablePOSIXShellScript pins two properties any
+// caller of the script depends on: it is executable, and it is a POSIX sh
+// script.
 func TestVerifyInstallIsAnExecutablePOSIXShellScript(t *testing.T) {
 	info, err := os.Stat(verifyInstallPath)
 	require.NoErrorf(t, err, "stat %s", verifyInstallPath)
