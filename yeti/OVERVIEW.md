@@ -96,7 +96,10 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
                       installs `rpm` (which on the Debian bookworm base provides
-                      `rpm`, `rpmbuild` and `rpm2cpio`) and `cpio`; `dpkg-deb`
+                      `rpm`, `rpmbuild` and `rpm2cpio`) and `cpio`, the latter
+                      only because `cmd/verify-packages/integration_test.go`
+                      still resolves it in its rpm tool list — the RPM extractor
+                      itself runs `rpm2archive` piped into `tar`; `dpkg-deb`
                       already comes from the Debian base image, so no package is
                       needed for it. The image declares
                       `ENV PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1`, which reaches
@@ -2222,12 +2225,15 @@ since.
   Pro, and the CI packaging job is **#72**'s; this package is exercised by
   `go test` alone.
 - **On-disk state after a real install.** No Go code in this package installs
-  anything. The container-level install checks live in the shell script
-  `packaging/verify-install.sh` ("Install validation" below), which this
-  package's Go tests only read as text; VM installs and booted-host
-  verification are **#67**'s — see M1 above for why an artifact cannot
-  prove ownership and why `Entry.Owner`/`Entry.Group` therefore drive no
-  assertion.
+  anything. Package validation splits in two here. **Layer A** is the
+  container-level install check: the shell script `packaging/verify-install.sh`
+  ("Install validation" below), which this package's Go tests only read as
+  text, run by `make verify-package-install` locally and by
+  `.github/workflows/packaging.yml`'s `install` job in CI. **Layer B** — VM
+  installs and booted-host verification, anything needing systemd as PID 1 or
+  an enforcing SELinux policy — is **#67**'s and has not landed; see M1 above
+  for why an artifact cannot prove ownership and why `Entry.Owner`/
+  `Entry.Group` therefore drive no assertion.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
 (`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
@@ -2492,8 +2498,41 @@ resolve dependencies against the distro's real repositories.
 Like `verify-packages` and `package`, the target is **deliberately absent from
 `ci` and from `docker-ci`** (`make -n ci | grep verify-package-install` prints
 nothing): it depends on artifacts a stock checkout does not have, and
-additionally on Docker and the network. **No CI job calls it yet** — the
-`.github/workflows/packaging.yml` job that will is later work.
+additionally on Docker and the network.
+
+**The CI job that runs it.** `.github/workflows/packaging.yml` gained a second
+job, `install` ("Install packages on target distros"), as of this commit. It is
+Layer A in CI, and it is a *consumer* of the `packages` job, not a second build:
+
+- `needs: packages`, and **no `if:` of its own**. The fork skip lives once, on
+  `packages` (a fork pull request never receives `GORELEASER_KEY`); a skipped
+  job skips its dependents, so this job inherits the skip instead of carrying a
+  second copy of the condition that could drift from the first.
+- A `strategy.matrix` of exactly two entries — `debian:12@sha256:9344f8…` paired
+  with the `packages-deb` artifact and `fedora:42@sha256:99e203…` paired with
+  `packages-rpm` — with `fail-fast: false`, so one family's failure does not
+  mask the other's result. The same digest pins the Makefile's unset-variable
+  message names, for the same reason: a floating tag makes the gate's result
+  depend on when it ran.
+- Its steps are `actions/checkout@v7` (the script and the Makefile come from the
+  tree, never from the artifact), `actions/download-artifact@v5` fetching the
+  matrix row's artifact into `dist/`, then
+  `make verify-package-install INSTALL_IMAGE=${{ matrix.image }}
+  ARTIFACT_DIR=dist` — the *same* target a developer runs, so CI and a
+  workstation cannot disagree about what installing the package proves.
+- Reusing the uploaded artifacts is what keeps the bytes under test equal to
+  the bytes `make verify-packages` already passed, and keeps the workflow to
+  **exactly one** `goreleaser/goreleaser-action` step. Only the matching
+  format's artifact is downloaded, so a format mis-detection inside the script
+  cannot silently install the wrong file. The job needs no Go, no GoReleaser and
+  no packaging build dependencies — only Docker, which `ubuntu-latest` provides.
+
+`packaging/workflow_install_job_test.go` guards all of that by decoding the live
+workflow with `gopkg.in/yaml.v3` and asserting the job's `needs`, the absence of
+its own `if:`, both matrix rows verbatim, the `make verify-package-install`
+invocation, the one-GoReleaser-step count, and that the token `cpio` appears
+nowhere in the file. Its expectations are hand-written from the specification,
+never derived from the workflow under test.
 
 `make help` was added in the same commit. The Makefile has annotated targets
 with `## description` since long before, but nothing printed them; `help` is a
@@ -2983,7 +3022,9 @@ a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
 gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
 *does* run a packaging gate now — `.github/workflows/packaging.yml`, which
-builds the artifacts and runs `make verify-packages` against them — but that
+builds the artifacts, runs `make verify-packages` against them and then
+installs them on pinned Debian and Fedora containers with
+`make verify-package-install` — but that
 gate needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution, so
 it cannot run locally at all, and it is the single named exception to the
 mirror-CI promise rather than something `ci` could reproduce. An agent or developer who
@@ -3029,23 +3070,30 @@ host and in the development image.
 *The CI packaging gate* is `.github/workflows/packaging.yml` (workflow name
 `Packaging`). It triggers on `push` to `main` and on `pull_request` targeting
 `main` — no tag trigger, no `workflow_run` — holds `permissions: contents:
-read` because it publishes nothing, installs the packaging and cgo build
-dependencies (`rpm` **and** `cpio` explicitly, since Noble's `rpm` package does
-not depend on `cpio` and no ambient runner tool may be relied on, plus the
+read` because it publishes nothing, and runs **two** jobs. The first,
+`packages`, installs the packaging and cgo build dependencies (`rpm`
+explicitly, since no ambient runner tool may be relied on, plus the
 `libpam0g-dev`/`libsystemd-dev` headers and the `gcc-aarch64-linux-gnu` cross
-toolchain the arm64 cgo `pilothoused` build needs), runs
+toolchain the arm64 cgo `pilothoused` build needs — `cpio` is **not** among
+them: nothing in the workflow uses it, and `packaging/extract`'s rpm backend
+runs `rpm2archive` piped into `tar`), runs
 `goreleaser/goreleaser-action@v7` with the Pro distribution and the existing
 `~> v2` constraint on `release --snapshot --clean`, then asserts and verifies
-what came out.
+what came out and uploads the two artifacts. The second, `install`, downloads
+those artifacts and installs them on the two digest-pinned distro containers;
+it is described in full under "How the script is invoked" above. So the gate
+does not stop at the artifact payload: it also proves the packages install.
 
 It is a **separate file** from `.github/workflows/test.yml` because GitHub does
 not hand repository secrets to a run triggered by a fork's pull request: a job
 needing `GORELEASER_KEY` inside `test.yml` would fail for every fork
 contributor, and `test.yml` must stay green for them and must gain no
-`GORELEASER_KEY` dependency. Instead the single job carries
+`GORELEASER_KEY` dependency. Instead the `packages` job carries
 `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
 so a fork pull request **skips** the job — neutral, never failed — and never
-receives the key. `GORELEASER_KEY` is the only secret the job takes; there is
+receives the key. The `install` job restates nothing: `needs: packages` means a
+skipped `packages` skips it too. `GORELEASER_KEY` is the only secret the
+workflow takes; there is
 no `GITHUB_TOKEN`, because `--snapshot` publishes nothing and needs no tag.
 
 It is also a separate file from `.github/workflows/snapshot.yml`, which is a

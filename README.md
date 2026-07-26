@@ -48,8 +48,12 @@ native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
 CI. The single exception is `.github/workflows/packaging.yml`, the packaging
 gate, which cannot run locally because it needs the `GORELEASER_KEY` secret
-and the goreleaser Pro distribution; `make verify-packages` is the local tool
-for the package contracts it checks, once artifacts exist in `dist/`.
+and the goreleaser Pro distribution. That gate does more than read the
+artifacts: it also installs them on pinned Debian and Fedora containers, so
+it needs Docker and network access on top of the credentials, and it stays
+outside `make ci` and `make docker-ci` by construction. `make verify-packages`
+and `make verify-package-install` are the local tools for the contracts it
+checks, once artifacts exist in `dist/`.
 
 Go 1.26 or newer is required.
 
@@ -110,7 +114,9 @@ The target is deliberately not part of `make ci` or `make docker-ci`: those
 gates must stay green on a checkout with no built artifacts, so that local
 green still means the credential-free CI gates will be green. The one CI gate
 they do not mirror is `.github/workflows/packaging.yml`, which builds the
-artifacts and runs this same verification in CI; it cannot run locally because
+artifacts, runs this same verification in CI, and then installs those same
+artifacts on pinned Debian and Fedora containers with
+`make verify-package-install`. It cannot run locally because
 it needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution.
 
 `make package` is the local producer: it runs `goreleaser release --snapshot
@@ -167,8 +173,14 @@ holding; and that removal leaves the per-format state each manager promises
 Like `make verify-packages`, it is deliberately outside `make ci` and `make
 docker-ci`, and for a stronger version of the same reason: it needs artifacts
 that a stock checkout does not have, plus Docker and network access — check 1's
-whole point is dependency resolution against the distro's real repositories. No
-CI job runs this target yet.
+whole point is dependency resolution against the distro's real repositories.
+
+CI runs this exact target. `.github/workflows/packaging.yml`'s `install` job
+depends on the build-and-verify job, downloads the artifacts it uploaded, and
+runs `make verify-package-install` once per image across a two-entry matrix —
+the pinned Debian image with the `.deb`, the pinned Fedora image with the
+`.rpm`. That is why the packaging gate is not a payload-only check, and why it
+stays outside `make ci` / `make docker-ci`.
 
 ### Create a release
 
