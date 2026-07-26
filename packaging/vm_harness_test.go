@@ -32,10 +32,33 @@ const (
 
 	// vmCloudInitLibPath generates the run-time credentials and the NoCloud
 	// seed; vmVMLibPath boots the guest and owns the serial-console channel;
-	// vmSSHLibPath owns the guest's SSH lifecycle.
-	vmCloudInitLibPath = vmLibDir + "/cloudinit.sh"
-	vmVMLibPath        = vmLibDir + "/vm.sh"
-	vmSSHLibPath       = vmLibDir + "/ssh.sh"
+	// vmSSHLibPath owns the guest's SSH lifecycle; vmDiagnosticsLibPath owns
+	// the failure-time diagnostics discriminator.
+	vmCloudInitLibPath   = vmLibDir + "/cloudinit.sh"
+	vmVMLibPath          = vmLibDir + "/vm.sh"
+	vmSSHLibPath         = vmLibDir + "/ssh.sh"
+	vmDiagnosticsLibPath = vmLibDir + "/diagnostics.sh"
+
+	// vmOrchestratorPath is the harness's one entry point: the host-side
+	// program every stage runs from. It is EXECUTED, so it is committed
+	// executable and is additionally invoked through an explicit interpreter.
+	vmOrchestratorPath = vmHarnessDir + "/vm-boot-test.sh"
+
+	// vmGuestDir is the single directory every guest-side assertion script
+	// lives in, and vmGuestLibPath is the sourced library they share.
+	vmGuestDir     = vmHarnessDir + "/guest"
+	vmGuestLibPath = vmGuestDir + "/lib.sh"
+
+	// vmGuestStagingDir is the administrator-writable staging directory in the
+	// guest. The single SSH identity cannot write /root, cannot install
+	// packages and cannot read a 0600 root-owned file, so every guest-bound
+	// copy lands here and privilege is obtained explicitly afterwards.
+	vmGuestStagingDir = "~/vm-boot"
+
+	// vmGuestScriptInvocation is the ONLY form in which a guest script may be
+	// run: explicit interpreter and explicit escalation, against the staged
+	// path.
+	vmGuestScriptInvocation = "guest_run sudo -n sh " + vmGuestStagingDir + "/guest/"
 )
 
 // vmSourcedScripts are harness files that are sourced, never invoked as
@@ -47,6 +70,8 @@ var vmSourcedScripts = []string{
 	vmCloudInitLibPath,
 	vmVMLibPath,
 	vmSSHLibPath,
+	vmDiagnosticsLibPath,
+	vmGuestLibPath,
 }
 
 // vmSourcedBashLibraries are the sourced libraries that are bash, so they carry
@@ -56,6 +81,7 @@ var vmSourcedBashLibraries = []string{
 	vmCloudInitLibPath,
 	vmVMLibPath,
 	vmSSHLibPath,
+	vmDiagnosticsLibPath,
 }
 
 // vmDigestLengths is the hex length a digest must have under each algorithm the
@@ -265,13 +291,21 @@ func TestVMHarnessShellcheck(t *testing.T) {
 
 	t.Logf("using shellcheck at %s", shellcheck)
 
-	for _, path := range vmSourcedBashLibraries {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			out, err := exec.Command(shellcheck, "--shell=bash", path).CombinedOutput()
-			require.NoErrorf(t, err, "shellcheck --shell=bash %s reported problems:\n%s", path, out)
-			require.Emptyf(t, strings.TrimSpace(string(out)),
-				"shellcheck --shell=bash %s must emit no warnings, got:\n%s", path, out)
-		})
+	// Host-side code runs on ubuntu-latest only, so it is bash; guest-side code
+	// must run on both Debian's dash and Fedora's bash, so it is POSIX sh. Each
+	// file is checked under the dialect it is actually written in.
+	bash := append(append([]string{}, vmSourcedBashLibraries...), vmOrchestratorPath)
+	posix := append([]string{vmGuestLibPath}, vmGuestScripts(t)...)
+
+	for dialect, paths := range map[string][]string{"bash": bash, "sh": posix} {
+		for _, path := range paths {
+			t.Run(dialect+"/"+filepath.Base(path), func(t *testing.T) {
+				out, err := exec.Command(shellcheck, "--shell="+dialect, path).CombinedOutput()
+				require.NoErrorf(t, err, "shellcheck --shell=%s %s reported problems:\n%s", dialect, path, out)
+				require.Emptyf(t, strings.TrimSpace(string(out)),
+					"shellcheck --shell=%s %s must emit no warnings, got:\n%s", dialect, path, out)
+			})
+		}
 	}
 }
 
@@ -634,12 +668,11 @@ func TestVMSudoGrantIsLoadBearing(t *testing.T) {
 
 	invocation := regexp.MustCompile(`\bsudo\b[ \t]+(\S+)`)
 
-	entries, err := os.ReadDir(vmLibDir)
-	require.NoErrorf(t, err, "read %s", vmLibDir)
-
-	for _, entry := range entries {
-		path := filepath.Join(vmLibDir, entry.Name())
-
+	// The scan covers every file under test/vm, not just the library
+	// directory: the orchestrator is where the escalations actually happen, and
+	// a guard bounded to the directory where the defect was first noticed would
+	// let the next call site reintroduce it one directory over.
+	for _, path := range vmHarnessFiles(t) {
 		for _, match := range invocation.FindAllStringSubmatch(readVMHarnessFile(t, path), -1) {
 			require.Equalf(t, "-n", match[1],
 				"%s invokes `%s`: every guest-side escalation must pass -n, because a non-interactive command with no TTY would hang on a password prompt",
@@ -801,6 +834,585 @@ func requireNoPrivateKeyPrint(t *testing.T, path, content string) {
 
 			t.Fatalf("%s:%d must never print the private key: %s",
 				path, number+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// vmGuestScripts lists every EXECUTED guest-side script: everything under
+// test/vm/guest except the sourced lib.sh. The set is discovered on disk rather
+// than hand-kept, so a script added by a later change cannot escape the mode,
+// dialect, require-root and invocation-form guards below.
+func vmGuestScripts(t *testing.T) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(vmGuestDir)
+	require.NoErrorf(t, err, "read %s", vmGuestDir)
+
+	var scripts []string
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sh") {
+			continue
+		}
+
+		path := filepath.Join(vmGuestDir, entry.Name())
+		if path == filepath.FromSlash(vmGuestLibPath) {
+			continue
+		}
+
+		scripts = append(scripts, path)
+	}
+
+	require.NotEmptyf(t, scripts, "%s must hold at least one guest script", vmGuestDir)
+
+	return scripts
+}
+
+// vmUnquote removes shell quoting so a call site can be compared against the
+// exact command form it must use. The tilde paths in the orchestrator are
+// single-quoted on purpose — they are expanded by the guest's shell, not the
+// runner's — and that quoting is not part of the form being pinned.
+func vmUnquote(line string) string {
+	return strings.TrimSpace(strings.NewReplacer("'", "", `"`, "").Replace(line))
+}
+
+// vmCodeLines returns the script's non-comment, non-blank lines, unquoted, so
+// a form written only in a header comment cannot satisfy a call-site guard.
+func vmCodeLines(script string) []string {
+	var code []string
+
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		code = append(code, vmUnquote(trimmed))
+	}
+
+	return code
+}
+
+// TestVMOrchestratorIsAnExecutableBashProgram pins the executed half of the
+// executed-versus-sourced discipline for the harness's entry point. Both
+// mechanisms are required and neither is sufficient alone: the file is
+// committed executable, and it is additionally invoked through an explicit
+// interpreter, because scp does not preserve the executable bit without -p and
+// a harness that trusted a copied mode would carry the same defect one layer
+// down.
+func TestVMOrchestratorIsAnExecutableBashProgram(t *testing.T) {
+	info, err := os.Stat(vmOrchestratorPath)
+	require.NoErrorf(t, err, "stat %s", vmOrchestratorPath)
+	require.NotZerof(t, info.Mode().Perm()&0o111,
+		"%s is executed as a program and must be committed executable (100755); mode is %v",
+		vmOrchestratorPath, info.Mode())
+
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+	require.True(t, strings.HasPrefix(script, "#!/usr/bin/env bash\n"),
+		"%s must carry a bash shebang", vmOrchestratorPath)
+	require.Equal(t, "set -euo pipefail", effectiveLines(script)[0],
+		"the first effective line of %s must be `set -euo pipefail`", vmOrchestratorPath)
+}
+
+// TestVMOrchestratorAcceptsOnlyTheTwoFamilies pins the command line: --family
+// (debian or fedora) and --artifact-dir, with any other family rejected by
+// name rather than defaulted.
+func TestVMOrchestratorAcceptsOnlyTheTwoFamilies(t *testing.T) {
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+	parse := shellFunctionBody(t, vmOrchestratorPath, script, "parse_arguments")
+
+	require.Contains(t, parse, "--family)",
+		"%s must accept --family", vmOrchestratorPath)
+	require.Contains(t, parse, "--artifact-dir)",
+		"%s must accept --artifact-dir", vmOrchestratorPath)
+	require.Contains(t, parse, "debian | fedora) ;;",
+		"%s must accept exactly the two families this tier covers", vmOrchestratorPath)
+	require.Contains(t, parse, `orchestrator_fail "unknown family '$FAMILY': expected debian or fedora"`,
+		"%s must reject any other family by name rather than falling back to a default", vmOrchestratorPath)
+	require.Contains(t, parse, `orchestrator_fail "artifact directory '$ARTIFACT_DIR' does not exist or is not a directory"`,
+		"%s must reject a missing artifact directory by name", vmOrchestratorPath)
+}
+
+// TestVMGuestScriptsAreExecutablePOSIXShellScripts is the table-driven mode and
+// dialect guard for the executed guest set. It walks the directory rather than
+// a hand-kept list, so a guest script added later is held to the same rules:
+// committed executable, POSIX sh, fail-fast, sourcing the shared library and
+// calling require_root before it does anything else.
+func TestVMGuestScriptsAreExecutablePOSIXShellScripts(t *testing.T) {
+	for _, path := range vmGuestScripts(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			info, err := os.Stat(path)
+			require.NoErrorf(t, err, "stat %s", path)
+			require.NotZerof(t, info.Mode().Perm()&0o111,
+				"%s is executed as a program and must be committed executable (100755); mode is %v",
+				path, info.Mode())
+
+			script := readVMHarnessFile(t, path)
+			require.Truef(t, strings.HasPrefix(script, "#!/bin/sh\n"),
+				"%s must start with `#!/bin/sh`: Debian's /bin/sh is dash and Fedora's is bash, and the same script runs on both", path)
+
+			lines := effectiveLines(script)
+			require.GreaterOrEqual(t, len(lines), 3, "%s is too short to be a guest script", path)
+			require.Equalf(t, "set -eu", lines[0],
+				"the first effective line of %s must be `set -eu`, so it aborts on its first failed assertion", path)
+			require.Equalf(t, `. "$(dirname "$0")/lib.sh"`, lines[1],
+				"%s must source the shared guest library from its own staged directory", path)
+			require.Equalf(t, "require_root", lines[2],
+				"require_root must be %s's first effective statement: a call site that lost its `sudo -n` must fail here, not three assertions deep", path)
+
+			require.Containsf(t, script, `fail "`,
+				"%s must report failures through the shared fail(), which names the assertion and exits non-zero", path)
+			require.NotContainsf(t, script, "fail() {",
+				"%s must not define its own fail(): there is exactly one, in %s", path, vmGuestLibPath)
+		})
+	}
+}
+
+// TestVMGuestLibraryIsSourcedPOSIXSh pins the sourced half inside the guest
+// directory. lib.sh is sourced by every guest script and is never invoked, so
+// it carries no shebang and no executable bit — the mode guard for that lives
+// in TestVMSourcedScriptsAreNotExecutable, which now covers it, so the two
+// categories cannot blur in either direction.
+func TestVMGuestLibraryIsSourcedPOSIXSh(t *testing.T) {
+	script := readVMHarnessFile(t, vmGuestLibPath)
+
+	require.False(t, strings.HasPrefix(script, "#!"),
+		"%s is sourced and must not carry a shebang", vmGuestLibPath)
+	require.Contains(t, script, "# shellcheck shell=sh",
+		"%s must declare its POSIX sh dialect for shellcheck", vmGuestLibPath)
+	require.Equal(t, "set -eu", effectiveLines(script)[0],
+		"the first effective line of %s must be `set -eu`", vmGuestLibPath)
+}
+
+// TestVMGuestLibraryDefinesRequireRootAndOneFail pins the two functions the
+// whole guest-side discipline rests on: exactly one fail(), which names the
+// failing assertion and exits non-zero, and require_root(), which fails when
+// `id -u` is not 0.
+func TestVMGuestLibraryDefinesRequireRootAndOneFail(t *testing.T) {
+	script := readVMHarnessFile(t, vmGuestLibPath)
+
+	require.Equal(t, 1, strings.Count(script, "\nfail() {\n"),
+		"%s must define exactly one fail()", vmGuestLibPath)
+
+	failBody := shellFunctionBody(t, vmGuestLibPath, script, "fail")
+	require.Contains(t, failBody, `printf 'assertion failed: %s\n' "$*" >&2`,
+		"%s: fail() must print the failing assertion by name", vmGuestLibPath)
+	require.Contains(t, failBody, "exit 1",
+		"%s: fail() must exit non-zero, so `set -eu` aborts the script at its first failed assertion", vmGuestLibPath)
+
+	requireRoot := shellFunctionBody(t, vmGuestLibPath, script, "require_root")
+	require.Contains(t, requireRoot, `require_root_uid="$(id -u)"`,
+		"%s: require_root must read the effective uid", vmGuestLibPath)
+	require.Contains(t, requireRoot, `[ "$require_root_uid" = "0" ] ||`,
+		"%s: require_root must fail unless the uid is 0", vmGuestLibPath)
+	require.Contains(t, requireRoot, "fail \"this script must run as root",
+		"%s: require_root must name the assertion it failed", vmGuestLibPath)
+
+	// The converse direction: every executed guest script calls it.
+	for _, path := range vmGuestScripts(t) {
+		require.Containsf(t, readVMHarnessFile(t, path), "\nrequire_root\n",
+			"%s must call require_root: it is what makes a dropped `sudo -n` fail immediately and legibly", path)
+	}
+}
+
+// TestVMGuestCurlWrappersCarryNoInnerEscalation pins the single-escalation
+// model. The guest script already runs as root under `sudo -n sh`, and
+// require_root proves it at run time, so the curl wrappers carry no inner
+// escalation: one boundary is auditable, one per request is not.
+func TestVMGuestCurlWrappersCarryNoInnerEscalation(t *testing.T) {
+	script := readVMHarnessFile(t, vmGuestLibPath)
+
+	for _, name := range []string{"broker_curl", "web_curl"} {
+		body := shellFunctionBody(t, vmGuestLibPath, script, name)
+		require.NotContainsf(t, body, "sudo",
+			"%s: %s must carry no inner escalation — the script is already root, and require_root is what makes that safe",
+			vmGuestLibPath, name)
+	}
+
+	broker := shellFunctionBody(t, vmGuestLibPath, script, "broker_curl")
+	require.Contains(t, broker, `--unix-socket "$BROKER_SOCKET"`,
+		"%s: broker_curl must talk to the broker's Unix socket", vmGuestLibPath)
+}
+
+// TestVMAllGuestAssertionScriptsLiveInOneDirectory pins the "single directory"
+// fence: every shell file under test/vm is either the one orchestrator, a
+// sourced host-side library under lib/, or a guest-side script under guest/.
+func TestVMAllGuestAssertionScriptsLiveInOneDirectory(t *testing.T) {
+	for _, path := range vmHarnessFiles(t) {
+		if !strings.HasSuffix(path, ".sh") {
+			continue
+		}
+
+		slashed := filepath.ToSlash(path)
+		if slashed == vmOrchestratorPath {
+			continue
+		}
+
+		require.Truef(t,
+			strings.HasPrefix(slashed, vmLibDir+"/") || strings.HasPrefix(slashed, vmGuestDir+"/"),
+			"%s is neither the orchestrator, a host-side library under %s, nor a guest script under %s: every guest-side assertion script lives in one directory",
+			path, vmLibDir, vmGuestDir)
+	}
+}
+
+// TestVMOrchestratorInvokesGuestScriptsWithInterpreterAndEscalation enumerates
+// every guest-script invocation in the orchestrator and requires the full form:
+// explicit interpreter AND explicit escalation, against the staged path. A bare
+// path would depend on a copied executable bit that scp does not preserve, and
+// a missing `sudo -n` would fail obscurely inside the script instead of at the
+// call site.
+func TestVMOrchestratorInvokesGuestScriptsWithInterpreterAndEscalation(t *testing.T) {
+	reference := regexp.MustCompile(regexp.QuoteMeta(vmGuestStagingDir+"/guest/") + `([A-Za-z0-9._-]+\.sh)`)
+
+	invoked := map[string]bool{}
+
+	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
+		match := reference.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		require.Equalf(t, vmGuestScriptInvocation+match[1], line,
+			"%s runs a guest script as `%s`; the only permitted form is `%s`",
+			vmOrchestratorPath, line, vmGuestScriptInvocation+match[1])
+
+		invoked[match[1]] = true
+	}
+
+	// The converse direction: a guest script that exists but is never invoked
+	// would be a check nothing runs.
+	for _, path := range vmGuestScripts(t) {
+		require.Truef(t, invoked[filepath.Base(path)],
+			"%s is never invoked by %s", path, vmOrchestratorPath)
+	}
+}
+
+// vmArtifactGlob extracts the glob the orchestrator selects each format with,
+// as text. Nothing here executes the harness: the pattern is then matched
+// against a synthetic file list in Go.
+var vmArtifactGlob = regexp.MustCompile(`set -- "\$artifact_dir"/(\S+) ;;`)
+
+// TestVMOrchestratorSelectsTheArchQualifiedArtifact pins artifact selection.
+// The packages job uploads both an amd64 and an arm64 file per format, and the
+// runner is x86_64 with KVM requiring guest == host architecture, so selection
+// is arch-qualified. The globs are not merely asserted as text: they are
+// matched against a directory listing that holds both architectures, which is
+// the case an unqualified glob would silently get wrong.
+func TestVMOrchestratorSelectsTheArchQualifiedArtifact(t *testing.T) {
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+
+	require.Contains(t, script, `set -- "$artifact_dir"/*_amd64.deb ;;`,
+		"%s must select the Debian artifact with the amd64-qualified glob", vmOrchestratorPath)
+	require.Contains(t, script, `set -- "$artifact_dir"/*.x86_64.rpm ;;`,
+		"%s must select the Fedora artifact with the x86_64-qualified glob", vmOrchestratorPath)
+
+	for _, bare := range []string{"*.deb", "*.rpm", "*_arm64.deb", "*.aarch64.rpm"} {
+		require.NotContainsf(t, script, bare,
+			"%s must not use the unqualified or wrong-architecture glob %s: the directory holds both architectures",
+			vmOrchestratorPath, bare)
+	}
+
+	globs := vmArtifactGlob.FindAllStringSubmatch(script, -1)
+	require.Len(t, globs, 2, "%s must declare exactly one glob per format", vmOrchestratorPath)
+
+	listing := map[string][]string{
+		"*_amd64.deb":  {"pilothouse_0.5.0_amd64.deb", "pilothouse_0.5.0_arm64.deb"},
+		"*.x86_64.rpm": {"pilothouse-0.5.0.x86_64.rpm", "pilothouse-0.5.0.aarch64.rpm"},
+	}
+
+	for _, glob := range globs {
+		files, ok := listing[glob[1]]
+		require.Truef(t, ok, "%s declares an unexpected selection glob %q", vmOrchestratorPath, glob[1])
+
+		matched := 0
+
+		for _, file := range files {
+			hit, err := filepath.Match(glob[1], file)
+			require.NoError(t, err)
+
+			if hit {
+				matched++
+			}
+		}
+
+		require.Equalf(t, 1, matched,
+			"%s: glob %q must match exactly one file in a directory holding both an amd64 and an arm64 artifact of that format, matched %d",
+			vmOrchestratorPath, glob[1], matched)
+	}
+
+	selection := shellFunctionBody(t, vmOrchestratorPath, script, "select_artifact")
+	require.Contains(t, selection, `if [ "$count" -ne 1 ]; then`,
+		"%s: selection must require exactly one match", vmOrchestratorPath)
+	require.Contains(t, selection, `orchestrator_fail "expected exactly one amd64 $format artifact in $artifact_dir, found ${count}:${names:-" (none)"}"`,
+		"%s: an ambiguous or empty match must fail naming the count and the matched basenames", vmOrchestratorPath)
+	require.Contains(t, selection, `names="$names $(basename "$candidate")"`,
+		"%s: the failure message's basenames must be collected from the matches themselves", vmOrchestratorPath)
+}
+
+// TestVMOrchestratorStagesCredentialsPrivileged pins the credential path end to
+// end: scp into the administrator-writable staging directory, then a privileged
+// install into /root with the owner, group and mode stated, then removal of the
+// staged copy so the generated root credential does not linger where the
+// unprivileged account can read it. No credential is ever a command-line
+// argument — only the path of the file holding it.
+func TestVMOrchestratorStagesCredentialsPrivileged(t *testing.T) {
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+	body := vmUnquote(shellFunctionBody(t, vmOrchestratorPath, script, "install_guest_credentials"))
+
+	steps := []string{
+		"guest_copy $VM_CREDS_ENV " + vmGuestStagingDir + "/creds.env",
+		"guest_run sudo -n install -o root -g root -m 0600 " + vmGuestStagingDir + "/creds.env /root/.pilothouse-vm-creds",
+		"guest_run rm -f " + vmGuestStagingDir + "/creds.env",
+	}
+
+	previous := -1
+
+	for _, step := range steps {
+		at := strings.Index(body, step)
+		require.GreaterOrEqualf(t, at, 0,
+			"%s: install_guest_credentials must run `%s`", vmOrchestratorPath, step)
+		require.Greaterf(t, at, previous,
+			"%s: install_guest_credentials must stage, install privileged, then remove the staged copy, in that order", vmOrchestratorPath)
+
+		previous = at
+	}
+
+	// Only the PATH of the file holding the credentials is ever handed to a
+	// guest command; the values themselves are never arguments, where they
+	// would land in the guest's process table and in any command echo.
+	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
+		for _, credential := range []string{"PH_ADMIN_PASSWORD", "PH_ROOT_PASSWORD"} {
+			require.NotContainsf(t, line, credential,
+				"%s runs `%s`: no credential may be passed to a guest command as an argument", vmOrchestratorPath, line)
+		}
+	}
+}
+
+// TestVMOrchestratorCopiesOnlyIntoTheStagingDirectory pins the fence around
+// every guest-bound copy. The one SSH identity is the administrator account, so
+// each guest_copy must name exactly one guest-side path and that path must be
+// inside the staging directory; the host-side side of the copy is the job
+// workspace and is deliberately unconstrained.
+func TestVMOrchestratorCopiesOnlyIntoTheStagingDirectory(t *testing.T) {
+	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
+		if !strings.Contains(line, "guest_copy ") {
+			continue
+		}
+
+		staged := 0
+
+		for _, field := range strings.Fields(line) {
+			if !strings.HasPrefix(field, "~") {
+				continue
+			}
+
+			require.Truef(t, strings.HasPrefix(field, vmGuestStagingDir+"/"),
+				"%s: `%s` addresses the guest path %q, which is outside the staging directory %s",
+				vmOrchestratorPath, line, field, vmGuestStagingDir)
+
+			staged++
+		}
+
+		require.Equalf(t, 1, staged,
+			"%s: `%s` must name exactly one guest-side path, inside %s", vmOrchestratorPath, line, vmGuestStagingDir)
+	}
+
+	for _, line := range vmCodeLines(readVMHarnessFile(t, vmOrchestratorPath)) {
+		require.NotContainsf(t, line, "scp ",
+			"%s runs `%s`: every copy must go through guest_copy, which is the one place a guest destination is constructed",
+			vmOrchestratorPath, line)
+	}
+
+	// The one login identity is the administrator account, so no command
+	// anywhere in the harness may address the guest as root.
+	for _, path := range vmHarnessFiles(t) {
+		require.NotContainsf(t, readVMHarnessFile(t, path), "root@",
+			"%s must never address the guest as root: privilege is obtained by escalation, not by a second identity", path)
+	}
+
+	// The staging directory exists, owned by the administrator account and
+	// readable only by it, before anything is copied into it.
+	staging := shellFunctionBody(t, vmOrchestratorPath, readVMHarnessFile(t, vmOrchestratorPath), "create_guest_staging")
+	require.Contains(t, vmUnquote(staging), "guest_run mkdir -p "+vmGuestStagingDir+"/guest",
+		"%s: the staging directory and its guest/ subdirectory must be created as the administrator account", vmOrchestratorPath)
+	require.Contains(t, vmUnquote(staging), "guest_run chmod 0700 "+vmGuestStagingDir,
+		"%s: the staging directory must be mode 0700", vmOrchestratorPath)
+	require.NotContains(t, staging, "sudo",
+		"%s: the staging directory is the administrator account's own, so creating it needs no escalation", vmOrchestratorPath)
+}
+
+// TestVMOrchestratorProbesEscalationBeforeItStagesAnything pins the order of
+// the run. The escalation probe comes immediately after the guest is reachable
+// — boot_guest ends with wait_for_ssh — so a broken NOPASSWD grant is reported
+// once, at the top, by name, instead of surfacing three scripts deep. Staging,
+// selection, credential installation and the guest bootstrap all follow it.
+func TestVMOrchestratorProbesEscalationBeforeItStagesAnything(t *testing.T) {
+	script := readVMHarnessFile(t, vmOrchestratorPath)
+
+	probe := shellFunctionBody(t, vmOrchestratorPath, script, "require_passwordless_escalation")
+	require.Contains(t, probe, "if ! guest_run sudo -n true; then",
+		"%s: the probe must run `sudo -n true` in the guest", vmOrchestratorPath)
+	require.Contains(t, probe, `orchestrator_fail "assertion failed: 'sudo -n true' was rejected in the guest`,
+		"%s: a rejected probe must fail with a named assertion", vmOrchestratorPath)
+
+	main := shellFunctionBody(t, vmOrchestratorPath, script, "main")
+
+	order := []string{
+		"install_failure_diagnostics",
+		"boot_guest ",
+		"require_passwordless_escalation",
+		"create_guest_staging",
+		"select_artifact ",
+		"stage_artifact ",
+		"stage_guest_scripts",
+		"install_guest_credentials",
+		vmGuestScriptInvocation,
+	}
+
+	previous := -1
+
+	for _, step := range order {
+		at := strings.Index(vmUnquote(main), step)
+		require.GreaterOrEqualf(t, at, 0, "%s: main must call `%s`", vmOrchestratorPath, step)
+		require.Greaterf(t, at, previous,
+			"%s: main must run its stages in order; `%s` is out of place", vmOrchestratorPath, step)
+
+		previous = at
+	}
+
+	// "Immediately" is asserted literally: boot_guest ends with wait_for_ssh,
+	// so the probe must be the very next statement. Anything wedged between
+	// them would be a step running before passwordless escalation was known to
+	// work.
+	code := vmCodeLines(main)
+	for i, line := range code {
+		if !strings.HasPrefix(line, "boot_guest ") {
+			continue
+		}
+
+		require.Lessf(t, i+1, len(code), "%s: main must do something after boot_guest", vmOrchestratorPath)
+		require.Equalf(t, "require_passwordless_escalation", code[i+1],
+			"%s: the escalation probe must be the statement immediately after the guest becomes reachable, not merely somewhere later",
+			vmOrchestratorPath)
+	}
+}
+
+// TestVMGuardsNeverExecuteTheHarness is the meta-guard for this file: the
+// booted-VM harness needs KVM and a network, so no test here may run any part
+// of it. The only process any of these tests spawns is shellcheck.
+func TestVMGuardsNeverExecuteTheHarness(t *testing.T) {
+	const self = "vm_harness_test.go"
+
+	source := readVMHarnessFile(t, self)
+
+	for _, match := range regexp.MustCompile(`exec\.Command\(([^,)]+)`).FindAllStringSubmatch(source, -1) {
+		require.Equalf(t, "shellcheck", strings.TrimSpace(match[1]),
+			"%s spawns `%s`: these guards read the harness as text and stat its modes, and must never execute it", self, match[0])
+	}
+
+	// Spelled in two pieces so this assertion does not match itself.
+	require.NotContains(t, source, "exec.Command"+"Context",
+		"%s must spawn nothing but the skip-if-absent shellcheck runner", self)
+}
+
+// TestVMDiagnosticsDiscriminateOnLiveSSH pins the failure-time discriminator:
+// whether the guest answers SSH AT THE MOMENT OF FAILURE, not whether it ever
+// did. A reachable guest yields its own unit status and journals for both
+// units; an unreachable one yields the host-side QEMU stderr and serial console
+// logs. Neither branch is silent, and the guest is stopped only after the dump.
+func TestVMDiagnosticsDiscriminateOnLiveSSH(t *testing.T) {
+	script := readVMHarnessFile(t, vmDiagnosticsLibPath)
+
+	install := shellFunctionBody(t, vmDiagnosticsLibPath, script, "install_failure_diagnostics")
+	require.Contains(t, install, "trap 'dump_failure_diagnostics $?' ERR",
+		"%s must install an ERR trap", vmDiagnosticsLibPath)
+	require.Contains(t, install, "trap 'diagnostics_on_exit $?' EXIT",
+		"%s must install an EXIT trap", vmDiagnosticsLibPath)
+
+	probe := shellFunctionBody(t, vmDiagnosticsLibPath, script, "guest_is_reachable_now")
+	require.Contains(t, probe, "( guest_answers_ssh )",
+		"%s: reachability must be probed at failure time, in a subshell so a library exit cannot abandon the dump", vmDiagnosticsLibPath)
+
+	dump := shellFunctionBody(t, vmDiagnosticsLibPath, script, "dump_failure_diagnostics")
+	reachable := strings.Index(dump, "if guest_is_reachable_now; then")
+	require.GreaterOrEqual(t, reachable, 0,
+		"%s: the dump must branch on whether the guest answers ssh now", vmDiagnosticsLibPath)
+	require.Contains(t, dump, "dump_guest_unit_diagnostics",
+		"%s: the reachable branch must collect the guest's own unit state", vmDiagnosticsLibPath)
+	require.Contains(t, dump, "dump_boot_diagnostics",
+		"%s: the unreachable branch must fall back to the host-side qemu stderr and serial console logs", vmDiagnosticsLibPath)
+	require.Contains(t, dump, `diagnostics_log "the guest answers ssh now`,
+		"%s: the reachable branch must say so", vmDiagnosticsLibPath)
+	require.Contains(t, dump, `diagnostics_log "the guest does not answer ssh now`,
+		"%s: the unreachable branch must say so — neither branch may be silent", vmDiagnosticsLibPath)
+
+	units := shellFunctionBody(t, vmDiagnosticsLibPath, script, "dump_guest_unit_diagnostics")
+	require.Contains(t, script, "DIAGNOSTIC_UNITS=(pilothoused.service pilothouse.service)",
+		"%s must dump both units: they are separate processes with separate journals, so naming one would hide the other", vmDiagnosticsLibPath)
+	require.Contains(t, units, `guest_sudo systemctl status --no-pager --full "$unit"`,
+		"%s: unit status needs privilege, so it goes through the escalation wrapper", vmDiagnosticsLibPath)
+	require.Contains(t, units, `guest_sudo journalctl --no-pager --lines "$DIAGNOSTIC_JOURNAL_LINES" -u "$unit"`,
+		"%s: the journal read needs privilege too, and must be bounded", vmDiagnosticsLibPath)
+	require.Contains(t, units, "did not complete in the guest",
+		"%s: a collection command that fails must be reported by name, not swallowed", vmDiagnosticsLibPath)
+
+	exitPath := shellFunctionBody(t, vmDiagnosticsLibPath, script, "diagnostics_on_exit")
+	require.Less(t, strings.Index(exitPath, "dump_failure_diagnostics"), strings.Index(exitPath, "stop_vm"),
+		"%s: diagnostics must be collected before the guest is stopped; a dump from a killed guest is not a dump", vmDiagnosticsLibPath)
+}
+
+// TestVMInstallPackageInstallsTheStagedArtifact pins the guest bootstrap: the
+// artifact comes from the staging directory under a fixed name (selection
+// already happened on the host, arch-qualified), the format follows the guest's
+// own package manager, and curl and jq are installed as test fixtures.
+func TestVMInstallPackageInstallsTheStagedArtifact(t *testing.T) {
+	path := filepath.Join(vmGuestDir, "install-package.sh")
+	script := readVMHarnessFile(t, path)
+
+	require.Contains(t, script, `staging_dir="$(cd "$(dirname "$0")/.." && pwd)"`,
+		"%s must resolve the staging directory from its own staged path", path)
+	require.Contains(t, script, `artifact="$staging_dir/pilothouse-artifact.$format"`,
+		"%s must install the artifact staged by the orchestrator", path)
+
+	for _, command := range []string{
+		"apt-get install -y curl jq",
+		"dnf -y install curl jq",
+		`apt-get install -y "$artifact"`,
+		`dnf -y install "$artifact"`,
+	} {
+		require.Containsf(t, script, command, "%s must run `%s`", path, command)
+	}
+
+	// Layer A (#77) owns these against the same artifacts, in containers. This
+	// script must not restate any of them: the install here is a prerequisite
+	// for the booted-host checks, not a second copy of the container tier.
+	for _, layerA := range []string{
+		"systemd-analyze", "ldd ", "--reinstall", "dpkg -P", "dpkg -r",
+		"rpm -e", "apt-get remove", "sysusers", "pam.d",
+	} {
+		require.NotContainsf(t, script, layerA,
+			"%s must not re-assert Layer A's %q check: #77 already covers it in containers", path, layerA)
+	}
+}
+
+// TestVMHarnessNeverWeakensSELinuxOrRetainsArtifacts pins two negatives across
+// the whole harness. The Fedora guest boots SELinux-enforcing and stays that
+// way — a failing install is a real failure, not something to be worked around
+// by relaxing the policy — and nothing the run produces is uploaded: the disks,
+// the seed, the logs and the credentials live in the job workspace and are
+// never retained.
+func TestVMHarnessNeverWeakensSELinuxOrRetainsArtifacts(t *testing.T) {
+	for _, path := range vmHarnessFiles(t) {
+		content := readVMHarnessFile(t, path)
+
+		for _, forbidden := range []string{"setenforce", "permissive"} {
+			require.NotContainsf(t, content, forbidden,
+				"%s must not change the guest's SELinux mode (%s): the Fedora guest stays enforcing", path, forbidden)
+		}
+
+		for _, forbidden := range []string{"upload-artifact", "actions/upload"} {
+			require.NotContainsf(t, content, forbidden,
+				"%s must not upload anything (%s): disks, seeds, logs and credentials stay in the job workspace", path, forbidden)
 		}
 	}
 }

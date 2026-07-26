@@ -92,20 +92,26 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       runs either automatically. Being a separate package is what keeps
                       the parent's run-time-inert guarantee mechanically true
                        (see "Artifact extraction" below)
-test/vm/              host side of the booted-VM harness (Layer B, #67). At this
-                      commit it holds the image-acquisition and boot halves, all as
-                      sourced (non-executable) bash libraries: images.env, the single
-                      pinning site recording each distro family's cloud image URL,
-                      checksum algorithm and digest, lib/images.sh (fetch and verify
-                      against that pin), lib/cloudinit.sh (generate the run-time
-                      credentials into a 0700 workspace and emit the NoCloud seed),
-                      lib/vm.sh (QEMU/KVM boot of a qcow2 overlay plus the serial
-                      console channel) and lib/ssh.sh (the guest's SSH lifecycle).
-                      There is still no orchestrator, no guest-side assertion and no
-                      workflow job, so nothing here runs; packaging/vm_harness_test.go
-                      guards it structurally without executing it (see "Booted-VM
-                      harness: pinned image acquisition" and "Booted-VM harness:
-                      credentials, seed, boot and SSH" below)
+test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is the
+                      one entry point (--family debian|fedora --artifact-dir <dir>),
+                      committed executable and meant to be run through an explicit
+                      interpreter (`bash test/vm/vm-boot-test.sh`); nothing in the
+                      tree calls it yet. images.env is the single pinning site recording
+                      each distro family's cloud image URL, checksum algorithm and
+                      digest. lib/ holds the sourced, non-executable bash libraries:
+                      images.sh (fetch and verify against that pin), cloudinit.sh
+                      (generate the run-time credentials into a 0700 workspace and
+                      emit the NoCloud seed), vm.sh (QEMU/KVM boot of a qcow2 overlay
+                      plus the serial console channel), ssh.sh (the guest's SSH
+                      lifecycle) and diagnostics.sh (the failure-time discriminator).
+                      guest/ is the single directory holding every guest-side script:
+                      the sourced, non-executable lib.sh plus install-package.sh;
+                      every executed one is committed 100755 and invoked as
+                      `sudo -n sh ~/vm-boot/guest/<name>.sh`. At this commit a run
+                      ends once the package is installed, and no workflow job invokes
+                      any of it; packaging/vm_harness_test.go guards it structurally
+                      without executing it (see the three "Booted-VM harness"
+                      sections below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
@@ -2245,7 +2251,9 @@ since.
   text, run by `make verify-package-install` locally and by
   `.github/workflows/packaging.yml`'s `install` job in CI. **Layer B** — VM
   installs and booted-host verification, anything needing systemd as PID 1 or
-  an enforcing SELinux policy — is **#67**'s and has not landed; see M1 above
+  an enforcing SELinux policy — is **#67**'s; its harness is under construction
+  in `test/vm` (it boots a guest and installs the package, and asserts nothing
+  about the running system yet) and no CI job runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
   `Entry.Group` therefore drive no assertion.
 
@@ -2560,12 +2568,14 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 ### Booted-VM harness: pinned image acquisition (`test/vm/images.env`, `test/vm/lib/images.sh`)
 
 Layer B (#67) — installing the artifacts on a **booted** host with real
-systemd — is under construction. **At this commit nothing here installs a
-package or asserts anything about a running system**, and no workflow job
-invokes any of it: what exists is image acquisition (this section) and the boot
-mechanism ("Booted-VM harness: credentials, seed, boot and SSH" below).
-Everything Layer B is meant to *prove* still lives in the issue, not in the
-tree.
+systemd — is under construction. **At this commit the harness boots a guest and
+installs the package, but asserts nothing about a running system**, and no
+workflow job invokes any of it: what exists is image acquisition (this section),
+the boot mechanism ("Booted-VM harness: credentials, seed, boot and SSH") and
+the orchestrator that drives them ("Booted-VM harness: the orchestrator, guest
+staging and diagnostics"). Everything Layer B is meant to *prove* — activation,
+the systemd-created directories, the live broker socket, PAM, the journal
+read-back and the reboot posture — still lives in the issue, not in the tree.
 
 This section covers the pinning table and the host-side fetcher:
 
@@ -2608,11 +2618,11 @@ executed install-validation script.
 
 ### Booted-VM harness: credentials, seed, boot and SSH (`test/vm/lib/cloudinit.sh`, `vm.sh`, `ssh.sh`)
 
-The second half of Layer B's host side. **At this commit it is still only
-mechanism**: three sourced bash libraries that can create a guest and talk to
-it. Nothing installs a package, asserts anything about a running system, or is
-invoked by any workflow — the orchestrator that calls these functions, the
-guest-side assertion scripts and the CI job all land later.
+The boot half of Layer B's host side: three sourced bash libraries that can
+create a guest and talk to it. **They are mechanism only** — they assert nothing
+about a running system. The orchestrator that calls these functions and the
+guest-side script that installs the package are described in the next section;
+the booted-host assertions and the CI job land later.
 
 **`cloudinit.sh` — every credential is generated here, on the host, at run
 time.** `create_run_workspace` makes the per-run directory with mode `0700`;
@@ -2722,6 +2732,114 @@ silently permitted every occurrence that was not the last thing in the file.
 It also matches both spellings of the key — the literal `id_ed25519` and the
 `$VM_SSH_KEY` variable the scripts actually use — while exempting a reference
 followed by `.pub`, since the public key is not a credential.
+
+### Booted-VM harness: the orchestrator, guest staging and diagnostics (`test/vm/vm-boot-test.sh`, `test/vm/lib/diagnostics.sh`, `test/vm/guest/`)
+
+The harness's first end-to-end runnable path. **At this commit a run ends once
+the package is installed**: enabling the units, the directory and socket
+assertions, the PAM flows, the journal read-back and the reboot posture are not
+implemented yet, and no workflow invokes any of this — the CI job lands later.
+
+**`test/vm/vm-boot-test.sh` is the one entry point**, taking
+`--family debian|fedora` and `--artifact-dir <dir>`; any other family is
+rejected by name rather than defaulted. It fetches and verifies the pinned
+image, builds the seed, boots, gates on serial-console output, waits for sshd,
+probes escalation, creates the staging directory, selects the artifact, stages
+the artifact/guest scripts/`creds.env`, installs the credentials privileged and
+runs the guest bootstrap.
+
+**One guest identity, staged files, explicit escalation.** The only SSH identity
+in the guest is the administrator account cloud-init created. That account
+cannot write `/root`, cannot install packages and cannot read a `0600`
+root-owned file, so nothing is copied to a privileged destination directly:
+
+- The orchestrator creates `~/vm-boot` (mode `0700`) and `~/vm-boot/guest/` **as
+  that account, before anything is copied**, and every guest-bound destination
+  is inside it. Nothing ever addresses the guest as root over SSH.
+- `creds.env` is staged there and then placed with
+  `sudo -n install -o root -g root -m 0600 ~/vm-boot/creds.env
+  /root/.pilothouse-vm-creds`, after which the staged copy is removed with
+  `rm -f` — the generated root credential must not linger in a file the
+  unprivileged account can read. No credential is ever a command-line argument;
+  only the path of the file holding it is.
+- Every guest script is invoked as **`sudo -n sh ~/vm-boot/guest/<name>.sh`** —
+  explicit interpreter *and* explicit escalation. Package installation,
+  `systemctl enable --now`, reading that credentials file, opening the `0660`
+  `root:pilothouse` broker socket and `journalctl -u` all require root.
+- Immediately after the guest is reachable, the orchestrator probes
+  `sudo -n true` and fails with a named assertion. A broken `NOPASSWD` grant is
+  then reported once, at the top of the run, instead of surfacing obscurely
+  three scripts deep.
+
+**Executed versus sourced is enforced by two mechanisms, not one.** Every script
+invoked as a program — the orchestrator and every file under `test/vm/guest`
+except `lib.sh` — is committed `100755` **and** is run through an explicit
+interpreter (`bash test/vm/vm-boot-test.sh` for the orchestrator, whose caller
+lands with the CI job; `sh <staged path>` for each guest script, which the
+orchestrator already does today). `scp` does not preserve the executable bit
+without `-p`, so a harness that trusted the copied mode would carry the same
+defect one layer down.
+Sourced libraries (`test/vm/lib/*.sh` and `test/vm/guest/lib.sh`) stay
+non-executable and are guarded as such, so the two categories cannot blur in
+either direction.
+
+**Artifact selection is arch-qualified.** The `packages` job uploads both an
+amd64 and an arm64 file per format, and the runner is x86_64 with KVM requiring
+guest and host architectures to match, so the orchestrator globs
+`"${artifact_dir}"/*_amd64.deb` for Debian and `"${artifact_dir}"/*.x86_64.rpm`
+for Fedora, then requires **exactly one** match and otherwise fails naming the
+count and the matched basenames. This is the same rule
+`packaging/verify-install.sh` already applies for Layer A. The selected file is
+staged under a fixed name, so the guest script has nothing to choose.
+
+**`test/vm/guest/` is the single directory every guest-side assertion script
+lives in.** They are POSIX `sh` (Debian's `/bin/sh` is dash, Fedora's is bash)
+with `set -eu`, and they share `guest/lib.sh`: exactly one `fail()`, which
+prints the failing assertion by name and exits non-zero so the script aborts on
+its **first** failure, plus `require_root()`, `expect_owner_mode`, the
+credentials loader and the `broker_curl`/`web_curl` wrappers. `require_root` is
+each script's first effective statement and is the converse of the call form: a
+call site that lost its `sudo -n` fails immediately and legibly instead of
+producing a confusing permission error later. Because the script is already
+root, the curl wrappers carry **no inner escalation** — one escalation boundary
+is auditable, one per request is not, and `require_root` is what makes that
+safe.
+
+`guest/install-package.sh` installs `curl` and `jq` (test fixtures: `curl` makes
+the `--unix-socket` requests, `jq` lets later checks match a JSON field rather
+than a substring) and then the staged artifact, through the guest's own package
+manager. It deliberately restates **nothing** from Layer A (#77) — dependency
+resolution, postinstall repair, PAM policy resolution, unit validity, linkage,
+reinstall and removal are asserted there, against these same artifacts. The
+Fedora guest is SELinux-**enforcing** and stays that way: `setenforce` and
+`permissive` appear nowhere in the harness, so an install that policy would
+break fails the gate rather than being worked around.
+
+**`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at
+the moment of failure**, not on whether it ever did. `install_failure_diagnostics`
+arms an `ERR` and an `EXIT` trap; on a non-zero exit it probes reachability
+*then* and branches: a reachable guest yields `systemctl status` and
+`journalctl` for **both** `pilothoused.service` and `pilothouse.service` (two
+processes, two journals, so dumping one would hide the other), through `sudo -n`
+because both need privilege; an unreachable one yields the host-side
+`QEMU_STDERR_LOG` and `QEMU_CONSOLE_LOG`. Neither branch is silent, a collection
+command that does not complete is reported by name rather than swallowed, and
+the guest is stopped only *after* the dump — a dump from a killed guest is not a
+dump. Everything goes to the job log; nothing is uploaded.
+
+`packaging/vm_harness_test.go` grew the matching guards, still executing nothing
+but `shellcheck` (`--shell=bash` for the orchestrator and the host libraries,
+`--shell=sh` for the guest files). They discover the guest scripts **on disk**
+rather than from a hand-kept list, so a script added later cannot escape the
+mode, dialect, `require_root` and invocation-form checks; they enumerate every
+guest-script invocation in the orchestrator and require the full
+`guest_run sudo -n sh ~/vm-boot/guest/<name>.sh` form, in both directions (no
+other form is permitted, and a guest script that is never invoked fails too);
+they match the two selection globs against a synthetic listing holding *both*
+architectures, which is the case an unqualified glob would silently get wrong;
+and they pin the credential path's three steps in order. The `sudo -n` scan that
+previously covered `test/vm/lib` now covers **every** file under `test/vm`,
+since the orchestrator is where the escalations actually happen.
 
 ### Artifact extraction (`packaging/extract`)
 
