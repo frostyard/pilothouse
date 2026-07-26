@@ -952,7 +952,7 @@ func TestVerifyWrongContent(t *testing.T) {
 // TestVerifyNilContentIsWrongContent proves an entry the contract byte-compares
 // whose Content is nil is reported rather than treated as "nothing to compare".
 // An extractor that failed to capture the bytes must not verify clean, or
-// #73's extractor bugs become invisible.
+// packaging/extract's bugs become invisible.
 func TestVerifyNilContentIsWrongContent(t *testing.T) {
 	t.Parallel()
 
@@ -1374,8 +1374,8 @@ func TestVerifyDependencyFindingsAreNotPathScoped(t *testing.T) {
 // Path.
 //
 // The code is deliberately not missing_path: the scriptlet has no
-// destination, so reporting it that way would mean inventing one, and #73's
-// CLI has to tell "no scriptlet" apart from "wrong scriptlet".
+// destination, so reporting it that way would mean inventing one, and
+// cmd/verify-packages has to tell "no scriptlet" apart from "wrong scriptlet".
 func TestVerifyMissingScriptlet(t *testing.T) {
 	t.Parallel()
 

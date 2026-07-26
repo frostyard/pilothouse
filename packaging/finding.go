@@ -3,7 +3,8 @@ package packaging
 // Finding is a single contract violation.
 type Finding struct {
 	// Code is a stable, exported string identifying the kind of violation.
-	// This package's tests and #73's CLI both key off these values, so a
+	// This package's tests and cmd/verify-packages both key off these
+	// values, so a
 	// code's string is part of the exported contract and may not change
 	// without breaking downstream consumers.
 	Code string

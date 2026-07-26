@@ -9,7 +9,8 @@ import (
 // TestFindingCodeValues pins the exact string of every finding code.
 //
 // This is not a tautology: the strings are the exported contract that this
-// package's own tests and #73's CLI key off, so renaming a code's value must
+// package's own tests and cmd/verify-packages key off, so renaming a code's
+// value must
 // fail here rather than silently break a downstream consumer that matches on
 // the old text.
 func TestFindingCodeValues(t *testing.T) {

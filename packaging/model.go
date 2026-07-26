@@ -3,10 +3,20 @@
 //
 // The model is a plain in-memory description of a package: its format, the
 // files it installs, the dependencies it declares, and its postinstall
-// scriptlet. An extractor (out of scope here) populates it; the job of the
-// types declared in this file and in finding.go is only to describe the
-// shape. They are inert data: constructing or reading one opens no file and
-// starts no process.
+// scriptlet. The two extractors in the packaging/extract subpackage populate it
+// from a real artifact — Deb from a .deb and RPM from an .rpm; the job of the
+// types declared in this file and in finding.go is only to describe the shape.
+// They are inert data: constructing or reading one opens no file and starts no
+// process.
+//
+// The two extractors describe the same shape from different metadata, and a
+// claim about one is not a claim about the other. A deb's entries include the
+// intermediate directories dpkg-deb archives for each declared path and carry
+// no Owner or Group; an rpm's entries are exactly the paths its %files section
+// lists, with no synthesized parents, and carry the owner and group names its
+// header records. Neither difference is a contract question — Owner and Group
+// drive no assertion (see Entry), and an entry at a destination the contract
+// neither requires nor forbids is not a violation.
 //
 // Verify checks a Model against the contract. It reports an unknown format,
 // every required destination the model installs nothing to or installs more
@@ -40,6 +50,11 @@ const (
 // construction, and the RPM equivalent is unconfirmed against a real nFPM
 // build. Ownership on disk after installation is #67's to verify; nothing in
 // this package may read these two fields.
+//
+// Whether an extractor fills them in is therefore a per-backend detail, not a
+// promise of this type: the deb extractor leaves both empty, because a
+// dpkg-deb-extracted tree cannot recover the archive's recorded ownership,
+// while the rpm extractor reads the names straight out of the rpm header.
 type Entry struct {
 	// Dest is the absolute destination path the file installs to.
 	Dest string

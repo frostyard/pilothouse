@@ -21,6 +21,11 @@ of broker queries/actions implemented by a root-only daemon
 ```
 cmd/pilothouse/       unprivileged web binary (main.go) — TCP listener, no root
 cmd/pilothoused/      privileged broker binary (main.go) — Unix socket only, requires euid==0
+cmd/verify-packages/  repository tool (main.go) — reports packaging.Verify's findings for
+                      built .deb/.rpm artifacts. NOT a shipped binary: absent from
+                      `make build` and from .goreleaser.yaml's builds, so bin/ holds only
+                      the two above. Unreachable from either of them; performs no
+                      privileged operation (see "Artifact extraction" below)
 
 internal/
   modules/<name>/     vertical feature slices (UI + domain logic), one per management area
@@ -30,6 +35,11 @@ internal/
   audit/               durable action-history store (bbolt)
   jobs/                durable background-job store (bbolt), for long-running privileged mutations
   auth/, auth/pam/     NSS group resolution and PAM authentication (used only by pilothoused)
+  packagingtest/       test-support helpers imported only by test files: the packaging-tool
+                       skip-vs-fail gate and the fixture builders — BuildDeb and BuildRPM from
+                       one shared, declarative Spec, BuildDebRaw from an already-staged tree
+                       (see "Packaging test fixtures" below). Ships in no binary and imports no
+                       other repository package
 
 docs/                 authoritative subsystem docs (kept here, not duplicated into yeti/):
   authentication.md    login, session, authorization, audit, PAM policy, deployment rules
@@ -65,9 +75,36 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       artifact-contract behavioral tests; drift_test.go holds
                       the two guards tying contract.go's hand-written tables to
                       the live ../.goreleaser.yaml
+  extract/            subpackage (package extract) whose only job is to produce
+                      a packaging.Model from a real artifact on disk. At this
+                      commit it holds two backends: Deb, which shells out to
+                      dpkg-deb, and RPM, which shells out to rpm and to
+                      rpm2cpio piped into cpio. Its command-line entry point is
+                      cmd/verify-packages, which `make verify-packages` runs;
+                      that target stays outside `ci`/`docker-ci`, so nothing
+                      runs either automatically. Being a separate package is what keeps
+                      the parent's run-time-inert guarantee mechanically true
+                      (see "Artifact extraction" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
-                      packaging scriptlet) for docker-* make targets
+                      packaging scriptlet) for docker-* make targets. It also
+                      installs `rpm` (which on the Debian bookworm base provides
+                      `rpm`, `rpmbuild` and `rpm2cpio`) and `cpio`; `dpkg-deb`
+                      already comes from the Debian base image, so no package is
+                      needed for it. The image declares
+                      `ENV PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1`, which reaches
+                      every docker-* target through the Makefile's `DOCKER_RUN`
+                      with no per-target flag: because the image guarantees those
+                      tools, a tool-dependent test that would otherwise skip when
+                      one is missing must fail inside this image instead. The one
+                      reader in Go code is `internal/packagingtest.LookTool`,
+                      which exposes the variable's name as
+                      `packagingtest.RequireEnv`. `make
+                      docker-tools-check` asserts the whole set — it resolves
+                      `dpkg-deb`, `rpm`, `rpmbuild`, `rpm2cpio` and `cpio` and
+                      prints the flag's value, alongside the `svu` and
+                      `golangci-lint` checks it has always run — and stays
+                      outside `ci`/`docker-ci`
 ```
 
 ### Two binaries, one protocol
@@ -1309,6 +1346,156 @@ list in `cmd/pilothouse/main.go`, not just registered in
   `PILOTHOUSE_LIVE_PODMAN`, `PILOTHOUSE_LIVE_DOCKER`, `PILOTHOUSE_LIVE_INCUS`,
   `JOURNAL_SMOKE`.
 
+### Packaging test fixtures (`internal/packagingtest`)
+
+`internal/packagingtest` is an ordinary Go package — its implementation files
+carry no `_test.go` suffix — whose only consumers are test files. It exists
+because the helpers below are needed by the tests of more than one package, and
+an unexported helper living in a `_test.go` file is unreachable from another
+package. It sits under `internal/` because it ships in no binary, and it imports
+nothing else in this repository, so it can hold no knowledge of any packaging
+contract: a fixture it builds describes only what its caller declared.
+
+**The tool gate.** `LookTool(t, name)` resolves an external packaging tool and
+is the only place in the package that looks a name up on `PATH`; every
+tool-dependent test goes through it, so none can reach a tool around the gate.
+When the tool cannot be resolved, the behaviour depends on `RequireEnv`
+(`PILOTHOUSE_REQUIRE_PACKAGING_TOOLS`, which `.docker/Dockerfile` sets to `1`):
+
+- variable unset — `Skipf` with a reason naming the tool and pointing at
+  `.docker/Dockerfile`, following the wording of `packaging/units_test.go`'s
+  `systemd-analyze` skip and `packaging/postinstall_test.go`'s `shellcheck`
+  skip;
+- variable set to `1` — `Fatalf` instead, because the environment declares the
+  tool present and skipping there would silently hide the check.
+
+The parameter is a local three-method `TestingT` interface (`Helper`, `Skipf`,
+`Fatalf`) that `*testing.T` satisfies, rather than `testing.TB`, which has an
+unexported method and cannot be implemented outside `testing`. That is what
+lets a recording fake observe both branches from a test that itself passes, and
+it keeps `testing` out of the package's non-test imports.
+
+**The shared fixture vocabulary.** One hand-written `Spec` feeds both builders:
+`Dirs` and `Files`, each with a declared mode, an `Owner` and a `Group`; a
+per-file `Config` flag; `Depends`; and a `*string` `Postinstall`. An empty
+`Owner` or `Group` means `DefaultOwner` (`alpha`) or `DefaultGroup` (`beta`).
+Those defaults are placeholder names rather than `root` on purpose: an assertion
+that an entry's ownership was read out of a package's own metadata would pass
+against a reader that hardcoded `root` and would prove nothing, whereas against
+a placeholder it cannot. Only `BuildRPM` records ownership; `BuildDeb` ignores
+both fields, for the reason given below.
+
+Sharing one `Spec` across two formats has one caveat, and it is in `Depends`:
+the strings are written into each format's own metadata **verbatim**, never
+translated, so a `Spec` handed to both builders must use syntax both parse
+alike — plain dependency names. Each format's own constraint syntax is
+format-specific: a deb-only fixture may write `alpha | beta` and
+`gamma (>= 1)`, while an rpm-only fixture needs the **spaced** form
+`gamma >= 1`, since `gamma>=1` without the spaces is parsed by rpm as a
+dependency whose *name* is that whole string.
+
+**The deb fixture builder.** `BuildDeb(t, outDir, spec)` builds a throwaway
+`.deb` from a `Spec` and returns the artifact's path. `outDir` is
+caller-supplied, so fixtures can be built straight into a directory the caller
+later scans; the staging tree is scratch space inside it. `Depends` entries pass
+through verbatim, joined with `", "`, so alternatives and version constraints
+are never rewritten.
+`DEBIAN/conffiles` is written only when at least one `File` is marked `Config`.
+`Postinstall` keeps three states apart: nil ships no `DEBIAN/postinst` member at
+all, a pointer to `""` ships a zero-byte one, and a pointer to a body ships
+those bytes. `dpkg-deb` is resolved through `LookTool`, so a host without it
+skips with an explicit reason and the dev image cannot skip.
+
+`BuildDeb` **ignores** `Owner` and `Group` on every entry. It builds with
+`dpkg-deb --root-owner-group`, which records every archived path as `root/root`,
+and a deb's payload is read back by extracting it to disk, from which the
+archived ownership cannot be recovered at all — so honouring the fields would
+record something no reader of the artifact could observe.
+
+Two measured `dpkg-deb` constraints shape the builder. `dpkg-deb --build`
+refuses a control directory outside 0755-0775 (`control directory has bad
+permissions 700`) while `t.TempDir()` and `os.MkdirTemp` produce 0700
+directories, so `DEBIAN` is chmodded to 0755 explicitly. And `dpkg-deb`
+synthesizes the intermediate directories of every declared path into the
+archive, so each intermediate directory the builder creates is chmodded to 0755,
+making every synthesized parent's archived mode determinate rather than a
+product of the caller's umask. Declared modes are applied with an explicit
+`os.Chmod` for the same reason, rather than relying on the permission argument
+of `os.Mkdir`/`os.WriteFile`.
+
+**The raw escape hatch.** `BuildDebRaw(t, outDir, tree, modes)` packs an
+already-staged tree verbatim instead of rendering a `Spec`: `tree` maps a
+relative path to the bytes of a regular file there — `DEBIAN/control` included,
+since nothing is synthesized — and `modes` gives a path's mode, naming a
+directory when `tree` has no such file. It exists because a control area a
+broken package could genuinely carry is not always expressible through `Spec`:
+`dpkg-deb --build` **rejects** a `DEBIAN/conffiles` line that is not an absolute
+path outright (`conffile name 'etc/phx/relative.conf' is not an absolute
+pathname`, exit 2) — the message the package's own test requires it to print.
+So the only way to obtain that artifact is `--nocheck`, which `dpkg-deb`
+documents as building any archive you want no matter how broken. `BuildDebRaw`
+passes `--nocheck` and `BuildDeb` does not, which keeps malformed metadata in
+reach of only the tests that ask for it rather than making it expressible by
+every `Spec`. It carries `BuildDeb`'s umask defences over: every intermediate
+directory it creates is chmodded to 0755, each staged file is chmodded to its
+declared mode explicitly, declared directory modes are applied deepest path
+first once every file is written, and `DEBIAN` is chmodded to 0755 last.
+
+**The rpm fixture builder.** `BuildRPM(t, outDir, spec)` builds a throwaway
+`.rpm` from the same `Spec` and returns the artifact's path, so one fixture
+declaration can be built in both formats. Everything is scoped to scratch space
+inside `outDir`: a throwaway `_topdir` holding the generated spec file, the
+staged payload tree and `rpmbuild`'s own working directories. The spec file
+declares `%global debug_package %{nil}`, `AutoReqProv: no` and
+`BuildArch: noarch`, so the package holds exactly the declared payload, and
+every declared dependency appears verbatim. The requires set is not limited to
+the declared ones: outside the builder's control rpm also records the
+`rpmlib(...)` capabilities `rpmbuild` writes into every artifact, plus
+`/bin/sh` whenever a `%post` section is present — both even under
+`AutoReqProv: no`. A caller asserting on requires therefore checks each
+declared entry is present, not that the set is exactly the declared one. Each
+`Depends` element becomes one `Requires:` line verbatim. `%files` emits
+`%dir %attr(<mode>, <owner>, <group>)` per `Dir` and
+`%attr(...)` per `File`, prefixed with `%config` where declared, so rpm records
+each entry's mode and ownership from the declaration rather than from the build
+account — measured to hold when building as an unnamed uid 1000 with
+`HOME=/tmp`, which is exactly how the `make docker-*` targets invoke the dev
+image. The build runs `rpmbuild -bb` with `_topdir` and `_rpmdir` defined, then
+copies the single artifact produced into `outDir`. `rpmbuild` is resolved
+through `LookTool` like every other tool here.
+
+Because rpm owns only what `%files` lists, an rpm fixture holds **exactly** its
+declared destinations and no synthesized parents. That is the opposite of the
+deb builder, where `dpkg-deb` archives the intermediate directories of every
+declared path, and the two must never be stated as one claim.
+
+`BuildRPM` calls `Fatalf` when `Postinstall` is non-nil but empty, naming the
+limitation rather than quietly building something else. Measured, an empty
+`%post` builds but records **no body**: `rpm -qp --scripts` prints only
+`postinstall program: /bin/sh` with no scriptlet header, `%{POSTIN}` is
+`(none)`, and rpm's own tag-presence marker `%|POSTIN?{HASPOST}:{NOPOST}|` reads
+`NOPOST`. A zero-byte rpm scriptlet is therefore not a state an artifact can
+represent, let alone one a reader could tell apart from shipping none — so the
+empty-but-present postinstall case is exercised for **deb only**, and only the
+`nil` side is available in both formats. Two further measured caveats bind a
+declared body, and `BuildRPM`'s doc comment records both: rpm strips **all**
+trailing newlines from a recorded scriptlet, so a caller wanting byte-exact
+equality downstream declares a body without one; and a body line beginning with
+`%` at column 0 would be read by `rpmbuild` as the start of a new spec section.
+
+The package's own tests check each builder against that format's own tooling,
+never against other Go code: the deb builders against `dpkg-deb` — `-c` for the
+path/mode table, `-f` for the dependency field, `-e` for the control directory —
+and `BuildRPM` against `rpm` — `-qp -l` for the owned paths, `--requires` for
+the dependencies, `-qpc` for the configuration files, `--scripts` for the
+postinstall body, and a `%{FILENAMES}`/`%{FILEUSERNAME}`/`%{FILEGROUPNAME}`
+query proving both declared ownership pairs reached the header per entry. The
+gate's two branches and `BuildRPM`'s empty-`Postinstall` refusal are driven
+through a recording `TestingT`, in tests that need no external tool on any host.
+`BuildDebRaw`'s tests additionally pin the premise behind its `--nocheck`: an
+ordinary `--build` of the very same staged tree is required to fail, so the
+escape hatch's justification is a runnable claim rather than a comment.
+
 ## Configuration
 
 No config-file parser; configuration is command-line flags plus a couple of
@@ -1454,14 +1641,21 @@ and `Group`. `Scriptlet` holds a maintainer script's `Content`. `Model` ties
 them together: `Format`, `Entries`, `Dependencies`, and `Postinstall`, a
 `*Scriptlet` whose nil value is the representation of "this package ships no
 postinstall scriptlet" — a state the model keeps distinct from shipping a
-scriptlet with unexpected bytes. An extractor that populates a `Model` from a real
-`.deb`/`.rpm` is out of scope for this package.
+scriptlet with unexpected bytes. Populating a `Model` from a real artifact is
+out of scope for this package: both extractors live in the `packaging/extract`
+subpackage ("Artifact extraction" below).
 
 **M1 — modes are asserted from the payload; ownership is proved by the
 scriptlet; owner and group are never asserted.** `Entry.Mode` drives a real
 assertion (see `wrong_mode` below). `Entry.Owner` and `Entry.Group` do not:
-they exist for the convenience of extractors that surface them and no code in
-this package reads them. An artifact cannot prove installed ownership: nfpm's
+they exist for the convenience of an extractor that happens to surface them and
+no code in this package reads them. Whether an extractor fills them in is a
+per-backend detail, never one claim about "the extractors": the **deb** backend
+leaves both empty, because a `dpkg-deb`-extracted tree cannot recover the
+archive's recorded ownership, while the **rpm** backend populates both per entry
+from the `%{FILEUSERNAME}`/`%{FILEGROUPNAME}` header tags. Neither changes what
+this package asserts, because it reads neither field.
+An artifact cannot prove installed ownership: nfpm's
 DEB payload records numeric UID/GID 0 by construction (which is why #66 added
 the postinstall scriptlet), and the RPM equivalent is unconfirmed against a
 real nfpm build.
@@ -1481,7 +1675,7 @@ artifact is capable of proving. On-disk ownership after a real install remains
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
-package's tests and #73's planned CLI both key off it, so its value is part of
+package's tests and `cmd/verify-packages` both key off it, so its value is part of
 the contract, and `packaging/finding_test.go` pins each value literally and
 asserts the nine are pairwise distinct. `Path` is the destination a finding
 concerns and is empty for findings that are not path-scoped. `Message` is
@@ -1695,8 +1889,8 @@ is a complete verdict rather than a partial one.
 - **`missing_scriptlet`**, with `Path` **empty**, when `Postinstall` is nil —
   the model's representation of "this package ships no postinstall scriptlet".
   The distinct code (rather than `missing_path`) exists because the scriptlet
-  has no destination to name and because #73's CLI has to tell "no scriptlet"
-  apart from "wrong scriptlet".
+  has no destination to name and because `cmd/verify-packages` has to tell "no
+  scriptlet" apart from "wrong scriptlet".
 - **`wrong_content`**, with `Path` **also empty** and a `Message` naming
   `packaging/postinstall.sh`, when the scriptlet's bytes are not that embedded
   source's. This is the one `wrong_content` finding that is not path-scoped;
@@ -1729,8 +1923,8 @@ Three rules keep the mode, config and content checks honest:
   from a real archive carries the shipped bytes verbatim, so a single added
   newline is reported like any other difference. A byte-compared entry whose
   `Content` is `nil` is reported too, since every embedded source is non-empty —
-  an extractor that failed to capture the bytes must not verify clean, or the
-  extractor bugs #73 will have to find become invisible.
+  an extractor that failed to capture the bytes must not verify clean, or
+  `packaging/extract`'s own bugs become invisible.
 
 A duplicate does not suppress the other checks for its destination: `Verify`
 evaluates the first entry installing there for mode, config designation and
@@ -1861,7 +2055,7 @@ stops shipping a scriptlet or already carried the mutated bytes.
 tables that were *transcribed by hand* from `.goreleaser.yaml`. Two guards keep
 the transcription honest, and they live in
 their own file because that file is the one *artifact-contract* file that reads
-the working tree — see the three tiers below, which are what keep that
+the working tree — see the four tiers below, which are what keep that
 statement from being confused with a claim about the whole package.
 
 They are **not** a restatement of `goreleaser_config_test.go`. That test asserts
@@ -1942,10 +2136,13 @@ they guard is `contract.go` itself, so the way to demonstrate they fire is a
 dependency or binary destination, or a deleted row), never a checked-in mutation
 of `.goreleaser.yaml`.
 
-**Portability: three tiers, and why they must not be blurred.** The one claim
+**Portability: four tiers, and why they must not be blurred.** The one claim
 that holds without qualification across all of this work is: **no file added by
-the artifact-contract phase executes an external command.** Below that, the
-three tiers differ, and a sentence true of one is false of another.
+the artifact-contract phase executes an external command.** That phase is #70's,
+and it added only files in `packaging/` itself; the extractors added since are a
+*separate package* and are tier (d) below, and `cmd/verify-packages` — which
+runs them — is not under `packaging/` at all. Below that, the four tiers
+differ, and a sentence true of one is false of another.
 
 - **(a) The contract model, `Verify`, and their behavioral tests** —
   `packaging/model.go`, `finding.go`, `contract.go`, `verify.go`,
@@ -1970,19 +2167,37 @@ three tiers differ, and a sentence true of one is false of another.
   The skipping is exactly why **`make docker-ci` remains the full gate** — the
   dev image installs the systemd package and `shellcheck`, so those checks
   actually run there and quietly skip elsewhere.
+- **(d) The extractors** — `packaging/extract/`. A **different package**,
+  and the only tier here whose *non-test* code runs an external command: `Deb`
+  invokes `dpkg-deb` three times, and `RPM` runs four `rpm -qp` queries plus one
+  `rpm2cpio`-into-`cpio` pipe. It is a subpackage precisely so the
+  guarantee below stays exactly true — the glob is **not** recursive, so
+  `packaging/extract/*.go` is outside it and it still lists exactly the same two
+  files it always did. Its tool-dependent tests resolve every tool through
+  `internal/packagingtest.LookTool`, so they skip with an explicit reason on a
+  host without it and **fail** rather than skip inside `make docker-ci`; the deb
+  missing-tool test drives `PATH=""`, and the internal tables over the
+  unexported `conffiles`/`Depends` parsers and over the rpm file-table,
+  dependency-pairing and postinstall parsers read bytes the test itself staged,
+  so none of them needs a tool on any host.
 
 Because of (c), no sentence anywhere may claim that the `packaging` package's
 *whole test suite* runs no external command, nor that the contract tests *as a
 group* operate only over embedded bytes — the drift guards do not. Claims have
 to name the tier they describe. `grep -lE 'os/exec|exec\.Command' packaging/*.go`
 listing exactly `units_test.go` and `postinstall_test.go` is the mechanical form
-of the global guarantee.
+of the global guarantee, and adding tier (d) left that listing byte-for-byte
+unchanged.
 
 **Still out of scope for this package.**
 
-- **Reading real `.deb`/`.rpm` files.** Nothing here opens an artifact. The
-  extractor that populates a `Model` from a built package, and the CLI that
-  reports `Finding`s, are **#73**'s.
+- **Reading real `.deb`/`.rpm` files.** Nothing in `packaging/` itself opens an
+  artifact. The extractors that populate a `Model` from a built `.deb` and from
+  a built `.rpm` both exist one directory down, in `packaging/extract`
+  (tier (d) above), and the command that runs them and reports the resulting
+  `Finding`s is `cmd/verify-packages` (see "The command" below). Neither is
+  reachable from this package: `packaging/` imports neither, and the dependency
+  runs the other way.
 - **Building the packages.** A `make package` target and a CI packaging job are
   **#72**'s; this package is exercised by `go test` alone.
 - **On-disk state after a real install.** VM installs and verification of
@@ -1995,6 +2210,547 @@ of the global guarantee.
 unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.
+
+### Artifact extraction (`packaging/extract`)
+
+`packaging/extract` is a subpackage whose only job is to turn a real artifact on
+disk into a `packaging.Model`. At this commit it holds exactly two backends,
+`Deb` and `RPM`. The command that runs them, `cmd/verify-packages`, exists as of
+this commit and is described under "The command" below, and as of this commit
+`make verify-packages` is the target that runs it; that target is wired into
+neither `ci` nor `docker-ci`, so nothing in the repository invokes the command
+automatically.
+Nothing here decides whether a model is acceptable — `packaging.Verify` remains
+the sole source of `Finding`s, and moving one of its assertions down into an
+extractor would be a defect, because that separation is what keeps every
+contract assertion provable on a host with no packaging tool installed.
+
+**Why a subpackage, not more files in `packaging/`.** Three structural reasons,
+not stylistic ones:
+
+- The `grep -lE 'os/exec|exec\.Command' packaging/*.go` guarantee above is a
+  **non-recursive** glob, so every `exec.Command` this package adds leaves it
+  exactly true. An extractor placed in `packaging/` would have falsified it,
+  along with `model.go`'s "they are inert data" and `contract.go`'s "nothing
+  here opens a file at run time".
+- `requirements`, `contractDependencies`, `forbiddenRoots`, `sourceBytes` and
+  `postinstallSource` are unexported. From another package they are not merely
+  off limits, they are **invisible**, so contract logic cannot leak into an
+  extractor by accident.
+- `packaging/drift_test.go` already declares `usrBinDir` and `underUsrBin` in
+  package `packaging`. Those are test-only and belong to the drift guard; they
+  stay exactly where they are, and `packaging/extract` declares its own copies
+  with a comment recording the deliberate duplication.
+
+`packaging` itself cannot move the other way: a `//go:embed` pattern may not name
+a parent directory, so only a package rooted at `packaging/` can embed
+`packaging/*`.
+
+**Shared helpers and the error-text contract** (`packaging/extract/extract.go`).
+`ErrToolUnavailable` is wrapped into every error caused by a tool that is not on
+`PATH`, so `errors.Is` separates an environmental fault from a definitive one: a
+tool that ran and rejected the artifact does **not** report it. Two unexported
+helpers do the work — `lookTool`, which resolves a tool, and `runTool`, which
+runs one with `exec.CommandContext` under the caller's context and folds its
+standard error into the returned error. Every error either one returns carries
+the literal prefix `packaging/extract: <tool>: `, for example
+`packaging/extract: dpkg-deb: packaging tool unavailable`. The prefix is produced
+inside those two helpers and never at a call site, so no path can return a tool
+error without it, and it is a token an artifact's filename cannot forge —
+matching on the bare tool name would be satisfied by any file called `b.rpm`.
+Folding standard error in is also what puts the offending artifact's path into
+the message, since `dpkg-deb` names the file it could not read there.
+
+**The deb backend** (`packaging/extract/deb.go`). `Deb(ctx, path)` runs
+`dpkg-deb` three separate times under `ctx`, once per thing it needs, and caches
+nothing between them:
+
+- `dpkg-deb -x <deb> <dir>` extracts the payload into scratch space. That
+  extraction was measured to reproduce recorded modes exactly (0640, 0700 and
+  0750 under `umask 077`), which is why entry modes are read off the extracted
+  tree rather than parsed out of the `drwxr-x---` strings `dpkg-deb -c` prints.
+- `dpkg-deb -e <deb> <dir>` extracts the control members. It writes a
+  **directory** and emits no tar stream, so a `-e … | tar -xO postinst` pipeline
+  is not a valid way to read one of them.
+- `dpkg-deb -f <deb> Depends` reads the dependency field. A package declaring no
+  dependencies exits 0 with empty output, so absence is not a failure.
+
+Neither `dpkg-deb -c` nor `-I` is used: the extracted tree already carries exact
+modes, and `-f` gives the one field needed. `dpkg-deb -c` *is* used one package
+over, in `internal/packagingtest`'s own tests, as an independent oracle for the
+fixture builder — a different role in a different package.
+
+Entries come from a `filepath.WalkDir` over the extracted payload with the tree
+root itself skipped, so `/` is never an entry, while the intermediate
+directories `dpkg-deb` synthesizes for a declared path **are** — a package
+rooted at `/opt/phx/…` and `/usr/bin/…` archives `./opt/`, `./opt/phx/`,
+`./usr/` and `./usr/bin/` too, and each becomes an entry. Directory entries
+carry `Mode` and nil `Content`; regular files carry their bytes except those
+under `/usr/bin`, whose nil `Content` means "deliberately not captured" rather
+than "empty file"; symlinks, devices and fifos are not emitted at all, so a
+required destination shipped in one of those shapes surfaces as a loud
+`missing_path` rather than being silently accepted. `Config` is true for the
+destinations the `conffiles` control member lists, and a `conffiles` line that is
+not an absolute path is an error rather than a dropped row — an artifact read
+wrong must not come back as a confident model. `Postinstall` is a non-nil
+`Scriptlet` exactly when a `postinst` control member exists and `nil` when it does
+not, keeping "ships none" distinct from "ships the wrong bytes". `Dependencies`
+are split on commas only and trimmed, so alternatives (`a | b`) and version
+constraints (`c (>= 1)`) pass through verbatim in declaration order; splitting on
+`|` would make `Verify`'s rule against alternatives unfireable. `Owner` and
+`Group` are left empty for a deb, because a `dpkg-deb`-extracted tree cannot
+recover the archive's recorded ownership and nFPM's DEB tar records numeric
+UID/GID 0 anyway — both fields are informational per M1.
+
+**What failure means for `Deb`.** Everything in this paragraph is a statement
+about the deb backend alone; the rpm backend's outcomes are stated separately
+with that backend below, and none of this is a claim about extraction in
+general. `Deb`
+distinguishes three outcomes. (1) **Absent optional metadata is not a failure.**
+A package with no `Depends` field returns no dependencies and a nil error,
+because `dpkg-deb -f <deb> Depends` exits 0 with empty output there; a package
+with no `conffiles` member marks no entry `Config`; a package with no `postinst`
+member returns a nil `Postinstall`, which stays distinct from the non-nil empty
+`Scriptlet` a zero-byte member returns. (2) **A definitive fault returns a
+non-nil error and the zero-value `packaging.Model`** — never a confidently empty
+model, which would otherwise verify as a pile of absent paths indistinguishable
+from a genuinely broken package. A nonexistent path and a file that is not an
+`ar` archive both land here, and both name the offending artifact, because
+`dpkg-deb` writes the filename to standard error and `runTool` folds it in.
+Metadata that is present but malformed lands here too: a `conffiles` line that
+is not an absolute path is an error rather than a row silently defaulted to "not
+a configuration file". (3) **An environmental fault also carries
+`ErrToolUnavailable`**, so `errors.Is` separates "this host has no `dpkg-deb`"
+from "`dpkg-deb` ran and rejected the artifact". Every error that comes from
+*running* the tool — outcome (3), and the two archive faults in (2) — carries the
+`packaging/extract: dpkg-deb: ` prefix, because `runTool` produces it. The
+malformed-`conffiles` error does not: no tool failed there, so it reads
+`packaging/extract: conffiles entry "…" is not an absolute path` and names the
+offending line. Only (3) satisfies `errors.Is(err, ErrToolUnavailable)`.
+
+**The deb backend's tests** (`packaging/extract/deb_test.go`,
+`extract_test.go`). The happy
+path builds a throwaway `.deb` with `packagingtest.BuildDeb` into a
+`t.TempDir()` and asserts every model field against literals hand-written from
+the `Spec` the test itself declares — never against a value the extractor,
+`Verify` or a contract helper produced. The destination assertion is **set
+equality in both directions**, including those synthesized parents and excluding
+`/`: a one-directional membership check would pass while the extractor invented
+or dropped entries. Around it sits one fixture-backed row per outcome above: a
+fixture with no config file, no `Depends` and no postinstall; one whose
+postinstall is a zero-byte member; a nonexistent path and a file of arbitrary
+non-`ar` bytes, both required to return the zero-value model; a `conffiles`
+member holding a relative path, which needs `packagingtest.BuildDebRaw` because
+`dpkg-deb` will not `--build` such a tree; and `t.Setenv("PATH", "")` for the
+`ErrToolUnavailable` row, which needs no packaging tool and therefore executes
+on every host with no skip. `extract_test.go` is an **internal** test (package
+`extract`) holding table-driven tests over the unexported `conffiles` and
+`Depends` parsers, reaching the shapes a real `dpkg-deb` cannot be made to emit
+(an empty comma-separated component, a member of nothing but whitespace); they
+supplement the fixture-backed tests rather than replacing them. Every
+fixture-backed test resolves `dpkg-deb` through `packagingtest.LookTool`, so on
+a host without it they skip with an explicit reason while the parser tables and
+the `ErrToolUnavailable` row still run.
+
+**The rpm backend** (`packaging/extract/rpm.go`). `RPM(ctx, path)` runs four
+`rpm -qp` metadata queries under `ctx` and extracts the payload once. Nothing is
+cached between them:
+
+- the **file table**, in one query:
+  `rpm -qp --qf '[%{FILENAMES}\t%{FILEMODES:octal}\t%{FILEFLAGS}\t%{FILEUSERNAME}\t%{FILEGROUPNAME}\n]' <rpm>`.
+  Destination, mode, config bit, owner and group all come from this one query,
+  so there is no separate `-qpc` pass for the configuration-file designation.
+- `rpm -qp --requires <rpm>` for the dependency text, paired index-wise with
+  `rpm -qp --qf '[%{REQUIREFLAGS}\n]' <rpm>`, a second query carrying no
+  dependency text at all.
+- `rpm -qp --qf '%|POSTIN?{HAS\n%{POSTIN}}:{NONE\n}|' <rpm>` for the postinstall
+  body behind a tag-presence marker.
+- `rpm2cpio <rpm>` piped into `cpio -idm --no-absolute-filenames` for the
+  payload bytes. The pipe is wired **in Go**, so no shell is invoked and
+  **both** exit statuses are the verdict — a shell pipeline would report only
+  the last one. `cpio` writes its `2 blocks` progress line to standard error on
+  *success*, so standard error is folded into an error message and is read for
+  nothing else.
+
+**The pipe uses `os.Pipe`, not `StdoutPipe`, and waits on both halves at
+once.** This is a correctness requirement, not a style choice. `StdoutPipe`
+leaves the *parent* holding the read end, and an earlier implementation waited
+on `rpm2cpio` before `cpio`: when `cpio` exited early, `rpm2cpio` kept writing
+into a full pipe, and because this process still held a reader it never took
+`SIGPIPE` — so the wait never returned and extraction hung forever with no
+deadline. Both ends are now `*os.File`, handed straight to the children with no
+copying goroutine in between, and **this process closes both of its copies as
+soon as both children are running**: dropping the read end is what lets
+`SIGPIPE` reach a producer whose consumer has gone, and dropping the write end
+is what gives the consumer its end of input. The two `Wait` calls then run
+concurrently so neither can block the other's reaping.
+
+Error precedence follows from the same asymmetry: the producer's status is
+reported first, because a producer that dies mid-stream makes the consumer fail
+too and is the more useful root cause — **except** when the producer died of
+`SIGPIPE`, which means the consumer went first and the consumer's status is the
+real explanation.
+
+**Why the file table is a tab-delimited `--qf` and not rpm's positional dump
+alias.** The alias *pads* its columns — an `X` where a symlink target would go,
+an all-zero digest for a directory — so its field count is stable at eleven; an
+earlier claim that its columns can be empty was wrong and is corrected here. The
+reason it is not parsed is different and measured: **a destination containing a
+space** (`/opt/phx/with space.txt`) yields **twelve** whitespace fields, so no
+whitespace-positional scheme is sound, while the five-field tab query parses the
+same package correctly. Two lesser reasons stand: the alias's column set is a
+formatting detail rpm documents nowhere and has changed before, and it
+pre-digests the config designation into an `isconfig` column where
+`%{FILEFLAGS}` gives the raw bit, read with a named `rpmfileConfig = 1` constant
+citing rpm's `RPMFILE_CONFIG`. The parse uses `strings.Split(line, "\t")` and
+requires exactly five fields, because `Split` preserves empty fields where a
+whitespace split would collapse a row whose owner name is empty; the mode is
+`strconv.ParseUint(field, 8, 32)` — base 8 **explicitly**, so both `0100644` and
+`%{FILEMODES:octal}`'s `100644` read as the same file; the flags field must be
+decimal. Empty output and the literal `(none)` mean zero entries; anything else
+parses strictly, and a wrong field count, a non-octal mode or a non-decimal
+flags field is an error rather than a defaulted row.
+
+**Why the postinstall body comes from the `POSTIN` header tag and not from
+rpm's scriptlet report.** That report is human-readable prose with no escaping,
+no quoting and no length prefix, so a `%post` body containing the lines
+`preuninstall scriptlet (using /bin/sh):` and `postinstall program: /bin/sh`
+renders them at column 0 **byte-identically to real headers** (measured on rpm
+4.18). Any header-anchored terminator therefore truncates such a body, and the
+truncated bytes can still be exactly what the contract expects — a package
+shipping *extra* postinstall code would verify clean. No smarter regexp fixes
+that: the information needed to tell body from header is not in the output. The
+tag-presence marker cannot be fooled, because rpm emits it from a tag-presence
+test, before the body, at a fixed position: the parse splits on the **first**
+newline and nothing else, `NONE` → `Postinstall = nil` (the measured verdict for
+both a missing and an empty `%post`), `HAS` → the remaining bytes verbatim, and
+any other prefix is an error. It also disambiguates a body that *is* the literal
+text `(none)`, which comes back as `HAS\n(none)`.
+
+**Trailing newlines are rpm's and stay rpm's.** Measured, rpm strips **all**
+trailing newlines from a recorded scriptlet (`echo one\n\n\n` → `echo one`). The
+extractor returns exactly what rpm recorded and **must not** append one:
+re-adding a byte the package does not contain is the same normalization hazard
+that forbids rewriting dependency expressions. It is also unnecessary, because
+`packaging.Verify`'s scriptlet check already compares
+`trimFinalNewline(scriptlet.Content)` against `trimFinalNewline` of the embedded
+source, so a package differing only in a final newline produces no finding.
+
+**Dependencies are filtered by provenance flags, never by name.** A requires
+entry is dropped **iff** rpm marked it `RPMSENSE_RPMLIB` (`1 << 24`) or
+`RPMSENSE_INTERP` (`1 << 8`), both declared as named constants in `rpm.go`.
+Both classes are written by the *builder*, not by any packaging author:
+`rpmlib` capabilities make an older rpm refuse the package, and the `INTERP`
+requirement is what `rpmbuild` derives from a scriptlet's interpreter — measured,
+**any** `%post` adds a `/bin/sh` requirement with flag word `1280` even under
+`AutoReqProv: no`. Filtering on provenance rather than on a name is what keeps
+the check honest in both directions: a package that genuinely declares
+`Requires: /bin/sh` records a *second* entry with flag word `0`, and **that one
+survives** while the generated one is dropped — a name filter would return
+neither, and no filter would return both. Everything surviving passes through
+verbatim, version constraints and spacing included. The two queries are
+index-parallel and a line-count mismatch is an **error**, never a best-effort
+merge. rpm does not preserve declaration order (measured: a dependency declared
+third comes back first), so every assertion about rpm dependencies compares
+**sorted clones** — which is what `Verify` does too. RPM has no `|` alternative
+syntax, so the alternative-preservation rule is a deb-only concern and is tested
+there.
+
+**What failure means for `RPM`.** This paragraph is a statement about the rpm
+backend alone. Absent optional metadata is not a failure: a package with no
+requires table, no owned files or no `%post` yields no dependencies, no entries
+and a nil `Postinstall` respectively, because rpm answers each of those with
+empty output or the literal `(none)`. Everything else parses **strictly** — a
+file-table line whose tab-separated field count is not five, a mode that is not
+octal, a non-decimal flags word, a requires/flags line-count mismatch and an
+unrecognised postinstall presence marker are all errors, and each returns the
+zero-value `packaging.Model` rather than a confidently partial one, which would
+otherwise verify as a pile of absent paths indistinguishable from a genuinely
+broken package. A tool that is not on `PATH` yields an error wrapping
+`ErrToolUnavailable`; a tool that ran and rejected the artifact yields one that
+does not, so `errors.Is` still separates "this host has no rpm" from "this file
+is not an rpm".
+
+**Where the two backends deliberately differ.** Each row is a statement about
+one backend; none of it may be restated as one sentence about "the extractors".
+
+| | `Deb` | `RPM` |
+| --- | --- | --- |
+| mode source | read off the tree `dpkg-deb -x` extracted, measured to reproduce recorded modes exactly | `%{FILEMODES:octal}` from the header, masked to `0o777`; setuid/setgid/sticky are not mapped to Go's `ModeSetuid`/`ModeSetgid`/`ModeSticky`, since the contract compares `Mode.Perm()` only |
+| owner/group | left empty — a `dpkg-deb`-extracted tree cannot recover them | populated per entry from `%{FILEUSERNAME}`/`%{FILEGROUPNAME}` |
+| intermediate directories | present — `dpkg-deb` archives `./opt/`, `./opt/phx/`, `./usr/` and `./usr/bin/` for a package rooted at `/opt/phx/…` and `/usr/bin/…`, and each becomes an entry | absent — rpm owns only what `%files` lists, so a package rooted at the same paths yields **no** entry for `/opt`, `/opt/phx`, `/usr` or `/usr/bin` |
+| empty scriptlet | constructible: a zero-byte `postinst` member yields a non-nil `Scriptlet` with empty `Content`, distinct from a nil one | not constructible: an empty `%post` builds but records no body, and its `POSTIN` presence marker reads `NONE`, so it is indistinguishable from shipping none |
+| config designation | the `conffiles` control member | the `RPMFILE_CONFIG` bit of the same file-table query |
+| dependency order | preserved, since it comes from splitting one field | not preserved by rpm, so callers sort |
+
+What both share: directory entries carry `Mode` and nil `Content`; regular files
+carry their bytes except under `/usr/bin`, whose nil `Content` means
+"deliberately not captured"; symlinks, devices and fifos are not emitted at all,
+so a required destination shipped in one of those shapes surfaces as a loud
+`missing_path`; and every error from running a tool carries the
+`packaging/extract: <tool>: ` prefix, with `ErrToolUnavailable` wrapped in only
+when the tool is not on `PATH`.
+
+**The rpm backend's tests** (`packaging/extract/rpm_test.go`). This file is an
+**internal** test (package `extract`), because three of its tables drive
+unexported parsers. The happy path builds a throwaway `.rpm` with
+`packagingtest.BuildRPM` and asserts every model field against literals
+hand-written from the `Spec` the test itself declares: destination **set
+equality in both directions**, containing exactly the declared paths and **no**
+synthesized parents; `Mode.Perm()` per entry including a `0750` directory, a
+`0700` directory and a `0640` file; `fs.ModeDir` and nil `Content` on the
+directories; `Config` true for exactly the `%config` file; byte-equal `Content`
+for every regular file except the `/usr/bin` one, whose `Content` is nil; and
+**three distinct owner/group pairs**, so an extractor that read one owner and
+reused it cannot pass and no assertion could pass against a hardcoded `root`.
+Its dependency assertion compares sorted clones against a hand-written literal
+and adds two separate provenance assertions — no returned element carries the
+`rpmlib` prefix, and none is `/bin/sh` — even though the fixture ships a
+`%post`. A second fixture declares a `%post` body containing the two
+header-shaped lines above and asserts `Postinstall.Content` byte-equal to it;
+that test is the standing guard against reintroducing a report-anchored parse,
+which returns a truncated body for exactly that fixture. A third pair of
+fixtures pins the trailing-newline behaviour in both directions. The pipe helper
+gets its own three rows, each required to surface as an error carrying the
+failing half's `packaging/extract: <tool>: ` prefix: `rpm2cpio` against a file
+that is not an rpm (the source half exits non-zero), a real artifact extracted
+into a directory that does not exist (the destination half never starts), and a
+real artifact whose payload is deliberately larger than any pipe buffer piped
+into a `cpio` given an option it does not implement (**the destination half
+exits before draining the pipe**). That last row is the deadlock guard: it is
+the case a sequential `Wait` hangs on forever — measured, it does not return,
+and the row's own 30-second deadline fails it rather than letting the test
+binary time out — while the concurrent implementation returns in under a tenth
+of a second. It is also the case a happy-path row cannot reach, because the
+hang needs the *consumer* to leave first with more than a buffer still to
+write. None of the three simulates a denial by `chmod`-ing a directory
+unwritable: root and `CAP_DAC_OVERRIDE` write into one anyway, so such a row
+asserts a property of whoever ran the test rather than of the code (see
+`docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md`);
+a file that is not an rpm, a path that does not exist and an unimplemented
+option get the same answer for every user. The happy path is the other side of
+that contract, proving `cpio`'s `2 blocks` on standard error is not treated as a
+failure. The four table-driven tables — the file-table line parser, the whole
+file-table output, the dependency-pairing function with the *measured* flag words
+`0`, `12`, `1280` and `16777226`, and the postinstall presence-marker parser —
+need no tool and execute on **every** host. Every fixture-backed test resolves
+*all four* of its tools through `packagingtest.LookTool` before it builds
+anything — `rpmbuild`, `rpm`, `rpm2cpio` and `cpio` — so a host missing any one
+of them skips with a message naming that tool and
+`make docker-ci`, while inside the dev image — which sets
+`PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` — the same call **fails** instead, which
+is what makes a green `make docker-ci` proof that they ran.
+
+**The declared-versus-generated `/bin/sh` row** is the end-to-end proof that
+rpm dependencies are reconciled by provenance and never by name, and it is a
+statement about the rpm backend alone. One fixture **both** declares
+`Requires: /bin/sh` **and** ships a `%post`. Measured, its raw
+`rpm -qp --requires` output lists `/bin/sh` **twice**, with index-parallel flag
+words `0` (declared) and `1280` (`INTERP|SCRIPT_POST`, which `rpmbuild` derives
+from the scriptlet's interpreter).
+`TestRPMKeepsADeclaredInterpreterAndDropsTheGeneratedOne` asserts that
+`Dependencies` contains `/bin/sh` **exactly once**, which discriminates all
+three candidate implementations: a name-based
+filter returns **0** occurrences and silently disarms a genuinely declared
+dependency, an unfiltered pass-through returns **2** and reports one the package
+never declared, and only the flag-based filter returns **1**. The raw count of
+two is asserted first, so that if `rpmbuild` ever stopped generating the
+interpreter requirement the row fails loudly instead of letting a do-nothing
+filter satisfy "exactly once" vacuously. The test also re-checks that `alpha`
+and `gamma >= 1` survived and that no `rpmlib(` capability did, so exactly-once
+cannot be bought by discarding the requires table wholesale.
+
+**What the rpm backend's degenerate and error rows pin.** Every sentence here is
+about `RPM`; none of it is a claim about `Deb` or about "the extractors".
+`TestRPMOnFixtureWithoutOptionalMetadata` builds one fixture with no
+`Requires:` line, nothing marked `%config` and no `%post` section, and makes
+three separate assertions on it: `Postinstall` is **nil**; `Dependencies` is
+empty **with a nil error**, asserted alongside a check that the raw
+`rpm -qp --requires` output for the *same* artifact was **not** empty — measured,
+`rpmbuild` writes three `rpmlib(...)` capabilities into every artifact, so that
+second check is what proves the provenance filter removed them rather than the
+assertion passing vacuously; and `Config` is false on **every** entry, including
+the one whose name ends in `.conf`, over a destination set pinned in both
+directions first so the sweep cannot run over an empty entry list.
+`TestRPMOnUnreadableArtifact` covers a path that does not exist and a file of
+arbitrary non-rpm bytes (a fixed literal, so a failure reproduces byte for
+byte): each returns a non-nil error and the **zero-value** `packaging.Model`,
+names the offending artifact path, carries the `packaging/extract: rpm: `
+prefix, and does **not** satisfy `errors.Is(err, ErrToolUnavailable)`, because
+`rpm` ran and rejected the file. `TestRPMWithoutToolWrapsErrToolUnavailable` is
+the converse: `t.Setenv("PATH", "")` makes the first `rpm` lookup fail, and the
+error both wraps `ErrToolUnavailable` and starts with that same prefix. That row
+needs no packaging tool, so it executes on **every** host and never skips.
+
+**The one rpm row that is narrowed rather than covered** is the non-nil-but-empty
+`Scriptlet`. An empty `%post` builds but records no body at all — measured,
+`rpm -qp --scripts` prints `postinstall program: /bin/sh` with no scriptlet
+header, `%{POSTIN}` is `(none)`, and rpm's own presence marker
+`%|POSTIN?{HAS}:{NONE}|` reads `NONE` — so the rpm backend correctly reports
+such a package as `nil`, and the empty-but-present side is proven for the **deb**
+backend only, by `TestDebOnFixtureWithEmptyPostinstall` in
+`packaging/extract/deb_test.go`, where a zero-byte `postinst` member is
+genuinely constructible. `packagingtest.BuildRPM`'s `t.Fatalf` on a non-nil
+empty `Postinstall` is what makes the case impossible to reintroduce for rpm by
+accident, and both the narrowing and its measurement are recorded in a comment
+on `TestRPMOnFixtureWithoutOptionalMetadata` as well as here.
+
+**The command** (`cmd/verify-packages/main.go`). This is what turns the two
+backends and `packaging.Verify` into something a person can run. It sits under
+`cmd/` because that is where every binary in this repository lives, and its
+non-product name says what it is: a repository tool, deliberately **not** added
+to `make build` and **not** given a `.goreleaser.yaml` `builds:` entry, so `bin/`
+still holds only `pilothouse` and `pilothoused` and no development tool can leak
+into a package. It is developer tooling in the strict sense used everywhere else
+in this document — it performs no privileged operation, registers no broker query
+or action, adds no capability, imports none of `internal/broker`,
+`internal/platform` or `internal/capability`, and is unreachable from either
+shipped binary. At this commit `make verify-packages` is the one thing that runs
+it, and that target is wired into neither `ci` nor `docker-ci`, so nothing
+invokes it automatically (see "The make target" below).
+
+*Shape.* `main` is one line, `os.Exit(run(context.Background(), defaultDeps(),
+os.Args[1:], os.Stdout, os.Stderr))`. `run` is the composing entry point and the
+function whose return value becomes the exit status. It takes a `deps` — an
+**ordered slice** of backends (`ext`, `label`, `extract`) plus the verification
+function — and `defaultDeps()` is the only thing production code constructs:
+`{".deb", "deb", extract.Deb}`, `{".rpm", "rpm", extract.RPM}`, and
+`packaging.Verify`. The slice is ordered rather than keyed because discovery
+order is a guarantee, not an accident; a map would leave it unspecified.
+`packaging.Verify` is named exactly once in non-test code, inside `defaultDeps`,
+so every verdict printed for a real artifact is that function's. The command
+invents no finding code and never compares a `Finding.Message` — it only prints
+one.
+
+*Discovery.* With no positional arguments, `run` globs the `-dir` directory
+(default `dist`) once per backend, **in backend order**, sorting each glob's
+matches and concatenating them: every `*.deb` in sorted order, then every
+`*.rpm` in sorted order. So `z.deb`, `a.deb` and `b.rpm` in one directory are
+reported as `a.deb`, `z.deb`, `b.rpm`, and a file matching neither glob is not an
+artifact. With positional arguments, those are the paths, in the order given, and
+`-dir` is not consulted at all.
+
+*Dispatch.* The format comes from the file extension, matched
+case-insensitively against `deps.backends`: `.deb` to `extract.Deb`, `.rpm` to
+`extract.RPM`. An extension no backend claims is an error naming the path and its
+extension — never a silently skipped file.
+
+*Output shape.* The report goes to standard output; standard error carries only
+the reasons no report could be produced (a bad flag, an unreadable directory, no
+artifacts). Per artifact, one header line naming the path, its format label and
+its finding count — `dist/pilothouse_1.0_amd64.deb (deb): 3 findings` — followed
+by one tab-indented line per finding carrying `Code`, `Path` and `Message`. A
+finding whose `Path` is empty, which is what a dependency mismatch or a missing
+scriptlet is, renders its path column as `-` rather than blank. An artifact whose
+extraction fails prints a failure line in place of a header, carrying the path,
+the format label and the extractor's error — including the
+`packaging/extract: <tool>: ` prefix — folded onto one line, and processing
+**continues** to the remaining artifacts, because one unreadable file must not
+hide the others' findings. A summary line closes every run.
+
+*Exit semantics.* Non-zero if any finding was reported or any artifact could not
+be extracted; zero only when every artifact was extracted and verified with no
+findings.
+
+*The empty-`dist/` message*, which is the output this command produces on a
+development host and inside the development image, since neither builds
+packages. It names the directory searched and both globs, names the two
+GoReleaser Pro workflows that are the only producers today
+(`.github/workflows/release.yml` on a tag, `.github/workflows/snapshot.yml` on
+`main`), and states in one line that this repository has no local packaging
+target yet and that `make package` arrives with **#72**. That target is named as
+future work and never as an instruction; the message names no `make` target that
+exists at this commit, so a reader is never pointed at something real that would
+not help them.
+
+*The make target.* `make verify-packages` is a one-line target — `$(GO) run
+./cmd/verify-packages`, with no prerequisite and no arguments, so it verifies
+whatever `dist/` holds — carrying a `##` help comment like every other
+non-obvious target and listed in `.PHONY` because it produces no file of its
+own. It is **deliberately absent from `ci` and from `docker-ci`**, and that
+absence is the point rather than an oversight: `dist/` is empty on this host and
+in the development image, so the target fails there by design, printing the
+empty-`dist/` message above — the searched directory and both globs, both
+GoReleaser Pro workflows, and, on one line, that this repository has no local
+packaging target yet and that `make package` arrives with **#72**. Wiring it
+into `ci` would make every local and containerized run of the full gate fail on
+a clean checkout and would break the "`make ci` / `make docker-ci` runs every
+gate CI runs, and local green means CI green" promise that `AGENTS.md` and
+`README.md` both make — CI has no packaging step either, so a gate that failed
+here would be reporting on something CI never does. An agent or developer who
+runs `make verify-packages` on a checkout with nothing built should read the
+failure as the expected outcome, not as a defect to fix; the target becomes
+useful once a build has put real artifacts in `dist/`. The exclusion is meant to
+stay checkable by `make -n ci | grep verify-packages` printing nothing, which is
+why the same commit made the Makefile's `GOFILES` expand in the shell at recipe
+time rather than in make at parse time: `format-check` otherwise inlined every
+Go source path — including `cmd/verify-packages`' own files — into the dry-run
+text, so the check reported wiring that does not exist. The set of files
+formatted is unchanged, and a command-line `GOFILES=` override still wins, which
+is what `scripts/bump_test.sh` relies on.
+
+*Its tests* live in two files, split by what they need from the host, and every
+test in both drives `run` itself, never a reporting or dispatch helper.
+`main_test.go` holds the cells that execute on **every** host with no packaging
+tool and no skip: discovery over a mixed directory, dispatch by the
+`packaging/extract: <tool>: ` error prefix, the unsupported extension, the
+missing artifact path, the empty-`dist/` message and the injected clean-path
+table. `integration_test.go` holds the cells that need a real synthetic artifact
+— an explicit `.deb`, an explicit `.rpm`, and one discovered directory holding
+one of each beside a decoy — and those are **deep-gated**: they build their
+fixtures with `internal/packagingtest`, which resolves every tool through
+`packagingtest.LookTool`, so on a host without `rpmbuild`/`rpm`/`rpm2cpio`/`cpio`
+the `.rpm` and mixed cells skip naming the missing tool, while `make docker-ci`
+sets `PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1` and the same lookup **fails** there
+instead. A green `docker-ci` is therefore proof those three cells ran. All of
+them go through `run(ctx, defaultDeps(), …)` — real artifact in, `extract.Deb` or
+`extract.RPM` out, `packaging.Verify` deciding — and none injects a backend or a
+verification result, which is what keeps the hand-built `deps` below bounded to
+the outcomes a real artifact cannot produce. A placeholder fixture cannot satisfy
+the artifact contract, so each block carries real `Verify` findings; the
+assertions are structural — the block names its file, carries its own format
+label, lists at least one finding, shows no extraction-failure text, and (for the
+`.rpm`) contains no `dpkg-deb` text — plus membership of every printed `Code` in
+a hand-written literal of the nine codes, so an invented code fails. No test
+there asserts the wording of a finding.
+
+The artifacts `main_test.go` stages are arbitrary bytes, so extraction is
+expected to fail there, and its dispatch proof reads the
+`packaging/extract: <tool>: ` prefix rather than a bare tool name: the deb
+block must contain `packaging/extract: dpkg-deb: ` and not
+`packaging/extract: rpm`, and the rpm block the converse. That distinction is
+load-bearing — a bare `rpm` check would be satisfied by the filename `b.rpm`
+itself — and it holds in both environments, since a missing tool yields
+`ErrToolUnavailable` and a present one yields a parse failure, both carrying the
+prefix. Every substring assertion over a multi-artifact run is applied to the
+slice of output belonging to the artifact under test, from its line through the
+indented lines beneath it, never to the whole capture.
+
+One test, `TestRunExitStatusIsDerivedFromResults`, is the only place a `deps` is
+built by hand, and the reason is worth recording. Exit 0 is correct only for a
+package that satisfies the artifact contract, and no such package can be built
+here: a conforming synthetic fixture would have to restate `contract.go`'s tables
+inside a test, and the repository cannot build a real project package locally or
+in `make docker-ci` (`.goreleaser.yaml` uses a GoReleaser Pro block, and the dev
+image deliberately has no goreleaser). Asserting the clean path one level down,
+on a reporting helper, would leave `run`'s own return value asserted only on
+failures — where a `run` that returned 1 unconditionally would pass everything
+(`docs/agents/skills/test-the-composing-function-not-its-merge-helper.md`). So
+that table injects an extraction result and a verification result, and only
+those: a placeholder `Model` with a `verify` returning nothing gives exit 0 with
+the zero-finding summary and no failure text, for a `.deb` row and an `.rpm` row;
+two hand-written findings, one with an empty `Path`, give exit 1 with both
+rendered and the empty path shown as `-`; and a backend erroring on the first of
+two artifacts gives exit 1 with the second still processed. The injected backend
+records the path it was handed, so the clean rows cannot pass against a `run` that
+reports success without invoking a backend. The doubles carry no contract
+knowledge — the findings use invented codes that are none of the nine, and the
+models are the same `/opt/phx/…` placeholders the fixtures use. Everything a real
+artifact *can* demonstrate — discovery, dispatch, extraction failure — is asserted
+through `defaultDeps()`, which keeps the seam a seam and not a shim
+(`docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md`).
+The narrowing that remains, stated plainly: **no test asserts exit 0 for a real
+artifact**, because no conforming one can be produced here.
 
 ## Release workflow
 
