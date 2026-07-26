@@ -82,6 +82,28 @@ The broker validates fixed storage-tool paths at startup; distro-provided
 symlinks such as `pvs -> lvm` are accepted only when the resolved executable is
 a safe root-owned regular file.
 
+### Verify built packages
+
+`make verify-packages` reads every `.deb` and `.rpm` in `dist/`, turns each one
+into the packaging contract model, and prints the contract findings for it. It
+exits non-zero if any artifact carries a finding or cannot be extracted.
+
+An empty or missing `dist/` is the normal state on a development host, because
+nothing here builds a package: GoReleaser Pro does that in CI, through
+`.github/workflows/release.yml` on a tag and `.github/workflows/snapshot.yml` on
+`main`. The target then fails with a message naming that directory, both
+workflows, and the fact that this repository has no local packaging target yet
+and that `make package` arrives with #72. That failure is the expected local
+outcome, not a defect to fix.
+
+```bash
+make verify-packages
+```
+
+The target is deliberately not part of `make ci` or `make docker-ci`: those
+gates must stay green on a checkout with no built artifacts, so that local
+green still means CI green.
+
 ### Create a release
 
 `make bump` verifies the project in the development container, calculates the

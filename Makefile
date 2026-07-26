@@ -1,8 +1,14 @@
-.PHONY: build generate run test race fmt format-check lint bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint
+.PHONY: build generate run test race fmt format-check lint bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages
 
 GO ?= go
 GOFMT ?= gofmt
-GOFILES := $(shell find . -type f -name '*.go' -not -name '*_templ.go')
+# GOFILES is expanded by the shell when a recipe runs, not by make while it
+# reads this file, so `make -n` prints the find command instead of the
+# repository's current source-file list. That keeps a dry run's text an honest,
+# greppable record of what a gate invokes rather than of which files happen to
+# exist. Overriding it on the command line still works, as scripts/bump_test.sh
+# does when it drives format-check with a stub gofmt.
+GOFILES = $$(find . -type f -name '*.go' -not -name '*_templ.go')
 GO_VERSION ?= 1.26.5
 GOLANGCI_LINT_VERSION ?= v2.11.4
 SVU_VERSION ?= v3.4.1
@@ -161,6 +167,9 @@ docker-next-version: ## Calculate the next version with pinned svu
 
 docker-tools-check: docker-image ## Verify release and packaging tools are executable in Docker
 	$(DOCKER_RUN) sh -c 'svu --version && golangci-lint version && for t in dpkg-deb rpm rpmbuild rpm2cpio cpio; do command -v $$t || exit 1; done && echo "PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=$$PILOTHOUSE_REQUIRE_PACKAGING_TOOLS"'
+
+verify-packages: ## Report contract findings for built .deb/.rpm artifacts in dist/ (outside ci; fails when dist/ is empty)
+	$(GO) run ./cmd/verify-packages
 
 test-bump: ## Test release orchestration without publishing
 	bash scripts/bump_test.sh

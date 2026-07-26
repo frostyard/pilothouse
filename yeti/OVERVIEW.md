@@ -79,8 +79,10 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
                       a packaging.Model from a real artifact on disk. At this
                       commit it holds two backends: Deb, which shells out to
                       dpkg-deb, and RPM, which shells out to rpm and to
-                      rpm2cpio piped into cpio. There is no command-line entry
-                      point yet. Being a separate package is what keeps
+                      rpm2cpio piped into cpio. Its command-line entry point is
+                      cmd/verify-packages, which `make verify-packages` runs;
+                      that target stays outside `ci`/`docker-ci`, so nothing
+                      runs either automatically. Being a separate package is what keeps
                       the parent's run-time-inert guarantee mechanically true
                       (see "Artifact extraction" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
@@ -2210,8 +2212,9 @@ and reuse the repo's dev container image.
 `packaging/extract` is a subpackage whose only job is to turn a real artifact on
 disk into a `packaging.Model`. At this commit it holds exactly two backends,
 `Deb` and `RPM`. The command that runs them, `cmd/verify-packages`, exists as of
-this commit and is described under "The command" below; there is still no
-`make verify-packages` target, and nothing in the repository invokes the command
+this commit and is described under "The command" below, and as of this commit
+`make verify-packages` is the target that runs it; that target is wired into
+neither `ci` nor `docker-ci`, so nothing in the repository invokes the command
 automatically.
 Nothing here decides whether a model is acceptable — `packaging.Verify` remains
 the sole source of `Finding`s, and moving one of its assertions down into an
@@ -2598,8 +2601,9 @@ into a package. It is developer tooling in the strict sense used everywhere else
 in this document — it performs no privileged operation, registers no broker query
 or action, adds no capability, imports none of `internal/broker`,
 `internal/platform` or `internal/capability`, and is unreachable from either
-shipped binary. At this commit nothing invokes it automatically: there is no
-`make verify-packages` target and it is wired into neither `ci` nor `docker-ci`.
+shipped binary. At this commit `make verify-packages` is the one thing that runs
+it, and that target is wired into neither `ci` nor `docker-ci`, so nothing
+invokes it automatically (see "The make target" below).
 
 *Shape.* `main` is one line, `os.Exit(run(context.Background(), defaultDeps(),
 os.Args[1:], os.Stdout, os.Stderr))`. `run` is the composing entry point and the
@@ -2654,6 +2658,32 @@ target yet and that `make package` arrives with **#72**. That target is named as
 future work and never as an instruction; the message names no `make` target that
 exists at this commit, so a reader is never pointed at something real that would
 not help them.
+
+*The make target.* `make verify-packages` is a one-line target — `$(GO) run
+./cmd/verify-packages`, with no prerequisite and no arguments, so it verifies
+whatever `dist/` holds — carrying a `##` help comment like every other
+non-obvious target and listed in `.PHONY` because it produces no file of its
+own. It is **deliberately absent from `ci` and from `docker-ci`**, and that
+absence is the point rather than an oversight: `dist/` is empty on this host and
+in the development image, so the target fails there by design, printing the
+empty-`dist/` message above — the searched directory and both globs, both
+GoReleaser Pro workflows, and, on one line, that this repository has no local
+packaging target yet and that `make package` arrives with **#72**. Wiring it
+into `ci` would make every local and containerized run of the full gate fail on
+a clean checkout and would break the "`make ci` / `make docker-ci` runs every
+gate CI runs, and local green means CI green" promise that `AGENTS.md` and
+`README.md` both make — CI has no packaging step either, so a gate that failed
+here would be reporting on something CI never does. An agent or developer who
+runs `make verify-packages` on a checkout with nothing built should read the
+failure as the expected outcome, not as a defect to fix; the target becomes
+useful once a build has put real artifacts in `dist/`. The exclusion is meant to
+stay checkable by `make -n ci | grep verify-packages` printing nothing, which is
+why the same commit made the Makefile's `GOFILES` expand in the shell at recipe
+time rather than in make at parse time: `format-check` otherwise inlined every
+Go source path — including `cmd/verify-packages`' own files — into the dry-run
+text, so the check reported wiring that does not exist. The set of files
+formatted is unchanged, and a command-line `GOFILES=` override still wins, which
+is what `scripts/bump_test.sh` relies on.
 
 *Its tests* live in two files, split by what they need from the host, and every
 test in both drives `run` itself, never a reporting or dispatch helper.
