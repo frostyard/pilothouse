@@ -9,8 +9,8 @@
 # (`bash test/vm/vm-boot-test.sh`) and is also committed executable: scp does
 # not preserve the executable bit without -p, so a harness that relied on the
 # copied mode alone would be one layer down from the same defect. Both
-# mechanisms, so neither is a single point of failure. Nothing in the tree calls
-# this script yet — the CI job that does lands later.
+# mechanisms, so neither is a single point of failure. The CI job that calls it
+# is `vm-boot` in .github/workflows/packaging.yml.
 #
 # What it does, in order:
 #
@@ -67,8 +67,8 @@
 #
 # At this commit the run ends once the guest has come back from a real reboot
 # with both units active unaided, the same capability set, a destroyed and
-# recreated /run/pilothouse and a persisted /var/lib/pilothouse. Nothing in the
-# tree invokes this script yet; the CI job lands later.
+# recreated /run/pilothouse and a persisted /var/lib/pilothouse. The `vm-boot`
+# job in .github/workflows/packaging.yml is what invokes it.
 #
 # Every tilde path in this file is deliberately quoted: it is transmitted
 # literally and expanded by the GUEST's shell, because ~/vm-boot is the

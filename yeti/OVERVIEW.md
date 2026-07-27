@@ -95,8 +95,8 @@ packaging/            systemd units, PAM policy, sysusers declaration, and the t
 test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is the
                       one entry point (--family debian|fedora --artifact-dir <dir>),
                       committed executable and meant to be run through an explicit
-                      interpreter (`bash test/vm/vm-boot-test.sh`); nothing in the
-                      tree calls it yet. images.env is the single pinning site recording
+                      interpreter (`bash test/vm/vm-boot-test.sh`); packaging.yml's
+                      vm-boot job is what calls it. images.env is the single pinning site recording
                       each distro family's cloud image URL, checksum algorithm and
                       digest. lib/ holds the sourced, non-executable bash libraries:
                       images.sh (fetch and verify against that pin), cloudinit.sh
@@ -113,9 +113,10 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       ends once the guest has come back from a real reboot with both
                       units active unaided, the same capability set, a destroyed and
                       recreated /run/pilothouse and a persisted /var/lib/pilothouse,
-                      and no workflow
-                      job invokes any of it; packaging/vm_harness_test.go guards it structurally
-                      without executing it (see the three "Booted-VM harness"
+                      run by .github/workflows/packaging.yml's vm-boot job on main and
+                      on the vm-boot pull-request label; packaging/vm_harness_test.go and
+                      packaging/workflow_vm_job_test.go guard it structurally
+                      without executing it (see the four "Booted-VM harness"
                       sections below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
@@ -1707,8 +1708,9 @@ whose payload claimed `root:pilothouse` would prove nothing; a package that
 ships the scriptlet whose behavior is already pinned proves everything the
 artifact is capable of proving. On-disk ownership after a real install is
 asserted outside this Go package, by `packaging/verify-install.sh`
-("Install validation" below); ownership on a booted host remains #67's to
-verify.
+("Install validation" below); ownership on a booted host is Layer B's, verified
+by the booted-VM harness in `test/vm` and run in CI by
+`.github/workflows/packaging.yml`'s `vm-boot` job.
 
 **Finding shape and code vocabulary** (`packaging/finding.go`). `Finding` has a
 `Code`, a `Path`, and a `Message`. `Code` is a stable exported string — this
@@ -2256,13 +2258,14 @@ since.
   text, run by `make verify-package-install` locally and by
   `.github/workflows/packaging.yml`'s `install` job in CI. **Layer B** — VM
   installs and booted-host verification, anything needing systemd as PID 1 or
-  an enforcing SELinux policy — is **#67**'s; its harness is under construction
+  an enforcing SELinux policy — is **#67**'s; its harness lives
   in `test/vm` (it boots a guest, installs the package, starts both units,
   asserts the systemd-created directories, the broker socket's ownership and
   mode, that the broker is live, that PAM authenticates a real non-root
-  administrator through the running stack, and that the daemon reads a record
-  it emitted itself back through the broker's journal query) and no CI job
-  runs it; see M1 above
+  administrator through the running stack, that the daemon reads a record
+  it emitted itself back through the broker's journal query, and that the
+  posture survives a real reboot) and `.github/workflows/packaging.yml`'s
+  `vm-boot` job runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
   `Entry.Group` therefore drive no assertion.
 
@@ -2577,16 +2580,16 @@ both `verify-package-install` and `help` are listed in `.PHONY`.
 ### Booted-VM harness: pinned image acquisition (`test/vm/images.env`, `test/vm/lib/images.sh`)
 
 Layer B (#67) — installing the artifacts on a **booted** host with real
-systemd — is under construction. **At this commit the harness boots a guest,
+systemd — is complete as of this commit. **The harness boots a guest,
 installs the package, activates both units, authenticates a real non-root
 administrator through PAM, reads the daemon's own journal record back
 through the broker and proves the posture that survives a real guest
-reboot**, and no workflow job invokes any of it: what exists
-is image acquisition (this section), the boot mechanism ("Booted-VM harness:
-credentials, seed, boot and SSH") and the orchestrator, the guest scripts and
-the diagnostics that drive them ("Booted-VM harness: the orchestrator, guest
-staging and diagnostics"). What Layer B still lacks is the CI job that runs
-any of it, which lives in the issue, not yet in the tree.
+reboot**, and `.github/workflows/packaging.yml`'s `vm-boot` job runs it in CI.
+What exists is image acquisition (this section), the boot mechanism
+("Booted-VM harness: credentials, seed, boot and SSH"), the orchestrator, the
+guest scripts and the diagnostics that drive them ("Booted-VM harness: the
+orchestrator, guest staging and diagnostics") and the CI job that invokes them
+("Booted-VM harness: the CI job (`vm-boot`)").
 
 This section covers the pinning table and the host-side fetcher:
 
@@ -2752,10 +2755,10 @@ followed by `.pub`, since the public key is not a credential.
 
 ### Booted-VM harness: the orchestrator, guest staging and diagnostics (`test/vm/vm-boot-test.sh`, `test/vm/lib/diagnostics.sh`, `test/vm/guest/`)
 
-The harness's first end-to-end runnable path. **At this commit a run ends once
+The harness's first end-to-end runnable path. **A run ends once
 the guest has come back from a real reboot with its posture proven** (see
-"Reboot posture" below); no workflow invokes any of this — the CI job lands
-later.
+"Reboot posture" below); `.github/workflows/packaging.yml`'s `vm-boot` job is
+what invokes it (see "Booted-VM harness: the CI job" below).
 
 **`test/vm/vm-boot-test.sh` is the one entry point**, taking
 `--family debian|fedora` and `--artifact-dir <dir>`; any other family is
@@ -3021,8 +3024,9 @@ anything aliased from one, joins the set, so an inequality reintroduced under a
 fresh name — or written inline with no variable at all — is still caught.
 
 **At this commit the harness run ends there.** The guest's SELinux audit
-posture, image-based hosts and sysext delivery are #80's, and no workflow
-invokes any of this.
+posture, image-based hosts and sysext delivery are #80's.
+`.github/workflows/packaging.yml`'s `vm-boot` job is what invokes all of this
+(see "Booted-VM harness: the CI job (`vm-boot`)" below).
 
 **`test/vm/lib/diagnostics.sh` discriminates on whether the guest answers SSH at
 the moment of failure**, not on whether it ever did. `install_failure_diagnostics`
@@ -3085,6 +3089,84 @@ now matches `guest_copy`/`scp` only outside string literals, because
 calling it. Without that, widening the scan produces a phantom violation, and
 the tempting fix — re-narrowing the guard until it goes quiet — is what left
 the fence covering one file in the first place.
+
+### Booted-VM harness: the CI job (`vm-boot`)
+
+The third job in `.github/workflows/packaging.yml`, added as of this commit,
+is what makes the harness above a gate rather than a script nobody runs. It is
+Layer B in CI, and like `install` it is a *consumer* of `packages`, never a
+second build.
+
+- `runs-on: ubuntu-latest`, `needs: packages`. The standard GitHub-hosted
+  runner is deliberate: no self-hosted runner, no larger runner. Hardware
+  acceleration is available there once the `99-kvm4all.rules` udev rule is
+  installed (`KERNEL=="kvm", GROUP="kvm", MODE="0666",
+  OPTIONS+="static_node=kvm"`, then `udevadm control --reload-rules` and
+  `udevadm trigger --name-match=kvm`), which is the job's second step. There
+  is **no** software-emulation fallback: `start_vm` passes `-accel kvm`, so a
+  runner that cannot accelerate fails the job instead of quietly running a
+  slower, different test.
+- `strategy.fail-fast: false` with a two-row matrix — `debian` paired with the
+  `packages-deb` artifact and `fedora` with `packages-rpm`. Unlike `install`'s
+  matrix, no image reference appears here: the guest image is pinned by
+  checksum in `test/vm/images.env`, which stays the single pinning site.
+- Its `if:` is precisely
+  `github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')`
+  and nothing else. That is label **presence**, not the labeling event, so a
+  later push to an already-labelled pull request runs the job again — a gate
+  keyed to the `labeled` event alone would certify only the commit that
+  happened to be at HEAD when the label was applied. The workflow's
+  `pull_request.types` is widened to `[opened, synchronize, reopened,
+  labeled]` for the same reason: without `labeled` the trigger cannot fire when
+  the label goes on. Widening `types:` also lets `packages` start on a labeling
+  event, which is expected and is not a second build. The fork skip is **not**
+  restated: `needs: packages` inherits it.
+- **No tag trigger was added.** `packaging.yml` is deliberately not
+  tag-triggered; adding one so `needs: packages` could be satisfied on tags
+  would create a third GoReleaser build alongside `release.yml` for no gain,
+  since every tag points at a commit the `main` push trigger already covered.
+- Its steps are `actions/checkout@v7` (the harness comes from the tree), the
+  KVM rule, an `apt-get install` of `qemu-system-x86`, `qemu-utils` and
+  `xorriso` (boot, overlay creation and the NoCloud seed ISO respectively),
+  `actions/download-artifact@v5` for the matrix row's artifact **only**, and a
+  single run step: `bash test/vm/vm-boot-test.sh --family ${{ matrix.family }}
+  --artifact-dir dist`. The **explicit interpreter** is not decoration —
+  `test/vm/vm-boot-test.sh` is also committed `100755`, so neither the file
+  mode nor the `bash` prefix is a single point of failure for the step
+  starting.
+- It adds **no** repository secret (the workflow's one `secrets.` use remains
+  `GORELEASER_KEY`, in `packages`), carries **no** `actions/upload-artifact`
+  step and pushes to no registry: the overlay disk, the NoCloud seed and the
+  run-time credentials never leave the job, and diagnostics go to the job log
+  (see the orchestrator section). No OS image is built, derived or published.
+- It is **not** a required check and is on no branch-protection list, and
+  there is no local `make` target for it: it needs KVM, network access and the
+  artifact `packages` builds, so it cannot run under `make ci` or
+  `make docker-ci` any more than the rest of `packaging.yml` can.
+
+`packaging/workflow_vm_job_test.go` guards all of that, reusing
+`loadPackagingWorkflow` from `workflow_install_job_test.go` so both tiers are
+asserted against the same live decode of the same file. Its expectations —
+the matrix rows, the exact label expression, the `pull_request.types` list —
+are hand-written from the specification, never derived from the workflow under
+test, and it asserts the harness step's command *starts with* `bash
+test/vm/vm-boot-test.sh` and passes `--family` and `--artifact-dir`. It also
+asserts the absences that matter: no tag trigger, no fork-skip restatement, no
+GoReleaser step in the job (the workflow-wide count stays exactly one), no
+upload-artifact and no registry push, no `tcg` fallback, and no `secrets.`
+reference outside `packages`. It executes nothing — the harness needs KVM and
+a network.
+
+**What this tier proves, and what it does not.** It proves what a container
+cannot: units activating on a booted host, systemd itself creating
+`/run/pilothouse` and `/var/lib/pilothouse` `root:pilothouse 0750`, a live
+broker socket at `0660 root:pilothouse`, PAM authenticating a real non-root
+administrator through the running stack, journald reachable through the
+broker's own journal query, and the whole posture surviving a real reboot. It
+does **not** cover image-based hosts (uCore/cayo), SELinux AVC assertion or
+policy qualification — the Fedora guest stays enforcing, but nothing scans or
+classifies the audit log — or sysext/bootc delivery. All of those are
+**#80**'s.
 
 ### Artifact extraction (`packaging/extract`)
 
@@ -3569,11 +3651,14 @@ a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
 gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
 *does* run a packaging gate now — `.github/workflows/packaging.yml`, which
-builds the artifacts, runs `make verify-packages` against them and then
+builds the artifacts, runs `make verify-packages` against them, then
 installs them on pinned Debian and Fedora containers with
-`make verify-package-install` — but that
+`make verify-package-install`, and finally boots real Debian and Fedora VMs
+under QEMU/KVM and validates the installed package on a host with systemd as
+PID 1 — but that
 gate needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution, so
-it cannot run locally at all, and it is the single named exception to the
+it cannot run locally at all (and its booted-VM tier needs KVM besides), and
+it is the single named exception to the
 mirror-CI promise rather than something `ci` could reproduce. An agent or developer who
 runs `make verify-packages` on a checkout with nothing built should read the
 failure as the expected outcome, not as a defect to fix; the target becomes
@@ -3616,8 +3701,9 @@ host and in the development image.
 
 *The CI packaging gate* is `.github/workflows/packaging.yml` (workflow name
 `Packaging`). It triggers on `push` to `main` and on `pull_request` targeting
-`main` — no tag trigger, no `workflow_run` — holds `permissions: contents:
-read` because it publishes nothing, and runs **two** jobs. The first,
+`main` with `types: [opened, synchronize, reopened, labeled]` — no tag
+trigger, no `workflow_run` — holds `permissions: contents:
+read` because it publishes nothing, and runs **three** jobs. The first,
 `packages`, installs the packaging and cgo build dependencies (`rpm`
 explicitly, since no ambient runner tool may be relied on, plus the
 `libpam0g-dev`/`libsystemd-dev` headers and the `gcc-aarch64-linux-gnu` cross
@@ -3628,8 +3714,12 @@ runs `rpm2archive` piped into `tar`), runs
 `~> v2` constraint on `release --snapshot --clean`, then asserts and verifies
 what came out and uploads the two artifacts. The second, `install`, downloads
 those artifacts and installs them on the two digest-pinned distro containers;
-it is described in full under "How the script is invoked" above. So the gate
-does not stop at the artifact payload: it also proves the packages install.
+it is described in full under "How the script is invoked" above. The third,
+`vm-boot`, downloads the same artifacts and boots real Debian and Fedora VMs
+with them; it is described in full under "Booted-VM harness: the CI job
+(`vm-boot`)" above. So the gate
+does not stop at the artifact payload: it also proves the packages install,
+and that the installed package works on a booted host.
 
 It is a **separate file** from `.github/workflows/test.yml` because GitHub does
 not hand repository secrets to a run triggered by a fork's pull request: a job
@@ -3638,8 +3728,10 @@ contributor, and `test.yml` must stay green for them and must gain no
 `GORELEASER_KEY` dependency. Instead the `packages` job carries
 `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
 so a fork pull request **skips** the job — neutral, never failed — and never
-receives the key. The `install` job restates nothing: `needs: packages` means a
-skipped `packages` skips it too. `GORELEASER_KEY` is the only secret the
+receives the key. Neither `install` nor `vm-boot` restates that condition:
+`needs: packages` means a skipped `packages` skips them too. (`vm-boot` does
+carry an `if:` — the `vm-boot` label gate — but nothing about forks.)
+`GORELEASER_KEY` is the only secret the
 workflow takes; there is
 no `GITHUB_TOKEN`, because `--snapshot` publishes nothing and needs no tag.
 
