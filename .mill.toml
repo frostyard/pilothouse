@@ -11,7 +11,9 @@ chunk = [
   # NOTE: sdjournal-tagged files need libsystemd headers absent on native
   # hosts, so the tagged build lives in the deep gate (make docker-ci runs
   # make build -tags sdjournal in-container), not here.
-  "go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -c 6000; exit ${PIPESTATUS[0]}",
+  # Millhouse gives each run a deliberately isolated but long TMPDIR. Keep
+  # Go's test sockets under Linux's sockaddr_un pathname limit.
+  "TMPDIR=/tmp go test ./... 2>&1 | { grep -v '^ok ' || true; } | tail -c 6000; exit ${PIPESTATUS[0]}",
 ]
 # Heavier final gate before the ship decision (mill.sh --no-deep skips these
 # and re-runs the chunk gates instead).
