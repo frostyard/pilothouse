@@ -1,9 +1,11 @@
 # .github/workflows/packaging.yml
 #
 # The packaging gate: it builds the .deb and .rpm artifacts with GoReleaser Pro,
-# checks them against the repository's artifact contract, and then installs
-# those same artifacts on pinned Debian and Fedora containers, so a packaging
-# regression fails a pull request instead of shipping.
+# checks them against the repository's artifact contract, installs those same
+# artifacts on pinned Debian and Fedora containers, and — on main and on
+# labelled pull requests — boots a real Debian and Fedora VM and validates the
+# installed package on a host with systemd as PID 1, so a packaging regression
+# fails a pull request instead of shipping.
 #
 # Why this is its own file, and not a job in .github/workflows/test.yml:
 # this job needs the GORELEASER_KEY secret, and GitHub does not hand repository
@@ -33,6 +35,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `labeled` is added to the three defaults so applying the `vm-boot` label
+    # can start a run. The VM job then gates on the label being PRESENT, not on
+    # the event that added it, so a later push to the same pull request runs it
+    # again — a label that certified only the commit at HEAD when it was
+    # applied would be a worse guarantee than not running at all.
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -159,3 +167,75 @@ jobs:
 
       - name: Install and validate inside ${{ matrix.family }}
         run: make verify-package-install INSTALL_IMAGE=${{ matrix.image }} ARTIFACT_DIR=dist
+
+  # Layer B of package validation: install the same artifacts on a BOOTED host
+  # with systemd as PID 1 and assert what no container can show — units actually
+  # starting, systemd actually creating the runtime and state directories, the
+  # broker socket actually live, PAM actually authenticating a real non-root
+  # administrator, journald actually reachable through the broker's own journal
+  # query, and that posture surviving a real reboot.
+  #
+  # Like `install`, this job deliberately does NOT restate the fork-skip
+  # condition from `packages`: `needs: packages` makes the skip inherited. Its
+  # `if:` is the label gate and nothing else.
+  #
+  # This tier is not a required check. It runs on every push to main, and on a
+  # pull request only while the `vm-boot` label is on it.
+  #
+  # It builds nothing: no GoReleaser step, and only the matching format's
+  # artifact is downloaded. It publishes nothing either — no upload-artifact
+  # step and no registry push, so the throwaway overlay disk, the NoCloud seed
+  # and the run-time credentials never leave the job. Diagnostics (QEMU stderr
+  # and the guest serial console) go to the job log instead.
+  vm-boot:
+    name: Boot ${{ matrix.family }} and validate the installed package
+    runs-on: ubuntu-latest
+    needs: packages
+    # Label PRESENCE, not the labeling event: a subsequent push to a labelled
+    # pull request runs this job again.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')
+    strategy:
+      # One family's failure must not mask the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          - family: debian
+            artifact: packages-deb
+          - family: fedora
+            artifact: packages-rpm
+    steps:
+      # The harness comes from the tree, never from the artifact.
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Standard GitHub-hosted runners expose /dev/kvm but not to the job's
+      # user. This udev rule is what makes hardware acceleration usable; the
+      # harness boots with `-accel kvm` and never falls back to software
+      # emulation, so a runner without it fails the job rather than running
+      # a slower, different test.
+      - name: Enable KVM acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # qemu-system-x86 boots the guest, qemu-img builds the copy-on-write
+      # overlay over the pinned base image, and xorriso writes the NoCloud seed
+      # ISO cloud-init reads.
+      - name: Install QEMU and cloud-image tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
+
+      - name: Download the built packages
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+      # The orchestrator is invoked through an EXPLICIT interpreter. It is also
+      # committed executable, so neither the file mode nor this `bash` prefix is
+      # a single point of failure for the step starting.
+      - name: Boot ${{ matrix.family }} and validate on a real host
+        run: bash test/vm/vm-boot-test.sh --family ${{ matrix.family }} --artifact-dir dist

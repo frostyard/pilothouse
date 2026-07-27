@@ -49,11 +49,13 @@ the same order. Local green means the credential-free gates will be green in
 CI. The single exception is `.github/workflows/packaging.yml`, the packaging
 gate, which cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
-artifacts: it also installs them on pinned Debian and Fedora containers, so
-it needs Docker and network access on top of the credentials, and it stays
-outside `make ci` and `make docker-ci` by construction. `make verify-packages`
-and `make verify-package-install` are the local tools for the contracts it
-checks, once artifacts exist in `dist/`.
+artifacts: it installs them on pinned Debian and Fedora containers, so it
+needs Docker and network access on top of the credentials, and its `vm-boot`
+job boots real Debian and Fedora VMs under QEMU/KVM, so that tier needs KVM
+too. The whole workflow stays outside `make ci` and `make docker-ci` by
+construction. `make verify-packages` and `make verify-package-install` are the
+local tools for the contracts it checks, once artifacts exist in `dist/`;
+the booted-VM tier has no local `make` target.
 
 Go 1.26 or newer is required.
 
@@ -101,7 +103,9 @@ nothing here builds a package by default: GoReleaser Pro does that in CI,
 through `.github/workflows/release.yml` on a tag,
 `.github/workflows/snapshot.yml` on `main`, and
 `.github/workflows/packaging.yml` on every push and pull request targeting
-`main`. The target then fails with a message naming that directory, all three
+`main` (that workflow's booted-VM job additionally runs only on `main` or on
+a pull request carrying the `vm-boot` label). The target then fails with a
+message naming that directory, all three
 workflows, and `make package` as the local producer along with its goreleaser
 Pro requirement. That failure is the expected local outcome, not a defect to
 fix.
@@ -114,10 +118,12 @@ The target is deliberately not part of `make ci` or `make docker-ci`: those
 gates must stay green on a checkout with no built artifacts, so that local
 green still means the credential-free CI gates will be green. The one CI gate
 they do not mirror is `.github/workflows/packaging.yml`, which builds the
-artifacts, runs this same verification in CI, and then installs those same
+artifacts, runs this same verification in CI, installs those same
 artifacts on pinned Debian and Fedora containers with
-`make verify-package-install`. It cannot run locally because
-it needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution.
+`make verify-package-install`, and then boots real Debian and Fedora VMs and
+validates the installed package on a host with systemd as PID 1. It cannot
+run locally because it needs the `GORELEASER_KEY` secret and the goreleaser
+Pro distribution — and its booted-VM tier needs KVM as well.
 
 `make package` is the local producer: it runs `goreleaser release --snapshot
 --clean`, which builds snapshot `.deb` and `.rpm` artifacts into `dist/`,
@@ -180,7 +186,45 @@ depends on the build-and-verify job, downloads the artifacts it uploaded, and
 runs `make verify-package-install` once per image across a two-entry matrix —
 the pinned Debian image with the `.deb`, the pinned Fedora image with the
 `.rpm`. That is why the packaging gate is not a payload-only check, and why it
-stays outside `make ci` / `make docker-ci`.
+stays outside `make ci` / `make docker-ci`. The same workflow's `vm-boot` job
+carries the check one layer further, onto a booted host; it is described next.
+
+### Booted-VM validation
+
+A container shares the host's kernel and does not run systemd as PID 1, so the
+install validation above can prove what a package *put on disk* but not what it
+*does when the host boots*. `.github/workflows/packaging.yml`'s `vm-boot` job
+closes that gap. It downloads the same verified artifact, boots a stock Debian
+12 or Fedora 42 cloud image — pinned by checksum in `test/vm/images.env` —
+under QEMU/KVM on the standard runner, installs the package the ordinary way,
+and runs the assertions in `test/vm/` against the running guest:
+
+- both units activate on a booted host, and systemd creates the runtime and
+  state directories with the ownership and mode the units declare;
+- the privileged broker's Unix socket is live, with the right owner, group and
+  mode, and answers over that socket;
+- PAM authenticates a real non-root administrator end to end through the
+  running stack, and both negatives hold — a wrong password is rejected with
+  a 401 by PAM itself, and a direct root login is refused;
+- journald is reachable: the daemon reads a record it emitted itself back
+  through the broker's own journal query;
+- the posture survives a real reboot — both units come back active unaided,
+  the capability set is unchanged, `/run/pilothouse` is destroyed and
+  recreated, and `/var/lib/pilothouse` persists.
+
+The job runs on every push to `main` and, on a pull request, only while the
+`vm-boot` label is present. It is **not** a required check, it builds no
+packages of its own, and it publishes nothing: the throwaway overlay disk, the
+cloud-init seed and the run-time credentials never leave the job, and
+diagnostics (QEMU stderr and the guest serial console) go to the job log. There
+is no local `make` target for it — it needs KVM, network access and the
+artifact the build job produced.
+
+What it deliberately does **not** cover, all of which is
+[#80](https://github.com/frostyard/pilothouse/issues/80): image-based hosts
+(uCore/cayo), SELinux AVC assertions and policy qualification — the Fedora
+guest stays enforcing, but the job neither scans the audit log nor classifies
+denials — and sysext or bootc delivery.
 
 ### Create a release
 

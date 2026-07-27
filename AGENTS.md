@@ -26,7 +26,7 @@ Run `make build`, `make test`, `make fmt`, and `make lint` before handing off ch
 
 If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
 
-`make verify-packages` reports the packaging contract's findings for built `.deb` and `.rpm` artifacts in `dist/`; it sits outside `make ci` and `make docker-ci` on purpose, and it fails by design when `dist/` is empty, which is the normal state on a development host and in the development image. `make package` is the local producer that fills `dist/` — it runs `goreleaser release --snapshot --clean`, requires the goreleaser Pro distribution at major version 2, which is not installed on this host or in the development image, and it too sits outside `make ci` and `make docker-ci`. `make verify-package-install` is the install-side sibling: it runs `packaging/verify-install.sh` inside the container image named by `INSTALL_IMAGE` (no default; an unset value fails with a message naming the two digest-pinned images) against `ARTIFACT_DIR` (default `dist`), and it sits outside `make ci` and `make docker-ci` too, because it needs built artifacts, Docker and network access. `.github/workflows/packaging.yml` now runs that same target in CI, installing the built artifacts on pinned Debian and Fedora containers after the contract check passes; that gate stays outside `make ci` and `make docker-ci`. `make help` prints every target carrying a `##` description.
+`make verify-packages` reports the packaging contract's findings for built `.deb` and `.rpm` artifacts in `dist/`; it sits outside `make ci` and `make docker-ci` on purpose, and it fails by design when `dist/` is empty, which is the normal state on a development host and in the development image. `make package` is the local producer that fills `dist/` — it runs `goreleaser release --snapshot --clean`, requires the goreleaser Pro distribution at major version 2, which is not installed on this host or in the development image, and it too sits outside `make ci` and `make docker-ci`. `make verify-package-install` is the install-side sibling: it runs `packaging/verify-install.sh` inside the container image named by `INSTALL_IMAGE` (no default; an unset value fails with a message naming the two digest-pinned images) against `ARTIFACT_DIR` (default `dist`), and it sits outside `make ci` and `make docker-ci` too, because it needs built artifacts, Docker and network access. `.github/workflows/packaging.yml` now runs that same target in CI, installing the built artifacts on pinned Debian and Fedora containers after the contract check passes; that gate stays outside `make ci` and `make docker-ci`. That workflow also carries a third tier beyond the contract check and the container install matrix: the `vm-boot` job, which boots a stock Debian and a stock Fedora cloud image under QEMU/KVM with `bash test/vm/vm-boot-test.sh` and validates the installed package on a booted host — activation, the systemd-created directories, a live broker socket, real PAM authentication, journald read-back and reboot posture. It runs on every push to `main` and on a pull request only while the `vm-boot` label is on it, it is **not** a required check, and — like the rest of `packaging.yml` — it cannot run under `make ci` or `make docker-ci`, here because it needs KVM, network access and the artifact the `packages` job builds, so there is no local `make` target for it. `make help` prints every target carrying a `##` description.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
@@ -63,15 +63,20 @@ and CI can never disagree about what "passing" means for the credential-free
 gates.
 
 The single exception is `.github/workflows/packaging.yml`, the packaging
-gate: it builds the `.deb` and `.rpm` artifacts, verifies them, and then
-installs those same artifacts on pinned Debian and Fedora containers, and it
-cannot run locally because it needs the `GORELEASER_KEY` secret and the
-goreleaser Pro distribution, neither of which is available on a development
-host or in the development image. The install half additionally needs Docker
-and network access, so the whole gate stays outside `make ci` and
-`make docker-ci` by construction. Once artifacts exist in `dist/`,
-`make verify-packages` and `make verify-package-install` are the local tools
-for the contracts that gate checks.
+gate, which now carries three tiers: it builds the `.deb` and `.rpm`
+artifacts and verifies them against the artifact contract, installs those
+same artifacts on pinned Debian and Fedora containers, and — in the
+`vm-boot` job — boots a real Debian and a real Fedora VM under QEMU/KVM and
+validates the installed package on a host with systemd as PID 1. It cannot
+run locally because it needs the `GORELEASER_KEY` secret and the goreleaser
+Pro distribution, neither of which is available on a development host or in
+the development image. The install half additionally needs Docker and
+network access, and the `vm-boot` half needs KVM, network access and the
+artifact the `packages` job builds, so the whole gate stays outside
+`make ci` and `make docker-ci` by construction. Once artifacts exist in
+`dist/`, `make verify-packages` and `make verify-package-install` are the
+local tools for the first two tiers' contracts; there is deliberately **no**
+local `make` target for the `vm-boot` tier.
 
 ## Learned agent skills
 
