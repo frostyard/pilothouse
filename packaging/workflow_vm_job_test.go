@@ -1,6 +1,7 @@
 package packaging
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -269,7 +270,12 @@ func TestPackagingWorkflowVMJobAddsNoSecret(t *testing.T) {
 
 	workflow, raw := loadPackagingWorkflow(t)
 
-	require.Equalf(t, 1, strings.Count(raw, "secrets."),
+	// Every form a secret can be reached by — `secrets.KEY`, `secrets['KEY']`
+	// and a YAML `secrets:` declaration — counts, so the criterion cannot be
+	// sidestepped by spelling the reference differently.
+	secretReference := regexp.MustCompile(`\bsecrets\s*[.\[:]`)
+
+	require.Lenf(t, secretReference.FindAllString(raw, -1), 1,
 		"%s must use exactly one secret — GORELEASER_KEY, in the packages job — and this tier must add none",
 		packagingWorkflowPath)
 	require.Containsf(t, raw, "${{ secrets.GORELEASER_KEY }}",
@@ -280,7 +286,7 @@ func TestPackagingWorkflowVMJobAddsNoSecret(t *testing.T) {
 			continue
 		}
 		for _, step := range job.Steps {
-			require.NotContainsf(t, step.Run, "secrets.",
+			require.NotRegexpf(t, secretReference, step.Run,
 				"job %q must reference no secret (step %q)", name, step.Name)
 		}
 	}

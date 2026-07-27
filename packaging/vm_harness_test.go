@@ -1939,6 +1939,12 @@ const vmCheckJournalPath = vmGuestDir + "/check-journal.sh"
 // second copy of the string.
 const vmDaemonMainPath = "../cmd/pilothoused/main.go"
 
+// vmServicesManagerPath declares the journal response shape the read-back
+// selects on. It is read as text for the same reason vmDaemonMainPath is: the
+// `.entries` and `.message` selectors the guard pins must be grounded in the
+// live JSON tags rather than in a second copy of them.
+const vmServicesManagerPath = "../internal/modules/services/manager.go"
+
 var (
 	// vmQueryServicesJournalDeclaration extracts the journal query's id from
 	// the broker's wire contract, and vmJournalHandlerParameter extracts the
@@ -2022,6 +2028,16 @@ func TestVMCheckJournalAssertsTheDaemonsOwnLineInTheBrokerResponse(t *testing.T)
 
 	require.Contains(t, script, `startup_hits="$(`,
 		"%s must count the matching entries rather than rely on a command's exit status, which cannot tell a failed search from an empty one", vmCheckJournalPath)
+
+	// The two selectors below are the response shape services.Journal declares,
+	// so they are grounded in its live JSON tags rather than assumed.
+	manager, err := os.ReadFile(vmServicesManagerPath)
+	require.NoErrorf(t, err, "read %s", vmServicesManagerPath)
+	require.Containsf(t, string(manager), "Entries     []JournalEntry `json:\"entries\"`",
+		"%s selects `.entries`, which %s must be the tag for", vmCheckJournalPath, vmServicesManagerPath)
+	require.Containsf(t, string(manager), "Message   string    `json:\"message\"`",
+		"%s selects `.message`, which %s must be the tag for", vmCheckJournalPath, vmServicesManagerPath)
+
 	require.Contains(t, script, `'[.entries[] | select((.message // "") | contains($message))] | length' \`,
 		"%s must match on the message field of the entries the broker returned", vmCheckJournalPath)
 	require.Contains(t, script, `<"$journal_response"`,
@@ -2373,10 +2389,12 @@ func TestVMRebootPostureDriftGuard(t *testing.T) {
 	// The identifiers are derived from the harness rather than listed here, so
 	// an inode-inequality assertion introduced under any name — including one
 	// read inline, without a variable at all — is caught: the inline form is
-	// matched directly, and every named form is either seeded by its own read or
-	// pulled in by the alias closure.
+	// matched directly with the directory named on either side of the `%i`
+	// format, and every named form is either seeded by its own read or pulled
+	// in by the alias closure.
 	identifiers := vmRuntimeInodeIdentifiers(t)
-	inlineRead := regexp.MustCompile(`stat\b[^|]*%i[^|]*(\$\{?RUNTIME_DIRECTORY\b|` + regexp.QuoteMeta(vmRuntimeDirectory) + `)`)
+	runtimeDirectoryReference := `(\$\{?RUNTIME_DIRECTORY\b|` + regexp.QuoteMeta(vmRuntimeDirectory) + `)`
+	inlineRead := regexp.MustCompile(`stat\b[^|]*(%i[^|]*` + runtimeDirectoryReference + `|` + runtimeDirectoryReference + `[^|]*%i)`)
 
 	for _, path := range vmHarnessFiles(t) {
 		for _, line := range vmRawCodeLines(readVMHarnessFile(t, path)) {
