@@ -37,3 +37,22 @@ substitution" criteria were both written as enumerated structural
 denylists and both were rejected for omitting a form (`[[ -p ]]`/`[[ -b ]]`/
 `file`, and export-inside-a-subshell) that the same rule should have
 caught.
+
+**Name-only oracles are just a subtler syntax denylist — capture values,
+not existence.** Switching to a behavioral before/after diff is not
+automatically sufficient: `compgen -e` lists exported *variable names*,
+and `declare -Fx` lists exported *function names* — neither reflects a
+changed value or a redefined function body. A helper that reassigns an
+already-exported variable, or redefines an already-exported function's
+body, passes a bare name-set diff while still mutating caller-visible
+state. When the claim is "no exported state changes," diff something
+value-bearing — normalized `export -p` output (captures variable values
+and attributes) plus the actual definitions of any exported functions
+(e.g. `declare -f <name>` per already-exported function) — not just the
+set of names present before and after.
+
+**Learned from:** mill run for issue #80, plan revision rounds 4 and 5 —
+the destination-helper purity criterion was rejected first for using
+`compgen -e` (names only, misses value mutation of an already-exported
+variable) and, after being fixed, rejected again for using `declare -Fx`
+(names only, misses body mutation of an already-exported function).
