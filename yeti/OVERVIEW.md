@@ -2531,9 +2531,11 @@ that reset, then remove the workspace. No workflow invokes the image tier yet.
 The install-to-VM handoff has its own direct fatal loop-detach check: it is
 ordered after the exact bootc install and before update export or QEMU work, so
 the VM never opens a disk that the installer still holds through a loop device.
-QEMU is the only top-level background statement in the runner; every other
-helper remains synchronous and bounded, so no untracked child can retain CI
-descriptors past cleanup.
+QEMU is the only background statement in the runner's complete AST, including
+all function bodies; every other helper remains synchronous, so no untracked
+child can retain CI descriptors past cleanup. The SSH/SCP and Podman operations
+that can wait on external systems retain their explicit timeouts. All runner
+function bodies are exact, including usage and OVMF discovery.
 All `losetup` and private-store Podman invocations are closed to their reviewed
 query/detach and inspect/install/save/named-remove forms. On success, cleanup is
 immediately followed by trap disarm, which is the penultimate statement; the
@@ -2669,6 +2671,10 @@ callsites and may occur only inside their exact higher-level wrapper bodies.
 Every derived resource declaration—VM directory, disk, update archive, SSH key,
 credentials, firmware paths and install-container name—also has one pinned
 readonly value, not merely a pinned variable name.
+Outside the exact reviewed guest wrappers, interpreters, privilege/process
+wrappers and bridge programs are rejected anywhere in a main-path argv, not
+only in command position. A `timeout bash -c ...` layer therefore cannot hide
+raw SSH behind an otherwise bounded outer command.
 Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,

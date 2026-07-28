@@ -1218,6 +1218,9 @@ exit 1
 			imageRequireExactFunction(t, path, file, language, "log", `
 echo "ucore-vm-test: $*"
 `)
+			imageRequireExactFunction(t, path, file, language, "usage", `
+echo "usage: ucore-vm-test.sh --workspace ABSOLUTE_PATH [--ssh-port 2222]" >&2
+`)
 		} else {
 			imageRequireExactFunctionSet(t, path, file,
 				"fail", "log", "cleanup", "broker_query",
@@ -1529,16 +1532,32 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		{"guest_run_long", "bootc", "rollback"},
 	}
 	for _, call := range mainCalls {
-		for _, bridgeProgram := range []string{"ssh", "scp", "sftp", "rsync"} {
-			require.Falsef(t, imageCallContainsProgram(call, bridgeProgram),
-				"the runner main path must reach the guest only through reviewed wrappers; call: %#v",
-				call.args)
+		effectiveCommand := imageCallEffectiveCommand(call)
+		reviewedGuestBridge := slices.Contains(
+			[]string{"guest_copy", "guest_run", "guest_run_long"},
+			effectiveCommand,
+		)
+		if !reviewedGuestBridge {
+			for _, bridgeProgram := range []string{
+				"bash", "busybox", "chroot", "dash", "doas", "env", "eval", "nc",
+				"ncat", "nice", "nohup", "perl", "python", "python3", "rsync",
+				"scp", "setsid", "sftp", "sh", "socat", "ssh", "stdbuf", "sudo",
+				"timeout", "xargs",
+			} {
+				require.Falsef(t, imageCallContainsProgram(call, bridgeProgram),
+					"the runner main path must not nest an alternate guest bridge or interpreter; call: %#v",
+					call.args)
+			}
 		}
 		require.NotContains(t,
-			[]string{"bash", "dash", "env", "nc", "ncat", "sh", "socat", "xargs"},
-			filepath.Base(imageCallEffectiveCommand(call)),
+			[]string{
+				"bash", "busybox", "chroot", "dash", "doas", "env", "eval", "nc",
+				"ncat", "nice", "nohup", "perl", "python", "python3", "sh", "socat",
+				"stdbuf", "sudo", "timeout", "xargs",
+			},
+			filepath.Base(effectiveCommand),
 			"the runner main path must not add an alternate guest-command wrapper")
-		switch imageCallEffectiveCommand(call) {
+		switch effectiveCommand {
 		case "guest_copy":
 			require.True(t, imageCallMatchesAny(call, reviewedGuestCopies...),
 				"the runner may copy only the validator, credentials and local update archive: %#v",
@@ -1554,7 +1573,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		case "guest_probe", "guest_run_timeout":
 			require.Failf(t, "direct low-level guest bridge call",
 				"%s may appear only inside its exact reviewed wrapper body: %#v",
-				imageCallEffectiveCommand(call), call.args)
+				effectiveCommand, call.args)
 		}
 	}
 	require.Len(t, reviewedGuestCopies, countCallsWithEffectiveCommand(mainCalls, "guest_copy"))
@@ -1849,6 +1868,22 @@ wait_for_broker
 after="$(guest_run cat /proc/sys/kernel/random/boot_id)"
 [[ -n "$before" && -n "$after" && "$before" != "$after" ]] ||
     fail "guest answered after reboot without changing boot_id"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "find_ovmf", `
+local pair code vars
+for pair in \
+    "/usr/share/OVMF/OVMF_CODE_4M.fd|/usr/share/OVMF/OVMF_VARS_4M.fd" \
+    "/usr/share/OVMF/OVMF_CODE.fd|/usr/share/OVMF/OVMF_VARS.fd" \
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd|/usr/share/edk2/ovmf/OVMF_VARS.fd" \
+    "/usr/share/qemu/OVMF_CODE.fd|/usr/share/qemu/OVMF_VARS.fd"; do
+    code="${pair%%|*}"
+    vars="${pair#*|}"
+    if [[ -r "$code" && -r "$vars" ]]; then
+        printf '%s|%s\n' "$code" "$vars"
+        return 0
+    fi
+done
+return 1
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_digest", `
 local slot="$1"
@@ -2156,6 +2191,16 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	require.NotEqual(t, -1, qemuStatement)
 	require.Equal(t, 1, backgroundStatements,
 		"the owned QEMU process must be the runner's only top-level background job")
+	var allBackgroundLines []uint
+	syntax.Walk(file, func(node syntax.Node) bool {
+		statement, ok := node.(*syntax.Stmt)
+		if ok && statement.Background {
+			allBackgroundLines = append(allBackgroundLines, statement.Pos().Line())
+		}
+		return true
+	})
+	require.Equal(t, []uint{file.Stmts[qemuStatement].Pos().Line()}, allBackgroundLines,
+		"the owned QEMU process must be the only background statement in the complete runner AST")
 	require.Less(t, qemuStatement+1, len(file.Stmts),
 		"QEMU must be followed immediately by qemu_pid=$!")
 	pidStatement := file.Stmts[qemuStatement+1]
