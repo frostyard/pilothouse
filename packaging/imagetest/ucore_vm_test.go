@@ -545,6 +545,33 @@ func imageRequireContiguousAssignmentSets(
 		"assignment/declaration sequence %#v must occur once contiguously at top level", want)
 }
 
+func imageRequireExactTopLevelSequence(
+	t *testing.T,
+	path string,
+	file *syntax.File,
+	language syntax.LangVariant,
+	source string,
+) {
+	t.Helper()
+	expected := imageParseShellSource(t, "expected-"+filepath.Base(path), source, language)
+	expectedStatements := make([]string, 0, len(expected.Stmts))
+	for _, statement := range expected.Stmts {
+		expectedStatements = append(expectedStatements, imageShellRender(t, statement))
+	}
+	actualStatements := make([]string, 0, len(file.Stmts))
+	for _, statement := range file.Stmts {
+		actualStatements = append(actualStatements, imageShellRender(t, statement))
+	}
+	matches := 0
+	for start := 0; start+len(expectedStatements) <= len(actualStatements); start++ {
+		if slices.Equal(actualStatements[start:start+len(expectedStatements)], expectedStatements) {
+			matches++
+		}
+	}
+	require.Equalf(t, 1, matches,
+		"%s must contain the exact reviewed contiguous top-level sequence", path)
+}
+
 func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrite {
 	t.Helper()
 	var writes []imageShellWrite
@@ -1220,10 +1247,33 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	topDeclarations := imageShellDeclarations(t, topLevel...)
-	imageRequireDeclaration(t, topDeclarations, imageShellDeclaration{
-		variant: "readonly", name: "GUEST_SCRIPT",
-		value: `"$SCRIPT_DIR/guest/validate-ucore.sh"`,
-	})
+	criticalDeclarationNames := map[string]bool{
+		"GUEST_SCRIPT": true, "IMAGE_DIR": true, "IMAGE_MANIFEST": true,
+		"VM_DIR": true, "DISK_IMAGE": true, "UPDATE_ARCHIVE": true,
+		"SSH_KEY": true, "CREDENTIALS": true, "OVMF_CODE": true, "OVMF_VARS": true,
+		"INSTALL_CONTAINER": true,
+	}
+	var criticalDeclarations []imageShellDeclaration
+	for _, declaration := range topDeclarations {
+		if criticalDeclarationNames[declaration.name] {
+			criticalDeclarations = append(criticalDeclarations, declaration)
+		}
+	}
+	require.Equal(t, []imageShellDeclaration{
+		{variant: "readonly", name: "GUEST_SCRIPT", value: `"$SCRIPT_DIR/guest/validate-ucore.sh"`},
+		{variant: "readonly", name: "IMAGE_DIR", value: `"$workspace/fixture-ucore-images"`},
+		{variant: "readonly", name: "IMAGE_MANIFEST", value: `"$IMAGE_DIR/fixture.json"`},
+		{variant: "readonly", name: "VM_DIR", value: `"$workspace/fixture-ucore-vm"`},
+		{variant: "readonly", name: "DISK_IMAGE", value: `"$VM_DIR/disk.raw"`},
+		{variant: "readonly", name: "UPDATE_ARCHIVE", value: `"$VM_DIR/update.oci"`},
+		{variant: "readonly", name: "SSH_KEY", value: `"$VM_DIR/id_ed25519"`},
+		{variant: "readonly", name: "CREDENTIALS", value: `"$VM_DIR/credentials.json"`},
+		{variant: "readonly", name: "OVMF_CODE", value: `"$VM_DIR/OVMF_CODE.fd"`},
+		{variant: "readonly", name: "OVMF_VARS", value: `"$VM_DIR/OVMF_VARS.fd"`},
+		{variant: "readonly", name: "INSTALL_CONTAINER",
+			value: `"pilothouse-image-install-$ssh_port"`},
+	}, criticalDeclarations,
+		"every derived runner resource must have one exact readonly declaration")
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "manifest_value", `
 local expression="$1"
 jq -er "$expression | select(type == \"string\" and length > 0)" "$IMAGE_MANIFEST"
@@ -1239,20 +1289,35 @@ TMPDIR="$image_tmpdir" timeout --signal=TERM --kill-after=30s "$1" \
 `)
 	var scriptPathAssignments []imageShellAssignment
 	for _, assignment := range imageShellAssignments(t, topLevel...) {
-		if assignment.name == "SCRIPT_DIR" {
+		if assignment.name == "SCRIPT_PATH" || assignment.name == "SCRIPT_DIR" {
 			scriptPathAssignments = append(scriptPathAssignments, assignment)
 		}
 	}
 	require.Equal(t, []imageShellAssignment{
-		{name: "SCRIPT_DIR", value: `"$(cd "$(dirname "${BASH_SOURCE[0]}")"&&pwd)"`},
+		{name: "SCRIPT_PATH", value: `"$(readlink -f -- "${BASH_SOURCE[0]}")"`},
+		{name: "SCRIPT_PATH", value: ""},
+		{name: "SCRIPT_DIR", value: `"$(dirname "$SCRIPT_PATH")"`},
 		{name: "SCRIPT_DIR", value: ""},
 	}, scriptPathAssignments,
-		"the repository script directory must have one reviewed capture and immediate readonly")
+		"the canonical repository script path and directory must have reviewed captures and readonlys")
 	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"SCRIPT_PATH"},
+		[]string{"SCRIPT_PATH"},
 		[]string{"SCRIPT_DIR"},
 		[]string{"SCRIPT_DIR"},
 		[]string{"GUEST_SCRIPT"},
 	)
+	expectedGuestSource := imageParseShellSource(t, "expected-guest-source.sh", `
+[[ -f "$GUEST_SCRIPT" && ! -L "$GUEST_SCRIPT" &&
+   -s "$GUEST_SCRIPT" && -r "$GUEST_SCRIPT" ]] ||
+    fail "guest validation script is missing, empty or not a regular file: $GUEST_SCRIPT"
+`, syntax.LangBash)
+	require.Len(t, expectedGuestSource.Stmts, 1)
+	expectedGuestSourceBinary, ok := expectedGuestSource.Stmts[0].Cmd.(*syntax.BinaryCmd)
+	require.True(t, ok)
+	guestSourceCondition := imageShellRender(t, expectedGuestSourceBinary.X.Cmd)
+	imageRequireFailingTest(t, topLevel, guestSourceCondition)
+	imageRequireDirectFailingTest(t, file, guestSourceCondition)
 	var workspaceReadonlyIndex = -1
 	for index, statement := range file.Stmts {
 		declaration, ok := statement.Cmd.(*syntax.DeclClause)
@@ -1279,16 +1344,67 @@ fi
 		imageShellRender(t, expectedPortValidation.Stmts[0]),
 		imageShellRender(t, file.Stmts[workspaceReadonlyIndex-1]),
 		"workspace and port must become readonly immediately after the exact port validation")
+	expectedCanonicalValidation := imageParseShellSource(t, "expected-canonical-validation.sh", `
+[[ "$workspace" == "$canonical_workspace" ]] ||
+    fail "--workspace must be its canonical absolute path"
+`, syntax.LangBash)
+	require.Len(t, expectedCanonicalValidation.Stmts, 1)
+	require.Equal(t,
+		imageShellRender(t, expectedCanonicalValidation.Stmts[0]),
+		imageShellRender(t, file.Stmts[workspaceReadonlyIndex-2]),
+		"canonical workspace equality, port validation and readonly must be contiguous")
 	require.False(t, file.Stmts[workspaceReadonlyIndex].Background)
 	require.False(t, file.Stmts[workspaceReadonlyIndex].Negated)
 	require.Empty(t, file.Stmts[workspaceReadonlyIndex].Redirs)
+	imageRequireExactTopLevelSequence(t, imageVMRunnerPath, file, syntax.LangBash, `
+workspace=""
+ssh_port="2222"
+while (($#)); do
+    case "$1" in
+        --workspace)
+            (($# >= 2)) || { usage; exit 2; }
+            workspace="$2"
+            shift 2
+            ;;
+        --ssh-port)
+            (($# >= 2)) || { usage; exit 2; }
+            ssh_port="$2"
+            shift 2
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+done
 
-	imageRequireDeclaration(t, topDeclarations, imageShellDeclaration{
-		variant: "readonly", name: "IMAGE_DIR", value: `"$workspace/fixture-ucore-images"`,
-	})
-	imageRequireDeclaration(t, topDeclarations, imageShellDeclaration{
-		variant: "readonly", name: "IMAGE_MANIFEST", value: `"$IMAGE_DIR/fixture.json"`,
-	})
+[[ -n "$workspace" && "$workspace" == /* && -d "$workspace" ]] ||
+    fail "--workspace must name an existing absolute directory"
+canonical_workspace="$(cd "$workspace" && pwd -P)"
+[[ "$workspace" == "$canonical_workspace" ]] ||
+    fail "--workspace must be its canonical absolute path"
+if [[ ! "$ssh_port" =~ ^[0-9]+$ ]] ||
+   ((ssh_port < 1024 || ssh_port > 65535)); then
+    fail "--ssh-port must be an integer from 1024 through 65535"
+fi
+readonly workspace canonical_workspace ssh_port
+`)
+	topAssignments := imageShellAssignments(t, topLevel...)
+	for name, want := range map[string][]string{
+		"workspace":           {`""`, `"$2"`, ""},
+		"canonical_workspace": {`"$(cd "$workspace"&&pwd -P)"`, ""},
+		"ssh_port":            {`"2222"`, `"$2"`, ""},
+	} {
+		var observed []string
+		for _, assignment := range topAssignments {
+			if assignment.name == name {
+				observed = append(observed, assignment.value)
+			}
+		}
+		require.Equalf(t, want, observed,
+			"%s must retain only its reviewed parse/canonicalize/readonly assignments", name)
+	}
+
 	for _, path := range [][]string{
 		{"assert_storage_path", `"$storage_root"`, `"$IMAGE_DIR/storage"`},
 		{"assert_storage_path", `"$image_store"`, `"$IMAGE_DIR/imagestore"`},
@@ -1380,10 +1496,19 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		`"$DISK_IMAGE"`,
 	}
 	imageRequireExactCallCount(t, allCalls, 1, installCall...)
-	imageRequireCall(t, mainCalls,
+	updateSaveCall := []string{
 		"podman_fixture", "20m", "save", "--format", "oci-archive",
 		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
-	)
+	}
+	imageRequireCall(t, mainCalls, updateSaveCall...)
+	imageRequireDirectFailingCall(t, file, "detach_disk_loops")
+	installLine := imageExactCallLine(t, allCalls, installCall...)
+	postInstallDetachLine := imageExactCallLine(t, mainCalls, "detach_disk_loops")
+	updateSaveLine := imageExactCallLine(t, mainCalls, updateSaveCall...)
+	require.Less(t, installLine, postInstallDetachLine,
+		"the installer must finish before its disk-backed loops are detached")
+	require.Less(t, postInstallDetachLine, updateSaveLine,
+		"the loop-free install handoff must precede update export and QEMU work")
 	imageRequireCall(t, mainCalls,
 		"guest_run_long", "podman", "load", "--input", "/var/tmp/pilothouse-image-update.oci",
 	)
@@ -1409,6 +1534,15 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		{"guest_run_long", "bootc", "rollback"},
 	}
 	for _, call := range mainCalls {
+		for _, bridgeProgram := range []string{"ssh", "scp", "sftp", "rsync"} {
+			require.Falsef(t, imageCallContainsProgram(call, bridgeProgram),
+				"the runner main path must reach the guest only through reviewed wrappers; call: %#v",
+				call.args)
+		}
+		require.NotContains(t,
+			[]string{"bash", "dash", "env", "nc", "ncat", "sh", "socat", "xargs"},
+			filepath.Base(imageCallEffectiveCommand(call)),
+			"the runner main path must not add an alternate guest-command wrapper")
 		switch imageCallEffectiveCommand(call) {
 		case "guest_copy":
 			require.True(t, imageCallMatchesAny(call, reviewedGuestCopies...),
@@ -1422,6 +1556,10 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 			require.True(t, imageCallMatchesAny(call, reviewedGuestLongRuns...),
 				"the runner may issue only the reviewed long guest update calls: %#v",
 				call.args)
+		case "guest_probe", "guest_run_timeout":
+			require.Failf(t, "direct low-level guest bridge call",
+				"%s may appear only inside its exact reviewed wrapper body: %#v",
+				imageCallEffectiveCommand(call), call.args)
 		}
 	}
 	require.Len(t, reviewedGuestCopies, countCallsWithEffectiveCommand(mainCalls, "guest_copy"))
@@ -1538,6 +1676,42 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
 	allCalls := imageShellAllCalls(t, file)
 	topCalls := imageShellCalls(t, imageShellTopLevel(file)...)
+	loopQueryCall := []string{"losetup", "-j", `"$DISK_IMAGE"`}
+	loopDetachCall := []string{
+		"timeout", "--signal=TERM", "--kill-after=10s", "30s",
+		"losetup", "--detach", `"$loop"`,
+	}
+	imageRequireExactCallCount(t, allCalls, 2, loopQueryCall...)
+	imageRequireExactCallCount(t, allCalls, 1, loopDetachCall...)
+	reviewedImageInspectCall := []string{
+		"podman_fixture", "2m", "image", "inspect",
+		"--format", "'{{.Id}}'", `"$ref"`,
+	}
+	reviewedImageSaveCall := []string{
+		"podman_fixture", "20m", "save", "--format", "oci-archive",
+		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
+	}
+	reviewedContainerRemoveCall := []string{
+		"podman_fixture", "2m", "rm", "--force", "--ignore", `"$INSTALL_CONTAINER"`,
+	}
+	for _, call := range allCalls {
+		if imageCallContainsProgram(call, "losetup") {
+			require.True(t,
+				slices.Equal(call.args, loopQueryCall) ||
+					slices.Equal(call.args, loopDetachCall),
+				"all loop-device access must remain inside the exact cleanup implementation: %#v",
+				call.args)
+		}
+		if imageCallEffectiveCommand(call) == "podman_fixture" {
+			require.True(t,
+				slices.Equal(call.args, reviewedImageInspectCall) ||
+					slices.Equal(call.args, reviewedImageSaveCall) ||
+					slices.Equal(call.args, reviewedContainerRemoveCall) ||
+					imageCallRunsFixture(call),
+				"private-store Podman may only inspect, install, save or remove the named installer: %#v",
+				call.args)
+		}
+	}
 	imageRequireExactCallCount(t, topCalls, 3, "exit", "2")
 	for _, call := range topCalls {
 		command := imageCallEffectiveCommand(call)
@@ -1884,6 +2058,33 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		"the EXIT cleanup trap must be armed before disk, installer, or QEMU resources are created")
 	require.Less(t, cleanupLine, disarmLine,
 		"success-path cleanup must finish before the EXIT trap is disarmed")
+	cleanupStatementIndex := -1
+	disarmStatementIndex := -1
+	for index, statement := range file.Stmts {
+		switch statement.Pos().Line() {
+		case cleanupLine:
+			cleanupStatementIndex = index
+		case disarmLine:
+			disarmStatementIndex = index
+		}
+	}
+	require.NotEqual(t, -1, cleanupStatementIndex)
+	require.Equal(t, cleanupStatementIndex+1, disarmStatementIndex,
+		"successful cleanup must be immediately followed by trap disarm")
+	require.Equal(t, len(file.Stmts)-2, disarmStatementIndex,
+		"trap disarm must be the penultimate top-level statement")
+	finalCall, ok := file.Stmts[len(file.Stmts)-1].Cmd.(*syntax.CallExpr)
+	require.True(t, ok, "the runner must end with its exact PASS log")
+	var finalArgs []string
+	for _, word := range finalCall.Args {
+		finalArgs = append(finalArgs, imageShellRender(t, word))
+	}
+	require.Equal(t, []string{
+		"log", `"PASS: uCore baseline, update and rollback satisfied the image-host contract"`,
+	}, finalArgs)
+	require.False(t, file.Stmts[len(file.Stmts)-1].Background)
+	require.False(t, file.Stmts[len(file.Stmts)-1].Negated)
+	require.Empty(t, file.Stmts[len(file.Stmts)-1].Redirs)
 	directTrapStatements := map[string]int{"arm": 0, "disarm": 0}
 	for _, statement := range file.Stmts {
 		call, ok := statement.Cmd.(*syntax.CallExpr)
@@ -1938,7 +2139,11 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	}
 	imageRequireExactCallCount(t, allCalls, 1, qemuCall...)
 	qemuStatement := -1
+	backgroundStatements := 0
 	for index, statement := range file.Stmts {
+		if statement.Background {
+			backgroundStatements++
+		}
 		call, ok := statement.Cmd.(*syntax.CallExpr)
 		if !ok {
 			continue
@@ -1954,6 +2159,8 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		}
 	}
 	require.NotEqual(t, -1, qemuStatement)
+	require.Equal(t, 1, backgroundStatements,
+		"the owned QEMU process must be the runner's only top-level background job")
 	require.Less(t, qemuStatement+1, len(file.Stmts),
 		"QEMU must be followed immediately by qemu_pid=$!")
 	pidStatement := file.Stmts[qemuStatement+1]

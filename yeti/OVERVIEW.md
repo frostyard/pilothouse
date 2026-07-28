@@ -2528,6 +2528,17 @@ the VM fixture directory and private container store. The later enclosing job
 must invoke acquisition and composition with a bounded log sink, wait for
 their helpers and this consumer, reset the exact private store and wait for
 that reset, then remove the workspace. No workflow invokes the image tier yet.
+The install-to-VM handoff has its own direct fatal loop-detach check: it is
+ordered after the exact bootc install and before update export or QEMU work, so
+the VM never opens a disk that the installer still holds through a loop device.
+QEMU is the only top-level background statement in the runner; every other
+helper remains synchronous and bounded, so no untracked child can retain CI
+descriptors past cleanup.
+All `losetup` and private-store Podman invocations are closed to their reviewed
+query/detach and inspect/install/save/named-remove forms. On success, cleanup is
+immediately followed by trap disarm, which is the penultimate statement; the
+exact PASS log is last. No process, loop or container can be created after the
+last verified cleanup.
 
 `packaging/imagetest/ucore_vm_test.go` parses both harnesses with
 `mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
@@ -2566,7 +2577,9 @@ key, credentials, firmware and named install-container identities.
 The canonical workspace and SSH port likewise become readonly immediately
 after the exact port-validation statement and before root checks, fixture paths
 or privileged container mounts use them; later code cannot redirect the
-installer's bind mount to another host path.
+installer's bind mount to another host path. The canonical equality statement,
+port validation and readonly declaration are contiguous, and the complete
+workspace/canonical-workspace/port assignment sets are exact.
 Comparisons and
 critical evidence calls must feed `|| fail`. Capability sorting is pinned
 separately to the independently probed expected file and decoded broker file;
@@ -2633,16 +2646,29 @@ The runner's main path has closed sets for `guest_copy`, `guest_run` and
 local update archive, then issue only the reviewed setup, archive removal,
 local-image load, switch and rollback commands. The SSH-up, SSH-down,
 broker-ready and reboot function bodies are exact alongside the copy/run
-wrappers. The runner's own directory capture becomes readonly immediately and
-the validator declaration is pinned to
+wrappers. The runner first canonicalizes the script file itself with
+`readlink -f`; that path and its derived directory become readonly immediately,
+and the validator declaration is pinned to
 `$SCRIPT_DIR/guest/validate-ucore.sh`; a readable empty file cannot be
-substituted at the source end. An extra host-to-guest command therefore cannot
+substituted at the source end. The source must be a non-symlink, nonempty,
+readable regular file. Invoking the runner through a symlink still resolves the
+repository's real validator rather than a sibling of the symlink. An extra
+host-to-guest command therefore cannot
 replace the copied validator while source guards continue inspecting the
 pristine repository file. The runner's `log` body is exact as well, so the
 post-reboot broker-ready log calls cannot hide an unreviewed guest mutation.
 Manifest extraction, fixed-storage comparison and the bounded private-Podman
 wrapper bodies are exact too; their reviewed calls cannot be retained while a
 function body skips path containment or cleanup work.
+Direct main-path SSH/SCP/SFTP/rsync calls and shell/network execution wrappers
+are forbidden. Guest execution and transfer must cross the exact
+`guest_run*`/`guest_probe`/`guest_copy` bodies; a raw SSH command cannot replace
+the validator outside the closed wrapper-call sets. The low-level
+`guest_probe` and `guest_run_timeout` helpers have zero direct main-path
+callsites and may occur only inside their exact higher-level wrapper bodies.
+Every derived resource declaration—VM directory, disk, update archive, SSH key,
+credentials, firmware paths and install-container name—also has one pinned
+readonly value, not merely a pinned variable name.
 Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,

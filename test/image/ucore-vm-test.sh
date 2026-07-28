@@ -9,7 +9,9 @@
 # issue-80 job owns the final exact-store reset and workspace removal.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly SCRIPT_PATH
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 readonly SCRIPT_DIR
 readonly GUEST_SCRIPT="${SCRIPT_DIR}/guest/validate-ucore.sh"
 readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
@@ -62,11 +64,13 @@ readonly workspace canonical_workspace ssh_port
 [[ $EUID -eq 0 ]] ||
     fail "bootc install and loop-device setup require root; run this fixture consumer through sudo"
 
-for tool in awk grep jq losetup openssl podman \
+for tool in awk grep jq losetup openssl podman readlink \
     qemu-system-x86_64 scp sed ssh ssh-keygen ss timeout truncate; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
-[[ -r "$GUEST_SCRIPT" ]] || fail "guest validation script is missing: $GUEST_SCRIPT"
+[[ -f "$GUEST_SCRIPT" && ! -L "$GUEST_SCRIPT" &&
+   -s "$GUEST_SCRIPT" && -r "$GUEST_SCRIPT" ]] ||
+    fail "guest validation script is missing, empty or not a regular file: $GUEST_SCRIPT"
 
 if ss -H -ltn "sport = :${ssh_port}" | grep -q .; then
     fail "TCP port $ssh_port is already in use"
