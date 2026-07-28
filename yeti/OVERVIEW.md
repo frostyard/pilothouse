@@ -2540,8 +2540,9 @@ Alias, `shopt`, `enable` and hash-table mutation are forbidden as well, so
 later exact command nodes cannot be rebound after parsing; quoted command names,
 `command`/`builtin` options and repeated wrapper prefixes are normalized for
 that check. Every command position (including a wrapped effective command) must
-resolve statically from literal, escaped or quoted AST word parts; a parameter
-expansion cannot hide a trap or teardown bypass.
+resolve statically from literal or quoted AST word parts; command names carrying
+shell escapes and parameter expansions are rejected rather than normalized, so
+they cannot hide a trap or teardown bypass.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
@@ -2554,13 +2555,19 @@ and disarmed only after explicit cleanup. Comparisons and
 critical evidence calls must feed `|| fail`. Capability sorting is pinned
 separately to the independently probed expected file and decoded broker file;
 the expected and actual host-image normalizers likewise accept only their
-respective `bootc status` and broker-response inputs. The two AVC scans use
+respective `bootc status` and broker-response inputs. Every critical evidence
+file has a complete, exact redirection-writer set and all of those writers must
+precede its comparison/scan; generic copy/move/truncate/stream writers and
+alternate in-place sorts are forbidden on the guest evidence path. The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
 command green. All three guest validation invocations must be direct, foreground
-top-level statements, not calls parked behind a false conditional. Whole-file
+top-level statements, not calls parked behind a false conditional, and their
+line ordering is anchored respectively before the switch, after the
+staged-to-booted continuity proofs, and after the rollback continuity proofs.
+Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
 extra bootc switches/QEMU processes and registry forms. It deliberately does

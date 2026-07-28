@@ -193,6 +193,12 @@ type imageShellAssignment struct {
 	value string
 }
 
+type imageShellWrite struct {
+	command string
+	target  string
+	line    uint
+}
+
 func imageShellRender(t *testing.T, node syntax.Node) string {
 	t.Helper()
 	var output bytes.Buffer
@@ -324,6 +330,36 @@ func imageRequireFailingTest(t *testing.T, roots []syntax.Node, condition string
 	require.Equalf(t, 1, matches, "%s must occur exactly once as the left side of || fail", condition)
 }
 
+func imageFailingTestLine(t *testing.T, roots []syntax.Node, condition string) uint {
+	t.Helper()
+	var lines []uint
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			binary, ok := node.(*syntax.BinaryCmd)
+			if !ok || binary.Op.String() != "||" {
+				return true
+			}
+			clause, ok := binary.X.Cmd.(*syntax.TestClause)
+			if !ok || imageShellRender(t, clause) != condition {
+				return true
+			}
+			failure, ok := binary.Y.Cmd.(*syntax.CallExpr)
+			if ok && len(failure.Args) > 0 && imageShellRender(t, failure.Args[0]) == "fail" {
+				lines = append(lines, binary.Pos().Line())
+			}
+			return true
+		})
+	}
+	require.Lenf(t, lines, 1, "want one failing comparison %s", condition)
+	return lines[0]
+}
+
 func imageShellDeclarations(t *testing.T, roots ...syntax.Node) []imageShellDeclaration {
 	t.Helper()
 	var declarations []imageShellDeclaration
@@ -392,6 +428,47 @@ func imageShellAssignments(t *testing.T, roots ...syntax.Node) []imageShellAssig
 	return assignments
 }
 
+func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrite {
+	t.Helper()
+	var writes []imageShellWrite
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			statement, ok := node.(*syntax.Stmt)
+			if !ok {
+				return true
+			}
+			call, ok := statement.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			command, static := imageShellStaticWord(call.Args[0])
+			if !static {
+				command = imageShellRender(t, call.Args[0])
+			}
+			for _, redirect := range statement.Redirs {
+				switch redirect.Op.String() {
+				case ">", ">>", ">|", "&>":
+					if redirect.Word != nil {
+						writes = append(writes, imageShellWrite{
+							command: command,
+							target:  imageShellRender(t, redirect.Word),
+							line:    statement.Pos().Line(),
+						})
+					}
+				}
+			}
+			return true
+		})
+	}
+	return writes
+}
+
 func imageShellArrayAssignment(t *testing.T, name string, roots ...syntax.Node) []string {
 	t.Helper()
 	var matches [][]string
@@ -435,6 +512,18 @@ func imageRequireExactCallCount(t *testing.T, calls []imageShellCall, count int,
 	t.Helper()
 	require.Equalf(t, count, countImageShellCalls(calls, want...),
 		"want exactly %d executable calls with args %#v; parsed calls: %#v", count, want, calls)
+}
+
+func imageExactCallLine(t *testing.T, calls []imageShellCall, want ...string) uint {
+	t.Helper()
+	var lines []uint
+	for _, call := range calls {
+		if slices.Equal(call.args, want) {
+			lines = append(lines, call.line)
+		}
+	}
+	require.Lenf(t, lines, 1, "want one executable call with args %#v", want)
+	return lines[0]
 }
 
 func countImageShellCalls(calls []imageShellCall, want ...string) int {
@@ -544,6 +633,24 @@ func imageCallEffectiveCommand(call imageShellCall) string {
 	}
 	command, _ := imageCallStaticArgument(call, commandIndex)
 	return command
+}
+
+func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
+	command := imageCallEffectiveCommand(call)
+	if slices.Contains(
+		[]string{"cp", "dd", "install", "ln", "mv", "read", "rsync", "tee", "touch", "truncate"},
+		command,
+	) {
+		return true
+	}
+	if command == "sed" {
+		for _, argument := range call.args[1:] {
+			if argument == "-i" || strings.HasPrefix(argument, "-i") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func imageCallInvokesHostProgram(call imageShellCall, program string) bool {
@@ -989,6 +1096,54 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 	}
 	imageRequireExactCallCount(t, directValidationCalls, 2, "run_guest_validation", "baseline")
 	imageRequireExactCallCount(t, directValidationCalls, 1, "run_guest_validation", "update")
+	var baselineValidationLines []uint
+	var updateValidationLine uint
+	for _, call := range directValidationCalls {
+		switch {
+		case slices.Equal(call.args, []string{"run_guest_validation", "baseline"}):
+			baselineValidationLines = append(baselineValidationLines, call.line)
+		case slices.Equal(call.args, []string{"run_guest_validation", "update"}):
+			updateValidationLine = call.line
+		}
+	}
+	require.Len(t, baselineValidationLines, 2)
+	require.NotZero(t, updateValidationLine)
+
+	var rebootLines []uint
+	for _, statement := range file.Stmts {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 1 || imageShellRender(t, call.Args[0]) != "reboot_guest" {
+			continue
+		}
+		require.False(t, statement.Background)
+		require.False(t, statement.Negated)
+		rebootLines = append(rebootLines, statement.Pos().Line())
+	}
+	require.Len(t, rebootLines, 2,
+		"update and rollback must each use one direct proven reboot")
+
+	switchLine := imageExactCallLine(t, mainCalls, switchCall...)
+	rollbackLine := imageExactCallLine(t, mainCalls, "guest_run_long", "bootc", "rollback")
+	updateContinuityLines := []uint{
+		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest booted)" == "$staged_digest" ]]`),
+		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest rollback)" == "$baseline_booted" ]]`),
+	}
+	rollbackContinuityLines := []uint{
+		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]]`),
+		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest rollback)" == "$pre_rollback_booted" ]]`),
+	}
+	require.Less(t, baselineValidationLines[0], switchLine)
+	require.Less(t, switchLine, rebootLines[0])
+	for _, continuityLine := range updateContinuityLines {
+		require.Less(t, rebootLines[0], continuityLine)
+		require.Less(t, continuityLine, updateValidationLine)
+	}
+	require.Less(t, updateValidationLine, rollbackLine)
+	require.Less(t, rollbackLine, rebootLines[1])
+	for _, continuityLine := range rollbackContinuityLines {
+		require.Less(t, rebootLines[1], continuityLine)
+		require.Less(t, continuityLine, baselineValidationLines[1])
+	}
 }
 
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
@@ -1287,6 +1442,10 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	require.Equal(t, 2, countImageFailingCalls(t, topLevel, bootcStatusCall...),
 		"both the initial bootc probe and captured host-image status must fail closed")
 	imageRequireCall(t, topCalls, "grep", "-qx", "bootc", `"$work_dir/actual"`)
+	capabilityBrokerCall := []string{
+		"broker_query", `"$CAPABILITY_QUERY"`, `"$work_dir/query-body.json"`,
+	}
+	imageRequireCall(t, topCalls, capabilityBrokerCall...)
 	capabilityDecodeCall := []string{
 		"jq", "-ser",
 		"'" + imageCapabilityJQProgram + "'",
@@ -1327,6 +1486,10 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		"jq", "-e", "'\n    .result.bootc_available == true\n'",
 		`"$work_dir/host-image.json"`,
 	}
+	hostBrokerCall := []string{
+		"broker_query", `"$HOST_IMAGE_QUERY"`, `"$work_dir/host-image.json"`,
+	}
+	imageRequireCall(t, topCalls, hostBrokerCall...)
 	imageRequireCall(t, topCalls, hostAvailabilityCall...)
 	imageRequireFailingCall(t, topLevel, hostAvailabilityCall...)
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
@@ -1375,6 +1538,78 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	}
 	imageRequireCall(t, topCalls, bootJournalCall...)
 	imageRequireFailingCall(t, topLevel, bootJournalCall...)
+
+	criticalWrites := map[string]map[string]int{
+		`"$work_dir/actual-unsorted"`:          {"jq": 1},
+		`"$work_dir/actual"`:                   {"sort": 1},
+		`"$work_dir/expected"`:                 {":": 1, "printf": 7},
+		`"$work_dir/bootc-status.json"`:        {"bootc": 1},
+		`"$work_dir/expected-host-image.json"`: {"jq": 1},
+		`"$work_dir/actual-host-image.json"`:   {"jq": 1},
+		`"$work_dir/new-avcs"`:                 {"journalctl": 1},
+		`"$work_dir/boot-journal"`:             {"journalctl": 1},
+		`"$work_dir/query-body.json"`:          {},
+		`"$work_dir/host-image.json"`:          {},
+	}
+	observedWrites := make(map[string]map[string]int, len(criticalWrites))
+	writeLines := make(map[string][]uint, len(criticalWrites))
+	for target := range criticalWrites {
+		observedWrites[target] = map[string]int{}
+	}
+	for _, write := range imageShellOutputWrites(t, topLevel...) {
+		if _, critical := criticalWrites[write.target]; !critical {
+			continue
+		}
+		observedWrites[write.target][write.command]++
+		writeLines[write.target] = append(writeLines[write.target], write.line)
+	}
+	require.Equal(t, criticalWrites, observedWrites,
+		"critical evidence files must have only their reviewed redirection writers")
+
+	for _, call := range topCalls {
+		require.False(t,
+			imageCallIsForbiddenEvidenceMutator(call),
+			"the guest evidence path must not gain a non-redirection file mutator")
+		command := imageCallEffectiveCommand(call)
+		if command == "sort" && slices.Contains(call.args, "-o") {
+			require.Equal(t, expectedCapabilitySortCall, call.args,
+				"the only in-place sort must normalize independent expected capabilities")
+		}
+	}
+
+	require.Less(t,
+		imageExactCallLine(t, topCalls, capabilityBrokerCall...),
+		imageExactCallLine(t, topCalls, capabilityDecodeCall...),
+	)
+	capabilityCompareLine := imageExactCallLine(t, topCalls, capabilityComparisonCall...)
+	for _, target := range []string{
+		`"$work_dir/actual-unsorted"`, `"$work_dir/actual"`, `"$work_dir/expected"`,
+	} {
+		for _, writerLine := range writeLines[target] {
+			require.Lessf(t, writerLine, capabilityCompareLine,
+				"%s must be completely written before capability comparison", target)
+		}
+	}
+	require.Less(t,
+		imageExactCallLine(t, topCalls, hostBrokerCall...),
+		imageExactCallLine(t, topCalls, actualHostNormalizeCall...),
+	)
+	hostCompareLine := imageExactCallLine(t, topCalls, hostComparisonCall...)
+	for _, target := range []string{
+		`"$work_dir/bootc-status.json"`,
+		`"$work_dir/expected-host-image.json"`,
+		`"$work_dir/actual-host-image.json"`,
+	} {
+		for _, writerLine := range writeLines[target] {
+			require.Lessf(t, writerLine, hostCompareLine,
+				"%s must be completely written before host-image comparison", target)
+		}
+	}
+	require.Less(t, writeLines[`"$work_dir/new-avcs"`][0],
+		imageExactCallLine(t, topCalls, windowAVCCall...))
+	require.Less(t, writeLines[`"$work_dir/boot-journal"`][0],
+		imageExactCallLine(t, topCalls, pilothouseAVCCall...))
+
 	for _, call := range allCalls {
 		require.False(t, slices.Equal(call.args,
 			[]string{"systemctl", "restart", "pilothoused.service", "pilothouse.service"}),
@@ -1559,6 +1794,15 @@ a\lias trap=:
 	require.Len(t, dynamicCalls, 1)
 	require.False(t, imageCallHasStaticCommand(dynamicCalls[0]),
 		"dynamic command positions must be rejected before executable policy checks")
+	overwrite := imageParseShellSource(t, "evidence-overwrite.sh", `
+sed -n p "$work_dir/expected" >"$work_dir/actual"
+: >"$work_dir/new-avcs"
+`, syntax.LangPOSIX)
+	require.ElementsMatch(t, []imageShellWrite{
+		{command: "sed", target: `"$work_dir/actual"`, line: 2},
+		{command: ":", target: `"$work_dir/new-avcs"`, line: 3},
+	}, imageShellOutputWrites(t, imageShellTopLevel(overwrite)...),
+		"redirection writes to evidence files must remain visible to the writer-set guard")
 }
 
 func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
@@ -1602,6 +1846,9 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 	require.True(t, imageCallContainsProgram(imageShellCall{
 		args: []string{`"/usr/bin/qemu-system-x86_64"`, "-S"},
 	}, "qemu-system-x86_64"))
+	require.True(t, imageCallIsForbiddenEvidenceMutator(imageShellCall{
+		args: []string{"cp", `"$work_dir/expected"`, `"$work_dir/actual"`},
+	}))
 	require.Equal(t, "exit", imageCallEffectiveCommand(imageShellCall{
 		args: []string{"command", "--", "command", "builtin", "exit", "0"},
 	}))
