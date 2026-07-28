@@ -2437,7 +2437,11 @@ then runs `bootc container lint`. The build context is only the released-RPM
 fixture directory, never the workspace-local container store. The output
 manifest records the source digests, both local refs and IDs, and all five
 storage paths. There is no push, upload, host-store image or workflow wiring
-in this slice.
+in this slice. It also records the composer's effective UID. A composition
+intended for the VM consumer must be run as UID 0: bootc disk installation is
+rootful, and rootful Podman cannot safely reopen a rootless store. Compose,
+consume, exact-store reset and workspace removal therefore stay in one
+rootful ownership domain.
 
 `packaging/imagetest/ucore_compose_test.go` executes the real composer only
 against bounded fake Skopeo, Cosign and Podman tools through the image tier's
@@ -2463,32 +2467,38 @@ accepts no source image or artifact argument. Before booting anything it
 requires the manifest's graphroot, imagestore, runroot, libpod tmpdir, image
 tmpdir and storage configuration to equal their fixed paths below the supplied
 canonical workspace, requires the baseline/update refs to share the one
-fixture prefix, and re-inspects both local IDs. Every Podman call carries the
+fixture prefix, requires the recorded producer UID to be 0, and re-inspects
+both local IDs. Every Podman call carries the
 same explicit remote-off, root, imagestore, runroot, tmpdir, no-events,
 overlay-driver and configuration isolation as the composer.
 
 The baseline goes through `bootc install to-disk --generic-image
 --via-loopback --skip-fetch-check --composefs-backend --filesystem btrfs`.
-The host creates a sparse 20-GiB disk and injects one run-local root SSH public
-key into the installed deployment's persistent root-home state. QEMU runs as a
-foreground child of the harness (backgrounded only by the owning shell), with
+The host creates a sparse 20-GiB disk and passes one run-local root SSH public
+key through bootc's `--root-ssh-authorized-keys` option. It does not mount or
+write a guessed partition, so bootc owns the layout and SELinux labeling.
+QEMU runs as a foreground child of the harness (backgrounded only by the
+owning shell), with
 KVM, q35, OVMF pflash, a raw virtio disk and one loopback SSH forward. Its
 serial output and stderr remain on the caller's standard streams instead of
 growing unbounded workspace log files. SSH connection attempts, copies and
-every synchronous Podman/mount operation have explicit timeouts.
+every synchronous Podman operation have explicit timeouts.
 
 `test/image/guest/validate-ucore.sh` is copied into the guest and invoked
 through an explicit `sh` interpreter. It creates one random-credential,
 wheel-group account solely because the broker capability and host-image
 queries require authentication; this is a prerequisite, not a repetition of
-#67's PAM positive/negative matrix. On the baseline, update and rolled-back
+#67's PAM positive/negative matrix. It neither restarts nor asserts activation
+of the services #67 already covers. On the baseline, update and rolled-back
 baseline it requires the immutable `/usr/lib/pilothouse-image-test/slot`
 marker, enforcing SELinux and a functional `bootc status --json`. It compares
 the broker's exact sorted capability list with a list produced independently
 from systemd, journal, sysext, bootc, rpm-ostree and automatic-update unit-file
 observations. Opt-in capabilities remain absent because the packaged unit
 configures none. It also requires the read-only host-image broker query to
-report bootc available plus a named, digest-identified booted deployment.
+report bootc available. Shape alone is insufficient: the broker's booted,
+staged and rollback image/digest pairs are normalized and compared exactly
+with an independent `bootc status --json` captured in the same guest phase.
 
 The SELinux smoke establishes a journal cursor immediately before the two
 broker reads and fails on any AVC denial after that cursor. It separately
@@ -2508,8 +2518,9 @@ those two digests and restore the baseline slot marker.
 
 The runner never uses `setsid`, `nohup`, daemonization or recursive deletion.
 Its exit path stops and waits for QEMU, force-removes and waits for the one
-named bootc-install container, unmounts the disk, detaches its recorded loop
-device, and verifies neither mount nor loop reference remains. It retains both
+named bootc-install container, enumerates and detaches every loop device backed
+by the exact private disk (including one a killed installer left behind), and
+verifies no loop reference remains. It retains both
 the VM fixture directory and private container store. The later enclosing job
 must invoke acquisition and composition with a bounded log sink, wait for
 their helpers and this consumer, reset the exact private store and wait for

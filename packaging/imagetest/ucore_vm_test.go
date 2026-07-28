@@ -34,7 +34,58 @@ func imageShellFunction(t *testing.T, path, script, name string) string {
 	end := strings.Index(rest, "\n}\n")
 	require.GreaterOrEqualf(t, end, 0, "%s must close %s() at column zero", path, name)
 
-	return rest[:end]
+	return imageEffectiveShell(rest[:end])
+}
+
+func imageShellAfterFunction(t *testing.T, path, script, name string) string {
+	t.Helper()
+
+	opener := "\n" + name + "() {\n"
+	start := strings.Index(script, opener)
+	require.GreaterOrEqualf(t, start, 0, "%s must define %s()", path, name)
+
+	rest := script[start+len(opener):]
+	end := strings.Index(rest, "\n}\n")
+	require.GreaterOrEqualf(t, end, 0, "%s must close %s() at column zero", path, name)
+
+	return imageEffectiveShell(rest[end+len("\n}\n"):])
+}
+
+func imageShellTopLevel(script string) string {
+	var topLevel []string
+	inFunction := false
+	for _, raw := range strings.Split(script, "\n") {
+		if !inFunction && raw == strings.TrimSpace(raw) && strings.HasSuffix(raw, "() {") {
+			inFunction = true
+			continue
+		}
+		if inFunction {
+			if raw == "}" {
+				inFunction = false
+			}
+			continue
+		}
+		topLevel = append(topLevel, raw)
+	}
+
+	return imageEffectiveShell(strings.Join(topLevel, "\n"))
+}
+
+// imageEffectiveShell removes blank and comment-only lines before a structural
+// guard inspects shell source. It is intentionally small: it does not claim to
+// interpret shell, but it makes disabling a guarded command with `#` visible
+// to every contains/ordering assertion below.
+func imageEffectiveShell(script string) string {
+	var effective []string
+	for _, raw := range strings.Split(script, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		effective = append(effective, line)
+	}
+
+	return strings.Join(effective, "\n")
 }
 
 func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
@@ -64,7 +115,9 @@ func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
 }
 
 func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
-	script := imageReadHarness(t, imageVMRunnerPath)
+	raw := imageReadHarness(t, imageVMRunnerPath)
+	script := imageEffectiveShell(raw)
+	topLevel := imageShellTopLevel(raw)
 
 	for _, path := range []string{
 		`readonly IMAGE_DIR="${workspace}/fixture-ucore-images"`,
@@ -76,13 +129,14 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 		`assert_storage_path "$image_tmpdir" "${IMAGE_DIR}/image-tmp"`,
 		`assert_storage_path "$storage_config" "${IMAGE_DIR}/storage.conf"`,
 	} {
-		require.Contains(t, script, path)
+		require.Contains(t, topLevel, path)
 	}
-	require.Contains(t, script, `.kind == "pilothouse-ucore-image-fixture"`)
-	require.Contains(t, script, `.source == "ghcr.io/ublue-os/ucore:latest"`)
-	require.Contains(t, script, `[[ "$actual_id" == "$expected_id" ]]`,
+	require.Contains(t, topLevel, `.kind == "pilothouse-ucore-image-fixture"`)
+	require.Contains(t, topLevel, `.producer_uid == 0`)
+	require.Contains(t, topLevel, `.source == "ghcr.io/ublue-os/ucore:latest"`)
+	require.Contains(t, topLevel, `[[ "$actual_id" == "$expected_id" ]]`,
 		"both local refs must be rechecked against their manifested image IDs")
-	require.Contains(t, script, `[[ "${baseline_ref%:*}" == "${update_ref%:*}" ]]`,
+	require.Contains(t, topLevel, `[[ "${baseline_ref%:*}" == "${update_ref%:*}" ]]`,
 		"the two slots must belong to one private fixture prefix")
 
 	podman := imageShellFunction(t, imageVMRunnerPath, script, "podman_fixture")
@@ -109,7 +163,8 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 }
 
 func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
-	script := imageReadHarness(t, imageVMRunnerPath)
+	raw := imageReadHarness(t, imageVMRunnerPath)
+	main := imageShellAfterFunction(t, imageVMRunnerPath, raw, "run_guest_validation")
 
 	for _, argument := range []string{
 		"bootc install to-disk",
@@ -119,17 +174,18 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--composefs-backend",
 		"--filesystem btrfs",
 		"--karg console=ttyS0",
+		"--root-ssh-authorized-keys /run/pilothouse-image-test-key.pub",
 	} {
-		require.Contains(t, script, argument)
+		require.Contains(t, main, argument)
 	}
-	require.Contains(t, script,
+	require.Contains(t, main,
 		`podman_fixture 20m save --format oci-archive --output "$UPDATE_ARCHIVE" "$update_ref"`)
-	require.Contains(t, script,
-		`guest_run podman load --input /var/tmp/pilothouse-image-update.oci`)
-	require.Contains(t, script,
-		`guest_run bootc switch --quiet --transport containers-storage "$update_ref"`)
-	require.NotContains(t, script, "registry:2")
-	require.NotContains(t, script, "bootc switch docker://")
+	require.Contains(t, main,
+		`guest_run_long podman load --input /var/tmp/pilothouse-image-update.oci`)
+	require.Contains(t, main,
+		`guest_run_long bootc switch --quiet --transport containers-storage "$update_ref"`)
+	require.NotContains(t, main, "registry:2")
+	require.NotContains(t, main, "bootc switch docker://")
 
 	for _, continuity := range []string{
 		`[[ "$(guest_status_digest booted)" == "$staged_digest" ]]`,
@@ -137,16 +193,16 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		`[[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]]`,
 		`[[ "$(guest_status_digest rollback)" == "$pre_rollback_booted" ]]`,
 	} {
-		require.Contains(t, script, continuity)
+		require.Contains(t, main, continuity)
 	}
-	require.Contains(t, script, "run_guest_validation baseline")
-	require.Contains(t, script, "run_guest_validation update")
-	require.Equal(t, 2, strings.Count(script, "run_guest_validation baseline"),
+	require.Contains(t, main, "run_guest_validation baseline")
+	require.Contains(t, main, "run_guest_validation update")
+	require.Equal(t, 2, strings.Count(main, "run_guest_validation baseline"),
 		"the baseline must be checked both before update and after rollback")
 }
 
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
-	script := imageReadHarness(t, imageVMRunnerPath)
+	script := imageEffectiveShell(imageReadHarness(t, imageVMRunnerPath))
 
 	for _, escape := range []string{"setsid", "nohup", "disown", "daemonize"} {
 		require.NotContainsf(t, script, escape,
@@ -161,15 +217,16 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	cleanup := imageShellFunction(t, imageVMRunnerPath, script, "cleanup")
 	qemu := strings.Index(cleanup, "stop_qemu")
 	container := strings.Index(cleanup, "remove_install_container")
-	disk := strings.Index(cleanup, "detach_disk")
+	disk := strings.Index(cleanup, "detach_disk_loops")
 	require.True(t, qemu >= 0 && container > qemu && disk > container,
-		"cleanup must stop/wait QEMU, remove/wait the named install container, then detach host mounts")
+		"cleanup must stop/wait QEMU, remove/wait the named install container, then detach disk-backed loops")
 
-	detach := imageShellFunction(t, imageVMRunnerPath, script, "detach_disk")
-	require.Contains(t, detach, `umount "$MOUNT_DIR"`)
-	require.Contains(t, detach, `losetup --detach "$loop_device"`)
-	require.Contains(t, detach, `mountpoint -q "$MOUNT_DIR"`)
+	detach := imageShellFunction(t, imageVMRunnerPath, script, "detach_disk_loops")
+	require.Contains(t, detach, `losetup --detach "$loop"`)
 	require.Contains(t, detach, `losetup -j "$DISK_IMAGE"`)
+	require.Contains(t, script, `--volume "${SSH_KEY}.pub:/run/pilothouse-image-test-key.pub:ro"`)
+	require.NotContains(t, script, "${loop_device}p3")
+	require.NotContains(t, script, "authorized_keys")
 
 	require.Contains(t, script, "-serial stdio",
 		"QEMU output must remain on the caller-owned bounded sink, not an unbounded workspace file")
@@ -178,7 +235,8 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 }
 
 func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
-	script := imageReadHarness(t, imageVMGuestPath)
+	raw := imageReadHarness(t, imageVMGuestPath)
+	script := imageShellTopLevel(raw)
 
 	require.Contains(t, script,
 		`[ "$(cat /usr/lib/pilothouse-image-test/slot)" = "$expected_slot" ]`)
@@ -206,14 +264,17 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	}
 
 	require.Contains(t, script, `.result.bootc_available == true`)
-	require.Contains(t, script, `.result.booted.image`)
-	require.Contains(t, script, `.result.booted.digest`)
+	require.Contains(t, script, `bootc status --json >"$work_dir/bootc-status.json"`)
+	require.Contains(t, script,
+		`cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json"`)
 
 	require.Contains(t, script, `--after-cursor="$journal_cursor"`)
 	require.Contains(t, script, `'avc:[[:space:]]+denied'`)
-	require.Contains(t, script, `grep -Eiq 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse'`)
-	require.Contains(t, script,
+	require.Contains(t, script, `grep -Ei 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse'`)
+	require.Contains(t, raw,
 		"not a claim that the RPM provides a dedicated Pilothouse SELinux domain")
+	require.Contains(t, script, `journalctl --no-pager --boot -o cat >"$work_dir/boot-journal"`)
+	require.NotContains(t, script, "systemctl restart pilothoused.service")
 
 	for _, duplicate := range []string{
 		"audit.db",
@@ -225,6 +286,28 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		require.NotContainsf(t, script, duplicate,
 			"the image tier must not repeat the plain-VM assertion %q", duplicate)
 	}
+}
+
+func TestImageEffectiveShellExcludesDisabledCommands(t *testing.T) {
+	const command = `guest_run_long bootc switch --transport containers-storage "$update_ref"`
+	require.NotContains(t, imageEffectiveShell("# "+command), command)
+	require.Contains(t, imageEffectiveShell(command), command)
+}
+
+func TestImageShellFunctionScopeExcludesCommandsMovedOutside(t *testing.T) {
+	const fixture = `
+target() {
+    wanted-command
+}
+
+wrong() {
+    other-command
+}
+wanted-command
+`
+	require.Equal(t, "wanted-command", imageShellFunction(t, "fixture.sh", fixture, "target"))
+	require.NotContains(t, imageShellFunction(t, "fixture.sh", fixture, "wrong"), "wanted-command")
+	require.Equal(t, "wanted-command", imageShellTopLevel(fixture))
 }
 
 func TestUCoreVMRunnerRejectsRelativeWorkspaceBeforeMutation(t *testing.T) {

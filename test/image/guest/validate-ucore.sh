@@ -40,9 +40,6 @@ case "${1-}" in
         fi
         printf '%s:%s\n' "$username" "$password" | chpasswd
         unset password
-        systemctl restart pilothoused.service pilothouse.service
-        systemctl is-active --quiet pilothoused.service pilothouse.service ||
-            fail "Pilothouse units did not become active after preparing the image-test identity"
         log "prepared the ephemeral administrator used to read broker capabilities"
         exit 0
         ;;
@@ -70,7 +67,10 @@ cleanup() {
     rm -f "$work_dir/login.json" "$work_dir/login-body.json" \
         "$work_dir/query.json" "$work_dir/query-body.json" \
         "$work_dir/auth.header" "$work_dir/actual" "$work_dir/expected" \
-        "$work_dir/host-image.json" "$work_dir/new-avcs"
+        "$work_dir/host-image.json" "$work_dir/bootc-status.json" \
+        "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" \
+        "$work_dir/new-avcs" "$work_dir/boot-journal" \
+        "$work_dir/all-avcs" "$work_dir/pilothouse-avcs"
     rmdir "$work_dir"
 }
 trap cleanup EXIT
@@ -176,29 +176,83 @@ if ! cmp -s "$work_dir/expected" "$work_dir/actual"; then
     fail "advertised capabilities do not exactly match independently observed image capabilities"
 fi
 
+bootc status --json >"$work_dir/bootc-status.json" ||
+    fail "could not capture bootc's deployment slots for the host-image comparison"
+jq -e '
+    def observed($slot):
+        .status[$slot] as $entry |
+        if $entry == null then null
+        else {
+            image: ($entry.image.image.image // ""),
+            digest: ($entry.image.imageDigest // "")
+        }
+        end;
+    {
+        booted: observed("booted"),
+        staged: observed("staged"),
+        rollback: observed("rollback")
+    }
+' "$work_dir/bootc-status.json" >"$work_dir/expected-host-image.json" ||
+    fail "could not normalize bootc's deployment slots"
+jq -e '
+    .booted.image | type == "string" and length > 0
+' "$work_dir/expected-host-image.json" >/dev/null ||
+    fail "bootc reports no named booted deployment"
+jq -e '
+    .booted.digest | type == "string" and
+        test("^sha256:[0-9a-f]{64}$")
+' "$work_dir/expected-host-image.json" >/dev/null ||
+    fail "bootc reports no digest-identified booted deployment"
+
 broker_query "$HOST_IMAGE_QUERY" "$work_dir/host-image.json"
 jq -e '
-    .result.bootc_available == true and
-    (.result.booted.image | type == "string" and length > 0) and
-    (.result.booted.digest | type == "string" and
-        test("^sha256:[0-9a-f]{64}$"))
+    .result.bootc_available == true
 ' "$work_dir/host-image.json" >/dev/null ||
-    fail "Pilothouse's host-image query does not report the booted bootc deployment"
+    fail "Pilothouse's host-image query reports bootc unavailable"
+jq -e '
+    def reported($entry):
+        if $entry == null then null
+        else {
+            image: ($entry.image // ""),
+            digest: ($entry.digest // "")
+        }
+        end;
+    .result | {
+        booted: reported(.booted),
+        staged: reported(.staged),
+        rollback: reported(.rollback)
+    }
+' "$work_dir/host-image.json" >"$work_dir/actual-host-image.json" ||
+    fail "could not normalize Pilothouse's host-image deployment slots"
+if ! cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json"; then
+    diff -u "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" >&2 || true
+    fail "Pilothouse's host-image deployment slots do not exactly match bootc status"
+fi
 
 # Fail on every AVC created during the controlled broker-query window, and on
 # any current-boot AVC that names Pilothouse. This is an enforcing smoke test,
 # not a claim that the RPM provides a dedicated Pilothouse SELinux domain.
-journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs"
+journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs" ||
+    fail "could not read the journal after the image-host query cursor"
 if grep -Eiq 'avc:[[:space:]]+denied' "$work_dir/new-avcs"; then
     cat "$work_dir/new-avcs" >&2
     fail "an unexpected SELinux AVC denial occurred during image-host validation"
 fi
-if journalctl --no-pager --boot -o cat |
-    grep -Ei 'avc:[[:space:]]+denied' |
-    grep -Eiq 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse'; then
-    journalctl --no-pager --boot -o cat |
-        grep -Ei 'avc:[[:space:]]+denied' |
-        grep -Ei 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse' >&2 || true
+journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||
+    fail "could not read the current boot journal for Pilothouse AVC denials"
+avc_status=0
+grep -Ei 'avc:[[:space:]]+denied' "$work_dir/boot-journal" \
+    >"$work_dir/all-avcs" || avc_status=$?
+[ "$avc_status" -le 1 ] ||
+    fail "could not filter the current boot journal for AVC denials"
+pilothouse_avc_status=0
+grep -Ei 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse' \
+    "$work_dir/all-avcs" >"$work_dir/pilothouse-avcs" ||
+    pilothouse_avc_status=$?
+[ "$pilothouse_avc_status" -le 1 ] ||
+    fail "could not filter current-boot AVC denials for Pilothouse"
+if [ "$pilothouse_avc_status" -eq 0 ]; then
+    cat "$work_dir/pilothouse-avcs" >&2
     fail "the current boot contains a Pilothouse-related SELinux AVC denial"
 fi
 

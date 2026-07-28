@@ -4,7 +4,7 @@
 # SELinux without new AVC denials, and bootc update/rollback slot continuity.
 #
 # This is a consumer of fixture-ucore-images, not its owner. It stops and waits
-# for every process it starts, detaches its mounts and loop device, and leaves
+# for every process it starts, detaches every loop backed by its disk, and leaves
 # the private Podman store and fixture-ucore-vm directory in place. The outer
 # issue-80 job owns the final exact-store reset and workspace removal.
 set -euo pipefail
@@ -61,9 +61,8 @@ fi
 [[ $EUID -eq 0 ]] ||
     fail "bootc install and loop-device setup require root; run this fixture consumer through sudo"
 
-for tool in awk grep jq losetup mount mountpoint openssl podman \
-    qemu-system-x86_64 scp sed ssh ssh-keygen ss timeout truncate udevadm \
-    umount; do
+for tool in awk grep jq losetup openssl podman \
+    qemu-system-x86_64 scp sed ssh ssh-keygen ss timeout truncate; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
 [[ -r "$GUEST_SCRIPT" ]] || fail "guest validation script is missing: $GUEST_SCRIPT"
@@ -82,6 +81,7 @@ mkdir -m 0700 -- "$VM_DIR" ||
 jq -e '
     .schema == 1 and
     .kind == "pilothouse-ucore-image-fixture" and
+    .producer_uid == 0 and
     .source == "ghcr.io/ublue-os/ucore:latest" and
     .baseline.slot == "baseline" and
     .update.slot == "update"
@@ -166,14 +166,11 @@ readonly DISK_IMAGE="${VM_DIR}/disk.raw"
 readonly UPDATE_ARCHIVE="${VM_DIR}/update.oci"
 readonly SSH_KEY="${VM_DIR}/id_ed25519"
 readonly CREDENTIALS="${VM_DIR}/credentials.json"
-readonly MOUNT_DIR="${VM_DIR}/mnt"
 readonly OVMF_CODE="${VM_DIR}/OVMF_CODE.fd"
 readonly OVMF_VARS="${VM_DIR}/OVMF_VARS.fd"
 readonly INSTALL_CONTAINER="pilothouse-image-install-${ssh_port}"
 
 qemu_pid=""
-loop_device=""
-mounted=0
 
 stop_qemu() {
     local pid="${qemu_pid:-}"
@@ -198,18 +195,17 @@ remove_install_container() {
     podman_fixture 2m rm --force --ignore "$INSTALL_CONTAINER" >/dev/null
 }
 
-detach_disk() {
-    local failed=0
-    if ((mounted)) || mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-        timeout --signal=TERM --kill-after=10s 30s umount "$MOUNT_DIR" || failed=1
-        mounted=0
-    fi
-    if [[ -n "${loop_device:-}" ]]; then
-        timeout --signal=TERM --kill-after=10s 30s losetup --detach "$loop_device" || failed=1
-        loop_device=""
-    fi
-    mountpoint -q "$MOUNT_DIR" 2>/dev/null && failed=1
-    [[ -z "$(losetup -j "$DISK_IMAGE" 2>/dev/null)" ]] || failed=1
+detach_disk_loops() {
+    local failed=0 loop listing remaining
+    listing="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || return 1
+    while IFS= read -r loop; do
+        [[ -n "$loop" ]] || continue
+        timeout --signal=TERM --kill-after=10s 30s \
+            losetup --detach "$loop" || failed=1
+    done < <(awk -F: '{print $1}' <<<"$listing")
+
+    remaining="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || failed=1
+    [[ -z "$remaining" ]] || failed=1
     return "$failed"
 }
 
@@ -217,7 +213,7 @@ cleanup() {
     local failed=0
     stop_qemu || failed=1
     remove_install_container || failed=1
-    detach_disk || failed=1
+    detach_disk_loops || failed=1
     return "$failed"
 }
 
@@ -264,7 +260,22 @@ ssh_options=(
 )
 
 guest_run() {
-    timeout --signal=TERM --kill-after=10s 2m \
+    guest_run_timeout 2m "$@"
+}
+
+guest_run_long() {
+    guest_run_timeout 20m "$@"
+}
+
+guest_run_timeout() {
+    local duration="$1"
+    shift
+    timeout --signal=TERM --kill-after=10s "$duration" \
+        ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
+}
+
+guest_probe() {
+    timeout --signal=TERM --kill-after=5s 15s \
         ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
 }
 
@@ -275,34 +286,44 @@ guest_copy() {
 }
 
 wait_for_ssh() {
-    local waited=0
-    while ((waited < 300)); do
+    local started=$SECONDS deadline=$((SECONDS + 300))
+    while ((SECONDS < deadline)); do
         if [[ -n "${qemu_pid:-}" ]] && ! kill -0 "$qemu_pid" 2>/dev/null; then
             fail "QEMU exited before the guest answered SSH"
         fi
-        if guest_run true >/dev/null 2>&1; then
-            log "guest answered SSH after ${waited}s"
+        if guest_probe true >/dev/null 2>&1; then
+            log "guest answered SSH after $((SECONDS - started))s"
             return 0
         fi
         sleep 5
-        waited=$((waited + 5))
     done
     fail "guest did not answer SSH within 300s"
 }
 
 wait_for_ssh_gone() {
-    local waited=0 misses=0
-    while ((waited < 120)); do
-        if guest_run true >/dev/null 2>&1; then
+    local misses=0 deadline=$((SECONDS + 120))
+    while ((SECONDS < deadline)); do
+        if guest_probe true >/dev/null 2>&1; then
             misses=0
         else
             misses=$((misses + 1))
             ((misses >= 3)) && return 0
         fi
         sleep 2
-        waited=$((waited + 2))
     done
     fail "pre-reboot sshd was still answering after 120s"
+}
+
+wait_for_broker() {
+    local started=$SECONDS deadline=$((SECONDS + 120))
+    while ((SECONDS < deadline)); do
+        if guest_probe test -S /run/pilothouse/broker.sock >/dev/null 2>&1; then
+            log "broker socket became ready after $((SECONDS - started))s"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "broker socket did not become ready within 120s after SSH"
 }
 
 reboot_guest() {
@@ -314,6 +335,7 @@ reboot_guest() {
     fi
     wait_for_ssh_gone
     wait_for_ssh
+    wait_for_broker
     after="$(guest_run cat /proc/sys/kernel/random/boot_id)"
     [[ -n "$before" && -n "$after" && "$before" != "$after" ]] ||
         fail "guest answered after reboot without changing boot_id"
@@ -338,6 +360,7 @@ run_guest_validation() {
 
 log "creating sparse VM disk and installing the baseline with composefs"
 truncate -s 20G "$DISK_IMAGE"
+ssh-keygen -q -t ed25519 -N '' -C 'pilothouse-image-test' -f "$SSH_KEY"
 podman_fixture 45m run \
     --rm \
     --name "$INSTALL_CONTAINER" \
@@ -345,6 +368,7 @@ podman_fixture 45m run \
     --pid=host \
     --volume /dev:/dev \
     --volume "$workspace:$workspace" \
+    --volume "${SSH_KEY}.pub:/run/pilothouse-image-test-key.pub:ro" \
     --security-opt label=type:unconfined_t \
     --env CONTAINERS_CONF=/dev/null \
     --env "CONTAINERS_STORAGE_CONF=$storage_config" \
@@ -357,25 +381,11 @@ podman_fixture 45m run \
     --composefs-backend \
     --filesystem btrfs \
     --karg console=ttyS0 \
+    --root-ssh-authorized-keys /run/pilothouse-image-test-key.pub \
     "$DISK_IMAGE"
 
-log "injecting one ephemeral root SSH key into the installed deployment"
-ssh-keygen -q -t ed25519 -N '' -C 'pilothouse-image-test' -f "$SSH_KEY"
-mkdir -m 0700 -- "$MOUNT_DIR"
-loop_device="$(losetup --find --show --partscan "$DISK_IMAGE")"
-timeout --signal=TERM --kill-after=10s 30s udevadm settle
-partition="${loop_device}p3"
-for _ in {1..30}; do
-    [[ -b "$partition" ]] && break
-    sleep 1
-done
-[[ -b "$partition" ]] || fail "bootc-installed root partition did not appear: $partition"
-timeout --signal=TERM --kill-after=10s 30s mount "$partition" "$MOUNT_DIR"
-mounted=1
-ssh_dir="${MOUNT_DIR}/state/os/default/var/roothome/.ssh"
-install -d -m 0700 "$ssh_dir"
-install -m 0600 "${SSH_KEY}.pub" "$ssh_dir/authorized_keys"
-detach_disk || fail "could not detach the disk after injecting the SSH key"
+detach_disk_loops ||
+    fail "bootc install returned with a loop device still attached to the private disk"
 
 log "exporting the update fixture to a job-local OCI archive"
 podman_fixture 20m save --format oci-archive --output "$UPDATE_ARCHIVE" "$update_ref"
@@ -404,6 +414,7 @@ qemu-system-x86_64 \
     </dev/null &
 qemu_pid=$!
 wait_for_ssh
+wait_for_broker
 
 password="$(openssl rand -hex 24)"
 PILOTHOUSE_IMAGE_TEST_PASSWORD="$password" jq -n \
@@ -423,9 +434,9 @@ run_guest_validation baseline
 
 log "loading the private update archive and staging it through containers-storage"
 guest_copy "$UPDATE_ARCHIVE" /var/tmp/pilothouse-image-update.oci
-guest_run podman load --input /var/tmp/pilothouse-image-update.oci
+guest_run_long podman load --input /var/tmp/pilothouse-image-update.oci
 guest_run rm -f /var/tmp/pilothouse-image-update.oci
-guest_run bootc switch --quiet --transport containers-storage "$update_ref"
+guest_run_long bootc switch --quiet --transport containers-storage "$update_ref"
 staged_name="$(guest_status_name staged)"
 staged_digest="$(guest_status_digest staged)"
 [[ "$staged_name" == "$update_ref" && "$staged_digest" =~ $DIGEST_PATTERN ]] ||
@@ -441,7 +452,7 @@ run_guest_validation update
 log "rolling back and proving the deployment slots reverse"
 pre_rollback_booted="$(guest_status_digest booted)"
 pre_rollback_target="$(guest_status_digest rollback)"
-guest_run bootc rollback
+guest_run_long bootc rollback
 reboot_guest
 [[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]] ||
     fail "bootc rollback did not boot the prior deployment"
@@ -449,6 +460,6 @@ reboot_guest
     fail "bootc rollback did not retain the rolled-back-from deployment"
 run_guest_validation baseline
 
-trap - EXIT
 cleanup || fail "cleanup did not fully stop processes and detach the VM disk"
+trap - EXIT
 log "PASS: uCore baseline, update and rollback satisfied the image-host contract"

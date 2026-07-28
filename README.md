@@ -251,7 +251,7 @@ The next image-test step consumes that fixture and builds two local uCore
 derivatives:
 
 ```bash
-test/image/compose-ucore.sh \
+sudo test/image/compose-ucore.sh \
     --workspace /absolute/path/to/ephemeral-workspace \
     --run-id local-run
 ```
@@ -270,7 +270,10 @@ private `storage.conf` repeats the graph, image and run paths plus driver; the
 two temporary paths are pinned separately by `--tmpdir` and `TMPDIR`. Storage
 environment and late general-configuration overrides are cleared, file events
 are disabled, and remote Podman selection is disabled. It never pushes an
-image or deletes its store. Tool
+image or deletes its store. Its manifest records the effective UID that owns
+the store. A fixture intended for the VM consumer must be composed as UID 0,
+and compose, consume, exact-store reset and workspace removal must remain in
+that one rootful ownership domain. Tool
 progress remains on caller-owned standard output and standard error.
 
 Once composition succeeds, the root-only VM consumer installs the baseline
@@ -284,9 +287,11 @@ sudo test/image/ucore-vm-test.sh \
 
 It boots that disk under QEMU/KVM with OVMF, validates enforcing SELinux and
 the exact broker-advertised capability set against independent host probes,
-and requires Pilothouse's host-image query to report the booted bootc
-deployment. The controlled broker-query window must produce no AVC denial,
-and no current-boot AVC may name Pilothouse. The update fixture is exported to
+and requires Pilothouse's booted, staged and rollback image/digest pairs to
+match `bootc status` exactly. The controlled broker-query window must produce
+no AVC denial, and no current-boot AVC denial may name Pilothouse. The baseline
+SSH key is passed through bootc's supported install option so bootc owns disk
+layout and SELinux labeling. The update fixture is exported to
 a job-local OCI archive, loaded into the guest's own container storage, and
 staged with `bootc switch --transport containers-storage`; no registry is
 started or contacted for the derived images. Reboots prove staged-to-booted
@@ -298,9 +303,9 @@ login, journald-readback, or plain-reboot assertions.
 
 The VM consumer streams QEMU output to the caller-owned sink and bounds every
 other long-running child. On success and failure it stops and waits for QEMU,
-removes the named install container, unmounts the disk and detaches its loop
-device. It deliberately retains `fixture-ucore-vm` and never resets or deletes
-the private Podman store. No workflow or enclosing production orchestrator
+removes the named install container, and detaches every loop device backed by
+its exact disk. It deliberately retains `fixture-ucore-vm` and never resets or
+deletes the private Podman store. No workflow or enclosing production orchestrator
 invokes acquisition, composition and the VM consumer yet; that final job must
 bound its log sink, wait for every producer and consumer, reset this exact
 fixture store and wait for reset to finish, and only then remove the entire
