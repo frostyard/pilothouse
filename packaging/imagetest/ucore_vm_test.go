@@ -646,12 +646,12 @@ func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
 				"bash", "cp", "dash", "dd", "install", "ln", "mv",
 				"read", "rsync", "sh", "tee", "touch", "truncate",
 			},
-			argument,
+			filepath.Base(argument),
 		) {
 			return true
 		}
 	}
-	command := imageCallEffectiveCommand(call)
+	command := filepath.Base(imageCallEffectiveCommand(call))
 	if command == "curl" {
 		for _, argument := range call.args {
 			for _, evidence := range []string{
@@ -756,6 +756,38 @@ func imageRequireFailingCall(t *testing.T, roots []syntax.Node, want ...string) 
 	t.Helper()
 	require.Equalf(t, 1, countImageFailingCalls(t, roots, want...),
 		"call %#v must occur exactly once as the left side of || fail", want)
+}
+
+func imageRequireDirectFailingCall(t *testing.T, file *syntax.File, want ...string) {
+	t.Helper()
+	matches := 0
+	for _, statement := range file.Stmts {
+		binary, ok := statement.Cmd.(*syntax.BinaryCmd)
+		if !ok || binary.Op.String() != "||" {
+			continue
+		}
+		call, ok := binary.X.Cmd.(*syntax.CallExpr)
+		if !ok {
+			continue
+		}
+		var args []string
+		for _, word := range call.Args {
+			args = append(args, imageShellRender(t, word))
+		}
+		if !slices.Equal(args, want) {
+			continue
+		}
+		failure, ok := binary.Y.Cmd.(*syntax.CallExpr)
+		if !ok || len(failure.Args) == 0 || imageShellRender(t, failure.Args[0]) != "fail" {
+			continue
+		}
+		matches++
+		require.False(t, statement.Background)
+		require.False(t, statement.Negated)
+		require.Empty(t, statement.Redirs)
+	}
+	require.Equalf(t, 1, matches,
+		"critical evidence call %#v must be one direct foreground top-level || fail statement", want)
 }
 
 func countImageStatusCaptures(
@@ -1457,6 +1489,17 @@ status="$(
 [ "$status" = 200 ] ||
     fail "$query_id returned HTTP $status, expected 200"
 `)
+	loginCurlCall := []string{
+		"curl", "--silent", "--show-error", "--max-time", "30",
+		"--unix-socket", `"$BROKER_SOCKET"`,
+		"--request", "POST",
+		"--header", "'Content-Type: application/json'",
+		"--data-binary", `@"$work_dir/login.json"`,
+		"--output", `"$work_dir/login-body.json"`,
+		"--write-out", "'%{http_code}'",
+		"http://localhost/v1/login",
+	}
+	imageRequireExactCallCount(t, topCalls, 1, loginCurlCall...)
 	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
 	for _, call := range topCalls {
 		command := imageCallEffectiveCommand(call)
@@ -1529,6 +1572,17 @@ status="$(
 		"broker_query", `"$HOST_IMAGE_QUERY"`, `"$work_dir/host-image.json"`,
 	}
 	imageRequireCall(t, topCalls, hostBrokerCall...)
+	imageRequireExactCallCount(t, topCalls, 1, capabilityBrokerCall...)
+	imageRequireExactCallCount(t, topCalls, 1, hostBrokerCall...)
+	for _, call := range topCalls {
+		if imageCallEffectiveCommand(call) != "broker_query" {
+			continue
+		}
+		require.True(t,
+			slices.Equal(call.args, capabilityBrokerCall) ||
+				slices.Equal(call.args, hostBrokerCall),
+			"the guest must make exactly the two reviewed broker evidence queries: %#v", call.args)
+	}
 	imageRequireCall(t, topCalls, hostAvailabilityCall...)
 	imageRequireFailingCall(t, topLevel, hostAvailabilityCall...)
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
@@ -1549,11 +1603,13 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, hostComparisonCall...)
 	imageRequireFailingCall(t, topLevel, hostComparisonCall...)
+	imageRequireDirectFailingCall(t, file, hostComparisonCall...)
 	capabilityComparisonCall := []string{
 		"cmp", "-s", `"$work_dir/expected"`, `"$work_dir/actual"`,
 	}
 	imageRequireCall(t, topCalls, capabilityComparisonCall...)
 	imageRequireFailingCall(t, topLevel, capabilityComparisonCall...)
+	imageRequireDirectFailingCall(t, file, capabilityComparisonCall...)
 
 	windowJournalCall := []string{
 		"journalctl", "--no-pager", `--after-cursor="$journal_cursor"`, "-o", "cat",
@@ -1565,11 +1621,13 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, windowAVCCall...)
 	imageRequireFailingCall(t, topLevel, windowAVCCall...)
+	imageRequireDirectFailingCall(t, file, windowAVCCall...)
 	pilothouseAVCCall := []string{
 		"jq", "-Rse", "'" + imagePilothouseAVCJQProgram + "'", `"$work_dir/boot-journal"`,
 	}
 	imageRequireCall(t, topCalls, pilothouseAVCCall...)
 	imageRequireFailingCall(t, topLevel, pilothouseAVCCall...)
+	imageRequireDirectFailingCall(t, file, pilothouseAVCCall...)
 	require.Contains(t, imageReadHarness(t, imageVMGuestPath),
 		"not a claim that the RPM provides a dedicated Pilothouse SELinux domain")
 	bootJournalCall := []string{
@@ -1628,7 +1686,11 @@ status="$(
 			"the guest evidence path must not gain a non-redirection file mutator: %#v",
 			call.args)
 		command := imageCallEffectiveCommand(call)
-		if command == "sort" {
+		if filepath.Base(command) == "curl" {
+			require.Equal(t, loginCurlCall, call.args,
+				"the exact login request must be the only top-level curl writer")
+		}
+		if filepath.Base(command) == "sort" {
 			require.True(t,
 				slices.Equal(call.args, expectedCapabilitySortCall) ||
 					slices.Equal(call.args, actualCapabilitySortCall),

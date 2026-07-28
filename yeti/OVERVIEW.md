@@ -2565,7 +2565,10 @@ the writer set. The broker query helper's complete curl/output/status body is
 exact-pinned because its legitimate destination is necessarily a parameter.
 The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
-feed the same fatal edge, leaving no mutable shell status variable. Successful top-level
+feed the same fatal edge, leaving no mutable shell status variable. Both scans
+and both evidence comparisons must be direct foreground top-level statements,
+so an unreachable outer branch cannot preserve their AST while skipping them.
+Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
 command green. All three guest validation invocations must be direct, foreground
