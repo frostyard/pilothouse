@@ -2557,16 +2557,21 @@ separately to the independently probed expected file and decoded broker file;
 the expected and actual host-image normalizers likewise accept only their
 respective `bootc status` and broker-response inputs. Every critical evidence
 file has a complete, exact redirection-writer set and all of those writers must
-use the reviewed command, stdout descriptor, operator and literal target, then
+use the reviewed command, file descriptor, operator and literal target, then
 precede its comparison/scan; generic copy/move/truncate/stream writers and
 every alternate sort are forbidden on the guest evidence path. Redirection-only
-and compound-command statements are recorded too, and every output target must
-be one reviewed literal path, so variable and `/./` path aliases cannot evade
-the writer set. The broker query helper's complete curl/output/status body is
-exact-pinned because its legitimate destination is necessarily a parameter.
-Execution wrappers such as `env`, `nice`, `nohup`, `setsid`, `timeout`, `find`
-and `xargs` are forbidden on that path so they cannot hide a path-qualified or
-dynamically selected writer.
+and compound-command statements are recorded too. The write-capable `<>` and
+non-numeric `>&` forms are covered alongside ordinary output redirections, and
+every target must be one reviewed literal path, so descriptor changes, variable
+targets and `/./` path aliases cannot evade the writer set. The broker query
+helper's complete curl/output/status body is exact-pinned because its legitimate
+destination is necessarily a parameter. The guest main path also has a closed
+allowlist of effective command names; `stdbuf`, `chroot`, `awk`, shell
+interpreters and any other unreviewed execution layer fail the guard before
+they can hide a writer. Its only four command-prefix assignment sites are
+closed as well: the two `LC_ALL=C` sorts and the two credential-to-`jq`
+environment projections. A `PATH=...` or similar prefix cannot alter how an
+otherwise reviewed command resolves.
 The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Both scans

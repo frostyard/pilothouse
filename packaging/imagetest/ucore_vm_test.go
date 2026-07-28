@@ -176,10 +176,11 @@ func imageShellTopLevel(file *syntax.File) []syntax.Node {
 }
 
 type imageShellCall struct {
-	args       []string
-	staticArgs []string
-	static     []bool
-	line       uint
+	args        []string
+	assignments []string
+	staticArgs  []string
+	static      []bool
+	line        uint
 }
 
 type imageShellDeclaration struct {
@@ -293,8 +294,13 @@ func imageCollectShellCalls(t *testing.T, includeFunctions bool, roots ...syntax
 				staticArgs = append(staticArgs, value)
 				static = append(static, ok)
 			}
+			assignments := make([]string, 0, len(call.Assigns))
+			for _, assignment := range call.Assigns {
+				assignments = append(assignments, imageShellRender(t, assignment))
+			}
 			calls = append(calls, imageShellCall{
-				args: args, staticArgs: staticArgs, static: static, line: call.Pos().Line(),
+				args: args, assignments: assignments,
+				staticArgs: staticArgs, static: static, line: call.Pos().Line(),
 			})
 			return true
 		})
@@ -463,22 +469,35 @@ func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrit
 				}
 			}
 			for _, redirect := range statement.Redirs {
-				switch redirect.Op.String() {
-				case ">", ">>", ">|", "&>":
-					if redirect.Word != nil {
-						fd := "1"
-						if redirect.N != nil {
-							fd = redirect.N.Value
-						}
-						writes = append(writes, imageShellWrite{
-							command: command,
-							fd:      fd,
-							op:      redirect.Op.String(),
-							target:  imageShellRender(t, redirect.Word),
-							line:    statement.Pos().Line(),
-						})
-					}
+				if redirect.Word == nil {
+					continue
 				}
+				op := redirect.Op.String()
+				switch op {
+				case ">", ">>", ">|", "&>", "<>":
+				case ">&":
+					target, static := imageShellStaticWord(redirect.Word)
+					if static && (target == "-" ||
+						(target != "" && strings.Trim(target, "0123456789") == "")) {
+						continue
+					}
+				default:
+					continue
+				}
+				fd := "1"
+				if op == "<>" {
+					fd = "0"
+				}
+				if redirect.N != nil {
+					fd = redirect.N.Value
+				}
+				writes = append(writes, imageShellWrite{
+					command: command,
+					fd:      fd,
+					op:      op,
+					target:  imageShellRender(t, redirect.Word),
+					line:    statement.Pos().Line(),
+				})
 			}
 			return true
 		})
@@ -650,6 +669,25 @@ func imageCallEffectiveCommand(call imageShellCall) string {
 	}
 	command, _ := imageCallStaticArgument(call, commandIndex)
 	return command
+}
+
+func imageGuestReviewedTopLevelCommand(call imageShellCall) string {
+	if slices.Equal(call.args, []string{"command", "-v", `"$tool"`}) {
+		return "command-v"
+	}
+	return filepath.Base(imageCallEffectiveCommand(call))
+}
+
+func imageGuestCommandIsReviewed(call imageShellCall) bool {
+	switch imageGuestReviewedTopLevelCommand(call) {
+	case ":", "[", "bootc", "broker_query", "cat", "chmod", "chpasswd", "cmp",
+		"command-v", "curl", "exit", "fail", "getenforce", "getent", "grep", "id",
+		"journalctl", "jq", "log", "mktemp", "printf", "rpm-ostree", "sed", "set",
+		"sort", "systemctl", "systemd-sysext", "trap", "unset", "useradd", "usermod":
+		return true
+	default:
+		return false
+	}
 }
 
 func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
@@ -1797,6 +1835,8 @@ status="$(
 			imageCallIsForbiddenEvidenceMutator(call),
 			"the guest evidence path must not gain a non-redirection file mutator: %#v",
 			call.args)
+		require.True(t, imageGuestCommandIsReviewed(call),
+			"the guest main path must use only reviewed effective commands: %#v", call.args)
 		command := imageCallEffectiveCommand(call)
 		if filepath.Base(command) == "curl" {
 			require.Equal(t, loginCurlCall, call.args,
@@ -1807,6 +1847,37 @@ status="$(
 				slices.Equal(call.args, expectedCapabilitySortCall) ||
 					slices.Equal(call.args, actualCapabilitySortCall),
 				"the guest must use only the two reviewed capability sort calls: %#v", call.args)
+			require.Equal(t, []string{"LC_ALL=C"}, call.assignments,
+				"each reviewed capability sort must retain its exact locale assignment")
+		}
+	}
+	var assignedCalls []imageShellCall
+	for _, call := range topCalls {
+		if len(call.assignments) > 0 {
+			assignedCalls = append(assignedCalls, call)
+		}
+	}
+	require.Len(t, assignedCalls, 4,
+		"the guest main path must retain only the four reviewed prefix-assignment calls")
+	for _, call := range assignedCalls {
+		switch imageGuestReviewedTopLevelCommand(call) {
+		case "sort":
+			require.Equal(t, []string{"LC_ALL=C"}, call.assignments)
+		case "jq":
+			require.True(t,
+				slices.Equal(call.assignments, []string{
+					`PILOTHOUSE_IMAGE_TEST_USERNAME="$username"`,
+					`PILOTHOUSE_IMAGE_TEST_PASSWORD="$password"`,
+				}) ||
+					slices.Equal(call.assignments, []string{
+						`PILOTHOUSE_IMAGE_TEST_TOKEN="$token"`,
+					}),
+				"jq may retain only the reviewed credential-to-environment assignments: %#v",
+				call.assignments)
+		default:
+			require.Failf(t, "unreviewed prefix assignment",
+				"effective command %q has assignments %#v",
+				imageGuestReviewedTopLevelCommand(call), call.assignments)
 		}
 	}
 
@@ -2036,6 +2107,20 @@ a\lias trap=:
 	require.Len(t, dynamicCalls, 1)
 	require.False(t, imageCallHasStaticCommand(dynamicCalls[0]),
 		"dynamic command positions must be rejected before executable policy checks")
+	wrappedEvidence := imageParseShellSource(t, "wrapped-evidence.sh", `
+PATH=/tmp stdbuf -o0 sort -o "$work_dir/actual" "$work_dir/expected"
+chroot / sort -u "$work_dir/expected"
+awk '{print}' "$work_dir/expected"
+`, syntax.LangPOSIX)
+	wrappedCalls := imageShellCalls(t, imageShellTopLevel(wrappedEvidence)...)
+	require.Len(t, wrappedCalls, 3)
+	require.Equal(t, []string{"PATH=/tmp"}, wrappedCalls[0].assignments,
+		"prefix assignments must remain attached to the command they modify")
+	for _, call := range wrappedCalls {
+		require.Falsef(t, imageGuestCommandIsReviewed(call),
+			"execution wrapper or alternate output program must not enter the guest allowlist: %#v",
+			call.args)
+	}
 	overwrite := imageParseShellSource(t, "evidence-overwrite.sh", `
 sed -n p "$work_dir/expected" >"$work_dir/actual"
 : >"$work_dir/new-avcs"
@@ -2044,6 +2129,8 @@ sed -n p "$work_dir/expected" >"$work_dir/actual"
 evidence_target="$work_dir/actual"
 : >"$evidence_target"
 journalctl 2>"$work_dir/new-avcs"
+cat "$work_dir/expected" 0<>"$work_dir/actual"
+cat "$work_dir/expected" >&"$work_dir/actual"
 	`, syntax.LangPOSIX)
 	require.ElementsMatch(t, []imageShellWrite{
 		{command: "sed", fd: "1", op: ">", target: `"$work_dir/actual"`, line: 2},
@@ -2052,8 +2139,10 @@ journalctl 2>"$work_dir/new-avcs"
 		{command: "<compound>", fd: "1", op: ">", target: `"$work_dir/actual-host-image.json"`, line: 5},
 		{command: ":", fd: "1", op: ">", target: `"$evidence_target"`, line: 7},
 		{command: "journalctl", fd: "2", op: ">", target: `"$work_dir/new-avcs"`, line: 8},
+		{command: "cat", fd: "0", op: "<>", target: `"$work_dir/actual"`, line: 9},
+		{command: "cat", fd: "1", op: ">&", target: `"$work_dir/actual"`, line: 10},
 	}, imageShellOutputWrites(t, imageShellTopLevel(overwrite)...),
-		"redirection writes to evidence files must remain visible to the writer-set guard")
+		"write-capable redirections to evidence files must remain visible to the writer-set guard")
 }
 
 func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
