@@ -47,7 +47,7 @@ done
 [[ $EUID -eq 0 ]] ||
     fail "the image lifecycle must run as root"
 
-for tool in bash go mktemp podman readlink rm tail timeout; do
+for tool in bash go mktemp podman readlink rm setsid tail timeout; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "required tool is unavailable: $tool"
 done
@@ -66,6 +66,20 @@ readonly run_root="${image_dir}/runroot"
 readonly podman_tmpdir="${image_dir}/libpod-tmp"
 readonly image_tmpdir="${image_dir}/image-tmp"
 readonly storage_config="${image_dir}/storage.conf"
+current_phase_pid=""
+
+handle_signal() {
+    local signal_name="$1"
+    local exit_status="$2"
+    local phase_pid="$current_phase_pid"
+
+    if [[ -n "$phase_pid" ]]; then
+        kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
+        wait "$phase_pid" 2>/dev/null || true
+        current_phase_pid=""
+    fi
+    exit "$exit_status"
+}
 
 run_bounded() {
     local phase="$1"
@@ -73,16 +87,29 @@ run_bounded() {
     shift 2
     local phase_log="${workspace}/${phase}.log"
     local status
+    local pending_signal=""
 
     log "starting ${phase}"
-    if (
+    trap 'pending_signal=INT' INT
+    trap 'pending_signal=TERM' TERM
+    (
         ulimit -f "$LOG_KIB"
-        timeout --signal=TERM --kill-after=30s "$duration" "$@"
-    ) >"$phase_log" 2>&1; then
+        exec setsid timeout --signal=TERM --kill-after=30s "$duration" "$@"
+    ) >"$phase_log" 2>&1 &
+    current_phase_pid=$!
+    local phase_pid="$current_phase_pid"
+    trap 'handle_signal INT 130' INT
+    trap 'handle_signal TERM 143' TERM
+    case "$pending_signal" in
+        INT) handle_signal INT 130 ;;
+        TERM) handle_signal TERM 143 ;;
+    esac
+    if wait "$phase_pid"; then
         status=0
     else
         status=$?
     fi
+    current_phase_pid=""
 
     printf '%s\n' "----- ${phase} log (maximum ${LOG_BYTES} bytes) -----"
     tail -c "$LOG_BYTES" -- "$phase_log" || status=1
@@ -91,8 +118,10 @@ run_bounded() {
 }
 
 reset_private_store() {
-    if [[ ! -e "$storage_config" ]]; then
-        [[ ! -e "$storage_root" && ! -e "$image_store" && ! -e "$run_root" ]] || {
+    if [[ ! -e "$storage_config" && ! -L "$storage_config" ]]; then
+        [[ (! -e "$storage_root" && ! -L "$storage_root") &&
+            (! -e "$image_store" && ! -L "$image_store") &&
+            (! -e "$run_root" && ! -L "$run_root") ]] || {
             echo "ucore-image-test: private store exists without its reviewed configuration" >&2
             return 1
         }
@@ -140,8 +169,8 @@ cleanup_on_exit() {
 }
 
 trap 'cleanup_on_exit $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
 
 cd -- "$REPOSITORY_ROOT"
 run_bounded acquire-release-rpm 5m \

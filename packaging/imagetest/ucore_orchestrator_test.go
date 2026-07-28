@@ -17,6 +17,62 @@ func TestUCoreImageOrchestratorLifecycleIsClosed(t *testing.T) {
 	allCalls := imageShellAllCalls(t, file)
 	topCalls := imageShellCalls(t, imageShellTopLevel(file)...)
 
+	imageRequireUniqueFunctions(t, imageOrchestratorPath, file)
+	imageRequireExactFunctionSet(t, imageOrchestratorPath, file,
+		"usage", "fail", "log", "handle_signal", "run_bounded",
+		"reset_private_store", "cleanup", "cleanup_on_exit",
+	)
+	imageRequireExactShellMode(t, file, "set", "-euo", "pipefail")
+	for _, call := range allCalls {
+		require.Truef(t, imageCallHasStaticCommand(call),
+			"the lifecycle command position must be static: %#v", call.args)
+		require.Falsef(t, imageCallMutatesShellResolution(call),
+			"the lifecycle must not redefine shell command resolution: %#v", call.args)
+	}
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "handle_signal", `
+local signal_name="$1"
+local exit_status="$2"
+local phase_pid="$current_phase_pid"
+if [[ -n "$phase_pid" ]]; then
+    kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
+    wait "$phase_pid" 2>/dev/null || true
+    current_phase_pid=""
+fi
+exit "$exit_status"
+`)
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "run_bounded", `
+local phase="$1"
+local duration="$2"
+shift 2
+local phase_log="${workspace}/${phase}.log"
+local status
+local pending_signal=""
+log "starting ${phase}"
+trap 'pending_signal=INT' INT
+trap 'pending_signal=TERM' TERM
+(
+    ulimit -f "$LOG_KIB"
+    exec setsid timeout --signal=TERM --kill-after=30s "$duration" "$@"
+) >"$phase_log" 2>&1 &
+current_phase_pid=$!
+local phase_pid="$current_phase_pid"
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+case "$pending_signal" in
+    INT) handle_signal INT 130 ;;
+    TERM) handle_signal TERM 143 ;;
+esac
+if wait "$phase_pid"; then
+    status=0
+else
+    status=$?
+fi
+current_phase_pid=""
+printf '%s\n' "----- ${phase} log (maximum ${LOG_BYTES} bytes) -----"
+tail -c "$LOG_BYTES" -- "$phase_log" || status=1
+printf '%s\n' "----- end ${phase} log -----"
+return "$status"
+`)
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "cleanup", `
 local cleanup_status=0
 reset_private_store || cleanup_status=1
@@ -34,8 +90,10 @@ fi
 exit "$status"
 `)
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "reset_private_store", `
-if [[ ! -e "$storage_config" ]]; then
-    [[ ! -e "$storage_root" && ! -e "$image_store" && ! -e "$run_root" ]] || {
+if [[ ! -e "$storage_config" && ! -L "$storage_config" ]]; then
+    [[ (! -e "$storage_root" && ! -L "$storage_root") &&
+        (! -e "$image_store" && ! -L "$image_store") &&
+        (! -e "$run_root" && ! -L "$run_root") ]] || {
         echo "ucore-image-test: private store exists without its reviewed configuration" >&2
         return 1
     }
@@ -80,11 +138,28 @@ run_bounded reset-private-store 10m \
 		imageRequireExactCallCount(t, allCalls, 1, phase...)
 		imageRequireDirectCall(t, file, phase...)
 	}
+	var topCommandSequence []string
+	for _, call := range topCalls {
+		topCommandSequence = append(
+			topCommandSequence,
+			filepath.Base(imageCallEffectiveCommand(call)),
+		)
+	}
+	require.Equal(t, []string{
+		"set", "readlink", "dirname", "cd", "pwd", "usage", "exit", "shift",
+		"usage", "exit", "fail", "fail", ".", "fail", "fail", "cd", "pwd",
+		"mktemp", "trap", "trap", "trap", "cd", "run_bounded", "run_bounded",
+		"run_bounded", "cleanup", "fail", "trap", "log",
+	}, topCommandSequence,
+		"the complete top-level command order must keep traps ahead of all phases and forbid success shortcuts")
 	imageRequireOrderedCalls(t, topCalls,
 		"run_bounded", "run_bounded", "run_bounded", "cleanup", "trap", "log",
 	)
 	imageRequireDirectFailingCall(t, file, "cleanup")
 	imageRequireExactCallCount(t, topCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
+	imageRequireDirectCall(t, file, "trap", "'cleanup_on_exit $?'", "EXIT")
+	imageRequireDirectCall(t, file, "trap", "'handle_signal INT 130'", "INT")
+	imageRequireDirectCall(t, file, "trap", "'handle_signal TERM 143'", "TERM")
 	imageRequireExactCallCount(t, topCalls, 1, "trap", "-", "EXIT", "INT", "TERM")
 	imageRequireExactCallCount(t, topCalls, 1,
 		"log", `"PASS: uCore image lifecycle validated and removed"`,
@@ -102,7 +177,8 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 	runCalls := imageShellCalls(t, runNode)
 
 	imageRequireExactCallCount(t, runCalls, 1,
-		"timeout", "--signal=TERM", "--kill-after=30s", `"$duration"`, `"$@"`,
+		"exec", "setsid", "timeout", "--signal=TERM", "--kill-after=30s",
+		`"$duration"`, `"$@"`,
 	)
 	imageRequireExactCallCount(t, runCalls, 1,
 		"tail", "-c", `"$LOG_BYTES"`, "--", `"$phase_log"`,
@@ -124,13 +200,13 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 		}
 		return true
 	})
-	require.Empty(t, asynchronous,
-		"the outer owner must keep every phase and reset as a foreground child")
+	require.Len(t, asynchronous, 1,
+		"run_bounded's one owned process-group job must be the only asynchronous statement")
 	require.Empty(t, substitutions,
 		"the outer owner needs no implicit process-substitution children")
 
 	for _, call := range imageShellAllCalls(t, file) {
-		for _, forbidden := range []string{"nohup", "setsid"} {
+		for _, forbidden := range []string{"nohup"} {
 			require.Falsef(t, imageCallContainsProgram(call, forbidden),
 				"the outer owner may not detach a child through %s", forbidden)
 		}

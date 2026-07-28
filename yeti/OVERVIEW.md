@@ -2707,12 +2707,15 @@ of one complete image-tier run. It accepts no workspace path. Instead it
 canonicalizes the repository and `RUNNER_TEMP`, creates one unpredictable
 mode-0700 workspace below that runner-owned parent, and derives every RPM,
 image-store and VM path from that workspace. Acquisition, composition and VM
-validation are three direct foreground `run_bounded` calls. Their respective
+validation are three direct synchronous `run_bounded` calls. Their respective
 outer deadlines are 5, 75 and 75 minutes; the inner tools retain their narrower
 deadlines. Each phase writes through a 4 MiB file-size limit to a phase-local
-regular file, then emits at most that many bytes to the job log. The outer
-shell creates no background, coprocess, disowned or process-substitution
-children.
+regular file, then emits at most that many bytes to the job log. `run_bounded`
+creates exactly one separate-session background process group, records its
+PID, waits for it, and clears the PID only after the wait. INT/TERM is forwarded
+to that entire group and waited before EXIT cleanup proceeds; behavioral tests
+send INT and TERM to the orchestrator alone and prove the child is gone. The
+outer shell creates no coprocess, disowned or process-substitution children.
 
 The success path and the EXIT/INT/TERM path converge on the same cleanup
 function. If composition reached the point where its exact regular,
@@ -2733,22 +2736,24 @@ push to `main`; for pull requests it runs only while the `vm-boot` label is
 present, and `opened`, `synchronize`, `reopened` and `labeled` triggers ensure
 the label certifies the current head. The job uses `ubuntu-26.04` specifically:
 that runner provides Podman 5 and the `--imagestore` option the private-store
-contract requires. It installs only QEMU/OVMF and cosign, enables live KVM,
-checks `/dev/kvm` and the Podman option, then invokes the lifecycle owner once
-through explicit root `bash` with explicit PATH, token and runner-temp values.
-It has read-only contents permission, no dependency on the branch's GoReleaser
-package job, no repository `secrets.*` reference, no artifact upload or
-download, and no publication command. The artifact under test remains the
-released-RPM fixture selected by the acquisition phase.
+contract requires. It sets up Go, installs QEMU/OVMF and cosign, enables live
+KVM, checks `/dev/kvm` and the Podman option, then invokes the lifecycle owner
+once through explicit root `bash` with explicit PATH, token and runner-temp
+values. It has read-only contents permission, no dependency on the branch's
+GoReleaser package job, no repository `secrets.*` reference, no artifact
+upload or download, and no publication command. The artifact under test
+remains the released-RPM fixture selected by the acquisition phase.
 
 `packaging/imagetest/ucore_orchestrator_test.go` parses the lifecycle owner with
-the shared shell AST helpers. It pins the phase argv and order, exact reset and
-cleanup bodies, foreground-only process model, bounded timeout/tail/ulimit
-calls, one recursive deletion target, readonly derived paths, trap suffix and
-absence of publication. `packaging/workflow_image_tier_test.go` decodes the
-live YAML and fixes its trigger, label, runner, timeout, action, KVM,
-private-store preflight, root invocation, permissions and no-retention
-contracts.
+the shared shell AST helpers. It pins the exact function set, static command
+resolution, top-level trap/phase/success order, phase argv, reset and cleanup
+bodies, one owned background process group, bounded timeout/tail/ulimit calls,
+one recursive deletion target, readonly derived paths, trap suffix and absence
+of publication. `test/image/ucore_orchestrator_signal_test.go` exercises real
+TERM forwarding and child reaping. `packaging/workflow_image_tier_test.go`
+decodes the live YAML and fixes its complete permission map and ordered step
+bodies in addition to its trigger, label, runner and timeout, so an added
+upload step or a fail-open suffix is visible.
 
 **Still out of scope for this package.**
 
@@ -4164,7 +4169,8 @@ into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
 gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
-*does* run a packaging gate now — `.github/workflows/packaging.yml`, which
+*does* run two workflow gates outside the local mirror. The packaging gate
+is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
 installs them on pinned Debian and Fedora containers with
 `make verify-package-install`, and finally boots real Debian and Fedora VMs
@@ -4172,8 +4178,10 @@ under QEMU/KVM and validates the installed package on a host with systemd as
 PID 1 — but that
 gate needs the `GORELEASER_KEY` secret and the goreleaser Pro distribution, so
 it cannot run locally at all (and its booted-VM tier needs KVM besides), and
-it is the single named exception to the
-mirror-CI promise rather than something `ci` could reproduce. An agent or developer who
+it is one named exception to the mirror-CI promise rather than something
+`ci` could reproduce. The other is `.github/workflows/image-tier.yml`, whose
+root-owned uCore lifecycle needs live KVM, network access, Podman 5 and cosign
+and is described in the image-tier section above. An agent or developer who
 runs `make verify-packages` on a checkout with nothing built should read the
 failure as the expected outcome, not as a defect to fix; the target becomes
 useful once a build has put real artifacts in `dist/`. The exclusion is meant to

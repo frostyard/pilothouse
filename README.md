@@ -46,8 +46,8 @@ accepted.
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
-CI. The single exception is `.github/workflows/packaging.yml`, the packaging
-gate, which cannot run locally because it needs the `GORELEASER_KEY` secret
+CI. Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
+packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
 artifacts: it installs them on pinned Debian and Fedora containers, so it
 needs Docker and network access on top of the credentials, and its `vm-boot`
@@ -56,6 +56,10 @@ too. The whole workflow stays outside `make ci` and `make docker-ci` by
 construction. `make verify-packages` and `make verify-package-install` are the
 local tools for the contracts it checks, once artifacts exist in `dist/`;
 the booted-VM tier has no local `make` target.
+`.github/workflows/image-tier.yml` separately needs root, live KVM, network
+access, Podman 5, cosign and the GitHub-hosted `ubuntu-26.04` environment to
+exercise the last released RPM on ephemeral uCore derivatives, so it has no
+local make target either.
 
 Go 1.26 or newer is required.
 
@@ -315,11 +319,12 @@ sudo -n env "PATH=$PATH" "RUNNER_TEMP=$RUNNER_TEMP" \
     bash test/image/ucore-image-test.sh --run-id local-run
 ```
 
-It creates one private workspace, invokes acquisition, composition and VM
-validation as foreground phases with wall-clock and 4 MiB log-file bounds,
-resets the exact workspace-local Podman store in the foreground, and only then
-removes the workspace. Its signal and failure paths use the same cleanup
-ordering. `.github/workflows/image-tier.yml` runs this on `ubuntu-26.04`
+It creates one private workspace and invokes acquisition, composition and VM
+validation synchronously with wall-clock and 4 MiB log-file bounds. Each phase
+uses one owned process group so INT/TERM can be forwarded and waited before
+cleanup. It resets the exact workspace-local Podman store synchronously and
+only then removes the workspace. Its signal and failure paths use the same
+cleanup ordering. `.github/workflows/image-tier.yml` runs this on `ubuntu-26.04`
 because Podman 5's `--imagestore` support is part of the isolation contract. It
 runs on every push to `main` and, for pull requests, only while the `vm-boot`
 label is present. The job uses the last released x86_64 RPM, uploads nothing

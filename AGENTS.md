@@ -80,10 +80,12 @@ it does not recursively delete the VM directory or reset the image store.
 
 `test/image/ucore-image-test.sh --run-id LOWERCASE_ID` is the root-only owner
 of that complete lifecycle. It creates one mode-0700 workspace below
-`RUNNER_TEMP`, runs acquisition, composition and the VM consumer as foreground
-phases with both wall-clock and 4 MiB log-file limits, resets the exact private
-Podman store in the foreground, and only then recursively removes the
-workspace. Its EXIT/INT/TERM path performs the same reset-then-remove sequence.
+`RUNNER_TEMP`, runs acquisition, composition and the VM consumer synchronously
+with both wall-clock and 4 MiB log-file limits, resets the exact private Podman
+store synchronously, and only then recursively removes the workspace. Each
+bounded phase owns one separate process group, records its PID, forwards
+INT/TERM to the group and waits before cleanup. Its EXIT/INT/TERM path performs
+the same reset-then-remove sequence.
 `.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
 provides the required `--imagestore` option. The job runs on every push to
 `main` and on a pull request only while the `vm-boot` label is present. It is
@@ -124,10 +126,10 @@ Automated harnesses (the mill's deep gate) use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
 gates.
 
-The single exception is `.github/workflows/packaging.yml`, the packaging
-gate, which now carries three tiers: it builds the `.deb` and `.rpm`
-artifacts and verifies them against the artifact contract, installs those
-same artifacts on pinned Debian and Fedora containers, and — in the
+Two workflow gates sit outside that one-command mirror. First,
+`.github/workflows/packaging.yml` carries three tiers: it builds the `.deb`
+and `.rpm` artifacts and verifies them against the artifact contract, installs
+those same artifacts on pinned Debian and Fedora containers, and — in the
 `vm-boot` job — boots a real Debian and a real Fedora VM under QEMU/KVM and
 validates the installed package on a host with systemd as PID 1. It cannot
 run locally because it needs the `GORELEASER_KEY` secret and the goreleaser
@@ -139,6 +141,13 @@ artifact the `packages` job builds, so the whole gate stays outside
 `dist/`, `make verify-packages` and `make verify-package-install` are the
 local tools for the first two tiers' contracts; there is deliberately **no**
 local `make` target for the `vm-boot` tier.
+
+Second, `.github/workflows/image-tier.yml` acquires the last released x86_64
+RPM, composes signed ephemeral uCore derivatives and validates their
+update/rollback lifecycle under QEMU/KVM. It needs root, live KVM, network
+access, Podman 5, cosign and up to 180 minutes on the GitHub-hosted
+`ubuntu-26.04` image. It cannot run inside the development container or the
+credential-free local CI mirror, and deliberately has no local `make` target.
 
 ## Learned agent skills
 
