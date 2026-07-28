@@ -362,9 +362,11 @@ func imageRequireDirectFailingTest(t *testing.T, file *syntax.File, condition st
 			continue
 		}
 		matches++
-		require.False(t, statement.Background)
-		require.False(t, statement.Negated)
 		require.Empty(t, statement.Redirs)
+		for _, direct := range []*syntax.Stmt{statement, binary.X, binary.Y} {
+			require.False(t, direct.Background)
+			require.False(t, direct.Negated)
+		}
 	}
 	require.Equalf(t, 1, matches,
 		"critical comparison %s must be one direct foreground top-level || fail statement",
@@ -495,6 +497,48 @@ func imageShellAssignmentOnlyCalls(t *testing.T, roots ...syntax.Node) [][]strin
 	return calls
 }
 
+func imageShellStatementAssignmentNames(statement *syntax.Stmt) []string {
+	var assignments []*syntax.Assign
+	switch command := statement.Cmd.(type) {
+	case *syntax.CallExpr:
+		assignments = command.Assigns
+	case *syntax.DeclClause:
+		assignments = command.Args
+	default:
+		return nil
+	}
+	names := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		if assignment.Name != nil {
+			names = append(names, assignment.Name.Value)
+		}
+	}
+	return names
+}
+
+func imageRequireContiguousAssignmentSets(
+	t *testing.T,
+	file *syntax.File,
+	want ...[]string,
+) {
+	t.Helper()
+	matches := 0
+	for start := 0; start+len(want) <= len(file.Stmts); start++ {
+		matched := true
+		for offset, names := range want {
+			if !slices.Equal(imageShellStatementAssignmentNames(file.Stmts[start+offset]), names) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			matches++
+		}
+	}
+	require.Equalf(t, 1, matches,
+		"assignment/declaration sequence %#v must occur once contiguously at top level", want)
+}
+
 func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrite {
 	t.Helper()
 	var writes []imageShellWrite
@@ -610,6 +654,16 @@ func imageCallMatchesAny(call imageShellCall, allowed ...[]string) bool {
 		}
 	}
 	return false
+}
+
+func countCallsWithEffectiveCommand(calls []imageShellCall, command string) int {
+	count := 0
+	for _, call := range calls {
+		if imageCallEffectiveCommand(call) == command {
+			count++
+		}
+	}
+	return count
 }
 
 func imageExactCallLine(t *testing.T, calls []imageShellCall, want ...string) uint {
@@ -787,6 +841,13 @@ func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
 			}
 		}
 	}
+	if command == "printf" {
+		for _, argument := range call.args[1:] {
+			if argument == "-v" || strings.HasPrefix(argument, "-v") {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -902,9 +963,11 @@ func imageRequireDirectFailingCallCount(
 			continue
 		}
 		matches++
-		require.False(t, statement.Background)
-		require.False(t, statement.Negated)
 		require.Empty(t, statement.Redirs)
+		for _, direct := range []*syntax.Stmt{statement, binary.X, binary.Y} {
+			require.False(t, direct.Background)
+			require.False(t, direct.Negated)
+		}
 	}
 	require.Equalf(t, count, matches,
 		"critical evidence call %#v must have %d direct foreground top-level || fail statements",
@@ -1258,6 +1321,41 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--transport", "containers-storage", `"$update_ref"`,
 	}
 	imageRequireExactCallCount(t, allCalls, 1, switchCall...)
+	reviewedGuestCopies := [][]string{
+		{"guest_copy", `"$GUEST_SCRIPT"`, "/root/validate-ucore.sh"},
+		{"guest_copy", `"$CREDENTIALS"`, "/root/pilothouse-image-credentials.json"},
+		{"guest_copy", `"$UPDATE_ARCHIVE"`, "/var/tmp/pilothouse-image-update.oci"},
+	}
+	reviewedGuestRuns := [][]string{
+		{"guest_run", "chmod", "0700", "/root/validate-ucore.sh"},
+		{"guest_run", "chmod", "0600", "/root/pilothouse-image-credentials.json"},
+		{"guest_run", "sh", "/root/validate-ucore.sh", "prepare"},
+		{"guest_run", "rm", "-f", "/var/tmp/pilothouse-image-update.oci"},
+	}
+	reviewedGuestLongRuns := [][]string{
+		{"guest_run_long", "podman", "load", "--input", "/var/tmp/pilothouse-image-update.oci"},
+		switchCall,
+		{"guest_run_long", "bootc", "rollback"},
+	}
+	for _, call := range mainCalls {
+		switch imageCallEffectiveCommand(call) {
+		case "guest_copy":
+			require.True(t, imageCallMatchesAny(call, reviewedGuestCopies...),
+				"the runner may copy only the validator, credentials and local update archive: %#v",
+				call.args)
+		case "guest_run":
+			require.True(t, imageCallMatchesAny(call, reviewedGuestRuns...),
+				"the runner may issue only the reviewed direct guest setup/removal calls: %#v",
+				call.args)
+		case "guest_run_long":
+			require.True(t, imageCallMatchesAny(call, reviewedGuestLongRuns...),
+				"the runner may issue only the reviewed long guest update calls: %#v",
+				call.args)
+		}
+	}
+	require.Len(t, reviewedGuestCopies, countCallsWithEffectiveCommand(mainCalls, "guest_copy"))
+	require.Len(t, reviewedGuestRuns, countCallsWithEffectiveCommand(mainCalls, "guest_run"))
+	require.Len(t, reviewedGuestLongRuns, countCallsWithEffectiveCommand(mainCalls, "guest_run_long"))
 	for _, call := range allCalls {
 		require.False(t, imageCallUsesRegistry(call),
 			"the update must not use a registry transport: %#v", call.args)
@@ -1460,6 +1558,58 @@ local source="$1" destination="$2"
 timeout --signal=TERM --kill-after=10s 20m \
     scp "${ssh_common_options[@]}" -P "$ssh_port" -- "$source" "root@127.0.0.1:$destination"
 `)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_ssh", `
+local started=$SECONDS deadline=$((SECONDS + 300))
+while ((SECONDS < deadline)); do
+    if [[ -n "${qemu_pid:-}" ]] && ! kill -0 "$qemu_pid" 2>/dev/null; then
+        fail "QEMU exited before the guest answered SSH"
+    fi
+    if guest_probe true >/dev/null 2>&1; then
+        log "guest answered SSH after $((SECONDS - started))s"
+        return 0
+    fi
+    sleep 5
+done
+fail "guest did not answer SSH within 300s"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_ssh_gone", `
+local misses=0 deadline=$((SECONDS + 120))
+while ((SECONDS < deadline)); do
+    if guest_probe true >/dev/null 2>&1; then
+        misses=0
+    else
+        misses=$((misses + 1))
+        ((misses >= 3)) && return 0
+    fi
+    sleep 2
+done
+fail "pre-reboot sshd was still answering after 120s"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_broker", `
+local started=$SECONDS deadline=$((SECONDS + 120))
+while ((SECONDS < deadline)); do
+    if guest_probe test -S /run/pilothouse/broker.sock >/dev/null 2>&1; then
+        log "broker socket became ready after $((SECONDS - started))s"
+        return 0
+    fi
+    sleep 2
+done
+fail "broker socket did not become ready within 120s after SSH"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "reboot_guest", `
+local before after output status=0
+before="$(guest_run cat /proc/sys/kernel/random/boot_id)"
+output="$(guest_run systemctl reboot 2>&1)" || status=$?
+if [[ "$status" -ne 0 && "$status" -ne 255 && "$status" -ne 124 ]]; then
+    fail "guest reboot command failed with status $status: $output"
+fi
+wait_for_ssh_gone
+wait_for_ssh
+wait_for_broker
+after="$(guest_run cat /proc/sys/kernel/random/boot_id)"
+[[ -n "$before" && -n "$after" && "$before" != "$after" ]] ||
+    fail "guest answered after reboot without changing boot_id"
+`)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_digest", `
 local slot="$1"
 guest_run bootc status --format json |
@@ -1567,6 +1717,41 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	}
 	require.Equal(t, criticalReadonlySets, observedReadonlySets,
 		"fixture paths, Podman argv and the captured QEMU PID must become readonly")
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"baseline_ref"},
+		[]string{"baseline_id"},
+		[]string{"update_ref"},
+		[]string{"update_id"},
+		[]string{"storage_root"},
+		[]string{"image_store"},
+		[]string{"run_root"},
+		[]string{"podman_tmpdir"},
+		[]string{"image_tmpdir"},
+		[]string{"storage_config"},
+		[]string{"baseline_ref", "baseline_id", "update_ref", "update_id"},
+		[]string{
+			"storage_root", "image_store", "run_root", "podman_tmpdir",
+			"image_tmpdir", "storage_config",
+		},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"podman_args"},
+		[]string{"podman_args"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"baseline_booted"},
+		[]string{"baseline_booted"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"staged_name"},
+		[]string{"staged_digest"},
+		[]string{"staged_name", "staged_digest"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"pre_rollback_booted"},
+		[]string{"pre_rollback_target"},
+		[]string{"pre_rollback_booted", "pre_rollback_target"},
+	)
 
 	stopNode := imageShellFunction(t, imageVMRunnerPath, file, "stop_qemu")
 	stopCalls := imageShellCalls(t, stopNode)
@@ -1740,6 +1925,9 @@ rm -f "$work_dir/login.json" "$work_dir/login-body.json" \
     "$work_dir/cursor-journal" \
     "$work_dir/new-avcs" "$work_dir/boot-journal"
 rmdir "$work_dir"
+`)
+	imageRequireExactFunction(t, imageVMGuestPath, file, syntax.LangPOSIX, "log", `
+printf 'ucore guest: %s\n' "$*"
 `)
 	loginCurlCall := []string{
 		"curl", "--silent", "--show-error", "--max-time", "30",
@@ -2440,6 +2628,9 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 	}, "qemu-system-x86_64"))
 	require.True(t, imageCallIsForbiddenEvidenceMutator(imageShellCall{
 		args: []string{"cp", `"$work_dir/expected"`, `"$work_dir/actual"`},
+	}))
+	require.True(t, imageCallIsForbiddenEvidenceMutator(imageShellCall{
+		args: []string{"printf", "-v", "expected_slot", "%s", "baseline"},
 	}))
 	require.Equal(t, "exit", imageCallEffectiveCommand(imageShellCall{
 		args: []string{"command", "--", "command", "builtin", "exit", "0"},

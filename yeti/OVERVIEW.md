@@ -2555,7 +2555,10 @@ and disarmed only after one direct, fatal explicit cleanup. The fixture storage
 paths, Podman argument array, QEMU PID and observed deployment-slot identities
 become readonly after their separately fail-closed captures. Their assignment
 sets are exact, so cleanup cannot be redirected to a different container store
-or disk and update/rollback comparisons cannot be made self-referential.
+or disk and update/rollback comparisons cannot be made self-referential. The
+capture and matching readonly declaration sequences are contiguous top-level
+statements; an indirect `read` or other mutation cannot be inserted into the
+gap before protection.
 Comparisons and
 critical evidence calls must feed `|| fail`. Capability sorting is pinned
 separately to the independently probed expected file and decoded broker file;
@@ -2587,7 +2590,10 @@ evidence path are narrowed further to their reviewed read-only argument vectors:
 cannot gain vacuum, service mutation, deployment mutation or file-writing
 modes. The guest has exactly one direct `trap cleanup EXIT`, and both that
 invocation and the cleanup body are exact, so an EXIT trap cannot replace a
-validation failure with success.
+validation failure with success. Its `log` helper is exact too, and Bash's
+variable-writing `printf -v` extension is forbidden on the main path so a
+reviewed assignment cannot be changed without appearing in the assignment
+audit.
 The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Both scans
@@ -2608,7 +2614,18 @@ The staged name/digest shape assertion and all four post-reboot deployment-slot
 comparisons are likewise direct foreground fatal statements. The staged proof
 is ordered after both status captures and before the first reboot; wrapping
 continuity or cleanup in an unreachable branch cannot leave the recursive AST
-looking valid.
+looking valid. Direct fatal guards inspect both child statements for negation
+and backgrounding, while the outer `||` cannot carry a redirection, so
+`! cmp ... || fail` cannot invert an evidence oracle while retaining the
+expected command node.
+The runner's main path has closed sets for `guest_copy`, `guest_run` and
+`guest_run_long`: it may transfer only the reviewed validator, credentials and
+local update archive, then issue only the reviewed setup, archive removal,
+local-image load, switch and rollback commands. The SSH-up, SSH-down,
+broker-ready and reboot function bodies are exact alongside the copy/run
+wrappers. An extra host-to-guest command therefore cannot replace the copied
+validator while source guards continue inspecting the pristine repository
+file.
 Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
