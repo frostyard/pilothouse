@@ -636,16 +636,35 @@ func imageCallEffectiveCommand(call imageShellCall) string {
 }
 
 func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
+	for index := range call.args {
+		argument, static := imageCallStaticArgument(call, index)
+		if static && slices.Contains(
+			[]string{
+				"bash", "cp", "dash", "dd", "install", "ln", "mv",
+				"read", "rsync", "sh", "tee", "touch", "truncate",
+			},
+			argument,
+		) {
+			return true
+		}
+	}
 	command := imageCallEffectiveCommand(call)
-	if slices.Contains(
-		[]string{"cp", "dd", "install", "ln", "mv", "read", "rsync", "tee", "touch", "truncate"},
-		command,
-	) {
-		return true
+	if command == "curl" {
+		for _, argument := range call.args {
+			for _, evidence := range []string{
+				"actual", "expected", "bootc-status.json", "expected-host-image.json",
+				"actual-host-image.json", "new-avcs", "boot-journal",
+			} {
+				if strings.Contains(argument, evidence) {
+					return true
+				}
+			}
+		}
 	}
 	if command == "sed" {
 		for _, argument := range call.args[1:] {
-			if argument == "-i" || strings.HasPrefix(argument, "-i") {
+			if argument == "-i" || strings.HasPrefix(argument, "-i") ||
+				argument == "--in-place" || strings.HasPrefix(argument, "--in-place=") {
 				return true
 			}
 		}
@@ -1567,11 +1586,13 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		"critical evidence files must have only their reviewed redirection writers")
 
 	for _, call := range topCalls {
-		require.False(t,
+		require.Falsef(t,
 			imageCallIsForbiddenEvidenceMutator(call),
-			"the guest evidence path must not gain a non-redirection file mutator")
+			"the guest evidence path must not gain a non-redirection file mutator: %#v",
+			call.args)
 		command := imageCallEffectiveCommand(call)
-		if command == "sort" && slices.Contains(call.args, "-o") {
+		if command == "sort" &&
+			(slices.Contains(call.args, "-o") || slices.Contains(call.args, "--output")) {
 			require.Equal(t, expectedCapabilitySortCall, call.args,
 				"the only in-place sort must normalize independent expected capabilities")
 		}
