@@ -248,10 +248,8 @@ grep -Ei 'avc:[[:space:]]+denied' "$work_dir/new-avcs" \
     >"$work_dir/window-avcs" || window_avc_status=$?
 [ "$window_avc_status" -le 1 ] ||
     fail "could not filter the controlled broker-query window for AVC denials"
-if [ "$window_avc_status" -eq 0 ]; then
-    cat "$work_dir/window-avcs" >&2
+[ "$window_avc_status" -ne 0 ] ||
     fail "an unexpected SELinux AVC denial occurred during image-host validation"
-fi
 journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||
     fail "could not read the current boot journal for Pilothouse AVC denials"
 avc_status=0
@@ -265,9 +263,7 @@ grep -Ei 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse' \
     pilothouse_avc_status=$?
 [ "$pilothouse_avc_status" -le 1 ] ||
     fail "could not filter current-boot AVC denials for Pilothouse"
-if [ "$pilothouse_avc_status" -eq 0 ]; then
-    cat "$work_dir/pilothouse-avcs" >&2
+[ "$pilothouse_avc_status" -ne 0 ] ||
     fail "the current boot contains a Pilothouse-related SELinux AVC denial"
-fi
 
 log "$expected_slot deployment is enforcing, capability-truthful and AVC-clean"

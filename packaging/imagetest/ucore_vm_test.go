@@ -110,6 +110,20 @@ func imageRequireUniqueFunctions(t *testing.T, path string, file *syntax.File) {
 	}
 }
 
+func imageRequireExactFunctionSet(t *testing.T, path string, file *syntax.File, want ...string) {
+	t.Helper()
+	var names []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		decl, ok := node.(*syntax.FuncDecl)
+		if ok && decl.Name != nil {
+			names = append(names, decl.Name.Value)
+		}
+		return true
+	})
+	require.ElementsMatchf(t, want, names,
+		"%s must define exactly the reviewed function set; extra functions can shadow safety commands", path)
+}
+
 func imageShellTopLevel(file *syntax.File) []syntax.Node {
 	var nodes []syntax.Node
 	for _, stmt := range file.Stmts {
@@ -342,8 +356,17 @@ func imageCallContainsArgument(call imageShellCall, want string) bool {
 	return slices.Contains(call.args, want)
 }
 
+func imageCallContainsProgram(call imageShellCall, want string) bool {
+	for _, argument := range call.args {
+		if argument == want || filepath.Base(argument) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func imageCallInvokesHostProgram(call imageShellCall, program string) bool {
-	if !imageCallContainsArgument(call, program) || len(call.args) == 0 {
+	if !imageCallContainsProgram(call, program) || len(call.args) == 0 {
 		return false
 	}
 	switch call.args[0] {
@@ -358,10 +381,28 @@ func imageRequireExactShellMode(t *testing.T, file *syntax.File, want ...string)
 	t.Helper()
 	allCalls := imageShellAllCalls(t, file)
 	imageRequireExactCallCount(t, allCalls, 1, want...)
+	require.NotEmpty(t, file.Stmts)
+	first, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	require.True(t, ok, "the shell error mode must be the first executable statement")
+	var firstArgs []string
+	for _, word := range first.Args {
+		firstArgs = append(firstArgs, imageShellRender(t, word))
+	}
+	require.Equal(t, want, firstArgs,
+		"the shell error mode must be established before any other executable statement")
 	for _, call := range allCalls {
 		if imageCallContainsArgument(call, "set") {
 			require.Equal(t, want, call.args,
 				"the reviewed shell error mode must be the only invocation of set")
+		}
+		for _, dynamic := range []string{"eval", "source", "."} {
+			invoked := len(call.args) > 0 && call.args[0] == dynamic
+			if len(call.args) > 1 && slices.Contains([]string{"command", "builtin"}, call.args[0]) {
+				invoked = invoked || call.args[1] == dynamic
+			}
+			require.Falsef(t, invoked,
+				"dynamic shell evaluation could replace the reviewed error mode or safety functions: %#v",
+				call.args)
 		}
 	}
 }
@@ -575,21 +616,30 @@ func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
 		file := imageParseShell(t, path, language)
 		imageRequireUniqueFunctions(t, path, file)
 		if dialect == "bash" {
+			imageRequireExactFunctionSet(t, path, file,
+				"usage", "fail", "log", "manifest_value", "assert_storage_path",
+				"podman_fixture", "stop_qemu", "remove_install_container",
+				"detach_disk_loops", "cleanup", "cleanup_on_exit", "find_ovmf",
+				"guest_run", "guest_run_long", "guest_run_timeout", "guest_probe",
+				"guest_copy", "wait_for_ssh", "wait_for_ssh_gone", "wait_for_broker",
+				"reboot_guest", "guest_status_digest", "guest_status_name",
+				"run_guest_validation",
+			)
 			imageRequireExactShellMode(t, file, "set", "-euo", "pipefail")
 			imageRequireExactFunction(t, path, file, language, "fail", `
 echo "ucore-vm-test: $*" >&2
 exit 1
 `)
 		} else {
+			imageRequireExactFunctionSet(t, path, file,
+				"fail", "log", "cleanup", "broker_query",
+			)
 			imageRequireExactShellMode(t, file, "set", "-eu")
 			imageRequireExactFunction(t, path, file, language, "fail", `
 printf 'ucore guest: %s\n' "$*" >&2
 exit 1
 `)
 		}
-		require.Empty(t, imageShellFunctions(file, "exit"),
-			"%s must not shadow the exit builtin used by fail()", path)
-
 		sandbox := newImageSandbox(t)
 		result := imageRunChild(t, sandbox, imageRequireTool(t, "shellcheck"),
 			"--shell="+dialect, filepath.Join(root, path))
@@ -621,11 +671,14 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	} {
 		imageRequireCall(t, topCalls, path...)
 	}
-	imageRequireCall(t, topCalls,
+	manifestTrustCall := []string{
 		"jq", "-e",
 		"'\n    .schema == 1 and\n    .kind == \"pilothouse-ucore-image-fixture\" and\n    .producer_uid == 0 and\n    .source == \"ghcr.io/ublue-os/ucore:latest\" and\n    .baseline.slot == \"baseline\" and\n    .update.slot == \"update\"\n'",
 		`"$IMAGE_MANIFEST"`,
-	)
+	}
+	imageRequireCall(t, topCalls, manifestTrustCall...)
+	imageRequireFailingCall(t, topLevel, manifestTrustCall...)
+	imageRequireFailingTest(t, topLevel, `[[ $EUID -eq 0 ]]`)
 	imageRequireFailingTest(t, topLevel, `[[ "$actual_id" == "$expected_id" ]]`)
 	imageRequireFailingTest(t, topLevel, `[[ "${baseline_ref%:*}" == "${update_ref%:*}" ]]`)
 
@@ -669,6 +722,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
 	topLevel := imageShellTopLevel(file)
 	mainCalls := imageShellCalls(t, topLevel...)
+	allCalls := imageShellAllCalls(t, file)
 
 	installCall := []string{
 		"podman_fixture", "45m", "run",
@@ -694,7 +748,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--root-ssh-authorized-keys", "/run/pilothouse-image-test-key.pub",
 		`"$DISK_IMAGE"`,
 	}
-	imageRequireExactCallCount(t, mainCalls, 1, installCall...)
+	imageRequireExactCallCount(t, allCalls, 1, installCall...)
 	imageRequireCall(t, mainCalls,
 		"podman_fixture", "20m", "save", "--format", "oci-archive",
 		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
@@ -706,8 +760,8 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"guest_run_long", "bootc", "switch", "--quiet",
 		"--transport", "containers-storage", `"$update_ref"`,
 	}
-	imageRequireExactCallCount(t, mainCalls, 1, switchCall...)
-	for _, call := range imageShellAllCalls(t, file) {
+	imageRequireExactCallCount(t, allCalls, 1, switchCall...)
+	for _, call := range allCalls {
 		require.False(t, imageCallUsesRegistry(call),
 			"the update must not use a registry transport: %#v", call.args)
 		if imageCallContainsSequence(call, "bootc", "switch") {
@@ -849,17 +903,25 @@ timeout --signal=TERM --kill-after=10s 20m \
 	imageRequireFailingCall(t, imageShellTopLevel(file), "cleanup")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "-", "EXIT")
-	var cleanupLine, disarmLine uint
+	var armLine, firstResourceLine, cleanupLine, disarmLine uint
 	for _, call := range mainCalls {
 		switch {
+		case slices.Equal(call.args, []string{"trap", "'cleanup_on_exit $?'", "EXIT"}):
+			armLine = call.line
+		case slices.Equal(call.args, []string{"truncate", "-s", "20G", `"$DISK_IMAGE"`}):
+			firstResourceLine = call.line
 		case slices.Equal(call.args, []string{"cleanup"}):
 			cleanupLine = call.line
 		case slices.Equal(call.args, []string{"trap", "-", "EXIT"}):
 			disarmLine = call.line
 		}
 	}
+	require.NotZero(t, armLine)
+	require.NotZero(t, firstResourceLine)
 	require.NotZero(t, cleanupLine)
 	require.NotZero(t, disarmLine)
+	require.Less(t, armLine, firstResourceLine,
+		"the EXIT cleanup trap must be armed before disk, installer, or QEMU resources are created")
 	require.Less(t, cleanupLine, disarmLine,
 		"success-path cleanup must finish before the EXIT trap is disarmed")
 	for _, call := range allCalls {
@@ -886,9 +948,36 @@ timeout --signal=TERM --kill-after=10s 20m \
 		"-netdev", `"user,id=net0,hostfwd=tcp:127.0.0.1:$ssh_port-:22"`,
 		"-device", "virtio-net-pci,netdev=net0",
 	}
-	imageRequireExactCallCount(t, mainCalls, 1, qemuCall...)
+	imageRequireExactCallCount(t, allCalls, 1, qemuCall...)
+	qemuStatement := -1
+	for index, statement := range file.Stmts {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok {
+			continue
+		}
+		var args []string
+		for _, word := range call.Args {
+			args = append(args, imageShellRender(t, word))
+		}
+		if slices.Equal(args, qemuCall) {
+			require.True(t, statement.Background,
+				"QEMU must be a shell-owned background job before its PID is captured")
+			qemuStatement = index
+		}
+	}
+	require.NotEqual(t, -1, qemuStatement)
+	require.Less(t, qemuStatement+1, len(file.Stmts),
+		"QEMU must be followed immediately by qemu_pid=$!")
+	pidStatement := file.Stmts[qemuStatement+1]
+	require.False(t, pidStatement.Background)
+	pidCapture, ok := pidStatement.Cmd.(*syntax.CallExpr)
+	require.True(t, ok, "QEMU must be followed immediately by an assignment statement")
+	require.Empty(t, pidCapture.Args)
+	require.Len(t, pidCapture.Assigns, 1)
+	require.Equal(t, "qemu_pid", pidCapture.Assigns[0].Name.Value)
+	require.Equal(t, "$!", imageShellRender(t, pidCapture.Assigns[0].Value))
 	for _, call := range allCalls {
-		if imageCallContainsArgument(call, "qemu-system-x86_64") {
+		if imageCallContainsProgram(call, "qemu-system-x86_64") {
 			require.Equal(t, qemuCall, call.args,
 				"the owned foreground QEMU invocation must be the only QEMU process")
 		}
@@ -906,12 +995,28 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	allCalls := imageShellAllCalls(t, file)
+	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
+	for _, call := range topCalls {
+		if len(call.args) > 0 && call.args[0] == "exit" {
+			require.Equal(t, []string{"exit", "0"}, call.args,
+				"the reviewed prepare branch must be the guest harness's only successful early exit")
+		}
+		require.NotContains(t, []string{"exec", "return"}, call.args[0],
+			"the guest main path must not gain an alternate early termination command")
+	}
 
-	imageRequireCall(t, topCalls,
+	slotMarkerCall := []string{
 		"[", `"$(cat /usr/lib/pilothouse-image-test/slot)"`, "=", `"$expected_slot"`, "]",
-	)
-	imageRequireCall(t, topCalls, "[", `"$(getenforce)"`, "=", "Enforcing", "]")
-	imageRequireCall(t, topCalls, "bootc", "status", "--json")
+	}
+	imageRequireCall(t, topCalls, slotMarkerCall...)
+	imageRequireFailingCall(t, topLevel, slotMarkerCall...)
+	enforcingCall := []string{"[", `"$(getenforce)"`, "=", "Enforcing", "]"}
+	imageRequireCall(t, topCalls, enforcingCall...)
+	imageRequireFailingCall(t, topLevel, enforcingCall...)
+	bootcStatusCall := []string{"bootc", "status", "--json"}
+	imageRequireCall(t, topCalls, bootcStatusCall...)
+	require.Equal(t, 2, countImageFailingCalls(t, topLevel, bootcStatusCall...),
+		"both the initial bootc probe and captured host-image status must fail closed")
 	imageRequireCall(t, topCalls, "grep", "-qx", "bootc", `"$work_dir/actual"`)
 	capabilityDecodeCall := []string{
 		"jq", "-ser",
@@ -970,6 +1075,8 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		"controlled-window grep status must be captured without masking grep errors")
 	imageRequireFailingCall(t, topLevel,
 		"[", `"$window_avc_status"`, "-le", "1", "]")
+	imageRequireFailingCall(t, topLevel,
+		"[", `"$window_avc_status"`, "-ne", "0", "]")
 	currentBootAVCCall := []string{
 		"grep", "-Ei", "'avc:[[:space:]]+denied'", `"$work_dir/boot-journal"`,
 	}
@@ -986,6 +1093,8 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		"Pilothouse AVC grep status must be captured without masking grep errors")
 	imageRequireFailingCall(t, topLevel,
 		"[", `"$pilothouse_avc_status"`, "-le", "1", "]")
+	imageRequireFailingCall(t, topLevel,
+		"[", `"$pilothouse_avc_status"`, "-ne", "0", "]")
 	require.Contains(t, imageReadHarness(t, imageVMGuestPath),
 		"not a claim that the RPM provides a dedicated Pilothouse SELinux domain")
 	bootJournalCall := []string{
@@ -1166,9 +1275,15 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 	require.True(t, imageCallInvokesHostProgram(imageShellCall{
 		args: []string{"command", "podman", "run", "-d", "alpine"},
 	}, "podman"))
+	require.True(t, imageCallInvokesHostProgram(imageShellCall{
+		args: []string{"/usr/bin/podman", "run", "--rm", "docker.io/library/alpine", "true"},
+	}, "podman"))
 	require.False(t, imageCallInvokesHostProgram(imageShellCall{
 		args: []string{"guest_run_long", "podman", "load", "--input", "/tmp/update.oci"},
 	}, "podman"))
+	require.True(t, imageCallContainsProgram(imageShellCall{
+		args: []string{"/usr/bin/qemu-system-x86_64", "-S"},
+	}, "qemu-system-x86_64"))
 }
 
 func TestUCoreVMRunnerRejectsRelativeWorkspaceBeforeMutation(t *testing.T) {

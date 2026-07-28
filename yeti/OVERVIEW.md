@@ -2532,13 +2532,20 @@ that reset, then remove the workspace. No workflow invokes the image tier yet.
 `packaging/imagetest/ucore_vm_test.go` parses both harnesses with
 `mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
 function body or the top-level main region. Named functions must have exactly
-one definition across the complete AST. The reviewed shell error modes and
-non-returning `fail` implementations are exact, as are the resource teardown
+one definition across the complete AST, and each script's complete function
+name set is fixed so a new function cannot shadow `set`, `trap`, `timeout`,
+`cmp` or another reviewed builtin/program. The reviewed shell error modes must
+be the first executable statements; dynamic `eval`/source calls are forbidden.
+The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
-switch and foreground-QEMU actions must occur exactly once. Comparisons and
+switch and foreground-QEMU actions must occur exactly once across the whole
+AST. The QEMU statement itself must be backgrounded and immediately followed by
+its `$!` capture, and the EXIT trap must be armed before the first disk/resource
+mutation and disarmed only after explicit cleanup. Comparisons and
 critical evidence calls must feed `|| fail`, while the three `grep` probes must
-feed their named `$?` captures and separately reject error statuses. Whole-file
+feed their named `$?` captures and separately reject both inspection errors and
+forbidden AVC matches. Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
 extra bootc switches/QEMU processes and registry forms. It deliberately does
