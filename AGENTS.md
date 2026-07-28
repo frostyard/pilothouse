@@ -39,6 +39,30 @@ own; the later image orchestrator owns workspace cleanup. The workspace must
 be private to one invocation and not concurrently mutated. Do not point it at
 a reused fixture directory or substitute a branch artifact.
 
+`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID`
+consumes that released-RPM fixture from the same private, non-concurrently
+mutated workspace. It resolves `ghcr.io/ublue-os/ucore:latest` once, verifies
+both the index and its sole linux/amd64 member with the reviewed key in
+`test/image/ucore/cosign.pub`, then uses only the member digest. It rechecks
+the RPM size and SHA-256 before building distinct `baseline` and `update`
+derivatives with repositories and build networking disabled. Podman graph,
+image, run and both temporary-storage roots are below
+`fixture-ucore-images`. Explicit general/storage configuration selectors
+disable normal system and per-user Podman configuration: general configuration
+uses the explicit empty `/dev/null` file, while a generated private
+`storage.conf` repeats the graph, image and run paths plus driver; the libpod
+and download temporary paths are pinned separately by `--tmpdir` and `TMPDIR`.
+Storage environment and late general-configuration overrides are cleared,
+file events are disabled, and remote Podman selection is disabled. Never
+substitute the host store, push either image, or remove that directory
+independently of the enclosing workspace.
+The composer retains its store and does not claim to clean up detached tool
+helpers or bound caller-owned stdout/stderr storage. The later job
+orchestrator must bound its log sink, terminate and wait for composer/tool
+helpers, then reset this exact Podman store and wait for reset to finish, and
+only then remove the whole ephemeral workspace. That orchestrator is not part
+of this slice.
+
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
 authenticated host Git to create and push the tag. Do not run the full bump

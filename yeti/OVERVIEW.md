@@ -127,9 +127,16 @@ test/image/releaserpm/
                       shipped binary and no workflow invokes acquisition yet;
                       ordinary repository gates still analyze and test it (see
                       "Image-tier released-RPM fixture" below)
+test/image/compose-ucore.sh
+                      third #80 slice: verifies the uCore index and linux/amd64
+                      member, revalidates the released RPM, and builds distinct
+                      baseline/update derivatives in workspace-local Podman
+                      storage; no workflow invokes it yet (see "Image-tier
+                      uCore composition" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
-                      packaging scriptlet) for docker-* make targets. It also
+                      packaging scriptlet) for docker-* make targets. It includes
+                      `jq` so the real uCore composer runs in offline tests. It also
                       installs `rpm` (which on the Debian bookworm base provides
                       `rpm`, `rpmbuild` and `rpm2cpio`) and `cpio`, the latter
                       only because `cmd/verify-packages/integration_test.go`
@@ -2371,13 +2378,74 @@ closure and close-error rollback, standard-output rollback, known-entry-only
 cleanup and no-replace collision preservation; and pins redirect and token
 scheme/host/port/userinfo containment.
 
-Later #80 slices use `ghcr.io/ublue-os/ucore:latest` for discovery only. A job
-must resolve it once to a signature-verified immutable linux/amd64 digest and
-use that digest throughout. The two local variants and their storage are
-ephemeral: no image push, artifact upload, publication or retention is
-permitted. The enforcing-SELinux check looks for unexpected AVC denials but
-does not claim a dedicated Pilothouse confined domain; the released RPM ships
-no such policy today.
+**Image-tier uCore composition (#80, third slice).**
+`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID`
+consumes the second slice's manifest and RPM from the same private,
+non-concurrently mutated workspace. It rechecks the artifact's exact basename,
+size and SHA-256 before making any image operation, so mutation between
+acquisition and composition is detected. The output directory
+`fixture-ucore-images` must not already exist. It is retained inside the
+caller-owned workspace on both success and failure; the eventual enclosing
+job removes the whole workspace only after all bounded children have exited.
+This deliberately avoids recursively deleting a container store while a
+failed builder may still have a helper process unwinding. The composer does
+not claim to contain a tool that deliberately detaches into another session,
+does not delete or reset its Podman store, and leaves tool progress on
+caller-owned stdout/stderr. The later production orchestrator must bound its
+log sink, terminate and wait for composer/tool helpers, then reset this exact
+Podman store and wait for reset to finish, and only then remove the enclosing
+workspace. That orchestrator is deliberately outside this composition slice.
+
+Source discovery is exactly `ghcr.io/ublue-os/ucore:latest`. Skopeo resolves
+that name once to the OCI index digest. Cosign verifies the digest with the
+reviewed uCore key vendored at `test/image/ucore/cosign.pub`; the raw index is
+streamed through a 4 MiB limit plus one sentinel byte before it reaches disk,
+then required to contain exactly one linux/amd64 member without a variant.
+Cosign verifies that member digest separately. Every pull and `FROM` after
+discovery names the immutable member digest. The vendored key's upstream
+commit and local SHA-256 are recorded beside it in
+`test/image/ucore/README.md`; an automated checksum assertion makes key
+rotation an explicit code-review event.
+
+Podman's graph root, explicit image store, runroot, libpod temporary directory
+and image-download temporary directory all live below the output directory
+instead of touching the caller's normal container store. The composer clears
+inherited Podman connection and storage environment selectors, points both
+configuration surfaces away from ambient files, clears the late
+`CONTAINERS_CONF_OVERRIDE` selector, disables file events and remote mode, and
+pins `--imagestore`. General configuration uses the explicit empty `/dev/null`
+file. A generated mode-0600 `storage.conf` repeats the
+overlay driver and all graph/image/run paths, and its path is recorded in the
+fixture manifest. Normal system and per-user Podman configuration therefore
+cannot redirect writes. It pulls the verified member and builds two distinct,
+fixture-labelled local references: `baseline` and `update`. Both use the same
+released RPM; their immutable
+`/usr/lib/pilothouse-image-test/slot` markers create two deployments for the
+later bootc switch/rollback test. The Containerfile installs only the local
+RPM with every package repository disabled and build networking set to none,
+then runs `bootc container lint`. The build context is only the released-RPM
+fixture directory, never the workspace-local container store. The output
+manifest records the source digests, both local refs and IDs, and all five
+storage paths. There is no push, upload, host-store image or workflow wiring
+in this slice.
+
+`packaging/imagetest/ucore_compose_test.go` executes the real composer only
+against bounded fake Skopeo, Cosign and Podman tools through the image tier's
+sole one-second test process helper. That deadline bounds fake-test failures;
+it is not a production composition runner. Strict fake argv and environment
+checks prove immutable
+digest, offline build, local-storage and remote-mode boundaries. The suite
+also proves both signature-failure positions, the raw-index byte cap,
+ambiguous-member rejection, retained partial storage, exact manifest
+contents, distinct slots and absence of a push. An effective
+instruction parser prevents commented-out local-RPM installation or
+`bootc container lint` from satisfying the Containerfile contract, and a
+SHA-256 assertion pins the vendored key.
+
+Later #80 slices boot those fixtures, exercise bootc update/rollback, wire the
+job, and enforce the SELinux/capability assertions. The enforcing-SELinux
+check looks for unexpected AVC denials but does not claim a dedicated
+Pilothouse confined domain; the released RPM ships no such policy today.
 
 **Still out of scope for this package.**
 
