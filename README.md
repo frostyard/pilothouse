@@ -247,6 +247,36 @@ created by the invocation and never recursively delete unknown entries. The
 caller owns cleanup after success, and the helper never pushes or uploads an
 artifact or image.
 
+The next image-test step consumes that fixture and builds two local uCore
+derivatives:
+
+```bash
+test/image/compose-ucore.sh \
+    --workspace /absolute/path/to/ephemeral-workspace \
+    --run-id local-run
+```
+
+The workspace must be private and non-concurrently mutated. The command
+resolves `ghcr.io/ublue-os/ucore:latest` once, verifies the signed multi-arch
+index and its sole linux/amd64 member, and pins every later operation to that
+member digest. It rechecks the released RPM's size and SHA-256, installs it
+with package repositories and build networking disabled, runs
+`bootc container lint`, and creates distinct `baseline` and `update` fixtures
+with Podman's graph, image, run and temporary storage rooted entirely below
+`fixture-ucore-images/`. Explicit general/storage configuration
+selectors disable normal system and per-user Podman configuration: general
+configuration uses the explicit empty `/dev/null` file, while a generated
+private `storage.conf` repeats the graph, image and run paths plus driver; the
+two temporary paths are pinned separately by `--tmpdir` and `TMPDIR`. Storage
+environment and late general-configuration overrides are cleared, file events
+are disabled, and remote Podman selection is disabled. It never pushes an
+image or deletes its store. Tool
+progress remains on caller-owned standard output and standard error. No
+workflow or production process orchestrator invokes composition yet; the
+later job must bound its log sink, reset the exact fixture Podman store only
+after composer/tool helpers have terminated, wait for reset to finish and
+only then remove the entire workspace after either success or failure.
+
 ### Create a release
 
 `make bump` verifies the project in the development container, calculates the

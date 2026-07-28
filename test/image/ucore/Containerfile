@@ -1,0 +1,20 @@
+ARG UCORE_IMAGE
+FROM ${UCORE_IMAGE}
+
+ARG PILOTHOUSE_RPM
+ARG IMAGE_TEST_SLOT
+
+COPY ${PILOTHOUSE_RPM} /tmp/pilothouse-image-test.rpm
+RUN dnf -y --disable-repo='*' install /tmp/pilothouse-image-test.rpm \
+    && rm -f /tmp/pilothouse-image-test.rpm \
+    && dnf clean all \
+    && rm -rf /run/dnf /var/cache/libdnf5 \
+    && rm -f /var/cache/ldconfig/aux-cache /var/lib/dnf/system-repo.lock /var/log/dnf5.log
+RUN install -d -m 0755 /usr/lib/pilothouse-image-test \
+    && printf '%s\n' "${IMAGE_TEST_SLOT}" > /usr/lib/pilothouse-image-test/slot
+RUN bootc container lint
+
+LABEL org.opencontainers.image.title="Pilothouse image-tier test fixture"
+LABEL org.opencontainers.image.description="Ephemeral issue-80 fixture; never publish"
+LABEL io.frostyard.pilothouse.image-test="true"
+LABEL io.frostyard.pilothouse.image-test.slot="${IMAGE_TEST_SLOT}"
