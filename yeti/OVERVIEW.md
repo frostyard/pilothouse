@@ -2494,8 +2494,11 @@ baseline it requires the immutable `/usr/lib/pilothouse-image-test/slot`
 marker, enforcing SELinux and a functional `bootc status --json`. It compares
 the broker's exact sorted capability list with a list produced independently
 from systemd, journal, sysext, bootc, rpm-ostree and automatic-update unit-file
-observations. Opt-in capabilities remain absent because the packaged unit
-configures none. It also requires the read-only host-image broker query to
+observations. The response must be one JSON document containing only canonical
+lowercase capability identifiers; embedded line breaks and other output-shape
+injections are rejected before `jq -r` can turn them into comparison lines.
+Opt-in capabilities remain absent because the packaged unit configures none.
+It also requires the read-only host-image broker query to
 report bootc available. Shape alone is insufficient: the broker's booted,
 staged and rollback image/digest pairs are normalized and compared exactly
 with an independent `bootc status --json` captured in the same guest phase.
@@ -2529,12 +2532,17 @@ that reset, then remove the workspace. No workflow invokes the image tier yet.
 `packaging/imagetest/ucore_vm_test.go` parses both harnesses with
 `mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
 function body or the top-level main region. Named functions must have exactly
-one definition across the complete AST. Critical calls are matched as one exact
-argument vector rather than pieced together from subsequences, and comparison
-guards must be the left side of `|| fail`. Whole-file negative policies include
-nested function bodies and recognize wrapped/alternate push, any recursive
-removal, extra bootc switches and registry forms. It deliberately does not
-search raw shell text: comments, string literals, no-op copies and commands
+one definition across the complete AST. The reviewed shell error modes and
+non-returning `fail` implementations are exact, as are the resource teardown
+and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
+argument vector rather than pieced together from subsequences; unique install,
+switch and foreground-QEMU actions must occur exactly once. Comparisons and
+critical evidence calls must feed `|| fail`, while the three `grep` probes must
+feed their named `$?` captures and separately reject error statuses. Whole-file
+negative policies include nested function bodies and recognize direct or
+wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
+extra bootc switches/QEMU processes and registry forms. It deliberately does
+not search raw shell text: comments, string literals, no-op copies and commands
 moved into an uncalled decoy function cannot satisfy the guards. The guest also
 requires exactly one capability-response JSON document and captures `jq`,
 `sort`, journal and AVC-filter statuses separately so POSIX pipeline or `grep`

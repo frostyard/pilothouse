@@ -19,7 +19,7 @@ log() {
 }
 
 [ "$(id -u)" = 0 ] || fail "validation must run as root"
-for tool in bootc chpasswd cmp curl diff getenforce getent grep journalctl jq \
+for tool in bootc chpasswd cmp curl getenforce getent grep journalctl jq \
     podman sed systemctl useradd usermod; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "required image-host tool is unavailable: $tool"
@@ -140,9 +140,11 @@ broker_query() {
 broker_query "$CAPABILITY_QUERY" "$work_dir/query-body.json"
 jq -ser '
     if length == 1 and
-       (.[0].result.capabilities | type == "array" and all(.[]; type == "string"))
+       (.[0].result.capabilities |
+            type == "array" and
+            all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
     then .[0].result.capabilities[]
-    else error("want exactly one response whose capabilities are an array of strings")
+    else error("want exactly one response with canonical capability identifiers")
     end
 ' "$work_dir/query-body.json" \
     >"$work_dir/actual-unsorted" ||
@@ -182,10 +184,8 @@ LC_ALL=C sort -u -o "$work_dir/expected" "$work_dir/expected"
 
 grep -qx bootc "$work_dir/actual" ||
     fail "Pilothouse did not advertise bootc on the bootc host"
-if ! cmp -s "$work_dir/expected" "$work_dir/actual"; then
-    diff -u "$work_dir/expected" "$work_dir/actual" >&2 || true
+cmp -s "$work_dir/expected" "$work_dir/actual" ||
     fail "advertised capabilities do not exactly match independently observed image capabilities"
-fi
 
 bootc status --json >"$work_dir/bootc-status.json" ||
     fail "could not capture bootc's deployment slots for the host-image comparison"
@@ -235,10 +235,8 @@ jq -e '
     }
 ' "$work_dir/host-image.json" >"$work_dir/actual-host-image.json" ||
     fail "could not normalize Pilothouse's host-image deployment slots"
-if ! cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json"; then
-    diff -u "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" >&2 || true
+cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" ||
     fail "Pilothouse's host-image deployment slots do not exactly match bootc status"
-fi
 
 # Fail on every AVC created during the controlled broker-query window, and on
 # any current-boot AVC that names Pilothouse. This is an enforcing smoke test,

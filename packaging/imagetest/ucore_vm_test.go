@@ -13,8 +13,17 @@ import (
 )
 
 const (
-	imageVMRunnerPath = "test/image/ucore-vm-test.sh"
-	imageVMGuestPath  = "test/image/guest/validate-ucore.sh"
+	imageVMRunnerPath        = "test/image/ucore-vm-test.sh"
+	imageVMGuestPath         = "test/image/guest/validate-ucore.sh"
+	imageCapabilityJQProgram = `
+    if length == 1 and
+       (.[0].result.capabilities |
+            type == "array" and
+            all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    then .[0].result.capabilities[]
+    else error("want exactly one response with canonical capability identifiers")
+    end
+`
 )
 
 func imageReadHarness(t *testing.T, path string) string {
@@ -58,6 +67,32 @@ func imageShellFunctions(file *syntax.File, name string) []syntax.Node {
 		return true
 	})
 	return functions
+}
+
+func imageRequireExactFunction(
+	t *testing.T,
+	path string,
+	file *syntax.File,
+	language syntax.LangVariant,
+	name string,
+	body string,
+) {
+	t.Helper()
+
+	expected := imageParseShellSource(
+		t,
+		"expected-"+name+".sh",
+		name+"() {\n"+body+"\n}\n",
+		language,
+	)
+	require.Equal(
+		t,
+		imageShellRender(t, imageShellFunction(t, "expected-"+name+".sh", expected, name)),
+		imageShellRender(t, imageShellFunction(t, path, file, name)),
+		"%s must retain the exact reviewed %s() implementation",
+		path,
+		name,
+	)
 }
 
 func imageRequireUniqueFunctions(t *testing.T, path string, file *syntax.File) {
@@ -287,6 +322,12 @@ func imageRequireCall(t *testing.T, calls []imageShellCall, want ...string) {
 	require.Failf(t, "missing executable shell call", "want args %#v; parsed calls: %#v", want, calls)
 }
 
+func imageRequireExactCallCount(t *testing.T, calls []imageShellCall, count int, want ...string) {
+	t.Helper()
+	require.Equalf(t, count, countImageShellCalls(calls, want...),
+		"want exactly %d executable calls with args %#v; parsed calls: %#v", count, want, calls)
+}
+
 func countImageShellCalls(calls []imageShellCall, want ...string) int {
 	count := 0
 	for _, call := range calls {
@@ -295,6 +336,124 @@ func countImageShellCalls(calls []imageShellCall, want ...string) int {
 		}
 	}
 	return count
+}
+
+func imageCallContainsArgument(call imageShellCall, want string) bool {
+	return slices.Contains(call.args, want)
+}
+
+func imageCallInvokesHostProgram(call imageShellCall, program string) bool {
+	if !imageCallContainsArgument(call, program) || len(call.args) == 0 {
+		return false
+	}
+	switch call.args[0] {
+	case "guest_run", "guest_run_long", "guest_run_timeout", "guest_probe":
+		return false
+	default:
+		return true
+	}
+}
+
+func imageRequireExactShellMode(t *testing.T, file *syntax.File, want ...string) {
+	t.Helper()
+	allCalls := imageShellAllCalls(t, file)
+	imageRequireExactCallCount(t, allCalls, 1, want...)
+	for _, call := range allCalls {
+		if imageCallContainsArgument(call, "set") {
+			require.Equal(t, want, call.args,
+				"the reviewed shell error mode must be the only invocation of set")
+		}
+	}
+}
+
+func countImageFailingCalls(t *testing.T, roots []syntax.Node, want ...string) int {
+	t.Helper()
+	matches := 0
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			binary, ok := node.(*syntax.BinaryCmd)
+			if !ok || binary.Op.String() != "||" {
+				return true
+			}
+			call, ok := binary.X.Cmd.(*syntax.CallExpr)
+			if !ok {
+				return true
+			}
+			args := make([]string, 0, len(call.Args))
+			for _, word := range call.Args {
+				args = append(args, imageShellRender(t, word))
+			}
+			if !slices.Equal(args, want) {
+				return true
+			}
+			failure, ok := binary.Y.Cmd.(*syntax.CallExpr)
+			if !ok || len(failure.Args) == 0 || imageShellRender(t, failure.Args[0]) != "fail" {
+				return true
+			}
+			matches++
+			return true
+		})
+	}
+	return matches
+}
+
+func imageRequireFailingCall(t *testing.T, roots []syntax.Node, want ...string) {
+	t.Helper()
+	require.Equalf(t, 1, countImageFailingCalls(t, roots, want...),
+		"call %#v must occur exactly once as the left side of || fail", want)
+}
+
+func countImageStatusCaptures(
+	t *testing.T,
+	roots []syntax.Node,
+	statusVariable string,
+	want ...string,
+) int {
+	t.Helper()
+	matches := 0
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			binary, ok := node.(*syntax.BinaryCmd)
+			if !ok || binary.Op.String() != "||" {
+				return true
+			}
+			call, ok := binary.X.Cmd.(*syntax.CallExpr)
+			if !ok {
+				return true
+			}
+			args := make([]string, 0, len(call.Args))
+			for _, word := range call.Args {
+				args = append(args, imageShellRender(t, word))
+			}
+			if !slices.Equal(args, want) {
+				return true
+			}
+			capture, ok := binary.Y.Cmd.(*syntax.CallExpr)
+			if !ok || len(capture.Args) != 0 || len(capture.Assigns) != 1 {
+				return true
+			}
+			assignment := capture.Assigns[0]
+			if assignment.Name == nil || assignment.Name.Value != statusVariable ||
+				assignment.Value == nil || imageShellRender(t, assignment.Value) != "$?" {
+				return true
+			}
+			matches++
+			return true
+		})
+	}
+	return matches
 }
 
 func imageRequireOrderedCalls(t *testing.T, calls []imageShellCall, names ...string) {
@@ -413,7 +572,23 @@ func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
 		if dialect == "bash" {
 			language = syntax.LangBash
 		}
-		imageRequireUniqueFunctions(t, path, imageParseShell(t, path, language))
+		file := imageParseShell(t, path, language)
+		imageRequireUniqueFunctions(t, path, file)
+		if dialect == "bash" {
+			imageRequireExactShellMode(t, file, "set", "-euo", "pipefail")
+			imageRequireExactFunction(t, path, file, language, "fail", `
+echo "ucore-vm-test: $*" >&2
+exit 1
+`)
+		} else {
+			imageRequireExactShellMode(t, file, "set", "-eu")
+			imageRequireExactFunction(t, path, file, language, "fail", `
+printf 'ucore guest: %s\n' "$*" >&2
+exit 1
+`)
+		}
+		require.Empty(t, imageShellFunctions(file, "exit"),
+			"%s must not shadow the exit builtin used by fail()", path)
 
 		sandbox := newImageSandbox(t)
 		result := imageRunChild(t, sandbox, imageRequireTool(t, "shellcheck"),
@@ -456,10 +631,11 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 
 	podmanNode := imageShellFunction(t, imageVMRunnerPath, file, "podman_fixture")
 	podmanCalls := imageShellCalls(t, podmanNode)
-	imageRequireCall(t, podmanCalls,
+	podmanWrapperCall := []string{
 		"timeout", "--signal=TERM", "--kill-after=30s", `"$1"`,
 		"podman", `"${podman_args[@]}"`, `"${@:2}"`,
-	)
+	}
+	imageRequireExactCallCount(t, podmanCalls, 1, podmanWrapperCall...)
 	podmanArgs := imageShellArrayAssignment(t, "podman_args", topLevel...)
 	require.Equal(t, []string{
 		"--remote=false",
@@ -482,6 +658,10 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 			"the fixture consumer must never publish or copy an image: %#v", call.args)
 		require.False(t, imageCallRecursivelyRemoves(call),
 			"the fixture consumer must leave recursive workspace cleanup to the exact-store owner")
+		if imageCallInvokesHostProgram(call, "podman") {
+			require.Equal(t, podmanWrapperCall, call.args,
+				"every host Podman invocation must go through the bounded private-store wrapper")
+		}
 	}
 }
 
@@ -514,7 +694,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--root-ssh-authorized-keys", "/run/pilothouse-image-test-key.pub",
 		`"$DISK_IMAGE"`,
 	}
-	imageRequireCall(t, mainCalls, installCall...)
+	imageRequireExactCallCount(t, mainCalls, 1, installCall...)
 	imageRequireCall(t, mainCalls,
 		"podman_fixture", "20m", "save", "--format", "oci-archive",
 		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
@@ -526,7 +706,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"guest_run_long", "bootc", "switch", "--quiet",
 		"--transport", "containers-storage", `"$update_ref"`,
 	}
-	imageRequireCall(t, mainCalls, switchCall...)
+	imageRequireExactCallCount(t, mainCalls, 1, switchCall...)
 	for _, call := range imageShellAllCalls(t, file) {
 		require.False(t, imageCallUsesRegistry(call),
 			"the update must not use a registry transport: %#v", call.args)
@@ -556,12 +736,88 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
 	allCalls := imageShellAllCalls(t, file)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "stop_qemu", `
+local pid="${qemu_pid:-}"
+[[ -n "$pid" ]] || return 0
+
+if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+fi
+wait "$pid" 2>/dev/null || true
+kill -0 "$pid" 2>/dev/null && return 1
+qemu_pid=""
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "remove_install_container", `
+podman_fixture 2m rm --force --ignore "$INSTALL_CONTAINER" >/dev/null
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "detach_disk_loops", `
+local failed=0 loop listing remaining
+listing="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || return 1
+while IFS= read -r loop; do
+    [[ -n "$loop" ]] || continue
+    timeout --signal=TERM --kill-after=10s 30s \
+        losetup --detach "$loop" || failed=1
+done < <(awk -F: '{print $1}' <<<"$listing")
+
+remaining="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || failed=1
+[[ -z "$remaining" ]] || failed=1
+return "$failed"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "cleanup", `
+local failed=0
+stop_qemu || failed=1
+remove_install_container || failed=1
+detach_disk_loops || failed=1
+return "$failed"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "cleanup_on_exit", `
+local status="$1"
+trap - EXIT
+cleanup || {
+    echo "ucore-vm-test: cleanup did not fully stop processes and detach the VM disk" >&2
+    [[ "$status" -ne 0 ]] || status=1
+}
+exit "$status"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run", `
+guest_run_timeout 2m "$@"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run_long", `
+guest_run_timeout 20m "$@"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run_timeout", `
+local duration="$1"
+shift
+timeout --signal=TERM --kill-after=10s "$duration" \
+    ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_probe", `
+timeout --signal=TERM --kill-after=5s 15s \
+    ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_copy", `
+local source="$1" destination="$2"
+timeout --signal=TERM --kill-after=10s 20m \
+    scp "${ssh_common_options[@]}" -P "$ssh_port" -- "$source" "root@127.0.0.1:$destination"
+`)
 
 	for _, escape := range []string{"setsid", "nohup", "disown", "daemonize"} {
 		for _, call := range allCalls {
 			require.NotContainsf(t, call.args, escape,
 				"%s must not let a helper escape the teardown owner; call: %#v",
 				imageVMRunnerPath, call.args)
+			for _, argument := range call.args {
+				require.NotEqualf(t, escape, strings.TrimLeft(argument, "-"),
+					"%s must not let a helper escape via an option; call: %#v",
+					imageVMRunnerPath, call.args)
+			}
 		}
 	}
 	require.Contains(t,
@@ -590,6 +846,22 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	imageRequireCall(t, detachCalls, "losetup", "-j", `"$DISK_IMAGE"`)
 
 	mainCalls := imageShellCalls(t, imageShellTopLevel(file)...)
+	imageRequireFailingCall(t, imageShellTopLevel(file), "cleanup")
+	imageRequireExactCallCount(t, mainCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
+	imageRequireExactCallCount(t, mainCalls, 1, "trap", "-", "EXIT")
+	var cleanupLine, disarmLine uint
+	for _, call := range mainCalls {
+		switch {
+		case slices.Equal(call.args, []string{"cleanup"}):
+			cleanupLine = call.line
+		case slices.Equal(call.args, []string{"trap", "-", "EXIT"}):
+			disarmLine = call.line
+		}
+	}
+	require.NotZero(t, cleanupLine)
+	require.NotZero(t, disarmLine)
+	require.Less(t, cleanupLine, disarmLine,
+		"success-path cleanup must finish before the EXIT trap is disarmed")
 	for _, call := range allCalls {
 		for _, arg := range call.args {
 			require.NotContains(t, arg, "${loop_device}p3")
@@ -597,7 +869,7 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 				"the runner must not write an authorized_keys path into a guessed disk layout")
 		}
 	}
-	imageRequireCall(t, mainCalls,
+	qemuCall := []string{
 		"qemu-system-x86_64",
 		"-name", "pilothouse-ucore-image-test",
 		"-machine", "q35",
@@ -613,7 +885,14 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 		"-drive", `"file=$DISK_IMAGE,format=raw,if=virtio"`,
 		"-netdev", `"user,id=net0,hostfwd=tcp:127.0.0.1:$ssh_port-:22"`,
 		"-device", "virtio-net-pci,netdev=net0",
-	)
+	}
+	imageRequireExactCallCount(t, mainCalls, 1, qemuCall...)
+	for _, call := range allCalls {
+		if imageCallContainsArgument(call, "qemu-system-x86_64") {
+			require.Equal(t, qemuCall, call.args,
+				"the owned foreground QEMU invocation must be the only QEMU process")
+		}
+	}
 	for _, call := range mainCalls {
 		for _, argument := range call.args {
 			require.NotContains(t, argument, "console.log")
@@ -634,11 +913,13 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	imageRequireCall(t, topCalls, "[", `"$(getenforce)"`, "=", "Enforcing", "]")
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
 	imageRequireCall(t, topCalls, "grep", "-qx", "bootc", `"$work_dir/actual"`)
-	imageRequireCall(t, topCalls,
+	capabilityDecodeCall := []string{
 		"jq", "-ser",
-		"'\n    if length == 1 and\n       (.[0].result.capabilities | type == \"array\" and all(.[]; type == \"string\"))\n    then .[0].result.capabilities[]\n    else error(\"want exactly one response whose capabilities are an array of strings\")\n    end\n'",
+		"'" + imageCapabilityJQProgram + "'",
 		`"$work_dir/query-body.json"`,
-	)
+	}
+	imageRequireCall(t, topCalls, capabilityDecodeCall...)
+	imageRequireFailingCall(t, topLevel, capabilityDecodeCall...)
 
 	for _, expectedProbe := range [][]string{
 		{"systemctl", "show-environment"},
@@ -658,28 +939,60 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 			"unconfigured optional dependencies must not enter the expected advertised set")
 	}
 
-	imageRequireCall(t, topCalls,
+	hostAvailabilityCall := []string{
 		"jq", "-e", "'\n    .result.bootc_available == true\n'",
 		`"$work_dir/host-image.json"`,
-	)
+	}
+	imageRequireCall(t, topCalls, hostAvailabilityCall...)
+	imageRequireFailingCall(t, topLevel, hostAvailabilityCall...)
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
-	imageRequireCall(t, topCalls,
+	hostComparisonCall := []string{
 		"cmp", "-s", `"$work_dir/expected-host-image.json"`, `"$work_dir/actual-host-image.json"`,
-	)
+	}
+	imageRequireCall(t, topCalls, hostComparisonCall...)
+	imageRequireFailingCall(t, topLevel, hostComparisonCall...)
+	capabilityComparisonCall := []string{
+		"cmp", "-s", `"$work_dir/expected"`, `"$work_dir/actual"`,
+	}
+	imageRequireCall(t, topCalls, capabilityComparisonCall...)
+	imageRequireFailingCall(t, topLevel, capabilityComparisonCall...)
 
-	imageRequireCall(t, topCalls,
+	windowJournalCall := []string{
 		"journalctl", "--no-pager", `--after-cursor="$journal_cursor"`, "-o", "cat",
-	)
-	imageRequireCall(t, topCalls, "grep", "-Ei", "'avc:[[:space:]]+denied'", `"$work_dir/new-avcs"`)
-	imageRequireCall(t, topCalls,
+	}
+	imageRequireCall(t, topCalls, windowJournalCall...)
+	imageRequireFailingCall(t, topLevel, windowJournalCall...)
+	windowAVCCall := []string{
+		"grep", "-Ei", "'avc:[[:space:]]+denied'", `"$work_dir/new-avcs"`,
+	}
+	imageRequireCall(t, topCalls, windowAVCCall...)
+	require.Equal(t, 1, countImageStatusCaptures(t, topLevel, "window_avc_status", windowAVCCall...),
+		"controlled-window grep status must be captured without masking grep errors")
+	imageRequireFailingCall(t, topLevel,
+		"[", `"$window_avc_status"`, "-le", "1", "]")
+	currentBootAVCCall := []string{
+		"grep", "-Ei", "'avc:[[:space:]]+denied'", `"$work_dir/boot-journal"`,
+	}
+	imageRequireCall(t, topCalls, currentBootAVCCall...)
+	require.Equal(t, 1, countImageStatusCaptures(t, topLevel, "avc_status", currentBootAVCCall...),
+		"current-boot AVC grep status must be captured without masking grep errors")
+	imageRequireFailingCall(t, topLevel, "[", `"$avc_status"`, "-le", "1", "]")
+	pilothouseAVCCall := []string{
 		"grep", "-Ei", "'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse'",
 		`"$work_dir/all-avcs"`,
-	)
+	}
+	imageRequireCall(t, topCalls, pilothouseAVCCall...)
+	require.Equal(t, 1, countImageStatusCaptures(t, topLevel, "pilothouse_avc_status", pilothouseAVCCall...),
+		"Pilothouse AVC grep status must be captured without masking grep errors")
+	imageRequireFailingCall(t, topLevel,
+		"[", `"$pilothouse_avc_status"`, "-le", "1", "]")
 	require.Contains(t, imageReadHarness(t, imageVMGuestPath),
 		"not a claim that the RPM provides a dedicated Pilothouse SELinux domain")
-	imageRequireCall(t, topCalls,
+	bootJournalCall := []string{
 		"journalctl", "--no-pager", "--boot", "-o", "cat",
-	)
+	}
+	imageRequireCall(t, topCalls, bootJournalCall...)
+	imageRequireFailingCall(t, topLevel, bootJournalCall...)
 	for _, call := range allCalls {
 		require.False(t, slices.Equal(call.args,
 			[]string{"systemctl", "restart", "pilothoused.service", "pilothouse.service"}),
@@ -698,6 +1011,28 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 				"the image tier must not repeat the plain-VM assertion %q", duplicate)
 		}
 	}
+}
+
+func TestUCoreGuestCapabilityDecoderRejectsLineInjection(t *testing.T) {
+	sandbox := newImageSandbox(t)
+	input := filepath.Join(sandbox.cwd, "capabilities.json")
+	jq := imageRequireTool(t, "jq")
+
+	require.NoError(t, os.WriteFile(input, []byte(
+		`{"result":{"capabilities":["bootc`+"\n"+`journald`+"\n"+`systemd"]}}`+"\n",
+	), 0o600))
+	injected := imageRunChild(t, sandbox, jq, "-ser", imageCapabilityJQProgram, input)
+	require.Error(t, injected.Err)
+	require.False(t, injected.TimedOut)
+	require.NotZero(t, injected.ExitCode)
+
+	require.NoError(t, os.WriteFile(input, []byte(
+		`{"result":{"capabilities":["bootc","journald","systemd","autoupdate-bootc"]}}`+"\n",
+	), 0o600))
+	valid := imageRunChild(t, sandbox, jq, "-ser", imageCapabilityJQProgram, input)
+	require.NoError(t, valid.Err)
+	require.False(t, valid.TimedOut)
+	require.Equal(t, "bootc\njournald\nsystemd\nautoupdate-bootc\n", valid.Stdout)
 }
 
 func TestImageShellASTGuardsRejectCommentsStringsAndWrongRegions(t *testing.T) {
@@ -767,6 +1102,36 @@ fi
 		imageShellTopLevel(nonFailing),
 		`[[ "$actual" == "$expected" ]]`,
 	), "a comparison that does not feed || fail must not satisfy a failing-test guard")
+
+	discardedCall := imageParseShellSource(t, "discarded-call.sh", `
+if critical-command evidence; then
+    :
+fi
+`, syntax.LangBash)
+	require.Zero(t, countImageFailingCalls(
+		t,
+		imageShellTopLevel(discardedCall),
+		"critical-command", "evidence",
+	), "a critical call in a non-failing branch must not satisfy a failing-call guard")
+
+	maskedCall := imageParseShellSource(t, "masked-call.sh", `
+critical-command evidence || true
+`, syntax.LangBash)
+	require.Zero(t, countImageFailingCalls(
+		t,
+		imageShellTopLevel(maskedCall),
+		"critical-command", "evidence",
+	), "a critical call whose error is discarded must not satisfy a failing-call guard")
+
+	statusCapture := imageParseShellSource(t, "status-capture.sh", `
+grep evidence input || evidence_status=$?
+`, syntax.LangPOSIX)
+	require.Equal(t, 1, countImageStatusCaptures(
+		t,
+		imageShellTopLevel(statusCapture),
+		"evidence_status",
+		"grep", "evidence", "input",
+	), "the status-capture guard must recognize one exact command-to-$? assignment")
 }
 
 func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
@@ -795,6 +1160,15 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 	require.True(t, imageCallRunsFixture(imageShellCall{
 		args: []string{"timeout", "30s", "podman_fixture", "2m", "run", "registry:2"},
 	}))
+	require.True(t, imageCallInvokesHostProgram(imageShellCall{
+		args: []string{"timeout", "30s", "podman", "run", "-d", "alpine"},
+	}, "podman"))
+	require.True(t, imageCallInvokesHostProgram(imageShellCall{
+		args: []string{"command", "podman", "run", "-d", "alpine"},
+	}, "podman"))
+	require.False(t, imageCallInvokesHostProgram(imageShellCall{
+		args: []string{"guest_run_long", "podman", "load", "--input", "/tmp/update.oci"},
+	}, "podman"))
 }
 
 func TestUCoreVMRunnerRejectsRelativeWorkspaceBeforeMutation(t *testing.T) {

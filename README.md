@@ -286,7 +286,8 @@ sudo test/image/ucore-vm-test.sh \
 ```
 
 It boots that disk under QEMU/KVM with OVMF, validates enforcing SELinux and
-the exact broker-advertised capability set against independent host probes,
+the exact broker-advertised capability set against independent host probes
+(rejecting non-canonical or line-bearing capability IDs before comparison),
 and requires Pilothouse's booted, staged and rollback image/digest pairs to
 match `bootc status` exactly. The controlled broker-query window must produce
 no AVC denial, and no current-boot AVC denial may name Pilothouse. The baseline
