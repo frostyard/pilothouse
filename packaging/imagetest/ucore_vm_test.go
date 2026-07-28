@@ -13,8 +13,43 @@ import (
 )
 
 const (
-	imageVMRunnerPath        = "test/image/ucore-vm-test.sh"
-	imageVMGuestPath         = "test/image/guest/validate-ucore.sh"
+	imageVMRunnerPath             = "test/image/ucore-vm-test.sh"
+	imageVMGuestPath              = "test/image/guest/validate-ucore.sh"
+	imageFixtureManifestJQProgram = `
+    .schema == 1 and
+    .kind == "pilothouse-ucore-image-fixture" and
+    .producer_uid == 0 and
+    (.release.id | type) == "number" and
+    (.release.asset_id | type) == "number" and
+    (.release.tag | type) == "string" and
+    (.release.artifact | type) == "string" and
+    (
+        (
+            .release.pam_compatibility == "v0.6.0-debian-pam" and
+            .release.id == 358276825 and
+            .release.asset_id == 486354638 and
+            .release.tag == "v0.6.0" and
+            .release.artifact == "frostyard-pilothouse-0.6.0-1.x86_64.rpm"
+        ) or
+        (
+            .release.pam_compatibility == "none" and
+            (
+                .release.id != 358276825 or
+                .release.asset_id != 486354638 or
+                .release.tag != "v0.6.0" or
+                .release.artifact != "frostyard-pilothouse-0.6.0-1.x86_64.rpm"
+            )
+        )
+    ) and
+    .executables.source == "checked-out-head" and
+    (.executables.pilothouse_sha256 | type) == "string" and
+    (.executables.pilothouse_sha256 | test("^sha256:[0-9a-f]{64}$")) and
+    (.executables.pilothoused_sha256 | type) == "string" and
+    (.executables.pilothoused_sha256 | test("^sha256:[0-9a-f]{64}$")) and
+    .source == "ghcr.io/ublue-os/ucore:latest" and
+    .baseline.slot == "baseline" and
+    .update.slot == "update"
+`
 	imageCapabilityJQProgram = `
     if length == 1 and
        (.[0].result.capabilities |
@@ -54,7 +89,30 @@ const (
     }
 `
 	imageWindowAVCJQProgram = `
-    test("avc:[[:space:]]+denied"; "i") | not
+    def expected_ucore_boot_avc:
+        test("(^|[[:space:]])scontext=system_u:system_r:coreos_boot_mount_generator_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])permissive=1([[:space:]]|$)");
+    def expected_bootc_probe_avc:
+        test("denied[[:space:]]+\\{[[:space:]]*mac_admin[[:space:]]*\\}") and
+        test("(^|[[:space:]])comm=\"chcon\"([[:space:]]|$)") and
+        test("(^|[[:space:]])capability=33([[:space:]]|$)") and
+        test("(^|[[:space:]])scontext=system_u:system_r:unconfined_service_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])tcontext=system_u:system_r:unconfined_service_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])tclass=capability2([[:space:]]|$)") and
+        test("(^|[[:space:]])permissive=0([[:space:]]|$)");
+    [
+        splits("\n") |
+        select(test("avc:[[:space:]]+denied"; "i"))
+    ] as $avcs |
+    (
+        [$avcs[] | select((expected_ucore_boot_avc or expected_bootc_probe_avc) | not)] +
+        ([$avcs[] | select(expected_bootc_probe_avc)] | .[2:])
+    ) |
+    if length == 0 then
+        true
+    else
+        (.[0:20] | join("\n")) | halt_error(1)
+    end
 `
 	imagePilothouseAVCJQProgram = `
     [
@@ -1203,11 +1261,13 @@ func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
 		if dialect == "bash" {
 			imageRequireExactFunctionSet(t, path, file,
 				"usage", "fail", "log", "manifest_value", "assert_storage_path",
-				"podman_fixture", "stop_qemu", "remove_install_container",
-				"detach_disk_loops", "cleanup", "cleanup_on_exit", "find_ovmf",
-				"guest_run", "guest_run_long", "guest_run_timeout", "guest_probe",
-				"guest_copy", "wait_for_ssh", "wait_for_ssh_gone", "wait_for_broker",
-				"reboot_guest", "guest_status_digest", "guest_status_name",
+				"podman_fixture", "skopeo_fixture", "stop_qemu", "cleanup", "cleanup_on_exit",
+				"download_fcos_qemu", "create_ignition", "find_ovmf",
+				"guest_run", "guest_run_long", "guest_sudo", "guest_sudo_long",
+				"guest_run_timeout", "guest_probe",
+				"guest_copy", "wait_for_ssh", "wait_for_fixture_device",
+				"wait_for_boot_id_change", "wait_for_broker",
+				"reboot_guest", "guest_status_digest", "guest_status_name", "guest_image_id",
 				"run_guest_validation",
 			)
 			imageRequireExactShellMode(t, file, "set", "-euo", "pipefail")
@@ -1247,9 +1307,14 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	topDeclarations := imageShellDeclarations(t, topLevel...)
 	criticalDeclarationNames := map[string]bool{
 		"GUEST_SCRIPT": true, "IMAGE_DIR": true, "IMAGE_MANIFEST": true,
-		"VM_DIR": true, "DISK_IMAGE": true, "UPDATE_ARCHIVE": true,
-		"SSH_KEY": true, "CREDENTIALS": true, "OVMF_CODE": true, "OVMF_VARS": true,
-		"INSTALL_CONTAINER": true,
+		"MAX_FCOS_UNCOMPRESSED_BYTES": true, "MAX_FIXTURE_LAYOUT_BYTES": true,
+		"FIXTURE_DISK_BYTES": true,
+		"VM_DIR":             true, "FCOS_STREAM_URL": true, "FCOS_ARCHIVE": true,
+		"FCOS_BACKING": true, "DISK_IMAGE": true, "IGNITION_CONFIG": true,
+		"FIXTURE_LAYOUT": true, "FIXTURE_DISK": true,
+		"FIXTURE_LABEL": true, "GUEST_FIXTURE_DIR": true,
+		"GUEST_FIXTURE_DEVICE": true,
+		"SSH_KEY":              true, "CREDENTIALS": true, "OVMF_CODE": true, "OVMF_VARS": true,
 	}
 	var criticalDeclarations []imageShellDeclaration
 	for _, declaration := range topDeclarations {
@@ -1259,19 +1324,35 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	}
 	require.Equal(t, []imageShellDeclaration{
 		{variant: "readonly", name: "GUEST_SCRIPT", value: `"$SCRIPT_DIR/guest/validate-ucore.sh"`},
+		{variant: "readonly", name: "MAX_FCOS_UNCOMPRESSED_BYTES", value: `4294967296`},
+		{variant: "readonly", name: "MAX_FIXTURE_LAYOUT_BYTES", value: `3221225472`},
+		{variant: "readonly", name: "FIXTURE_DISK_BYTES", value: `3758096384`},
 		{variant: "readonly", name: "IMAGE_DIR", value: `"$workspace/fixture-ucore-images"`},
 		{variant: "readonly", name: "IMAGE_MANIFEST", value: `"$IMAGE_DIR/fixture.json"`},
 		{variant: "readonly", name: "VM_DIR", value: `"$workspace/fixture-ucore-vm"`},
-		{variant: "readonly", name: "DISK_IMAGE", value: `"$VM_DIR/disk.raw"`},
-		{variant: "readonly", name: "UPDATE_ARCHIVE", value: `"$VM_DIR/update.oci"`},
+		{variant: "readonly", name: "FCOS_STREAM_URL",
+			value: `"https://builds.coreos.fedoraproject.org/streams/stable.json"`},
+		{variant: "readonly", name: "FCOS_ARCHIVE", value: `"$VM_DIR/fcos.qcow2.xz"`},
+		{variant: "readonly", name: "FCOS_BACKING", value: `"$VM_DIR/fcos.qcow2"`},
+		{variant: "readonly", name: "DISK_IMAGE", value: `"$VM_DIR/disk.qcow2"`},
+		{variant: "readonly", name: "IGNITION_CONFIG", value: `"$VM_DIR/config.ign"`},
+		{variant: "readonly", name: "FIXTURE_LAYOUT", value: `"$VM_DIR/fixture-oci-layout"`},
+		{variant: "readonly", name: "FIXTURE_DISK", value: `"$VM_DIR/fixtures.ext4"`},
+		{variant: "readonly", name: "FIXTURE_LABEL", value: `"PH_FIXTURE"`},
+		{variant: "readonly", name: "GUEST_FIXTURE_DIR", value: `"/run/pilothouse-image-fixtures"`},
+		{variant: "readonly", name: "GUEST_FIXTURE_DEVICE",
+			value: `"/dev/disk/by-label/$FIXTURE_LABEL"`},
 		{variant: "readonly", name: "SSH_KEY", value: `"$VM_DIR/id_ed25519"`},
 		{variant: "readonly", name: "CREDENTIALS", value: `"$VM_DIR/credentials.json"`},
 		{variant: "readonly", name: "OVMF_CODE", value: `"$VM_DIR/OVMF_CODE.fd"`},
 		{variant: "readonly", name: "OVMF_VARS", value: `"$VM_DIR/OVMF_VARS.fd"`},
-		{variant: "readonly", name: "INSTALL_CONTAINER",
-			value: `"pilothouse-image-install-$ssh_port"`},
 	}, criticalDeclarations,
 		"every derived runner resource must have one exact readonly declaration")
+	imageRequireExactTopLevelSequence(t, imageVMRunnerPath, file, syntax.LangBash, `
+readonly IMAGE_DIR="${workspace}/fixture-ucore-images"
+readonly IMAGE_MANIFEST="${IMAGE_DIR}/fixture.json"
+readonly VM_DIR="${workspace}/fixture-ucore-vm"
+`)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "manifest_value", `
 local expression="$1"
 jq -er "$expression | select(type == \"string\" and length > 0)" "$IMAGE_MANIFEST"
@@ -1284,6 +1365,10 @@ local actual="$1" expected="$2"
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "podman_fixture", `
 TMPDIR="$image_tmpdir" timeout --signal=TERM --kill-after=30s "$1" \
     podman "${podman_args[@]}" "${@:2}"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "skopeo_fixture", `
+TMPDIR="$image_tmpdir" timeout --signal=TERM --kill-after=30s "$1" \
+    skopeo "${@:2}"
 `)
 	var scriptPathAssignments []imageShellAssignment
 	for _, assignment := range imageShellAssignments(t, topLevel...) {
@@ -1416,7 +1501,7 @@ readonly workspace canonical_workspace ssh_port
 	}
 	manifestTrustCall := []string{
 		"jq", "-e",
-		"'\n    .schema == 1 and\n    .kind == \"pilothouse-ucore-image-fixture\" and\n    .producer_uid == 0 and\n    .source == \"ghcr.io/ublue-os/ucore:latest\" and\n    .baseline.slot == \"baseline\" and\n    .update.slot == \"update\"\n'",
+		"'" + imageFixtureManifestJQProgram + "'",
 		`"$IMAGE_MANIFEST"`,
 	}
 	imageRequireCall(t, topCalls, manifestTrustCall...)
@@ -1452,18 +1537,35 @@ readonly workspace canonical_workspace ssh_port
 	}, podmanArgs)
 
 	for _, call := range imageShellAllCalls(t, file) {
-		require.False(t, imageCallPublishes(call),
-			"the fixture consumer must never publish or copy an image: %#v", call.args)
-		require.False(t, imageCallRecursivelyRemoves(call),
-			"the fixture consumer must leave recursive workspace cleanup to the exact-store owner")
-		if imageCallInvokesHostProgram(call, "podman") {
+		if imageCallPublishes(call) {
+			require.True(t,
+				slices.Equal(call.args, []string{
+					"guest_sudo_long", "skopeo", "copy",
+					`"oci:$GUEST_FIXTURE_DIR:baseline"`, `"containers-storage:$baseline_ref"`,
+				}) ||
+					slices.Equal(call.args, []string{
+						"guest_sudo_long", "skopeo", "copy",
+						`"oci:$GUEST_FIXTURE_DIR:update"`, `"containers-storage:$update_ref"`,
+					}),
+				"the fixture consumer may copy images only from its mounted OCI layout into guest storage: %#v",
+				call.args)
+		}
+		if imageCallRecursivelyRemoves(call) {
+			require.Equal(t,
+				[]string{"rm", "-rf", "--one-file-system", "--", `"$FIXTURE_LAYOUT"`},
+				call.args,
+				"the consumer may recursively remove only its fixed standalone OCI layout")
+		}
+		if imageCallInvokesHostProgram(call, "podman") &&
+			!slices.Contains([]string{"guest_sudo", "guest_sudo_long"},
+				imageCallEffectiveCommand(call)) {
 			require.Equal(t, podmanWrapperCall, call.args,
 				"every host Podman invocation must go through the bounded private-store wrapper")
 		}
 	}
 }
 
-func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
+func TestUCoreVMRunnerBootstrapsFCOSAndUsesLocalImageTransports(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
 	topLevel := imageShellTopLevel(file)
 	mainCalls := imageShellCalls(t, topLevel...)
@@ -1484,16 +1586,26 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"manifest_value", "manifest_value", "fail", "fail", "fail", "fail", "fail",
 		"assert_storage_path", "assert_storage_path", "assert_storage_path",
 		"assert_storage_path", "assert_storage_path", "assert_storage_path", "fail",
-		"unset", "podman_fixture", "fail", "trap", "log", "truncate", "ssh-keygen",
-		"podman_fixture", "detach_disk_loops", "fail", "log", "podman_fixture", "fail",
-		"find_ovmf", "fail", "cp", "cp", "log", "qemu-system-x86_64",
-		"wait_for_ssh", "wait_for_broker", "openssl", "jq", "chmod", "unset",
-		"guest_copy", "guest_copy", "guest_run", "guest_run", "guest_run",
-		"guest_status_digest", "run_guest_validation", "log", "guest_copy",
-		"guest_run_long", "guest_run", "guest_run_long", "guest_status_name",
+		"unset", "podman_fixture", "fail", "trap", "log", "mkdir", "fail",
+		"skopeo_fixture", "skopeo_fixture", "jq", "fail", "skopeo_fixture", "jq",
+		"fail", "fail", "podman_fixture", "podman_fixture", "fail",
+		"du", "awk", "fail", "fail", "truncate", "fail",
+		"mkfs.ext4", "fail", "rm", "fail",
+		"log", "download_fcos_qemu",
+		"create_ignition", "qemu-img", "qemu-img", "find_ovmf", "fail", "cp", "cp", "log",
+		"qemu-system-x86_64", "wait_for_ssh", "wait_for_fixture_device", "log",
+		"guest_sudo", "guest_sudo", "guest_sudo_long", "guest_sudo_long",
+		"guest_sudo", "guest_sudo",
+		"guest_image_id", "fail", "guest_image_id", "fail",
+		"guest_sudo_long", "guest_status_name",
+		"guest_status_digest", "fail", "reboot_guest", "guest_status_digest", "fail",
+		"openssl", "jq", "chmod", "unset",
+		"guest_copy", "guest_copy", "guest_run", "guest_run", "guest_sudo",
+		"guest_status_digest", "run_guest_validation", "log",
+		"guest_sudo_long", "guest_status_name",
 		"guest_status_digest", "fail", "reboot_guest", "guest_status_digest", "fail",
 		"guest_status_digest", "fail", "run_guest_validation", "log",
-		"guest_status_digest", "guest_status_digest", "guest_run_long", "reboot_guest",
+		"guest_status_digest", "guest_status_digest", "guest_sudo_long", "reboot_guest",
 		"guest_status_digest", "fail", "guest_status_digest", "fail",
 		"run_guest_validation", "cleanup", "fail", "trap", "log",
 	}, commandSequence,
@@ -1526,83 +1638,215 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 			command: "jq",
 			fd:      "1",
 			op:      ">",
+			target:  "/dev/null",
+		},
+		{
+			command: "qemu-img",
+			fd:      "1",
+			op:      ">",
+			target:  "/dev/null",
+		},
+		{
+			command: "qemu-img",
+			fd:      "1",
+			op:      ">",
+			target:  "/dev/null",
+		},
+		{
+			command: "jq",
+			fd:      "1",
+			op:      ">",
 			target:  `"$CREDENTIALS"`,
 		},
 	}, mainWrites,
 		"the runner main path's output writers and descriptor routing are closed")
 
-	installCall := []string{
-		"podman_fixture", "45m", "run",
-		"--rm",
-		"--name", `"$INSTALL_CONTAINER"`,
-		"--privileged",
-		"--pid=host",
-		"--volume", "/dev:/dev",
-		"--volume", `"$workspace:$workspace"`,
-		"--volume", `"$SSH_KEY.pub:/run/pilothouse-image-test-key.pub:ro"`,
-		"--security-opt", "label=type:unconfined_t",
-		"--env", "CONTAINERS_CONF=/dev/null",
-		"--env", `"CONTAINERS_STORAGE_CONF=$storage_config"`,
-		"--env", `"TMPDIR=$image_tmpdir"`,
-		`"$baseline_ref"`,
-		"bootc", "install", "to-disk",
-		"--generic-image",
-		"--via-loopback",
-		"--skip-fetch-check",
-		"--composefs-backend",
-		"--filesystem", "btrfs",
-		"--karg", "console=ttyS0",
-		"--root-ssh-authorized-keys", "/run/pilothouse-image-test-key.pub",
-		`"$DISK_IMAGE"`,
+	imageRequireExactCallCount(t, mainCalls, 1,
+		"qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
+		"-b", `"$FCOS_BACKING"`, `"$DISK_IMAGE"`,
+	)
+	imageRequireExactCallCount(t, mainCalls, 1,
+		"qemu-img", "resize", `"$DISK_IMAGE"`, "40G",
+	)
+	baselineExportCall := []string{
+		"skopeo_fixture", "20m", "copy",
+		`"containers-storage:$baseline_ref"`, `"oci:$FIXTURE_LAYOUT:baseline"`,
 	}
-	imageRequireExactCallCount(t, allCalls, 1, installCall...)
-	updateSaveCall := []string{
-		"podman_fixture", "20m", "save", "--format", "oci-archive",
-		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
+	updateExportCall := []string{
+		"skopeo_fixture", "20m", "copy",
+		`"containers-storage:$update_ref"`, `"oci:$FIXTURE_LAYOUT:update"`,
 	}
-	imageRequireCall(t, mainCalls, updateSaveCall...)
+	layoutInspectCall := []string{
+		"skopeo_fixture", "2m", "inspect", "--raw", `"oci:$FIXTURE_LAYOUT:$ref"`,
+	}
+	fixtureRemoveCall := []string{
+		"podman_fixture", "10m", "image", "rm", "--all", "--force",
+	}
+	fixtureStoreProofCall := []string{
+		"podman_fixture", "2m", "images", "--all", "--quiet",
+	}
+	fixtureTruncateCall := []string{
+		"truncate", `--size="$FIXTURE_DISK_BYTES"`, "--", `"$FIXTURE_DISK"`,
+	}
+	fixtureMkfsCall := []string{
+		"mkfs.ext4", "-F", "-q", "-m", "0", "-L", `"$FIXTURE_LABEL"`,
+		"-O", "^has_journal", "-d", `"$FIXTURE_LAYOUT"`, `"$FIXTURE_DISK"`,
+	}
+	for _, call := range [][]string{baselineExportCall, updateExportCall} {
+		imageRequireExactCallCount(t, mainCalls, 1, call...)
+		imageRequireDirectCall(t, file, call...)
+	}
+	imageRequireExactCallCount(t, mainCalls, 1, layoutInspectCall...)
+	imageRequireExactTopLevelSequence(t, imageVMRunnerPath, file, syntax.LangBash, `
+mkdir -m 0700 -- "$FIXTURE_LAYOUT" ||
+    fail "could not create the fixture OCI layout directory"
+skopeo_fixture 20m copy \
+    "containers-storage:${baseline_ref}" "oci:${FIXTURE_LAYOUT}:baseline"
+skopeo_fixture 20m copy \
+    "containers-storage:${update_ref}" "oci:${FIXTURE_LAYOUT}:update"
+jq -e '
+    [.manifests[].annotations["org.opencontainers.image.ref.name"]] |
+    sort == ["baseline", "update"]
+' "${FIXTURE_LAYOUT}/index.json" >/dev/null ||
+    fail "the fixture OCI layout does not contain exactly the baseline and update refs"
+`)
+	imageRequireFailingTest(t, topLevel, `[[ "$layout_config_id" == "$expected_id" ]]`)
+	for _, condition := range []string{
+		`[[ -z "$remaining_images" ]]`,
+		`[[ "$fixture_layout_size" =~ ^[1-9][0-9]*$ ]]`,
+		`[[ "$fixture_layout_size" -le "$MAX_FIXTURE_LAYOUT_BYTES" ]]`,
+	} {
+		imageRequireFailingTest(t, topLevel, condition)
+		imageRequireDirectFailingTest(t, file, condition)
+	}
+	imageRequireCall(t, mainCalls, fixtureRemoveCall...)
+	imageRequireDirectCall(t, file, fixtureRemoveCall...)
+	imageRequireExactCallCount(t, mainCalls, 1, fixtureStoreProofCall...)
+	imageRequireExactCallCount(t, mainCalls, 1, fixtureTruncateCall...)
+	imageRequireExactCallCount(t, mainCalls, 1, fixtureMkfsCall...)
+	imageRequireDirectFailingCall(t, file, fixtureTruncateCall...)
+	imageRequireDirectFailingCall(t, file, fixtureMkfsCall...)
 	imageRequireDirectCall(t, file,
 		"cp", "--", `"${firmware%%|*}"`, `"$OVMF_CODE"`,
 	)
 	imageRequireDirectCall(t, file,
 		"cp", "--", `"${firmware#*|}"`, `"$OVMF_VARS"`,
 	)
-	imageRequireDirectFailingCall(t, file, "detach_disk_loops")
-	installLine := imageExactCallLine(t, allCalls, installCall...)
-	postInstallDetachLine := imageExactCallLine(t, mainCalls, "detach_disk_loops")
-	updateSaveLine := imageExactCallLine(t, mainCalls, updateSaveCall...)
-	require.Less(t, installLine, postInstallDetachLine,
-		"the installer must finish before its disk-backed loops are detached")
-	require.Less(t, postInstallDetachLine, updateSaveLine,
-		"the loop-free install handoff must precede update export and QEMU work")
-	imageRequireCall(t, mainCalls,
-		"guest_run_long", "podman", "load", "--input", "/var/tmp/pilothouse-image-update.oci",
-	)
-	switchCall := []string{
-		"guest_run_long", "bootc", "switch", "--quiet",
+	bootstrapLine := imageExactCallLine(t, mainCalls, "download_fcos_qemu")
+	baselineExportLine := imageExactCallLine(t, mainCalls, baselineExportCall...)
+	updateExportLine := imageExactCallLine(t, mainCalls, updateExportCall...)
+	fixtureRemoveLine := imageExactCallLine(t, mainCalls, fixtureRemoveCall...)
+	fixtureStoreProofLine := imageExactCallLine(t, mainCalls, fixtureStoreProofCall...)
+	fixtureTruncateLine := imageExactCallLine(t, mainCalls, fixtureTruncateCall...)
+	fixtureMkfsLine := imageExactCallLine(t, mainCalls, fixtureMkfsCall...)
+	var qemuLine uint
+	for _, call := range mainCalls {
+		if imageCallEffectiveCommand(call) == "qemu-system-x86_64" {
+			require.Zero(t, qemuLine, "the runner must start QEMU exactly once")
+			qemuLine = call.line
+		}
+	}
+	require.NotZero(t, qemuLine, "the runner must start QEMU")
+	require.Less(t, baselineExportLine, updateExportLine,
+		"both refs must be added to one shared OCI layout in reviewed order")
+	require.Less(t, updateExportLine, fixtureRemoveLine,
+		"the complete OCI layout must exist before its private-store sources are removed")
+	require.Less(t, fixtureRemoveLine, fixtureStoreProofLine,
+		"the complete private store removal must precede its empty proof")
+	require.Less(t, fixtureStoreProofLine, fixtureTruncateLine,
+		"the private store must be proved empty before the fixture disk is allocated")
+	require.Less(t, fixtureTruncateLine, fixtureMkfsLine,
+		"the sparse fixture disk must exist before it is populated")
+	require.Less(t, fixtureRemoveLine, qemuLine,
+		"the multi-gigabyte private store must be released before QEMU grows its overlay")
+	layoutRemoveCall := []string{
+		"rm", "-rf", "--one-file-system", "--", `"$FIXTURE_LAYOUT"`,
+	}
+	fixtureMountDirCall := []string{
+		"guest_sudo", "mkdir", "-m", "0700", "--", `"$GUEST_FIXTURE_DIR"`,
+	}
+	fixtureMountCall := []string{
+		"guest_sudo", "mount", "-t", "ext4", "-o",
+		"ro,noload,nosuid,nodev,noexec,context=system_u:object_r:container_file_t:s0",
+		`"$GUEST_FIXTURE_DEVICE"`, `"$GUEST_FIXTURE_DIR"`,
+	}
+	baselineImportCall := []string{
+		"guest_sudo_long", "skopeo", "copy",
+		`"oci:$GUEST_FIXTURE_DIR:baseline"`, `"containers-storage:$baseline_ref"`,
+	}
+	updateImportCall := []string{
+		"guest_sudo_long", "skopeo", "copy",
+		`"oci:$GUEST_FIXTURE_DIR:update"`, `"containers-storage:$update_ref"`,
+	}
+	fixtureUnmountCall := []string{
+		"guest_sudo", "umount", `"$GUEST_FIXTURE_DIR"`,
+	}
+	fixtureMountDirRemoveCall := []string{
+		"guest_sudo", "rmdir", `"$GUEST_FIXTURE_DIR"`,
+	}
+	for _, call := range [][]string{
+		fixtureMountDirCall, fixtureMountCall, baselineImportCall, updateImportCall,
+		fixtureUnmountCall, fixtureMountDirRemoveCall,
+	} {
+		imageRequireExactCallCount(t, mainCalls, 1, call...)
+		imageRequireDirectCall(t, file, call...)
+	}
+	imageRequireExactCallCount(t, mainCalls, 1, layoutRemoveCall...)
+	imageRequireFailingCall(t, topLevel, layoutRemoveCall...)
+	imageRequireDirectFailingCall(t, file, layoutRemoveCall...)
+	layoutRemoveLine := imageExactCallLine(t, mainCalls, layoutRemoveCall...)
+	require.Less(t, fixtureMkfsLine, layoutRemoveLine,
+		"the standalone OCI layout must remain until the fixture disk is populated")
+	require.Less(t, layoutRemoveLine, bootstrapLine,
+		"the standalone OCI layout must be released before FCOS acquisition")
+	require.Less(t,
+		imageExactCallLine(t, mainCalls, fixtureMountCall...),
+		imageExactCallLine(t, mainCalls, baselineImportCall...),
+		"the read-only fixture disk must be mounted before Skopeo reads it")
+	require.Less(t,
+		imageExactCallLine(t, mainCalls, baselineImportCall...),
+		imageExactCallLine(t, mainCalls, updateImportCall...),
+		"the baseline and update refs must stream from one shared layout in reviewed order")
+	require.Less(t,
+		imageExactCallLine(t, mainCalls, updateImportCall...),
+		imageExactCallLine(t, mainCalls, fixtureUnmountCall...),
+		"the fixture disk must remain mounted until both Skopeo copies finish")
+	baselineSwitchCall := []string{
+		"guest_sudo_long", "bootc", "switch", "--quiet",
+		"--transport", "containers-storage", `"$baseline_ref"`,
+	}
+	updateSwitchCall := []string{
+		"guest_sudo_long", "bootc", "switch", "--quiet",
 		"--transport", "containers-storage", `"$update_ref"`,
 	}
-	imageRequireExactCallCount(t, allCalls, 1, switchCall...)
+	imageRequireExactCallCount(t, allCalls, 1, baselineSwitchCall...)
+	imageRequireExactCallCount(t, allCalls, 1, updateSwitchCall...)
 	reviewedGuestCopies := [][]string{
-		{"guest_copy", `"$GUEST_SCRIPT"`, "/root/validate-ucore.sh"},
-		{"guest_copy", `"$CREDENTIALS"`, "/root/pilothouse-image-credentials.json"},
-		{"guest_copy", `"$UPDATE_ARCHIVE"`, "/var/tmp/pilothouse-image-update.oci"},
+		{"guest_copy", `"$GUEST_SCRIPT"`, "/var/home/core/validate-ucore.sh"},
+		{"guest_copy", `"$CREDENTIALS"`, "/var/home/core/pilothouse-image-credentials.json"},
 	}
 	reviewedGuestRuns := [][]string{
-		{"guest_run", "chmod", "0700", "/root/validate-ucore.sh"},
-		{"guest_run", "chmod", "0600", "/root/pilothouse-image-credentials.json"},
-		{"guest_run", "sh", "/root/validate-ucore.sh", "prepare"},
-		{"guest_run", "rm", "-f", "/var/tmp/pilothouse-image-update.oci"},
+		{"guest_run", "chmod", "0700", "/var/home/core/validate-ucore.sh"},
+		{"guest_run", "chmod", "0600", "/var/home/core/pilothouse-image-credentials.json"},
 	}
-	reviewedGuestLongRuns := [][]string{
-		{"guest_run_long", "podman", "load", "--input", "/var/tmp/pilothouse-image-update.oci"},
-		switchCall,
-		{"guest_run_long", "bootc", "rollback"},
+	reviewedGuestSudoRuns := [][]string{
+		fixtureMountDirCall,
+		fixtureMountCall,
+		fixtureUnmountCall,
+		fixtureMountDirRemoveCall,
+		{"guest_sudo", "sh", "/var/home/core/validate-ucore.sh", "prepare"},
+	}
+	reviewedGuestSudoLongRuns := [][]string{
+		baselineImportCall,
+		updateImportCall,
+		baselineSwitchCall,
+		updateSwitchCall,
+		{"guest_sudo_long", "bootc", "rollback"},
 	}
 	for _, call := range mainCalls {
 		effectiveCommand := imageCallEffectiveCommand(call)
 		reviewedGuestBridge := slices.Contains(
-			[]string{"guest_copy", "guest_run", "guest_run_long"},
+			[]string{"guest_copy", "guest_run", "guest_sudo", "guest_sudo_long"},
 			effectiveCommand,
 		)
 		if !reviewedGuestBridge {
@@ -1628,14 +1872,18 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		switch effectiveCommand {
 		case "guest_copy":
 			require.True(t, imageCallMatchesAny(call, reviewedGuestCopies...),
-				"the runner may copy only the validator, credentials and local update archive: %#v",
+				"the runner may copy only the validator and credentials: %#v",
 				call.args)
 		case "guest_run":
 			require.True(t, imageCallMatchesAny(call, reviewedGuestRuns...),
 				"the runner may issue only the reviewed direct guest setup/removal calls: %#v",
 				call.args)
-		case "guest_run_long":
-			require.True(t, imageCallMatchesAny(call, reviewedGuestLongRuns...),
+		case "guest_sudo":
+			require.True(t, imageCallMatchesAny(call, reviewedGuestSudoRuns...),
+				"the runner may issue only the reviewed short privileged guest call: %#v",
+				call.args)
+		case "guest_sudo_long":
+			require.True(t, imageCallMatchesAny(call, reviewedGuestSudoLongRuns...),
 				"the runner may issue only the reviewed long guest update calls: %#v",
 				call.args)
 		case "guest_probe", "guest_run_timeout":
@@ -1646,21 +1894,23 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 	}
 	require.Len(t, reviewedGuestCopies, countCallsWithEffectiveCommand(mainCalls, "guest_copy"))
 	require.Len(t, reviewedGuestRuns, countCallsWithEffectiveCommand(mainCalls, "guest_run"))
-	require.Len(t, reviewedGuestLongRuns, countCallsWithEffectiveCommand(mainCalls, "guest_run_long"))
+	require.Len(t, reviewedGuestSudoRuns, countCallsWithEffectiveCommand(mainCalls, "guest_sudo"))
+	require.Len(t, reviewedGuestSudoLongRuns, countCallsWithEffectiveCommand(mainCalls, "guest_sudo_long"))
 	for _, call := range allCalls {
 		require.False(t, imageCallUsesRegistry(call),
-			"the update must not use a registry transport: %#v", call.args)
+			"the composed fixtures must not use a registry transport: %#v", call.args)
 		if imageCallContainsSequence(call, "bootc", "switch") {
-			require.Equal(t, switchCall, call.args,
-				"the local containers-storage switch must be the only bootc switch")
-		}
-		if imageCallRunsFixture(call) {
-			require.Equal(t, installCall, call.args,
-				"the bounded baseline installer must be the only fixture Podman run")
+			require.True(t,
+				slices.Equal(call.args, baselineSwitchCall) ||
+					slices.Equal(call.args, updateSwitchCall),
+				"only the reviewed local baseline and update bootc switches are allowed")
 		}
 	}
 
 	for _, continuity := range []string{
+		`[[ "$loaded_baseline_id" == "$baseline_id" ]]`,
+		`[[ "$loaded_update_id" == "$update_id" ]]`,
+		`[[ "$(guest_status_digest booted)" == "$baseline_staged_digest" ]]`,
 		`[[ "$(guest_status_digest booted)" == "$staged_digest" ]]`,
 		`[[ "$(guest_status_digest rollback)" == "$baseline_booted" ]]`,
 		`[[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]]`,
@@ -1669,6 +1919,9 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		imageRequireFailingTest(t, topLevel, continuity)
 		imageRequireDirectFailingTest(t, file, continuity)
 	}
+	baselineShapeCondition := `[[ "$baseline_staged_name" == "$baseline_ref" && "$baseline_staged_digest" =~ $DIGEST_PATTERN ]]`
+	imageRequireFailingTest(t, topLevel, baselineShapeCondition)
+	imageRequireDirectFailingTest(t, file, baselineShapeCondition)
 	stagedShapeCondition := `[[ "$staged_name" == "$update_ref" && "$staged_digest" =~ $DIGEST_PATTERN ]]`
 	imageRequireFailingTest(t, topLevel, stagedShapeCondition)
 	imageRequireDirectFailingTest(t, file, stagedShapeCondition)
@@ -1719,14 +1972,16 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		require.False(t, statement.Negated)
 		rebootLines = append(rebootLines, statement.Pos().Line())
 	}
-	require.Len(t, rebootLines, 2,
-		"update and rollback must each use one direct proven reboot")
+	require.Len(t, rebootLines, 3,
+		"bootstrap-to-baseline, update and rollback must each use one direct proven reboot")
 
-	switchLine := imageExactCallLine(t, mainCalls, switchCall...)
-	stagedNameLine := imageExactCallLine(t, mainCalls, "guest_status_name", "staged")
-	stagedDigestLine := imageExactCallLine(t, mainCalls, "guest_status_digest", "staged")
+	baselineSwitchLine := imageExactCallLine(t, mainCalls, baselineSwitchCall...)
+	updateSwitchLine := imageExactCallLine(t, mainCalls, updateSwitchCall...)
+	baselineShapeLine := imageFailingTestLine(t, topLevel, baselineShapeCondition)
 	stagedShapeLine := imageFailingTestLine(t, topLevel, stagedShapeCondition)
-	rollbackLine := imageExactCallLine(t, mainCalls, "guest_run_long", "bootc", "rollback")
+	rollbackLine := imageExactCallLine(t, mainCalls, "guest_sudo_long", "bootc", "rollback")
+	baselineContinuityLine := imageFailingTestLine(t, topLevel,
+		`[[ "$(guest_status_digest booted)" == "$baseline_staged_digest" ]]`)
 	updateContinuityLines := []uint{
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest booted)" == "$staged_digest" ]]`),
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest rollback)" == "$baseline_booted" ]]`),
@@ -1735,62 +1990,71 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]]`),
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest rollback)" == "$pre_rollback_booted" ]]`),
 	}
-	require.Less(t, baselineValidationLines[0], switchLine)
-	require.Less(t, switchLine, stagedNameLine)
-	require.Less(t, switchLine, stagedDigestLine)
-	require.Less(t, stagedNameLine, stagedShapeLine)
-	require.Less(t, stagedDigestLine, stagedShapeLine)
-	require.Less(t, stagedShapeLine, rebootLines[0])
-	require.Less(t, switchLine, rebootLines[0])
+	require.Less(t, baselineSwitchLine, baselineShapeLine)
+	require.Less(t, baselineShapeLine, rebootLines[0])
+	require.Less(t, rebootLines[0], baselineContinuityLine)
+	require.Less(t, baselineContinuityLine, baselineValidationLines[0])
+	require.Less(t, baselineValidationLines[0], updateSwitchLine)
+	require.Less(t, updateSwitchLine, stagedShapeLine)
+	require.Less(t, stagedShapeLine, rebootLines[1])
 	for _, continuityLine := range updateContinuityLines {
-		require.Less(t, rebootLines[0], continuityLine)
+		require.Less(t, rebootLines[1], continuityLine)
 		require.Less(t, continuityLine, updateValidationLine)
 	}
 	require.Less(t, updateValidationLine, rollbackLine)
-	require.Less(t, rollbackLine, rebootLines[1])
+	require.Less(t, rollbackLine, rebootLines[2])
 	for _, continuityLine := range rollbackContinuityLines {
-		require.Less(t, rebootLines[1], continuityLine)
+		require.Less(t, rebootLines[2], continuityLine)
 		require.Less(t, continuityLine, baselineValidationLines[1])
 	}
 }
 
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
+	expectedPrelude := imageParseShellSource(t, "expected-ucore-vm-prelude.sh", `
+set -euo pipefail
+readonly PATH
+`, syntax.LangBash)
+	require.GreaterOrEqual(t, len(file.Stmts), len(expectedPrelude.Stmts))
+	for index, expected := range expectedPrelude.Stmts {
+		require.Equal(t, imageShellRender(t, expected), imageShellRender(t, file.Stmts[index]),
+			"PATH must be frozen immediately after strict mode, before any other executable statement")
+	}
 	allCalls := imageShellAllCalls(t, file)
 	topCalls := imageShellCalls(t, imageShellTopLevel(file)...)
-	loopQueryCall := []string{"losetup", "-j", `"$DISK_IMAGE"`}
-	loopDetachCall := []string{
-		"timeout", "--signal=TERM", "--kill-after=10s", "30s",
-		"losetup", "--detach", `"$loop"`,
-	}
-	imageRequireExactCallCount(t, allCalls, 2, loopQueryCall...)
-	imageRequireExactCallCount(t, allCalls, 1, loopDetachCall...)
 	reviewedImageInspectCall := []string{
 		"podman_fixture", "2m", "image", "inspect",
 		"--format", "'{{.Id}}'", `"$ref"`,
 	}
-	reviewedImageSaveCall := []string{
-		"podman_fixture", "20m", "save", "--format", "oci-archive",
-		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
+	reviewedFixtureRemoveCall := []string{
+		"podman_fixture", "10m", "image", "rm", "--all", "--force",
 	}
-	reviewedContainerRemoveCall := []string{
-		"podman_fixture", "2m", "rm", "--force", "--ignore", `"$INSTALL_CONTAINER"`,
+	reviewedFixtureAbsentCall := []string{
+		"podman_fixture", "2m", "images", "--all", "--quiet",
 	}
 	for _, call := range allCalls {
-		if imageCallContainsProgram(call, "losetup") {
-			require.True(t,
-				slices.Equal(call.args, loopQueryCall) ||
-					slices.Equal(call.args, loopDetachCall),
-				"all loop-device access must remain inside the exact cleanup implementation: %#v",
-				call.args)
-		}
 		if imageCallEffectiveCommand(call) == "podman_fixture" {
 			require.True(t,
 				slices.Equal(call.args, reviewedImageInspectCall) ||
-					slices.Equal(call.args, reviewedImageSaveCall) ||
-					slices.Equal(call.args, reviewedContainerRemoveCall) ||
-					imageCallRunsFixture(call),
-				"private-store Podman may only inspect, install, save or remove the named installer: %#v",
+					slices.Equal(call.args, reviewedFixtureRemoveCall) ||
+					slices.Equal(call.args, reviewedFixtureAbsentCall),
+				"private-store Podman may only inspect the named fixtures or empty the isolated store: %#v",
+				call.args)
+		}
+		if imageCallEffectiveCommand(call) == "skopeo_fixture" {
+			require.True(t,
+				slices.Equal(call.args, []string{
+					"skopeo_fixture", "20m", "copy",
+					`"containers-storage:$baseline_ref"`, `"oci:$FIXTURE_LAYOUT:baseline"`,
+				}) ||
+					slices.Equal(call.args, []string{
+						"skopeo_fixture", "20m", "copy",
+						`"containers-storage:$update_ref"`, `"oci:$FIXTURE_LAYOUT:update"`,
+					}) ||
+					slices.Equal(call.args, []string{
+						"skopeo_fixture", "2m", "inspect", "--raw", `"oci:$FIXTURE_LAYOUT:$ref"`,
+					}),
+				"private-store Skopeo may only export or inspect the reviewed OCI refs: %#v",
 				call.args)
 		}
 	}
@@ -1830,39 +2094,87 @@ if kill -0 "$pid" 2>/dev/null; then
     fi
 fi
 wait "$pid" 2>/dev/null || true
-kill -0 "$pid" 2>/dev/null && return 1
-`)
-	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "remove_install_container", `
-podman_fixture 2m rm --force --ignore "$INSTALL_CONTAINER" >/dev/null
-`)
-	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "detach_disk_loops", `
-local failed=0 loop listing remaining
-listing="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || return 1
-while IFS= read -r loop; do
-    [[ -n "$loop" ]] || continue
-    timeout --signal=TERM --kill-after=10s 30s \
-        losetup --detach "$loop" || failed=1
-done < <(awk -F: '{print $1}' <<<"$listing")
-
-remaining="$(losetup -j "$DISK_IMAGE" 2>/dev/null)" || failed=1
-[[ -z "$remaining" ]] || failed=1
-return "$failed"
+if kill -0 "$pid" 2>/dev/null; then
+    return 1
+fi
+return 0
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "cleanup", `
-local failed=0
-stop_qemu || failed=1
-remove_install_container || failed=1
-detach_disk_loops || failed=1
-return "$failed"
+stop_qemu
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "cleanup_on_exit", `
 local status="$1"
 trap - EXIT
 cleanup || {
-    echo "ucore-vm-test: cleanup did not fully stop processes and detach the VM disk" >&2
+    echo "ucore-vm-test: cleanup did not fully stop QEMU" >&2
     [[ "$status" -ne 0 ]] || status=1
 }
 exit "$status"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "download_fcos_qemu", `
+local artifact url compressed_sha uncompressed_sha uncompressed_size
+artifact="$(
+    curl -fsSL --retry 3 --retry-delay 5 \
+        --proto '=https' --proto-redir '=https' \
+        --connect-timeout 30 --max-time 120 --max-filesize 1048576 \
+        "$FCOS_STREAM_URL" |
+        jq -cer '.architectures.x86_64.artifacts.qemu.formats["qcow2.xz"].disk'
+)" || fail "could not resolve the Fedora CoreOS stable QEMU image"
+
+url="$(jq -er '.location | select(type == "string")' <<<"$artifact")" ||
+    fail "Fedora CoreOS metadata has no QEMU image location"
+compressed_sha="$(jq -er '.sha256 | select(type == "string")' <<<"$artifact")" ||
+    fail "Fedora CoreOS metadata has no compressed checksum"
+uncompressed_sha="$(jq -er '."uncompressed-sha256" | select(type == "string")' <<<"$artifact")" ||
+    fail "Fedora CoreOS metadata has no uncompressed checksum"
+
+[[ "$url" =~ ^https://builds\.coreos\.fedoraproject\.org/.+\.qcow2\.xz$ ]] ||
+    fail "Fedora CoreOS metadata returned an unexpected QEMU image URL"
+[[ "$compressed_sha" =~ ^[0-9a-f]{64}$ && "$uncompressed_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "Fedora CoreOS metadata returned malformed checksums"
+
+curl -fL --retry 3 --retry-delay 5 \
+    --proto '=https' --proto-redir '=https' \
+    --connect-timeout 30 --max-time 1800 --max-filesize 2147483648 \
+    --output "$FCOS_ARCHIVE" "$url" ||
+    fail "could not download the Fedora CoreOS QEMU image"
+printf '%s  %s\n' "$compressed_sha" "$FCOS_ARCHIVE" |
+    sha256sum --check --status ||
+    fail "the compressed Fedora CoreOS QEMU image failed checksum verification"
+uncompressed_size="$(
+    xz --robot --list "$FCOS_ARCHIVE" |
+        awk -F '\t' '$1 == "file" {print $5}'
+)" || fail "could not read the Fedora CoreOS uncompressed size"
+[[ "$uncompressed_size" =~ ^[1-9][0-9]*$ ]] ||
+    fail "Fedora CoreOS archive has an invalid uncompressed size"
+((uncompressed_size <= MAX_FCOS_UNCOMPRESSED_BYTES)) ||
+    fail "Fedora CoreOS archive exceeds the 4 GiB uncompressed limit"
+xz -dc -- "$FCOS_ARCHIVE" >"$FCOS_BACKING" ||
+    fail "could not decompress the Fedora CoreOS QEMU image"
+printf '%s  %s\n' "$uncompressed_sha" "$FCOS_BACKING" |
+    sha256sum --check --status ||
+    fail "the Fedora CoreOS QEMU image failed its uncompressed checksum verification"
+rm -f -- "$FCOS_ARCHIVE" ||
+    fail "could not remove the verified compressed Fedora CoreOS image"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "create_ignition", `
+ssh-keygen -q -t ed25519 -N '' -C 'pilothouse-image-test' -f "$SSH_KEY"
+
+local public_key
+IFS= read -r public_key <"${SSH_KEY}.pub" ||
+    fail "could not read the generated SSH public key"
+[[ "$public_key" == ssh-ed25519\ * ]] ||
+    fail "the generated SSH public key has an unexpected format"
+
+jq -n --arg key "$public_key" '{
+        ignition: {version: "3.4.0"},
+        passwd: {users: [{
+            name: "core",
+            sshAuthorizedKeys: [$key]
+        }]}
+    }' >"$IGNITION_CONFIG" ||
+    fail "could not create the Fedora CoreOS Ignition configuration"
+chmod 0600 "$IGNITION_CONFIG"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run", `
 guest_run_timeout 2m "$@"
@@ -1870,20 +2182,26 @@ guest_run_timeout 2m "$@"
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run_long", `
 guest_run_timeout 20m "$@"
 `)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_sudo", `
+guest_run sudo -n "$@"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_sudo_long", `
+guest_run_long sudo -n "$@"
+`)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_run_timeout", `
 local duration="$1"
 shift
 timeout --signal=TERM --kill-after=10s "$duration" \
-    ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
+    ssh "${ssh_options[@]}" core@127.0.0.1 -- "$@"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_probe", `
 timeout --signal=TERM --kill-after=5s 15s \
-    ssh "${ssh_options[@]}" root@127.0.0.1 -- "$@"
+    ssh "${ssh_options[@]}" core@127.0.0.1 -- "$@"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_copy", `
 local source="$1" destination="$2"
 timeout --signal=TERM --kill-after=10s 20m \
-    scp "${ssh_common_options[@]}" -P "$ssh_port" -- "$source" "root@127.0.0.1:$destination"
+    scp "${ssh_common_options[@]}" -P "$ssh_port" -- "$source" "core@127.0.0.1:$destination"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_ssh", `
 local started=$SECONDS deadline=$((SECONDS + 300))
@@ -1899,23 +2217,38 @@ while ((SECONDS < deadline)); do
 done
 fail "guest did not answer SSH within 300s"
 `)
-	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_ssh_gone", `
-local misses=0 deadline=$((SECONDS + 120))
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_fixture_device", `
+local deadline=$((SECONDS + 60))
 while ((SECONDS < deadline)); do
-    if guest_probe true >/dev/null 2>&1; then
-        misses=0
-    else
-        misses=$((misses + 1))
-        ((misses >= 3)) && return 0
+    if [[ -n "${qemu_pid:-}" ]] && ! kill -0 "$qemu_pid" 2>/dev/null; then
+        fail "QEMU exited before the fixture disk appeared"
+    fi
+    if guest_probe test -b "$GUEST_FIXTURE_DEVICE" >/dev/null 2>&1; then
+        return 0
     fi
     sleep 2
 done
-fail "pre-reboot sshd was still answering after 120s"
+fail "fixture disk did not appear within 60s after SSH"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_boot_id_change", `
+local before="$1" after deadline=$((SECONDS + 120))
+while ((SECONDS < deadline)); do
+    if [[ -n "${qemu_pid:-}" ]] && ! kill -0 "$qemu_pid" 2>/dev/null; then
+        fail "QEMU exited before the guest completed its reboot"
+    fi
+    if after="$(guest_probe cat /proc/sys/kernel/random/boot_id 2>/dev/null)" &&
+        [[ -n "$after" && "$after" != "$before" ]]; then
+        printf '%s\n' "$after"
+        return 0
+    fi
+    sleep 2
+done
+fail "guest boot_id did not change from $before within 120s"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "wait_for_broker", `
 local started=$SECONDS deadline=$((SECONDS + 120))
 while ((SECONDS < deadline)); do
-    if guest_probe test -S /run/pilothouse/broker.sock >/dev/null 2>&1; then
+    if guest_sudo test -S /run/pilothouse/broker.sock >/dev/null 2>&1; then
         log "broker socket became ready after $((SECONDS - started))s"
         return 0
     fi
@@ -1926,16 +2259,13 @@ fail "broker socket did not become ready within 120s after SSH"
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "reboot_guest", `
 local before after output status=0
 before="$(guest_run cat /proc/sys/kernel/random/boot_id)"
-output="$(guest_run systemctl reboot 2>&1)" || status=$?
+output="$(guest_sudo systemctl reboot 2>&1)" || status=$?
 if [[ "$status" -ne 0 && "$status" -ne 255 && "$status" -ne 124 ]]; then
     fail "guest reboot command failed with status $status: $output"
 fi
-wait_for_ssh_gone
-wait_for_ssh
+after="$(wait_for_boot_id_change "$before")"
 wait_for_broker
-after="$(guest_run cat /proc/sys/kernel/random/boot_id)"
-[[ -n "$before" && -n "$after" && "$before" != "$after" ]] ||
-    fail "guest answered after reboot without changing boot_id"
+log "guest completed reboot (boot_id $before -> $after)"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "find_ovmf", `
 local pair code vars
@@ -1955,17 +2285,26 @@ return 1
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_digest", `
 local slot="$1"
-guest_run bootc status --format json |
+guest_sudo bootc status --format json |
     jq -er --arg slot "$slot" '.status[$slot].image.imageDigest // empty'
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_name", `
 local slot="$1"
-guest_run bootc status --format json |
+guest_sudo bootc status --format json |
     jq -er --arg slot "$slot" '.status[$slot].image.image.image // empty'
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_image_id", `
+local ref="$1" image_id
+image_id="$(guest_sudo podman image inspect --format '{{.Id}}' "$ref")"
+image_id="${image_id//[$'\r\n']/}"
+[[ "$image_id" =~ ^[0-9a-f]{64}$ ]] && image_id="sha256:$image_id"
+[[ "$image_id" =~ $DIGEST_PATTERN ]] ||
+    fail "guest Podman returned a non-canonical image ID for $ref"
+printf '%s\n' "$image_id"
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "run_guest_validation", `
 local expected_slot="$1"
-guest_run sh /root/validate-ucore.sh validate "$expected_slot"
+guest_sudo sh /var/home/core/validate-ucore.sh validate "$expected_slot"
 `)
 
 	for _, escape := range []string{"setsid", "nohup", "disown", "daemonize"} {
@@ -1980,19 +2319,56 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 			}
 		}
 	}
+	imageRequireExactTopLevelSequence(t, imageVMRunnerPath, file, syntax.LangBash, `
+unset \
+    CONTAINER_CONNECTION \
+    CONTAINER_HOST \
+    CONTAINER_SSHKEY \
+    CONTAINERS_CONF_OVERRIDE \
+    STORAGE_DRIVER \
+    STORAGE_OPTS
+export CONTAINERS_CONF=/dev/null
+export CONTAINERS_STORAGE_CONF="$storage_config"
+readonly CONTAINERS_CONF CONTAINERS_STORAGE_CONF
+podman_args=(
+    --remote=false
+    --root "$storage_root"
+    --imagestore "$image_store"
+    --runroot "$run_root"
+    --tmpdir "$podman_tmpdir"
+    --events-backend none
+    --storage-driver overlay
+)
+readonly -a podman_args
+`)
 	topAssignments := imageShellAssignments(t, imageShellTopLevel(file)...)
 	var criticalAssignmentValues = map[string][]string{
-		"storage_root":   {`"$(manifest_value '.storage.root')"`, ""},
-		"image_store":    {`"$(manifest_value '.storage.imagestore')"`, ""},
-		"run_root":       {`"$(manifest_value '.storage.runroot')"`, ""},
-		"podman_tmpdir":  {`"$(manifest_value '.storage.podman_tmpdir')"`, ""},
-		"image_tmpdir":   {`"$(manifest_value '.storage.image_tmpdir')"`, ""},
-		"storage_config": {`"$(manifest_value '.storage.config')"`, ""},
-		"DISK_IMAGE":     {`"$VM_DIR/disk.raw"`},
-		"INSTALL_CONTAINER": {
-			`"pilothouse-image-install-$ssh_port"`,
+		"storage_root":            {`"$(manifest_value '.storage.root')"`, ""},
+		"image_store":             {`"$(manifest_value '.storage.imagestore')"`, ""},
+		"run_root":                {`"$(manifest_value '.storage.runroot')"`, ""},
+		"podman_tmpdir":           {`"$(manifest_value '.storage.podman_tmpdir')"`, ""},
+		"image_tmpdir":            {`"$(manifest_value '.storage.image_tmpdir')"`, ""},
+		"storage_config":          {`"$(manifest_value '.storage.config')"`, ""},
+		"PATH":                    {""},
+		"CONTAINERS_CONF":         {"/dev/null", ""},
+		"CONTAINERS_STORAGE_CONF": {`"$storage_config"`, ""},
+		"DISK_IMAGE":              {`"$VM_DIR/disk.qcow2"`},
+		"qemu_pid":                {"$!"},
+		"remaining_images": {
+			`"$(podman_fixture 2m images --all --quiet)"`, "",
 		},
-		"qemu_pid": {"$!"},
+		"fixture_layout_size": {
+			`"$(du --summarize --bytes -- "$FIXTURE_LAYOUT"|awk '{print $1}')"`, "",
+		},
+		"loaded_baseline_id": {
+			`"$(guest_image_id "$baseline_ref")"`, "",
+		},
+		"baseline_staged_name": {
+			`"$(guest_status_name staged)"`, "",
+		},
+		"baseline_staged_digest": {
+			`"$(guest_status_digest staged)"`, "",
+		},
 		"baseline_booted": {
 			`"$(guest_status_digest booted)"`, "",
 		},
@@ -2001,6 +2377,9 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		},
 		"staged_digest": {
 			`"$(guest_status_digest staged)"`, "",
+		},
+		"loaded_update_id": {
+			`"$(guest_image_id "$update_ref")"`, "",
 		},
 		"pre_rollback_booted": {
 			`"$(guest_status_digest booted)"`, "",
@@ -2029,26 +2408,61 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 			"image_tmpdir", "storage_config",
 		},
 		"podman": {"podman_args"},
-		"qemu":   {"qemu_pid"},
+		"path-environment": {
+			"PATH",
+		},
+		"podman-environment": {
+			"CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF",
+		},
+		"qemu": {"qemu_pid"},
+		"private-store-empty": {
+			"remaining_images",
+		},
+		"fixture-layout-size": {
+			"fixture_layout_size",
+		},
+		"loaded-baseline": {
+			"loaded_baseline_id",
+		},
+		"bootstrap-slot": {
+			"baseline_staged_name", "baseline_staged_digest",
+		},
 		"baseline-slot": {
 			"baseline_booted",
 		},
 		"staged-slots": {
 			"staged_name", "staged_digest",
 		},
+		"loaded-update": {
+			"loaded_update_id",
+		},
 		"rollback-slots": {
 			"pre_rollback_booted", "pre_rollback_target",
 		},
-		"image-dir":         {"IMAGE_DIR"},
-		"image-manifest":    {"IMAGE_MANIFEST"},
-		"vm-dir":            {"VM_DIR"},
-		"disk-image":        {"DISK_IMAGE"},
-		"update-archive":    {"UPDATE_ARCHIVE"},
-		"ssh-key":           {"SSH_KEY"},
-		"credentials":       {"CREDENTIALS"},
-		"ovmf-code":         {"OVMF_CODE"},
-		"ovmf-vars":         {"OVMF_VARS"},
-		"install-container": {"INSTALL_CONTAINER"},
+		"image-dir":          {"IMAGE_DIR"},
+		"image-manifest":     {"IMAGE_MANIFEST"},
+		"vm-dir":             {"VM_DIR"},
+		"fcos-stream-url":    {"FCOS_STREAM_URL"},
+		"fcos-size-limit":    {"MAX_FCOS_UNCOMPRESSED_BYTES"},
+		"fixture-size-limit": {"MAX_FIXTURE_LAYOUT_BYTES"},
+		"fixture-disk-size":  {"FIXTURE_DISK_BYTES"},
+		"fcos-archive":       {"FCOS_ARCHIVE"},
+		"fcos-backing":       {"FCOS_BACKING"},
+		"disk-image":         {"DISK_IMAGE"},
+		"ignition-config":    {"IGNITION_CONFIG"},
+		"fixture-layout":     {"FIXTURE_LAYOUT"},
+		"fixture-disk":       {"FIXTURE_DISK"},
+		"fixture-label":      {"FIXTURE_LABEL"},
+		"guest-fixture-dir": {
+			"GUEST_FIXTURE_DIR",
+		},
+		"guest-fixture-device": {
+			"GUEST_FIXTURE_DEVICE",
+		},
+		"ssh-key":     {"SSH_KEY"},
+		"credentials": {"CREDENTIALS"},
+		"ovmf-code":   {"OVMF_CODE"},
+		"ovmf-vars":   {"OVMF_VARS"},
 	}
 	observedReadonlySets := map[string][]string{}
 	for _, statement := range file.Stmts {
@@ -2096,8 +2510,25 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		[]string{"podman_args"},
 	)
 	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"remaining_images"},
+		[]string{"remaining_images"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"loaded_baseline_id"},
+		[]string{"loaded_baseline_id"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"baseline_staged_name"},
+		[]string{"baseline_staged_digest"},
+		[]string{"baseline_staged_name", "baseline_staged_digest"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
 		[]string{"baseline_booted"},
 		[]string{"baseline_booted"},
+	)
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"loaded_update_id"},
+		[]string{"loaded_update_id"},
 	)
 	imageRequireContiguousAssignmentSets(t, file,
 		[]string{"staged_name"},
@@ -2118,17 +2549,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 
 	cleanupNode := imageShellFunction(t, imageVMRunnerPath, file, "cleanup")
 	cleanupCalls := imageShellCalls(t, cleanupNode)
-	imageRequireOrderedCalls(t, cleanupCalls,
-		"stop_qemu", "remove_install_container", "detach_disk_loops",
-	)
-
-	detachNode := imageShellFunction(t, imageVMRunnerPath, file, "detach_disk_loops")
-	detachCalls := imageShellCalls(t, detachNode)
-	imageRequireCall(t, detachCalls,
-		"timeout", "--signal=TERM", "--kill-after=10s", "30s",
-		"losetup", "--detach", `"$loop"`,
-	)
-	imageRequireCall(t, detachCalls, "losetup", "-j", `"$DISK_IMAGE"`)
+	imageRequireExactCallCount(t, cleanupCalls, 1, "stop_qemu")
 
 	mainCalls := topCalls
 	imageRequireFailingCall(t, imageShellTopLevel(file), "cleanup")
@@ -2140,7 +2561,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		switch {
 		case slices.Equal(call.args, []string{"trap", "'cleanup_on_exit $?'", "EXIT"}):
 			armLine = call.line
-		case slices.Equal(call.args, []string{"truncate", "-s", "20G", `"$DISK_IMAGE"`}):
+		case slices.Equal(call.args, []string{"download_fcos_qemu"}):
 			firstResourceLine = call.line
 		case slices.Equal(call.args, []string{"cleanup"}):
 			cleanupLine = call.line
@@ -2153,7 +2574,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	require.NotZero(t, cleanupLine)
 	require.NotZero(t, disarmLine)
 	require.Less(t, armLine, firstResourceLine,
-		"the EXIT cleanup trap must be armed before disk, installer, or QEMU resources are created")
+		"the EXIT cleanup trap must be armed before FCOS, disk, Ignition, or QEMU resources are created")
 	require.Less(t, cleanupLine, disarmLine,
 		"success-path cleanup must finish before the EXIT trap is disarmed")
 	cleanupStatementIndex := -1
@@ -2225,15 +2646,18 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		"-accel", "kvm",
 		"-cpu", "host",
 		"-smp", "2",
-		"-m", "3072",
+		"-m", "4096",
 		"-display", "none",
 		"-monitor", "none",
 		"-serial", "stdio",
 		"-drive", `"if=pflash,format=raw,unit=0,file=$OVMF_CODE,readonly=on"`,
 		"-drive", `"if=pflash,format=raw,unit=1,file=$OVMF_VARS"`,
-		"-drive", `"file=$DISK_IMAGE,format=raw,if=virtio"`,
+		"-drive", `"file=$DISK_IMAGE,format=qcow2,if=virtio"`,
+		"-drive", `"file=$FIXTURE_DISK,format=raw,if=none,readonly=on,id=fixture"`,
+		"-device", "virtio-blk-pci,drive=fixture,serial=pilothouse-fixture",
 		"-netdev", `"user,id=net0,hostfwd=tcp:127.0.0.1:$ssh_port-:22"`,
 		"-device", "virtio-net-pci,netdev=net0",
+		"-fw_cfg", `"name=opt/com.coreos/config,file=$IGNITION_CONFIG"`,
 	}
 	imageRequireExactCallCount(t, allCalls, 1, qemuCall...)
 	qemuStatement := -1
@@ -2288,8 +2712,8 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		"the runner must not create unowned Bash coprocesses")
 	require.Empty(t, disownedLines,
 		"the runner must not create shell coprocess or disowned jobs")
-	require.Equal(t, []string{`<(awk -F: '{print $1}' <<<"$listing")`}, processSubstitutions,
-		"the exact detach_disk_loops input must be the runner's only process substitution")
+	require.Empty(t, processSubstitutions,
+		"the runner must not create process-substitution helpers outside the teardown owner")
 	require.Less(t, qemuStatement+1, len(file.Stmts),
 		"QEMU must be followed immediately by qemu_pid=$!")
 	pidStatement := file.Stmts[qemuStatement+1]
@@ -2303,7 +2727,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	for _, call := range allCalls {
 		if imageCallContainsProgram(call, "qemu-system-x86_64") {
 			require.Equal(t, qemuCall, call.args,
-				"the owned foreground QEMU invocation must be the only QEMU process")
+				"the shell-owned background QEMU invocation must be the only QEMU process")
 		}
 	}
 	for _, call := range mainCalls {
@@ -2394,7 +2818,7 @@ printf 'ucore guest: %s\n' "$*"
 		"the guest main path must retain only its reviewed assignment-only statements")
 	topAssignments := imageShellAssignments(t, topLevel...)
 	for _, want := range []imageShellAssignment{
-		{name: "CREDENTIALS", value: "/root/pilothouse-image-credentials.json"},
+		{name: "CREDENTIALS", value: "/var/home/core/pilothouse-image-credentials.json"},
 		{name: "BROKER_SOCKET", value: "/run/pilothouse/broker.sock"},
 		{name: "CAPABILITY_QUERY", value: "org.frostyard.pilothouse.capabilities.list"},
 		{name: "HOST_IMAGE_QUERY", value: "org.frostyard.pilothouse.maintenance.host_image_status"},
@@ -2820,6 +3244,79 @@ func TestUCoreGuestCapabilityDecoderRejectsLineInjection(t *testing.T) {
 	require.Equal(t, "bootc\njournald\nsystemd\nautoupdate-bootc\n", valid.Stdout)
 }
 
+func TestUCoreFixtureManifestRequiresExactPAMCompatibilityRelationship(t *testing.T) {
+	sandbox := newImageSandbox(t)
+	input := filepath.Join(sandbox.cwd, "fixture.json")
+	jq := imageRequireTool(t, "jq")
+	legacy := `{
+		"schema": 1,
+		"kind": "pilothouse-ucore-image-fixture",
+		"producer_uid": 0,
+		"release": {
+			"id": 358276825,
+			"asset_id": 486354638,
+			"tag": "v0.6.0",
+			"artifact": "frostyard-pilothouse-0.6.0-1.x86_64.rpm",
+			"pam_compatibility": "v0.6.0-debian-pam"
+		},
+		"executables": {
+			"source": "checked-out-head",
+			"pilothouse_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"pilothoused_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		},
+		"source": "ghcr.io/ublue-os/ucore:latest",
+		"baseline": {"slot": "baseline"},
+		"update": {"slot": "update"}
+	}`
+	tests := []struct {
+		name    string
+		content string
+		valid   bool
+	}{
+		{name: "legacy identity requires compatibility", content: legacy, valid: true},
+		{
+			name: "legacy identity rejects none",
+			content: strings.Replace(
+				legacy,
+				`"pam_compatibility": "v0.6.0-debian-pam"`,
+				`"pam_compatibility": "none"`,
+				1,
+			),
+		},
+		{
+			name: "future identity accepts none",
+			content: strings.NewReplacer(
+				`"id": 358276825`, `"id": 358276826`,
+				`"pam_compatibility": "v0.6.0-debian-pam"`, `"pam_compatibility": "none"`,
+			).Replace(legacy),
+			valid: true,
+		},
+		{
+			name: "future identity rejects legacy compatibility",
+			content: strings.Replace(
+				legacy,
+				`"id": 358276825`,
+				`"id": 358276826`,
+				1,
+			),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(input, []byte(test.content), 0o600))
+			result := imageRunChild(t, sandbox, jq, "-e", imageFixtureManifestJQProgram, input)
+			require.False(t, result.TimedOut)
+			if test.valid {
+				require.NoError(t, result.Err, result.Stderr)
+				return
+			}
+			require.Error(t, result.Err)
+			require.NotZero(t, result.ExitCode)
+		})
+	}
+}
+
 func TestUCoreGuestAVCScannersFailOnForbiddenMatches(t *testing.T) {
 	sandbox := newImageSandbox(t)
 	input := filepath.Join(sandbox.cwd, "journal")
@@ -2831,8 +3328,65 @@ func TestUCoreGuestAVCScannersFailOnForbiddenMatches(t *testing.T) {
 	}
 
 	require.NoError(t, run(imageWindowAVCJQProgram, "ordinary journal entry\n").Err)
+	require.NoError(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:coreos_boot_mount_generator_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=1`+"\n").Err)
+	bootcProbe := `AVC avc: denied { mac_admin } for pid=3431 comm="chcon" capability=33 ` +
+		`scontext=system_u:system_r:unconfined_service_t:s0 ` +
+		`tcontext=system_u:system_r:unconfined_service_t:s0 tclass=capability2 permissive=0`
+	require.NoError(t, run(imageWindowAVCJQProgram, bootcProbe+"\n").Err)
+	require.NoError(t, run(imageWindowAVCJQProgram, bootcProbe+"\n"+bootcProbe+"\n").Err)
 	require.Error(t, run(imageWindowAVCJQProgram,
-		"type=AVC msg=audit: avc: denied { read } for comm=pilothoused\n").Err)
+		bootcProbe+"\n"+bootcProbe+"\n"+bootcProbe+"\n").Err)
+	for _, nearMiss := range []struct {
+		name string
+		line string
+	}{
+		{name: "permission", line: strings.Replace(bootcProbe, `{ mac_admin }`, `{ mac_admin sys_admin }`, 1)},
+		{name: "command", line: strings.Replace(bootcProbe, `comm="chcon"`, `comm="chconx"`, 1)},
+		{name: "capability", line: strings.Replace(bootcProbe, "capability=33", "capability=330", 1)},
+		{name: "source context", line: strings.Replace(bootcProbe,
+			"scontext=system_u:system_r:unconfined_service_t:s0",
+			"scontext=system_u:system_r:unconfined_service_t:s0:c1", 1)},
+		{name: "target context", line: strings.Replace(bootcProbe,
+			"tcontext=system_u:system_r:unconfined_service_t:s0",
+			"tcontext=system_u:system_r:unconfined_service_t:s0:c1", 1)},
+		{name: "class", line: strings.Replace(bootcProbe, "tclass=capability2", "tclass=capability", 1)},
+		{name: "permissive value", line: strings.Replace(bootcProbe, "permissive=0", "permissive=1", 1)},
+	} {
+		t.Run("bootc probe rejects near-miss "+nearMiss.name, func(t *testing.T) {
+			require.Error(t, run(imageWindowAVCJQProgram, nearMiss.line+"\n").Err)
+		})
+	}
+	forbidden := "type=AVC msg=audit: avc: denied { read } for comm=pilothoused\n"
+	result := run(imageWindowAVCJQProgram, forbidden)
+	require.Error(t, result.Err)
+	require.Contains(t, result.Stderr, strings.TrimSpace(forbidden))
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:coreos_boot_mount_generator_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=0`+"\n").Err)
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:coreos_boot_mount_generator_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=10`+"\n").Err)
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`xscontext=system_u:system_r:coreos_boot_mount_generator_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=1`+"\n").Err)
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:coreos_boot_mount_generator_t:s0:c1 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=1`+"\n").Err)
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:unconfined_service_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 permissive=1`+"\n").Err)
+	require.Error(t, run(imageWindowAVCJQProgram,
+		`avc: denied { write } for comm="coreos-boot-mou" `+
+			`scontext=system_u:system_r:coreos_boot_mount_generator_t:s0 `+
+			`tcontext=system_u:object_r:systemd_generator_unit_file_t:s0 notpermissive=1`+"\n").Err)
 
 	require.NoError(t, run(imagePilothouseAVCJQProgram,
 		"avc: denied { read } for comm=unrelated\n").Err)

@@ -34,17 +34,11 @@ VM_SSH_PORT="${VM_SSH_PORT:-2222}"
 # installing its key, so it is generous but explicit and finite.
 SSH_READY_TIMEOUT="${SSH_READY_TIMEOUT:-300}"
 
-# SSH_GONE_TIMEOUT is the bounded wait for the PRE-REBOOT sshd to stop
-# answering. Without this half, a readiness check issued too soon after a
-# reboot request would be satisfied by the sshd that is about to die, and the
-# reboot would never actually be observed.
-SSH_GONE_TIMEOUT="${SSH_GONE_TIMEOUT:-120}"
-
-# SSH_GONE_CONFIRMATIONS is how many consecutive unanswered probes count as
-# the pre-reboot sshd being gone. One is not enough: a single transient
-# refusal against a guest that never rebooted would end the wait, and the
-# readiness check that follows would be satisfied by that same sshd.
-SSH_GONE_CONFIRMATIONS="${SSH_GONE_CONFIRMATIONS:-3}"
+# SSH_REBOOT_TIMEOUT bounds the direct proof of a reboot: the time allowed for
+# the kernel boot_id to change. Watching for an SSH outage is not proof — a fast
+# reboot can disappear between probes — while a changed boot_id both proves a
+# new boot and proves that SSH on that new boot is reachable.
+SSH_REBOOT_TIMEOUT="${SSH_REBOOT_TIMEOUT:-120}"
 
 # GUEST_SSH_OPTS are the transport options every connection shares. The guest
 # is a throwaway VM reachable only through a loopback port forward, and its
@@ -94,19 +88,38 @@ guest_target() {
     printf '%s@%s\n' "$(guest_admin_user)" "$VM_SSH_HOST"
 }
 
-# guest_run runs a command in the guest as the administrator account. The
-# destination is resolved into a variable first: an assignment carries the
-# failure status of its command substitution, so a missing or malformed
-# creds.env stops the run here instead of being handed to ssh as an empty
-# destination.
-guest_run() {
+# guest_run_timeout runs a command in the guest as the administrator account
+# under one explicit wall-clock bound. It is the sole raw SSH site.
+guest_run_timeout() {
+    local duration="$1"
+    shift
+
     local key="${VM_SSH_KEY:-}"
     [ -n "$key" ] || ssh_fail "VM_SSH_KEY is unset: generate_credentials must run first"
 
     local target
     target="$(guest_target)"
 
-    ssh "${GUEST_SSH_OPTS[@]}" -i "$key" -p "$VM_SSH_PORT" "$target" -- "$@"
+    timeout --signal=TERM --kill-after=10s "$duration" \
+        ssh "${GUEST_SSH_OPTS[@]}" -i "$key" -p "$VM_SSH_PORT" "$target" -- "$@"
+}
+
+# guest_run runs a command in the guest as the administrator account. The
+# destination is resolved into a variable first: an assignment carries the
+# failure status of its command substitution, so a missing or malformed
+# creds.env stops the run here instead of being handed to ssh as an empty
+# destination. Twenty minutes bounds package-manager and validation work while
+# leaving their ordinary runtime unconstrained by a short readiness probe.
+guest_run() {
+    guest_run_timeout 20m "$@"
+}
+
+# guest_probe is the bounded sibling of guest_run for readiness and transition
+# polling. ConnectTimeout alone is insufficient once SSH has connected: a
+# stalled transport or remote command could otherwise make one probe exceed the
+# enclosing wait's advertised deadline.
+guest_probe() {
+    guest_run_timeout 15s "$@"
 }
 
 # guest_sudo runs a command in the guest with privilege. -n is mandatory: with
@@ -114,6 +127,14 @@ guest_run() {
 # grant into an immediate, named failure.
 guest_sudo() {
     guest_run sudo -n "$@"
+}
+
+# guest_sudo_probe keeps reboot dispatch under the same short bound as the
+# transition probes. A successful reboot may sever SSH or leave it connected
+# until this wrapper expires; both are accepted by reboot_guest before boot_id
+# continuity supplies the actual proof.
+guest_sudo_probe() {
+    guest_probe sudo -n "$@"
 }
 
 # guest_copy <source> <destination> copies one file between the runner and the
@@ -153,63 +174,36 @@ guest_copy() {
 
     case "$source" in
     '~'*)
-        scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$target:$source" "$destination"
+        timeout --signal=TERM --kill-after=10s 20m \
+            scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$target:$source" "$destination"
         ;;
     *)
-        scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$source" "$target:$destination"
+        timeout --signal=TERM --kill-after=10s 20m \
+            scp "${GUEST_SSH_OPTS[@]}" -i "$key" -P "$VM_SSH_PORT" -- "$source" "$target:$destination"
         ;;
     esac
 }
 
 # guest_answers_ssh reports whether the guest answers a trivial command now.
 guest_answers_ssh() {
-    guest_run true >/dev/null 2>&1
+    guest_probe true >/dev/null 2>&1
 }
 
 # wait_for_ssh polls until the guest answers, bounded by SSH_READY_TIMEOUT.
 wait_for_ssh() {
     ssh_log "waiting up to ${SSH_READY_TIMEOUT}s for sshd to answer on $VM_SSH_HOST:$VM_SSH_PORT"
 
-    local waited=0
-    while [ "$waited" -lt "$SSH_READY_TIMEOUT" ]; do
+    local started=$SECONDS deadline=$((SECONDS + SSH_READY_TIMEOUT))
+    while ((SECONDS < deadline)); do
         if guest_answers_ssh; then
-            ssh_log "guest answered ssh after ${waited}s"
+            ssh_log "guest answered ssh after $((SECONDS - started))s"
             return 0
         fi
 
         sleep 5
-        waited=$((waited + 5))
     done
 
     ssh_fail "assertion failed: the guest did not answer ssh within ${SSH_READY_TIMEOUT}s"
-}
-
-# wait_for_ssh_gone polls until the guest stops answering, bounded by
-# SSH_GONE_TIMEOUT. A single failed probe is not enough: a transient refusal
-# on a guest that never rebooted would satisfy a one-shot check, and
-# wait_for_ssh would then be satisfied by the very sshd that was supposed to
-# die. SSH_GONE_CONFIRMATIONS consecutive failures are required, and the
-# counter resets the moment the guest answers again.
-wait_for_ssh_gone() {
-    ssh_log "waiting up to ${SSH_GONE_TIMEOUT}s for the pre-reboot sshd to go away"
-
-    local waited=0 misses=0
-    while [ "$waited" -lt "$SSH_GONE_TIMEOUT" ]; do
-        if guest_answers_ssh; then
-            misses=0
-        else
-            misses=$((misses + 1))
-            if [ "$misses" -ge "$SSH_GONE_CONFIRMATIONS" ]; then
-                ssh_log "pre-reboot sshd stopped answering after ${waited}s (${misses} consecutive probes)"
-                return 0
-            fi
-        fi
-
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    ssh_fail "assertion failed: the pre-reboot sshd was still answering ${SSH_GONE_TIMEOUT}s after the reboot was issued"
 }
 
 # guest_boot_id prints the guest's current boot identifier. It changes on
@@ -217,16 +211,41 @@ wait_for_ssh_gone() {
 # the machine actually restarted — one that cannot be satisfied by a
 # still-running pre-reboot sshd no matter how the probes fall.
 guest_boot_id() {
-    guest_run cat /proc/sys/kernel/random/boot_id
+    guest_probe cat /proc/sys/kernel/random/boot_id
+}
+
+# wait_for_boot_id_change <before> polls through both the unreachable interval
+# and the new boot until SSH returns a non-empty boot_id different from before.
+# It does not require sampling an SSH outage: sufficiently fast guests can
+# reboot entirely between two probes, but they cannot retain their boot_id.
+wait_for_boot_id_change() {
+    local before="$1"
+    ssh_log "waiting up to ${SSH_REBOOT_TIMEOUT}s for boot_id ${before} to change"
+
+    local after deadline=$((SECONDS + SSH_REBOOT_TIMEOUT))
+    while ((SECONDS < deadline)); do
+        if after="$(guest_boot_id 2>/dev/null)"; then
+            after="${after//[$'\r\n']/}"
+            if [ -n "$after" ] && [ "$after" != "$before" ]; then
+                printf '%s\n' "$after"
+                return 0
+            fi
+        fi
+
+        sleep 2
+    done
+
+    ssh_fail "assertion failed: boot_id did not change from ${before} within ${SSH_REBOOT_TIMEOUT}s"
 }
 
 # reboot_guest reboots the guest and returns when it is reachable again. The
-# reboot is issued through guest_sudo, which passes -n, because the one login
+# reboot is issued through guest_sudo_probe, which passes -n, because the one login
 # identity is the administrator account and not root.
 #
 # The reboot command's status is NOT discarded. A successful reboot kills the
-# connection under ssh, which reports that as 255; that one status is the
-# expected symptom. Every other non-zero status means the command did not
+# connection under ssh, which reports that as 255; a connected session may
+# instead reach the probe's bound and report 124. Those two statuses are the
+# expected symptoms. Every other non-zero status means the command did not
 # dispatch at all — a rejected non-interactive escalation being the likely
 # one — and is reported with the remote stderr instead of being left to
 # surface later as a misleading "sshd never went away" timeout.
@@ -239,23 +258,14 @@ reboot_guest() {
     ssh_log "rebooting the guest (boot_id ${before})"
 
     local output status=0
-    output="$(guest_sudo systemctl reboot 2>&1)" || status=$?
+    output="$(guest_sudo_probe systemctl reboot 2>&1)" || status=$?
 
-    if [ "$status" -ne 0 ] && [ "$status" -ne 255 ]; then
+    if [ "$status" -ne 0 ] && [ "$status" -ne 255 ] && [ "$status" -ne 124 ]; then
         ssh_fail "reboot command failed with status ${status} before the guest could restart: ${output}"
     fi
 
-    wait_for_ssh_gone
-    wait_for_ssh
-
     local after
-    after="$(guest_boot_id)"
-    after="${after//[$'\r\n']/}"
-    [ -n "$after" ] || ssh_fail "could not read the guest's boot_id after the reboot"
-
-    if [ "$after" = "$before" ]; then
-        ssh_fail "assertion failed: boot_id is unchanged (${after}); the guest answered ssh but never rebooted"
-    fi
+    after="$(wait_for_boot_id_change "$before")"
 
     ssh_log "guest is back after the reboot (boot_id ${before} -> ${after})"
 }

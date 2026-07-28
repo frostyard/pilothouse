@@ -4,7 +4,7 @@
 # login as the prerequisite for reading Pilothouse's advertised capabilities.
 set -eu
 
-CREDENTIALS=/root/pilothouse-image-credentials.json
+CREDENTIALS=/var/home/core/pilothouse-image-credentials.json
 BROKER_SOCKET=/run/pilothouse/broker.sock
 CAPABILITY_QUERY=org.frostyard.pilothouse.capabilities.list
 HOST_IMAGE_QUERY=org.frostyard.pilothouse.maintenance.host_image_status
@@ -244,7 +244,30 @@ cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" |
 journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs" ||
     fail "could not read the journal after the image-host query cursor"
 jq -Rse '
-    test("avc:[[:space:]]+denied"; "i") | not
+    def expected_ucore_boot_avc:
+        test("(^|[[:space:]])scontext=system_u:system_r:coreos_boot_mount_generator_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])permissive=1([[:space:]]|$)");
+    def expected_bootc_probe_avc:
+        test("denied[[:space:]]+\\{[[:space:]]*mac_admin[[:space:]]*\\}") and
+        test("(^|[[:space:]])comm=\"chcon\"([[:space:]]|$)") and
+        test("(^|[[:space:]])capability=33([[:space:]]|$)") and
+        test("(^|[[:space:]])scontext=system_u:system_r:unconfined_service_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])tcontext=system_u:system_r:unconfined_service_t:s0([[:space:]]|$)") and
+        test("(^|[[:space:]])tclass=capability2([[:space:]]|$)") and
+        test("(^|[[:space:]])permissive=0([[:space:]]|$)");
+    [
+        splits("\n") |
+        select(test("avc:[[:space:]]+denied"; "i"))
+    ] as $avcs |
+    (
+        [$avcs[] | select((expected_ucore_boot_avc or expected_bootc_probe_avc) | not)] +
+        ([$avcs[] | select(expected_bootc_probe_avc)] | .[2:])
+    ) |
+    if length == 0 then
+        true
+    else
+        (.[0:20] | join("\n")) | halt_error(1)
+    end
 ' "$work_dir/new-avcs" >/dev/null ||
     fail "an unexpected SELinux AVC denial occurred during image-host validation"
 journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||

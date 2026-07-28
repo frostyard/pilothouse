@@ -114,12 +114,13 @@ web_login() {
         --write-out '%{http_code}'
 }
 
-# journal_cursor prints a cursor for the journal's current end. Cursors are
-# absolute positions in the journal, so one taken here bounds a later
-# `journalctl --unit <unit> --after-cursor` read of either unit's records.
+# journal_cursor <unit> prints a cursor for that unit's current end. Capturing
+# and consuming the cursor with the same unit filter avoids journal
+# implementation differences when a cursor from an unrelated stream is later
+# combined with `--unit`.
 journal_cursor() {
-    journalctl --no-pager --lines=1 --output json >"$WORK_DIR/cursor.json" ||
-        fail "could not read the journal to capture a cursor"
+    journalctl --unit "$1" --no-pager --lines=1 --output json >"$WORK_DIR/cursor.json" ||
+        fail "could not read $1's journal to capture a cursor"
 
     journal_cursor_value="$(jq -r '.__CURSOR // empty' <"$WORK_DIR/cursor.json")" ||
         fail "could not read a cursor out of the journal's last record"
@@ -240,7 +241,7 @@ write_form_field "$WORK_DIR/admin-secret"
 
 guest_log "signing in as the administrator through POST /login"
 
-login_cursor="$(journal_cursor)"
+login_cursor="$(journal_cursor "$WEB_UNIT")"
 
 login_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/username" "$WORK_DIR/admin-secret")" ||
     fail "POST /login for the administrator did not complete within ${WEB_REQUEST_TIMEOUT_SECONDS}s"
@@ -297,7 +298,7 @@ write_form_field "$WORK_DIR/root-secret"
 
 guest_log "attempting a direct root login with root's valid password"
 
-root_cursor="$(journal_cursor)"
+root_cursor="$(journal_cursor "$BROKER_UNIT")"
 
 root_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/root-username" "$WORK_DIR/root-secret")" ||
     fail "POST /login for root did not complete within ${WEB_REQUEST_TIMEOUT_SECONDS}s"

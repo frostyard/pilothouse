@@ -1,0 +1,71 @@
+# Image-based host validation for issue #80. This workflow uses the last
+# released x86_64 RPM as its packaging substrate and overlays executables built
+# from the checked-out head, so a pull request exercises its own code without a
+# branch package. It creates only ephemeral local uCore derivatives and
+# publishes or uploads nothing.
+name: Image tier
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # Presence matters: synchronizing an already-labelled pull request must
+    # validate its new head, not only the commit that was labelled.
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  ucore-vm:
+    name: Boot uCore with released packaging and checked-out executables
+    # ubuntu-26.04 carries Podman 5, whose --imagestore option keeps the
+    # composed-image container storage isolated in the job-local private store.
+    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Enable KVM acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # e2fsprogs supplies mkfs.ext4 for the read-only fixture disk that carries
+      # the shared OCI layout without growing the VM's writable overlay.
+      - name: Install QEMU, OVMF, fixture-disk and native build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs libpam0g-dev libsystemd-dev ovmf qemu-system-x86 qemu-utils xz-utils
+
+      - name: Build the checked-out Pilothouse executables
+        run: make build
+
+      - name: Verify the private-store tool contract
+        run: |
+          podman --version
+          podman --help | grep -F -- '--imagestore'
+          skopeo --version
+          cosign version
+          test -r /dev/kvm
+
+      - name: Compose, boot, validate and remove the uCore fixtures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sudo -n env "PATH=$PATH" "GITHUB_TOKEN=$GITHUB_TOKEN" \
+            bash test/image/ucore-image-test.sh \
+            --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

@@ -49,9 +49,9 @@
 #      `systemctl status` and `journalctl` for both units — all BEFORE the
 #      reboot is issued, so a guest that never returns still leaves evidence of
 #      its pre-reboot state in the job log;
-#  15. reboot the guest with `reboot_guest`, which waits for the PRE-REBOOT
-#      sshd to stop answering before it waits for sshd to return, so no later
-#      check can be satisfied by the sshd that was about to die;
+#  15. reboot the guest with `reboot_guest`, which waits until the boot_id
+#      changes and SSH can read it on the new boot, so no later check can be
+#      satisfied by the sshd from the previous boot;
 #  16. run the post-reboot checks as
 #      `sudo -n sh ~/vm-boot/guest/check-reboot-posture.sh`, which asserts both
 #      units are active again unaided, the capability set is unchanged,
@@ -349,9 +349,10 @@ main() {
     retrieve_pre_reboot_state
     dump_pre_reboot_diagnostics
 
-    # reboot_guest waits for the PRE-REBOOT sshd to stop answering before it
-    # waits for sshd to return, and compares boot ids, so nothing below can be
-    # satisfied by the sshd that was about to die.
+    # reboot_guest waits until SSH can read a changed boot id, so nothing below
+    # can be satisfied by the sshd from the previous boot. This deliberately
+    # does not require observing an SSH outage: a fast reboot can fall entirely
+    # between probes.
     reboot_guest
 
     # shellcheck disable=SC2088 # expanded by the guest's shell, not the runner's

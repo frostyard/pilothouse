@@ -41,24 +41,48 @@ image_pin_table() {
 }
 
 # load_image_pin sets IMAGE_URL, IMAGE_ALGORITHM and IMAGE_DIGEST for a family.
+# The table is data, never shell: VM_IMAGES_ENV may redirect the path, but every
+# non-comment line must match the one assignment grammar below and every field
+# may occur only once. Nothing from the table is evaluated or sourced.
 load_image_pin() {
     local family="$1"
+    [[ "$family" =~ ^[a-z0-9]+$ ]] ||
+        image_fail "invalid image family '$family'"
+
     local table
     table="$(image_pin_table)"
     [ -f "$table" ] || image_fail "pinned image table not found: $table"
 
-    # shellcheck disable=SC1090,SC1091 # resolved at run time; see image_pin_table
-    . "$table"
+    IMAGE_URL=""
+    IMAGE_ALGORITHM=""
+    IMAGE_DIGEST=""
 
-    local prefix
-    prefix="VM_IMAGE_$(printf '%s' "$family" | tr '[:lower:]' '[:upper:]')"
-    local url_var="${prefix}_URL"
-    local algorithm_var="${prefix}_ALGORITHM"
-    local digest_var="${prefix}_DIGEST"
+    local wanted="${family^^}"
+    local line line_number=0 row_family field value key
+    declare -A seen=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        ((line_number += 1))
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ ! "$line" =~ ^VM_IMAGE_([A-Z0-9]+)_(URL|ALGORITHM|DIGEST)=\"([^\"]*)\"$ ]]; then
+            image_fail "$table:$line_number is not a plain VM_IMAGE_<FAMILY>_<FIELD>=\"value\" assignment"
+        fi
 
-    IMAGE_URL="${!url_var:-}"
-    IMAGE_ALGORITHM="${!algorithm_var:-}"
-    IMAGE_DIGEST="${!digest_var:-}"
+        row_family="${BASH_REMATCH[1]}"
+        field="${BASH_REMATCH[2]}"
+        value="${BASH_REMATCH[3]}"
+        key="${row_family}_${field}"
+        [ -z "${seen[$key]+x}" ] ||
+            image_fail "$table:$line_number duplicates $key"
+        seen["$key"]=1
+
+        [ "$row_family" = "$wanted" ] || continue
+        case "$field" in
+            URL) IMAGE_URL="$value" ;;
+            ALGORITHM) IMAGE_ALGORITHM="$value" ;;
+            DIGEST) IMAGE_DIGEST="$value" ;;
+        esac
+    done <"$table"
 
     if [ -z "$IMAGE_URL" ] || [ -z "$IMAGE_ALGORITHM" ] || [ -z "$IMAGE_DIGEST" ]; then
         image_fail "no pinned image for family '$family' in $table"

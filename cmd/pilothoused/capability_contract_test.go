@@ -799,10 +799,11 @@ func TestCapabilityContractMinimalRegistersOnlyModuleLevelNoneIDs(t *testing.T) 
 	assert.Equal(t, len(moduleLevelNoneIDs), registeredCount, "minimal fixture must register exactly the 7 module-level-none IDs")
 
 	called := false
-	client := connectSystemd(context.Background(), minimal, func(context.Context) (*dbus.Conn, error) {
+	client, cancelConnection := connectSystemd(context.Background(), minimal, func(context.Context) (*dbus.Conn, error) {
 		called = true
 		return &dbus.Conn{}, nil
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	assert.Nil(t, client)
+	assert.Nil(t, cancelConnection)
 	assert.False(t, called, "connectSystemd must never invoke connect (no dbus dial attempted) when the Systemd capability is absent")
 }
