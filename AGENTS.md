@@ -28,6 +28,17 @@ If native Go, PAM, or systemd build dependencies are unavailable, use the matchi
 
 `make verify-packages` reports the packaging contract's findings for built `.deb` and `.rpm` artifacts in `dist/`; it sits outside `make ci` and `make docker-ci` on purpose, and it fails by design when `dist/` is empty, which is the normal state on a development host and in the development image. `make package` is the local producer that fills `dist/` — it runs `goreleaser release --snapshot --clean`, requires the goreleaser Pro distribution at major version 2, which is not installed on this host or in the development image, and it too sits outside `make ci` and `make docker-ci`. `make verify-package-install` is the install-side sibling: it runs `packaging/verify-install.sh` inside the container image named by `INSTALL_IMAGE` (no default; an unset value fails with a message naming the two digest-pinned images) against `ARTIFACT_DIR` (default `dist`), and it sits outside `make ci` and `make docker-ci` too, because it needs built artifacts, Docker and network access. `.github/workflows/packaging.yml` now runs that same target in CI, installing the built artifacts on pinned Debian and Fedora containers after the contract check passes; that gate stays outside `make ci` and `make docker-ci`. That workflow also carries a third tier beyond the contract check and the container install matrix: the `vm-boot` job, which boots a stock Debian and a stock Fedora cloud image under QEMU/KVM with `bash test/vm/vm-boot-test.sh` and validates the installed package on a booted host — activation, the systemd-created directories, a live broker socket, real PAM authentication, journald read-back and reboot posture. It runs on every push to `main` and on a pull request only while the `vm-boot` label is on it, it is **not** a required check, and — like the rest of `packaging.yml` — it cannot run under `make ci` or `make docker-ci`, here because it needs KVM, network access and the artifact the `packages` job builds, so there is no local `make` target for it. `make help` prints every target carrying a `##` description.
 
+`go run ./test/image/releaserpm --workspace ABSOLUTE_PATH` is the test-only
+producer for #80's released-RPM fixture. It resolves GitHub's latest stable
+semantic-version release once, accepts exactly the tag-correlated
+`frostyard-pilothouse-<version>-1.x86_64.rpm`, verifies its recorded size and
+SHA-256 while downloading, and creates a fresh
+`fixture-release-rpm/fixture.json` plus the RPM inside the caller-owned
+workspace. It never publishes, uploads, installs or retains anything on its
+own; the later image orchestrator owns workspace cleanup. The workspace must
+be private to one invocation and not concurrently mutated. Do not point it at
+a reused fixture directory or substitute a branch artifact.
+
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
 authenticated host Git to create and push the tag. Do not run the full bump
