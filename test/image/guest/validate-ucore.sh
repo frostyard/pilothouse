@@ -71,8 +71,7 @@ cleanup() {
         "$work_dir/host-image.json" "$work_dir/bootc-status.json" \
         "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" \
         "$work_dir/cursor-journal" \
-        "$work_dir/new-avcs" "$work_dir/window-avcs" "$work_dir/boot-journal" \
-        "$work_dir/all-avcs" "$work_dir/pilothouse-avcs"
+        "$work_dir/new-avcs" "$work_dir/boot-journal"
     rmdir "$work_dir"
 }
 trap cleanup EXIT
@@ -180,7 +179,8 @@ if systemctl list-unit-files rpm-ostreed-automatic.timer --no-legend |
     grep -q '^rpm-ostreed-automatic\.service[[:space:]]'; then
     printf '%s\n' autoupdate-rpm-ostree >>"$work_dir/expected"
 fi
-LC_ALL=C sort -u -o "$work_dir/expected" "$work_dir/expected"
+LC_ALL=C sort -u -o "$work_dir/expected" "$work_dir/expected" ||
+    fail "could not normalize independently observed image capabilities"
 
 grep -qx bootc "$work_dir/actual" ||
     fail "Pilothouse did not advertise bootc on the bootc host"
@@ -243,27 +243,21 @@ cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" |
 # not a claim that the RPM provides a dedicated Pilothouse SELinux domain.
 journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs" ||
     fail "could not read the journal after the image-host query cursor"
-window_avc_status=0
-grep -Ei 'avc:[[:space:]]+denied' "$work_dir/new-avcs" \
-    >"$work_dir/window-avcs" || window_avc_status=$?
-[ "$window_avc_status" -le 1 ] ||
-    fail "could not filter the controlled broker-query window for AVC denials"
-[ "$window_avc_status" -ne 0 ] ||
+jq -Rse '
+    test("avc:[[:space:]]+denied"; "i") | not
+' "$work_dir/new-avcs" >/dev/null ||
     fail "an unexpected SELinux AVC denial occurred during image-host validation"
 journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||
     fail "could not read the current boot journal for Pilothouse AVC denials"
-avc_status=0
-grep -Ei 'avc:[[:space:]]+denied' "$work_dir/boot-journal" \
-    >"$work_dir/all-avcs" || avc_status=$?
-[ "$avc_status" -le 1 ] ||
-    fail "could not filter the current boot journal for AVC denials"
-pilothouse_avc_status=0
-grep -Ei 'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse' \
-    "$work_dir/all-avcs" >"$work_dir/pilothouse-avcs" ||
-    pilothouse_avc_status=$?
-[ "$pilothouse_avc_status" -le 1 ] ||
-    fail "could not filter current-boot AVC denials for Pilothouse"
-[ "$pilothouse_avc_status" -ne 0 ] ||
+jq -Rse '
+    [
+        splits("\n") |
+        select(
+            test("avc:[[:space:]]+denied"; "i") and
+            test("pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse"; "i")
+        )
+    ] | length == 0
+' "$work_dir/boot-journal" >/dev/null ||
     fail "the current boot contains a Pilothouse-related SELinux AVC denial"
 
 log "$expected_slot deployment is enforcing, capability-truthful and AVC-clean"

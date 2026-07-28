@@ -2539,7 +2539,9 @@ be the first executable statements; dynamic `eval`/source calls are forbidden.
 Alias, `shopt`, `enable` and hash-table mutation are forbidden as well, so
 later exact command nodes cannot be rebound after parsing; quoted command names,
 `command`/`builtin` options and repeated wrapper prefixes are normalized for
-that check.
+that check. Every command position (including a wrapped effective command) must
+resolve statically from literal, escaped or quoted AST word parts; a parameter
+expansion cannot hide a trap or teardown bypass.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
@@ -2549,22 +2551,25 @@ for the same policy. The QEMU statement itself must be backgrounded and
 immediately followed by its `$!` capture, and the EXIT trap must be one direct,
 foreground parent-shell statement armed before the first disk/resource mutation
 and disarmed only after explicit cleanup. Comparisons and
-critical evidence calls must feed `|| fail`, while the three `grep` probes must
-have exactly two ordered writes — one unconditional top-level zero
-initialization and the matching grep's `$?` capture — and separately reject
-both inspection errors and forbidden AVC matches. Successful top-level
+critical evidence calls must feed `|| fail`. Capability sorting is pinned
+separately to the independently probed expected file and decoded broker file;
+the expected and actual host-image normalizers likewise accept only their
+respective `bootc status` and broker-response inputs. The two AVC scans use
+`jq -Rse` predicates whose false result, read error or malformed execution all
+feed the same fatal edge, leaving no mutable shell status variable. Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
-command green. Whole-file
+command green. All three guest validation invocations must be direct, foreground
+top-level statements, not calls parked behind a false conditional. Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
 extra bootc switches/QEMU processes and registry forms. It deliberately does
 not search raw shell text: comments, string literals, no-op copies and commands
 moved into an uncalled decoy function cannot satisfy the guards. The guest also
-requires exactly one capability-response JSON document and captures `jq`,
-`sort`, journal and AVC-filter statuses separately so POSIX pipeline or `grep`
-status semantics cannot turn malformed evidence or an inspection error into a
-clean result.
+requires exactly one capability-response JSON document and binds `jq`, `sort`,
+journal and AVC-filter failures directly to fatal edges so pipeline or
+line-filter status semantics cannot turn malformed evidence or an inspection
+error into a clean result.
 
 **Still out of scope for this package.**
 
