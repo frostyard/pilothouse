@@ -43,14 +43,21 @@ func imageParseShellSource(t *testing.T, path, source string, language syntax.La
 func imageShellFunction(t *testing.T, path string, file *syntax.File, name string) syntax.Node {
 	t.Helper()
 
-	for _, stmt := range file.Stmts {
-		decl, ok := stmt.Cmd.(*syntax.FuncDecl)
+	functions := imageShellFunctions(file, name)
+	require.Lenf(t, functions, 1, "%s must define %s() exactly once", path, name)
+	return functions[0]
+}
+
+func imageShellFunctions(file *syntax.File, name string) []syntax.Node {
+	var functions []syntax.Node
+	syntax.Walk(file, func(node syntax.Node) bool {
+		decl, ok := node.(*syntax.FuncDecl)
 		if ok && decl.Name != nil && decl.Name.Value == name {
-			return decl.Body
+			functions = append(functions, decl.Body)
 		}
-	}
-	require.Failf(t, "missing shell function", "%s must define %s()", path, name)
-	return nil
+		return true
+	})
+	return functions
 }
 
 func imageShellTopLevel(file *syntax.File) []syntax.Node {
@@ -61,16 +68,6 @@ func imageShellTopLevel(file *syntax.File) []syntax.Node {
 		}
 	}
 	return nodes
-}
-
-func imageShellAllExecutableRoots(file *syntax.File) []syntax.Node {
-	roots := imageShellTopLevel(file)
-	for _, stmt := range file.Stmts {
-		if decl, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
-			roots = append(roots, decl.Body)
-		}
-	}
-	return roots
 }
 
 type imageShellCall struct {
@@ -98,13 +95,23 @@ func imageShellRender(t *testing.T, node syntax.Node) string {
 
 func imageShellCalls(t *testing.T, roots ...syntax.Node) []imageShellCall {
 	t.Helper()
+	return imageCollectShellCalls(t, false, roots...)
+}
+
+func imageShellAllCalls(t *testing.T, roots ...syntax.Node) []imageShellCall {
+	t.Helper()
+	return imageCollectShellCalls(t, true, roots...)
+}
+
+func imageCollectShellCalls(t *testing.T, includeFunctions bool, roots ...syntax.Node) []imageShellCall {
+	t.Helper()
 	var calls []imageShellCall
 	for _, root := range roots {
 		syntax.Walk(root, func(node syntax.Node) bool {
 			if node == nil {
 				return true
 			}
-			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction && !includeFunctions {
 				return false
 			}
 			call, ok := node.(*syntax.CallExpr)
@@ -210,6 +217,35 @@ func imageShellAssignments(t *testing.T, roots ...syntax.Node) []imageShellAssig
 	return assignments
 }
 
+func imageShellArrayAssignment(t *testing.T, name string, roots ...syntax.Node) []string {
+	t.Helper()
+	var matches [][]string
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			assignment, ok := node.(*syntax.Assign)
+			if !ok || assignment.Name == nil || assignment.Name.Value != name || assignment.Array == nil {
+				return true
+			}
+			var elements []string
+			for _, element := range assignment.Array.Elems {
+				if element.Value != nil {
+					elements = append(elements, imageShellRender(t, element.Value))
+				}
+			}
+			matches = append(matches, elements)
+			return true
+		})
+	}
+	require.Lenf(t, matches, 1, "shell array %s must be assigned exactly once", name)
+	return matches[0]
+}
+
 func imageRequireCall(t *testing.T, calls []imageShellCall, want ...string) {
 	t.Helper()
 	for _, call := range calls {
@@ -230,37 +266,27 @@ func countImageShellCalls(calls []imageShellCall, want ...string) int {
 	return count
 }
 
-func imageRequireCallSubsequence(t *testing.T, calls []imageShellCall, want ...string) {
-	t.Helper()
-	for _, call := range calls {
-		for start := 0; start+len(want) <= len(call.args); start++ {
-			if slices.Equal(call.args[start:start+len(want)], want) {
-				return
-			}
-		}
-	}
-	require.Failf(t, "missing executable shell argument sequence", "want args %#v; parsed calls: %#v", want, calls)
-}
-
-func imageRequireCommandArguments(t *testing.T, calls []imageShellCall, command string, want ...string) {
-	t.Helper()
+func imageHasCommandSubsequence(calls []imageShellCall, command string, want ...string) bool {
 	for _, call := range calls {
 		if len(call.args) == 0 || call.args[0] != command {
 			continue
 		}
-		missing := false
-		for _, argument := range want {
-			if !slices.Contains(call.args[1:], argument) {
-				missing = true
-				break
+		for start := 1; start+len(want) <= len(call.args); start++ {
+			if slices.Equal(call.args[start:start+len(want)], want) {
+				return true
 			}
 		}
-		if !missing {
-			return
-		}
 	}
-	require.Failf(t, "missing executable shell command arguments",
-		"want %s args %#v; parsed calls: %#v", command, want, calls)
+	return false
+}
+
+func imageRequireCommandSubsequence(t *testing.T, calls []imageShellCall, command string, want ...string) {
+	t.Helper()
+	if imageHasCommandSubsequence(calls, command, want...) {
+		return
+	}
+	require.Failf(t, "missing executable shell argument sequence",
+		"want command %q with args %#v; parsed calls: %#v", command, want, calls)
 }
 
 func imageRequireOrderedCalls(t *testing.T, calls []imageShellCall, names ...string) {
@@ -280,6 +306,67 @@ func imageRequireOrderedCalls(t *testing.T, calls []imageShellCall, names ...str
 func imageRequireDeclaration(t *testing.T, declarations []imageShellDeclaration, want imageShellDeclaration) {
 	t.Helper()
 	require.Contains(t, declarations, want)
+}
+
+func imageCallPublishes(call imageShellCall) bool {
+	for index, argument := range call.args {
+		switch argument {
+		case "podman", "docker":
+			tail := call.args[index+1:]
+			if slices.Contains(tail, "push") {
+				return true
+			}
+		case "podman_fixture":
+			if index != 0 || len(call.args) < 3 {
+				continue
+			}
+			tail := call.args[2:]
+			if slices.Contains(tail, "push") {
+				return true
+			}
+		case "skopeo":
+			if slices.Contains(call.args[index+1:], "copy") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func imageCallRecursivelyRemoves(call imageShellCall) bool {
+	for index, argument := range call.args {
+		if argument != "rm" {
+			continue
+		}
+		recursive, force := false, false
+		for _, option := range call.args[index+1:] {
+			switch option {
+			case "--recursive":
+				recursive = true
+			case "--force":
+				force = true
+			default:
+				if strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") {
+					flags := strings.TrimLeft(option, "-")
+					recursive = recursive || strings.ContainsAny(flags, "rR")
+					force = force || strings.Contains(flags, "f")
+				}
+			}
+		}
+		if recursive && force {
+			return true
+		}
+	}
+	return false
+}
+
+func imageCallUsesRegistry(call imageShellCall) bool {
+	for _, argument := range call.args {
+		if strings.Contains(argument, "docker://") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
@@ -331,18 +418,11 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	} {
 		imageRequireCall(t, topCalls, path...)
 	}
-	var manifestCheck imageShellCall
-	for _, call := range topCalls {
-		if len(call.args) > 0 && call.args[0] == "jq" && slices.Contains(call.args, `"$IMAGE_MANIFEST"`) {
-			manifestCheck = call
-			break
-		}
-	}
-	require.NotEmpty(t, manifestCheck.args, "the top-level runner must execute jq against the fixture manifest")
-	manifestExpression := strings.Join(manifestCheck.args, "\n")
-	require.Contains(t, manifestExpression, `.kind == "pilothouse-ucore-image-fixture"`)
-	require.Contains(t, manifestExpression, `.producer_uid == 0`)
-	require.Contains(t, manifestExpression, `.source == "ghcr.io/ublue-os/ucore:latest"`)
+	imageRequireCall(t, topCalls,
+		"jq", "-e",
+		"'\n    .schema == 1 and\n    .kind == \"pilothouse-ucore-image-fixture\" and\n    .producer_uid == 0 and\n    .source == \"ghcr.io/ublue-os/ucore:latest\" and\n    .baseline.slot == \"baseline\" and\n    .update.slot == \"update\"\n'",
+		`"$IMAGE_MANIFEST"`,
+	)
 	require.Contains(t, topTests, `[[ "$actual_id" == "$expected_id" ]]`,
 		"both local refs must be rechecked against their manifested image IDs")
 	require.Contains(t, topTests, `[[ "${baseline_ref%:*}" == "${update_ref%:*}" ]]`,
@@ -350,37 +430,31 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 
 	podmanNode := imageShellFunction(t, imageVMRunnerPath, file, "podman_fixture")
 	podmanCalls := imageShellCalls(t, podmanNode)
-	imageRequireCallSubsequence(t, podmanCalls,
+	imageRequireCommandSubsequence(t, podmanCalls,
 		"timeout", "--signal=TERM", "--kill-after=30s", `"$1"`,
 		"podman", `"${podman_args[@]}"`, `"${@:2}"`,
 	)
-	podmanAssignments := imageShellAssignments(t, topLevel...)
-	var podmanArgs string
-	for _, assignment := range podmanAssignments {
-		if assignment.name == "podman_args" {
-			podmanArgs = assignment.value
-		}
-	}
-	require.NotEmpty(t, podmanArgs)
-	for _, option := range []string{
+	podmanArgs := imageShellArrayAssignment(t, "podman_args", topLevel...)
+	require.Equal(t, []string{
 		"--remote=false",
-		`--root "$storage_root"`,
-		`--imagestore "$image_store"`,
-		`--runroot "$run_root"`,
-		`--tmpdir "$podman_tmpdir"`,
-		"--events-backend none",
-		"--storage-driver overlay",
-	} {
-		require.Contains(t, podmanArgs, option)
-	}
+		"--root",
+		`"$storage_root"`,
+		"--imagestore",
+		`"$image_store"`,
+		"--runroot",
+		`"$run_root"`,
+		"--tmpdir",
+		`"$podman_tmpdir"`,
+		"--events-backend",
+		"none",
+		"--storage-driver",
+		"overlay",
+	}, podmanArgs)
 
-	for _, call := range imageShellCalls(t, imageShellAllExecutableRoots(file)...) {
-		require.False(t,
-			len(call.args) >= 2 &&
-				(call.args[0] == "podman" || call.args[0] == "docker" || call.args[0] == "skopeo") &&
-				(call.args[1] == "push" || call.args[1] == "copy"),
+	for _, call := range imageShellAllCalls(t, file) {
+		require.False(t, imageCallPublishes(call),
 			"the fixture consumer must never publish or copy an image: %#v", call.args)
-		require.False(t, len(call.args) >= 2 && call.args[0] == "rm" && call.args[1] == "-rf",
+		require.False(t, imageCallRecursivelyRemoves(call),
 			"the fixture consumer must leave recursive workspace cleanup to the exact-store owner")
 	}
 }
@@ -391,10 +465,11 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 	mainCalls := imageShellCalls(t, topLevel...)
 	mainTests := imageShellTests(t, topLevel...)
 
-	imageRequireCallSubsequence(t, mainCalls,
+	imageRequireCommandSubsequence(t, mainCalls,
 		"podman_fixture", "45m", "run",
 	)
-	imageRequireCallSubsequence(t, mainCalls,
+	imageRequireCommandSubsequence(t, mainCalls,
+		"podman_fixture",
 		`"$baseline_ref"`,
 		"bootc", "install", "to-disk",
 		"--generic-image",
@@ -418,11 +493,7 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--transport", "containers-storage", `"$update_ref"`,
 	)
 	for _, call := range mainCalls {
-		require.NotContains(t, call.args, "registry:2")
-		require.False(t,
-			len(call.args) > 2 && call.args[0] == "guest_run_long" &&
-				call.args[1] == "bootc" && call.args[2] == "switch" &&
-				slices.Contains(call.args, "docker://"),
+		require.False(t, imageCallUsesRegistry(call),
 			"the update must not use a registry transport: %#v", call.args)
 	}
 
@@ -441,12 +512,13 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
-	allCalls := imageShellCalls(t, imageShellAllExecutableRoots(file)...)
+	allCalls := imageShellAllCalls(t, file)
 
 	for _, escape := range []string{"setsid", "nohup", "disown", "daemonize"} {
 		for _, call := range allCalls {
-			require.NotEqualf(t, escape, call.args[0],
-				"%s must not let a helper escape the teardown owner", imageVMRunnerPath)
+			require.NotContainsf(t, call.args, escape,
+				"%s must not let a helper escape the teardown owner; call: %#v",
+				imageVMRunnerPath, call.args)
 		}
 	}
 	require.Contains(t,
@@ -468,11 +540,14 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 
 	detachNode := imageShellFunction(t, imageVMRunnerPath, file, "detach_disk_loops")
 	detachCalls := imageShellCalls(t, detachNode)
-	imageRequireCallSubsequence(t, detachCalls, "losetup", "--detach", `"$loop"`)
-	imageRequireCallSubsequence(t, detachCalls, "losetup", "-j", `"$DISK_IMAGE"`)
+	imageRequireCommandSubsequence(t, detachCalls,
+		"timeout", "losetup", "--detach", `"$loop"`,
+	)
+	imageRequireCommandSubsequence(t, detachCalls, "losetup", "-j", `"$DISK_IMAGE"`)
 
 	mainCalls := imageShellCalls(t, imageShellTopLevel(file)...)
-	imageRequireCallSubsequence(t, mainCalls,
+	imageRequireCommandSubsequence(t, mainCalls,
+		"podman_fixture",
 		"--volume", `"$SSH_KEY.pub:/run/pilothouse-image-test-key.pub:ro"`,
 	)
 	for _, call := range allCalls {
@@ -482,10 +557,12 @@ func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 				"the runner must not write an authorized_keys path into a guessed disk layout")
 		}
 	}
-	imageRequireCommandArguments(t, mainCalls, "qemu-system-x86_64", "-serial", "stdio")
+	imageRequireCommandSubsequence(t, mainCalls, "qemu-system-x86_64", "-serial", "stdio")
 	for _, call := range mainCalls {
-		require.NotContains(t, call.args, "console.log")
-		require.NotContains(t, call.args, "qemu-stderr.log")
+		for _, argument := range call.args {
+			require.NotContains(t, argument, "console.log")
+			require.NotContains(t, argument, "qemu-stderr.log")
+		}
 	}
 }
 
@@ -493,7 +570,7 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	file := imageParseShell(t, imageVMGuestPath, syntax.LangPOSIX)
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
-	allCalls := imageShellCalls(t, imageShellAllExecutableRoots(file)...)
+	allCalls := imageShellAllCalls(t, file)
 
 	imageRequireCall(t, topCalls,
 		"[", `"$(cat /usr/lib/pilothouse-image-test/slot)"`, "=", `"$expected_slot"`, "]",
@@ -513,38 +590,32 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 		{"systemctl", "list-unit-files", "rpm-ostreed-automatic.timer"},
 		{"systemctl", "list-unit-files", "rpm-ostreed-automatic.service"},
 	} {
-		imageRequireCallSubsequence(t, topCalls, expectedProbe...)
+		imageRequireCommandSubsequence(t, topCalls, expectedProbe[0], expectedProbe[1:]...)
 	}
 	for _, optedOut := range []string{"updex", "podman", "docker", "incus"} {
 		require.Zero(t, countImageShellCalls(topCalls, "printf", "%s\\n", optedOut),
 			"unconfigured optional dependencies must not enter the expected advertised set")
 	}
 
-	var availabilityCheck imageShellCall
-	for _, call := range topCalls {
-		if len(call.args) > 0 && call.args[0] == "jq" &&
-			slices.Contains(call.args, `"$work_dir/host-image.json"`) {
-			availabilityCheck = call
-			break
-		}
-	}
-	require.NotEmpty(t, availabilityCheck.args)
-	require.Contains(t, strings.Join(availabilityCheck.args, "\n"), ".result.bootc_available == true")
+	imageRequireCall(t, topCalls,
+		"jq", "-e", "'\n    .result.bootc_available == true\n'",
+		`"$work_dir/host-image.json"`,
+	)
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
 	imageRequireCall(t, topCalls,
 		"cmp", "-s", `"$work_dir/expected-host-image.json"`, `"$work_dir/actual-host-image.json"`,
 	)
 
-	imageRequireCallSubsequence(t, topCalls,
+	imageRequireCommandSubsequence(t, topCalls,
 		"journalctl", "--no-pager", `--after-cursor="$journal_cursor"`, "-o", "cat",
 	)
-	imageRequireCallSubsequence(t, topCalls, "grep", "-Ei", "'avc:[[:space:]]+denied'")
-	imageRequireCallSubsequence(t, topCalls,
+	imageRequireCommandSubsequence(t, topCalls, "grep", "-Ei", "'avc:[[:space:]]+denied'")
+	imageRequireCommandSubsequence(t, topCalls,
 		"grep", "-Ei", "'pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse'",
 	)
 	require.Contains(t, imageReadHarness(t, imageVMGuestPath),
 		"not a claim that the RPM provides a dedicated Pilothouse SELinux domain")
-	imageRequireCallSubsequence(t, topCalls,
+	imageRequireCommandSubsequence(t, topCalls,
 		"journalctl", "--no-pager", "--boot", "-o", "cat",
 	)
 	for _, call := range allCalls {
@@ -583,6 +654,7 @@ decoy() {
 # wanted-command top-level
 : # wanted-command top-level
 printf '%s' 'wanted-command top-level'
+printf '%s\n' dangerous-command argument
 wanted-command top-level
 `
 	file := imageParseShellSource(t, "fixture.sh", fixture, syntax.LangBash)
@@ -595,6 +667,44 @@ wanted-command top-level
 		"a command moved into a decoy function must not satisfy a top-level main guard")
 	require.Zero(t, countImageShellCalls(topCalls, "wanted-command", "target"),
 		"a target-function command must not leak into the top-level region")
+	require.False(t, imageHasCommandSubsequence(topCalls, "dangerous-command", "argument"),
+		"a printed argv copy must not satisfy a command-subsequence guard")
+
+	duplicate := imageParseShellSource(t, "duplicate.sh", `
+target() { safe-command; }
+target() { unsafe-command; }
+`, syntax.LangBash)
+	require.Len(t, imageShellFunctions(duplicate, "target"), 2,
+		"duplicate function definitions must be visible to the exact-one guard")
+
+	nested := imageParseShellSource(t, "nested.sh", `
+outer() {
+    inner() { setsid unsafe-command; }
+    inner
+}
+`, syntax.LangBash)
+	require.Equal(t, 1, countImageShellCalls(imageShellAllCalls(t, nested), "setsid", "unsafe-command"),
+		"whole-file negative policies must inspect nested function bodies")
+}
+
+func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
+	for _, call := range []imageShellCall{
+		{args: []string{"podman_fixture", "10m", "push", "localhost/test"}},
+		{args: []string{"podman", "image", "push", "localhost/test"}},
+		{args: []string{"timeout", "30s", "skopeo", "copy", "containers-storage:a", "dir:b"}},
+	} {
+		require.Truef(t, imageCallPublishes(call), "must identify publishing argv %#v", call.args)
+	}
+	for _, call := range []imageShellCall{
+		{args: []string{"rm", "-fr", "/tmp/work"}},
+		{args: []string{"command", "rm", "--recursive", "--force", "/tmp/work"}},
+		{args: []string{"timeout", "30s", "rm", "-r", "-f", "/tmp/work"}},
+	} {
+		require.Truef(t, imageCallRecursivelyRemoves(call), "must identify recursive removal argv %#v", call.args)
+	}
+	require.True(t, imageCallUsesRegistry(imageShellCall{
+		args: []string{"guest_run_long", "bootc", "switch", "docker://registry.example/os:test"},
+	}))
 }
 
 func TestUCoreVMRunnerRejectsRelativeWorkspaceBeforeMutation(t *testing.T) {
