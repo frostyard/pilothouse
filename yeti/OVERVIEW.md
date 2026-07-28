@@ -133,6 +133,16 @@ test/image/compose-ucore.sh
                       baseline/update derivatives in workspace-local Podman
                       storage; no workflow invokes it yet (see "Image-tier
                       uCore composition" below)
+test/image/ucore-vm-test.sh
+                      fourth #80 slice: consumes those two local images,
+                      installs the baseline through bootc's composefs path,
+                      boots QEMU/OVMF, validates enforcing SELinux and truthful
+                      capabilities, switches to the update through guest-local
+                      containers-storage, then rolls back with digest-slot
+                      continuity checks. It quiesces every live resource it
+                      owns but leaves exact-store reset and workspace deletion
+                      to the later enclosing job (see "Image-tier uCore VM
+                      consumer" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It includes
@@ -2442,10 +2452,68 @@ instruction parser prevents commented-out local-RPM installation or
 `bootc container lint` from satisfying the Containerfile contract, and a
 SHA-256 assertion pins the vendored key.
 
-Later #80 slices boot those fixtures, exercise bootc update/rollback, wire the
-job, and enforce the SELinux/capability assertions. The enforcing-SELinux
-check looks for unexpected AVC denials but does not claim a dedicated
-Pilothouse confined domain; the released RPM ships no such policy today.
+The fourth slice consumes these fixtures as described next. Workflow wiring
+and the enclosing acquire/compose/reset/remove lifecycle remain later #80
+slices.
+
+**Image-tier uCore VM consumer (#80, fourth slice).**
+`test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH [--ssh-port PORT]` is a
+root-only consumer of a completed `fixture-ucore-images/fixture.json`. It
+accepts no source image or artifact argument. Before booting anything it
+requires the manifest's graphroot, imagestore, runroot, libpod tmpdir, image
+tmpdir and storage configuration to equal their fixed paths below the supplied
+canonical workspace, requires the baseline/update refs to share the one
+fixture prefix, and re-inspects both local IDs. Every Podman call carries the
+same explicit remote-off, root, imagestore, runroot, tmpdir, no-events,
+overlay-driver and configuration isolation as the composer.
+
+The baseline goes through `bootc install to-disk --generic-image
+--via-loopback --skip-fetch-check --composefs-backend --filesystem btrfs`.
+The host creates a sparse 20-GiB disk and injects one run-local root SSH public
+key into the installed deployment's persistent root-home state. QEMU runs as a
+foreground child of the harness (backgrounded only by the owning shell), with
+KVM, q35, OVMF pflash, a raw virtio disk and one loopback SSH forward. Its
+serial output and stderr remain on the caller's standard streams instead of
+growing unbounded workspace log files. SSH connection attempts, copies and
+every synchronous Podman/mount operation have explicit timeouts.
+
+`test/image/guest/validate-ucore.sh` is copied into the guest and invoked
+through an explicit `sh` interpreter. It creates one random-credential,
+wheel-group account solely because the broker capability and host-image
+queries require authentication; this is a prerequisite, not a repetition of
+#67's PAM positive/negative matrix. On the baseline, update and rolled-back
+baseline it requires the immutable `/usr/lib/pilothouse-image-test/slot`
+marker, enforcing SELinux and a functional `bootc status --json`. It compares
+the broker's exact sorted capability list with a list produced independently
+from systemd, journal, sysext, bootc, rpm-ostree and automatic-update unit-file
+observations. Opt-in capabilities remain absent because the packaged unit
+configures none. It also requires the read-only host-image broker query to
+report bootc available plus a named, digest-identified booted deployment.
+
+The SELinux smoke establishes a journal cursor immediately before the two
+broker reads and fails on any AVC denial after that cursor. It separately
+scans the current boot for AVC denials naming Pilothouse, its daemon, runtime
+directory or state directory. The test does not claim a dedicated Pilothouse
+SELinux domain; the released RPM ships no policy. It intentionally does not
+repeat #67's directory ownership, root-login rejection, wrong-password,
+journald read-back, runtime sentinel or plain-reboot posture assertions.
+
+For update transfer, the host exports the already-local update fixture as a
+job-local OCI archive, copies it into the guest, loads it with Podman and calls
+`bootc switch --transport containers-storage`; there is no local registry and
+no push. Before reboot the staged image name and digest must be present. After
+reboot, that exact staged digest must be booted and the former booted digest
+must occupy rollback. `bootc rollback` plus a second proven reboot must reverse
+those two digests and restore the baseline slot marker.
+
+The runner never uses `setsid`, `nohup`, daemonization or recursive deletion.
+Its exit path stops and waits for QEMU, force-removes and waits for the one
+named bootc-install container, unmounts the disk, detaches its recorded loop
+device, and verifies neither mount nor loop reference remains. It retains both
+the VM fixture directory and private container store. The later enclosing job
+must invoke acquisition and composition with a bounded log sink, wait for
+their helpers and this consumer, reset the exact private store and wait for
+that reset, then remove the workspace. No workflow invokes the image tier yet.
 
 **Still out of scope for this package.**
 

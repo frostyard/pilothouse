@@ -60,8 +60,23 @@ The composer retains its store and does not claim to clean up detached tool
 helpers or bound caller-owned stdout/stderr storage. The later job
 orchestrator must bound its log sink, terminate and wait for composer/tool
 helpers, then reset this exact Podman store and wait for reset to finish, and
-only then remove the whole ephemeral workspace. That orchestrator is not part
-of this slice.
+only then remove the whole ephemeral workspace.
+
+`sudo test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH` consumes that
+composed fixture. It installs the baseline with bootc's generic-image,
+loopback, btrfs and composefs path, injects only an ephemeral SSH key, boots
+under QEMU/KVM with OVMF, and checks the image-host deltas that #67 does not:
+enforcing SELinux without new or Pilothouse-related AVC denials, an exact
+broker capability set derived from independent guest probes, a usable bootc
+host-image report, staged-to-booted update continuity, rollback-slot
+continuity, and the reverse transition after `bootc rollback`. The update
+travels as a job-local OCI archive and is switched through guest-local
+containers-storage; never add a registry or external push. The runner owns and
+waits for QEMU, its named install container, its mount and its loop device, but
+it does not recursively delete the VM directory or reset the image store.
+The still-later enclosing job owns acquisition/composition invocation, a
+bounded log sink, exact-store reset after all children have stopped, workspace
+removal and CI wiring.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses

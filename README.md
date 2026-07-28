@@ -271,11 +271,40 @@ two temporary paths are pinned separately by `--tmpdir` and `TMPDIR`. Storage
 environment and late general-configuration overrides are cleared, file events
 are disabled, and remote Podman selection is disabled. It never pushes an
 image or deletes its store. Tool
-progress remains on caller-owned standard output and standard error. No
-workflow or production process orchestrator invokes composition yet; the
-later job must bound its log sink, reset the exact fixture Podman store only
-after composer/tool helpers have terminated, wait for reset to finish and
-only then remove the entire workspace after either success or failure.
+progress remains on caller-owned standard output and standard error.
+
+Once composition succeeds, the root-only VM consumer installs the baseline
+fixture onto a sparse disk with the same composefs-backed bootc path used by
+Snosi:
+
+```bash
+sudo test/image/ucore-vm-test.sh \
+    --workspace /absolute/path/to/ephemeral-workspace
+```
+
+It boots that disk under QEMU/KVM with OVMF, validates enforcing SELinux and
+the exact broker-advertised capability set against independent host probes,
+and requires Pilothouse's host-image query to report the booted bootc
+deployment. The controlled broker-query window must produce no AVC denial,
+and no current-boot AVC may name Pilothouse. The update fixture is exported to
+a job-local OCI archive, loaded into the guest's own container storage, and
+staged with `bootc switch --transport containers-storage`; no registry is
+started or contacted for the derived images. Reboots prove staged-to-booted
+digest continuity and placement of the old deployment in the rollback slot,
+then `bootc rollback` proves the slots reverse and the baseline `/usr` marker
+returns. The guest uses PAM only as the prerequisite for its authenticated
+capability reads; it does not repeat #67's activation, directory, negative
+login, journald-readback, or plain-reboot assertions.
+
+The VM consumer streams QEMU output to the caller-owned sink and bounds every
+other long-running child. On success and failure it stops and waits for QEMU,
+removes the named install container, unmounts the disk and detaches its loop
+device. It deliberately retains `fixture-ucore-vm` and never resets or deletes
+the private Podman store. No workflow or enclosing production orchestrator
+invokes acquisition, composition and the VM consumer yet; that final job must
+bound its log sink, wait for every producer and consumer, reset this exact
+fixture store and wait for reset to finish, and only then remove the entire
+workspace.
 
 ### Create a release
 
