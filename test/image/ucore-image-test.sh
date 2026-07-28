@@ -75,6 +75,7 @@ readonly storage_config="${image_dir}/storage.conf"
 current_phase_pid=""
 cleanup_active=0
 termination_status=0
+workspace_created=0
 
 handle_signal() {
     local signal_name="$1"
@@ -177,8 +178,15 @@ cleanup() {
     local cleanup_status=0
 
     cleanup_active=1
+    if ((workspace_created == 0)); then
+        return 0
+    fi
     reset_private_store || cleanup_status=1
-    rm -rf --one-file-system -- "$workspace" || cleanup_status=1
+    if rm -rf --one-file-system -- "$workspace"; then
+        workspace_created=0
+    else
+        cleanup_status=1
+    fi
     return "$cleanup_status"
 }
 
@@ -202,7 +210,26 @@ trap 'cleanup_on_exit $?' EXIT
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
 
-mkdir -m 0700 -- "$workspace"
+workspace_signal=""
+trap 'workspace_signal=INT' INT
+trap 'workspace_signal=TERM' TERM
+if mkdir -m 0700 -- "$workspace"; then
+    workspace_created=1
+else
+    trap 'handle_signal INT 130' INT
+    trap 'handle_signal TERM 143' TERM
+    case "$workspace_signal" in
+        INT) handle_signal INT 130 ;;
+        TERM) handle_signal TERM 143 ;;
+    esac
+    fail "cannot create the private workspace"
+fi
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+case "$workspace_signal" in
+    INT) handle_signal INT 130 ;;
+    TERM) handle_signal TERM 143 ;;
+esac
 cd -- "$REPOSITORY_ROOT"
 run_bounded acquire-release-rpm 5m \
     go run ./test/image/releaserpm --workspace "$workspace"

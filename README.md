@@ -323,9 +323,9 @@ It creates one private workspace and invokes acquisition, composition and VM
 validation synchronously with wall-clock and 4 MiB log-file bounds. Each phase
 uses one owned process group; the owner waits until that group exists before
 acting on a pending INT/TERM, then forwards and reaps it before cleanup.
-Cleanup latches further INT/TERM requests while it resets the exact
-workspace-local Podman store synchronously and removes the workspace. Its
-signal and failure paths use the same reset-then-remove ordering.
+Once a signal handler begins, reentrant INT/TERM is deliberately ignored while
+cleanup resets the exact workspace-local Podman store synchronously and removes
+the workspace. Signal and failure paths use the same reset-then-remove ordering.
 `.github/workflows/image-tier.yml` runs this on `ubuntu-26.04`
 because Podman 5's `--imagestore` support is part of the isolation contract. It
 runs on every push to `main` and, for pull requests, only while the `vm-boot`

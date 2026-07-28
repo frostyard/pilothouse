@@ -72,6 +72,85 @@ func TestUCoreOrchestratorForwardsSignalsAndWaits(t *testing.T) {
 	}
 }
 
+func TestUCoreOrchestratorCleanupRequiresWorkspaceOwnership(t *testing.T) {
+	source, err := os.ReadFile("ucore-image-test.sh")
+	require.NoError(t, err)
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(bytes.NewReader(source), "ucore-image-test.sh")
+	require.NoError(t, err)
+
+	var cleanupFunction string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, ok := node.(*syntax.FuncDecl)
+		if !ok || declaration.Name == nil || declaration.Name.Value != "cleanup" {
+			return true
+		}
+		var rendered bytes.Buffer
+		require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
+		cleanupFunction = rendered.String()
+		return false
+	})
+	require.NotEmpty(t, cleanupFunction)
+
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("owned=%t", owned), func(t *testing.T) {
+			sandbox := t.TempDir()
+			workspace := filepath.Join(sandbox, "workspace")
+			require.NoError(t, os.Mkdir(workspace, 0o700))
+			markerPath := filepath.Join(workspace, "foreign-marker")
+			require.NoError(t, os.WriteFile(markerPath, []byte("keep\n"), 0o600))
+			resetMarkerPath := filepath.Join(sandbox, "reset-called")
+			statePath := filepath.Join(sandbox, "workspace-created")
+			probePath := filepath.Join(sandbox, "cleanup-probe.sh")
+			probe := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+workspace="$1"
+reset_marker="$2"
+state_path="$3"
+workspace_created=%d
+cleanup_active=0
+reset_private_store() {
+    printf 'reset\n' >"$reset_marker"
+}
+%s
+cleanup
+printf '%%s\n' "$workspace_created" >"$state_path"
+`, boolInt(owned), cleanupFunction)
+			require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
+
+			output, runErr := exec.Command(
+				"bash",
+				probePath,
+				workspace,
+				resetMarkerPath,
+				statePath,
+			).CombinedOutput()
+			require.NoError(t, runErr, string(output))
+
+			state, readErr := os.ReadFile(statePath)
+			require.NoError(t, readErr)
+			if owned {
+				require.Equal(t, "0\n", string(state))
+				_, statErr := os.Stat(workspace)
+				require.ErrorIs(t, statErr, os.ErrNotExist)
+				resetMarker, resetErr := os.ReadFile(resetMarkerPath)
+				require.NoError(t, resetErr)
+				require.Equal(t, "reset\n", string(resetMarker))
+				return
+			}
+
+			require.Equal(t, "0\n", string(state))
+			marker, markerErr := os.ReadFile(markerPath)
+			require.NoError(t, markerErr,
+				"cleanup must not remove a workspace this invocation did not create")
+			require.Equal(t, "keep\n", string(marker))
+			_, resetErr := os.Stat(resetMarkerPath)
+			require.ErrorIs(t, resetErr, os.ErrNotExist,
+				"cleanup must not reset storage under an unowned workspace")
+		})
+	}
+}
+
 func testUCoreOrchestratorSignal(
 	t *testing.T,
 	functions map[string]string,

@@ -86,9 +86,9 @@ with both wall-clock and 4 MiB log-file limits, resets the exact private Podman
 store synchronously, and only then recursively removes the workspace. Each
 bounded phase owns one separate process group, records its PID, waits for group
 readiness, then forwards INT/TERM to the group and reaps it before cleanup.
-Cleanup latches any further termination request until exact-store reset and
-workspace removal finish. Its EXIT/INT/TERM path performs the same
-reset-then-remove sequence.
+Once a signal handler begins, reentrant INT/TERM is deliberately ignored so
+bounded exact-store reset and workspace removal cannot be interrupted. Its
+EXIT/INT/TERM path performs the same reset-then-remove sequence.
 `.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
 provides the required `--imagestore` option. The job runs on every push to
 `main` and on a pull request only while the `vm-boot` label is present. It is

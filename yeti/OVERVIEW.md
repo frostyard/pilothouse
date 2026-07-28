@@ -2733,12 +2733,14 @@ quiescent workspace is removed so derived images are not retained. Successful
 cleanup is followed by trap disarm and the final PASS line.
 If no configuration exists, all three store roots must also be absent; a
 partial or redirected store cannot turn reset into a successful no-op.
-The cleanup frame latches any further INT/TERM, forwards it to a live reset
-group if necessary, waits, and still reaches workspace removal; the most recent
-termination status is returned only after cleanup finishes. Cleanup traps are
-armed before the workspace directory is created, and the UUID-derived target
-is fixed first, so a signal around creation can remove either the just-created
-directory or the still-absent target without leaking it.
+Once a signal handler begins, it deliberately ignores reentrant INT/TERM while
+the bounded cleanup frame finishes; a first signal received while cleanup is
+already active is still forwarded to its live reset group, waited, and followed
+by workspace removal. Cleanup traps are armed before the workspace directory is
+created, and the exact `/proc/sys/kernel/random/uuid` v4 source and validation
+are structurally pinned. Cleanup also requires a successful-create ownership
+flag before reset or recursive removal, so a collision or failed `mkdir` cannot
+authorize deletion of a pre-existing target.
 
 `.github/workflows/image-tier.yml` carries one `ucore-vm` job. It runs on every
 push to `main`; for pull requests it runs only while the `vm-boot` label is
