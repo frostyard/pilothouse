@@ -195,8 +195,16 @@ type imageShellAssignment struct {
 
 type imageShellWrite struct {
 	command string
+	fd      string
+	op      string
 	target  string
 	line    uint
+}
+
+type imageShellWriter struct {
+	command string
+	fd      string
+	op      string
 }
 
 func imageShellRender(t *testing.T, node syntax.Node) string {
@@ -458,8 +466,14 @@ func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrit
 				switch redirect.Op.String() {
 				case ">", ">>", ">|", "&>":
 					if redirect.Word != nil {
+						fd := "1"
+						if redirect.N != nil {
+							fd = redirect.N.Value
+						}
 						writes = append(writes, imageShellWrite{
 							command: command,
+							fd:      fd,
+							op:      redirect.Op.String(),
 							target:  imageShellRender(t, redirect.Word),
 							line:    statement.Pos().Line(),
 						})
@@ -643,8 +657,9 @@ func imageCallIsForbiddenEvidenceMutator(call imageShellCall) bool {
 		argument, static := imageCallStaticArgument(call, index)
 		if static && slices.Contains(
 			[]string{
-				"bash", "cp", "dash", "dd", "install", "ln", "mv",
-				"read", "rsync", "sh", "tee", "touch", "truncate",
+				"bash", "cp", "dash", "dd", "env", "find", "install", "ln", "mv",
+				"nice", "nohup", "read", "rsync", "setsid", "sh", "tee", "timeout",
+				"touch", "truncate", "xargs",
 			},
 			filepath.Base(argument),
 		) {
@@ -758,7 +773,12 @@ func imageRequireFailingCall(t *testing.T, roots []syntax.Node, want ...string) 
 		"call %#v must occur exactly once as the left side of || fail", want)
 }
 
-func imageRequireDirectFailingCall(t *testing.T, file *syntax.File, want ...string) {
+func imageRequireDirectFailingCallCount(
+	t *testing.T,
+	file *syntax.File,
+	count int,
+	want ...string,
+) {
 	t.Helper()
 	matches := 0
 	for _, statement := range file.Stmts {
@@ -786,8 +806,38 @@ func imageRequireDirectFailingCall(t *testing.T, file *syntax.File, want ...stri
 		require.False(t, statement.Negated)
 		require.Empty(t, statement.Redirs)
 	}
+	require.Equalf(t, count, matches,
+		"critical evidence call %#v must have %d direct foreground top-level || fail statements",
+		want, count)
+}
+
+func imageRequireDirectFailingCall(t *testing.T, file *syntax.File, want ...string) {
+	t.Helper()
+	imageRequireDirectFailingCallCount(t, file, 1, want...)
+}
+
+func imageRequireDirectCall(t *testing.T, file *syntax.File, want ...string) {
+	t.Helper()
+	matches := 0
+	for _, statement := range file.Stmts {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok {
+			continue
+		}
+		var args []string
+		for _, word := range call.Args {
+			args = append(args, imageShellRender(t, word))
+		}
+		if !slices.Equal(args, want) {
+			continue
+		}
+		matches++
+		require.False(t, statement.Background)
+		require.False(t, statement.Negated)
+		require.Empty(t, statement.Redirs)
+	}
 	require.Equalf(t, 1, matches,
-		"critical evidence call %#v must be one direct foreground top-level || fail statement", want)
+		"critical call %#v must be one direct foreground top-level statement", want)
 }
 
 func countImageStatusCaptures(
@@ -1516,18 +1566,24 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, slotMarkerCall...)
 	imageRequireFailingCall(t, topLevel, slotMarkerCall...)
+	imageRequireDirectFailingCall(t, file, slotMarkerCall...)
 	enforcingCall := []string{"[", `"$(getenforce)"`, "=", "Enforcing", "]"}
 	imageRequireCall(t, topCalls, enforcingCall...)
 	imageRequireFailingCall(t, topLevel, enforcingCall...)
+	imageRequireDirectFailingCall(t, file, enforcingCall...)
 	bootcStatusCall := []string{"bootc", "status", "--json"}
 	imageRequireCall(t, topCalls, bootcStatusCall...)
 	require.Equal(t, 2, countImageFailingCalls(t, topLevel, bootcStatusCall...),
 		"both the initial bootc probe and captured host-image status must fail closed")
-	imageRequireCall(t, topCalls, "grep", "-qx", "bootc", `"$work_dir/actual"`)
+	imageRequireDirectFailingCallCount(t, file, 2, bootcStatusCall...)
+	bootcCapabilityCall := []string{"grep", "-qx", "bootc", `"$work_dir/actual"`}
+	imageRequireCall(t, topCalls, bootcCapabilityCall...)
+	imageRequireDirectFailingCall(t, file, bootcCapabilityCall...)
 	capabilityBrokerCall := []string{
 		"broker_query", `"$CAPABILITY_QUERY"`, `"$work_dir/query-body.json"`,
 	}
 	imageRequireCall(t, topCalls, capabilityBrokerCall...)
+	imageRequireDirectCall(t, file, capabilityBrokerCall...)
 	capabilityDecodeCall := []string{
 		"jq", "-ser",
 		"'" + imageCapabilityJQProgram + "'",
@@ -1535,16 +1591,43 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, capabilityDecodeCall...)
 	imageRequireFailingCall(t, topLevel, capabilityDecodeCall...)
+	imageRequireDirectFailingCall(t, file, capabilityDecodeCall...)
 	actualCapabilitySortCall := []string{
 		"sort", "-u", `"$work_dir/actual-unsorted"`,
 	}
 	imageRequireCall(t, topCalls, actualCapabilitySortCall...)
 	imageRequireFailingCall(t, topLevel, actualCapabilitySortCall...)
+	imageRequireDirectFailingCall(t, file, actualCapabilitySortCall...)
 	expectedCapabilitySortCall := []string{
 		"sort", "-u", "-o", `"$work_dir/expected"`, `"$work_dir/expected"`,
 	}
 	imageRequireCall(t, topCalls, expectedCapabilitySortCall...)
 	imageRequireFailingCall(t, topLevel, expectedCapabilitySortCall...)
+	imageRequireDirectFailingCall(t, file, expectedCapabilitySortCall...)
+	cursorJournalCall := []string{
+		"journalctl", "--no-pager", "--lines", "0", "--show-cursor",
+	}
+	imageRequireCall(t, topCalls, cursorJournalCall...)
+	imageRequireFailingCall(t, topLevel, cursorJournalCall...)
+	imageRequireDirectFailingCall(t, file, cursorJournalCall...)
+	cursorDecodeCall := []string{
+		"sed", "-n", "'s/^-- cursor: //p'", `"$work_dir/cursor-journal"`,
+	}
+	imageRequireCall(t, topCalls, cursorDecodeCall...)
+	cursorNonemptyCall := []string{"[", "-n", `"$journal_cursor"`, "]"}
+	imageRequireCall(t, topCalls, cursorNonemptyCall...)
+	imageRequireFailingCall(t, topLevel, cursorNonemptyCall...)
+	imageRequireDirectFailingCall(t, file, cursorNonemptyCall...)
+	var journalCursorAssignments []imageShellAssignment
+	for _, assignment := range imageShellAssignments(t, topLevel...) {
+		if assignment.name == "journal_cursor" {
+			journalCursorAssignments = append(journalCursorAssignments, assignment)
+		}
+	}
+	require.Equal(t, []imageShellAssignment{{
+		name: "journal_cursor", value: `"$(sed -n 's/^-- cursor: //p' "$work_dir/cursor-journal")"`,
+	}}, journalCursorAssignments,
+		"the journal cursor must have one reviewed decode assignment")
 
 	for _, expectedProbe := range [][]string{
 		{"systemctl", "show-environment"},
@@ -1572,6 +1655,7 @@ status="$(
 		"broker_query", `"$HOST_IMAGE_QUERY"`, `"$work_dir/host-image.json"`,
 	}
 	imageRequireCall(t, topCalls, hostBrokerCall...)
+	imageRequireDirectCall(t, file, hostBrokerCall...)
 	imageRequireExactCallCount(t, topCalls, 1, capabilityBrokerCall...)
 	imageRequireExactCallCount(t, topCalls, 1, hostBrokerCall...)
 	for _, call := range topCalls {
@@ -1585,6 +1669,7 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, hostAvailabilityCall...)
 	imageRequireFailingCall(t, topLevel, hostAvailabilityCall...)
+	imageRequireDirectFailingCall(t, file, hostAvailabilityCall...)
 	imageRequireCall(t, topCalls, "bootc", "status", "--json")
 	expectedHostNormalizeCall := []string{
 		"jq", "-e", "'" + imageExpectedHostJQProgram + "'",
@@ -1592,12 +1677,29 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, expectedHostNormalizeCall...)
 	imageRequireFailingCall(t, topLevel, expectedHostNormalizeCall...)
+	imageRequireDirectFailingCall(t, file, expectedHostNormalizeCall...)
+	bootedImageShapeCall := []string{
+		"jq", "-e", "'\n    .booted.image | type == \"string\" and length > 0\n'",
+		`"$work_dir/expected-host-image.json"`,
+	}
+	imageRequireCall(t, topCalls, bootedImageShapeCall...)
+	imageRequireFailingCall(t, topLevel, bootedImageShapeCall...)
+	imageRequireDirectFailingCall(t, file, bootedImageShapeCall...)
+	bootedDigestShapeCall := []string{
+		"jq", "-e",
+		"'\n    .booted.digest | type == \"string\" and\n        test(\"^sha256:[0-9a-f]{64}$\")\n'",
+		`"$work_dir/expected-host-image.json"`,
+	}
+	imageRequireCall(t, topCalls, bootedDigestShapeCall...)
+	imageRequireFailingCall(t, topLevel, bootedDigestShapeCall...)
+	imageRequireDirectFailingCall(t, file, bootedDigestShapeCall...)
 	actualHostNormalizeCall := []string{
 		"jq", "-e", "'" + imageActualHostJQProgram + "'",
 		`"$work_dir/host-image.json"`,
 	}
 	imageRequireCall(t, topCalls, actualHostNormalizeCall...)
 	imageRequireFailingCall(t, topLevel, actualHostNormalizeCall...)
+	imageRequireDirectFailingCall(t, file, actualHostNormalizeCall...)
 	hostComparisonCall := []string{
 		"cmp", "-s", `"$work_dir/expected-host-image.json"`, `"$work_dir/actual-host-image.json"`,
 	}
@@ -1616,6 +1718,7 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, windowJournalCall...)
 	imageRequireFailingCall(t, topLevel, windowJournalCall...)
+	imageRequireDirectFailingCall(t, file, windowJournalCall...)
 	windowAVCCall := []string{
 		"jq", "-Rse", "'" + imageWindowAVCJQProgram + "'", `"$work_dir/new-avcs"`,
 	}
@@ -1635,23 +1738,28 @@ status="$(
 	}
 	imageRequireCall(t, topCalls, bootJournalCall...)
 	imageRequireFailingCall(t, topLevel, bootJournalCall...)
+	imageRequireDirectFailingCall(t, file, bootJournalCall...)
 
-	criticalWrites := map[string]map[string]int{
-		`"$work_dir/actual-unsorted"`:          {"jq": 1},
-		`"$work_dir/actual"`:                   {"sort": 1},
-		`"$work_dir/expected"`:                 {":": 1, "printf": 7},
-		`"$work_dir/bootc-status.json"`:        {"bootc": 1},
-		`"$work_dir/expected-host-image.json"`: {"jq": 1},
-		`"$work_dir/actual-host-image.json"`:   {"jq": 1},
-		`"$work_dir/new-avcs"`:                 {"journalctl": 1},
-		`"$work_dir/boot-journal"`:             {"journalctl": 1},
+	stdoutWrite := func(command, op string) imageShellWriter {
+		return imageShellWriter{command: command, fd: "1", op: op}
+	}
+	criticalWrites := map[string]map[imageShellWriter]int{
+		`"$work_dir/actual-unsorted"`:          {stdoutWrite("jq", ">"): 1},
+		`"$work_dir/actual"`:                   {stdoutWrite("sort", ">"): 1},
+		`"$work_dir/expected"`:                 {stdoutWrite(":", ">"): 1, stdoutWrite("printf", ">>"): 7},
+		`"$work_dir/cursor-journal"`:           {stdoutWrite("journalctl", ">"): 1},
+		`"$work_dir/bootc-status.json"`:        {stdoutWrite("bootc", ">"): 1},
+		`"$work_dir/expected-host-image.json"`: {stdoutWrite("jq", ">"): 1},
+		`"$work_dir/actual-host-image.json"`:   {stdoutWrite("jq", ">"): 1},
+		`"$work_dir/new-avcs"`:                 {stdoutWrite("journalctl", ">"): 1},
+		`"$work_dir/boot-journal"`:             {stdoutWrite("journalctl", ">"): 1},
 		`"$work_dir/query-body.json"`:          {},
 		`"$work_dir/host-image.json"`:          {},
 	}
-	observedWrites := make(map[string]map[string]int, len(criticalWrites))
+	observedWrites := make(map[string]map[imageShellWriter]int, len(criticalWrites))
 	writeLines := make(map[string][]uint, len(criticalWrites))
 	for target := range criticalWrites {
-		observedWrites[target] = map[string]int{}
+		observedWrites[target] = map[imageShellWriter]int{}
 	}
 	allowedOutputTargets := map[string]bool{
 		"/dev/null":                            true,
@@ -1674,7 +1782,11 @@ status="$(
 		if _, critical := criticalWrites[write.target]; !critical {
 			continue
 		}
-		observedWrites[write.target][write.command]++
+		observedWrites[write.target][imageShellWriter{
+			command: write.command,
+			fd:      write.fd,
+			op:      write.op,
+		}]++
 		writeLines[write.target] = append(writeLines[write.target], write.line)
 	}
 	require.Equal(t, criticalWrites, observedWrites,
@@ -1698,8 +1810,17 @@ status="$(
 		}
 	}
 
+	cursorWriteLine := writeLines[`"$work_dir/cursor-journal"`][0]
+	cursorDecodeLine := imageExactCallLine(t, topCalls, cursorDecodeCall...)
+	cursorNonemptyLine := imageExactCallLine(t, topCalls, cursorNonemptyCall...)
+	capabilityBrokerLine := imageExactCallLine(t, topCalls, capabilityBrokerCall...)
+	hostBrokerLine := imageExactCallLine(t, topCalls, hostBrokerCall...)
+	require.Less(t, cursorWriteLine, cursorDecodeLine)
+	require.Less(t, cursorDecodeLine, cursorNonemptyLine)
+	require.Less(t, cursorNonemptyLine, capabilityBrokerLine)
+	require.Less(t, cursorNonemptyLine, hostBrokerLine)
 	require.Less(t,
-		imageExactCallLine(t, topCalls, capabilityBrokerCall...),
+		capabilityBrokerLine,
 		imageExactCallLine(t, topCalls, capabilityDecodeCall...),
 	)
 	capabilityCompareLine := imageExactCallLine(t, topCalls, capabilityComparisonCall...)
@@ -1712,7 +1833,7 @@ status="$(
 		}
 	}
 	require.Less(t,
-		imageExactCallLine(t, topCalls, hostBrokerCall...),
+		hostBrokerLine,
 		imageExactCallLine(t, topCalls, actualHostNormalizeCall...),
 	)
 	hostCompareLine := imageExactCallLine(t, topCalls, hostComparisonCall...)
@@ -1922,13 +2043,15 @@ sed -n p "$work_dir/expected" >"$work_dir/actual"
 { :; } >"$work_dir/actual-host-image.json"
 evidence_target="$work_dir/actual"
 : >"$evidence_target"
-`, syntax.LangPOSIX)
+journalctl 2>"$work_dir/new-avcs"
+	`, syntax.LangPOSIX)
 	require.ElementsMatch(t, []imageShellWrite{
-		{command: "sed", target: `"$work_dir/actual"`, line: 2},
-		{command: ":", target: `"$work_dir/new-avcs"`, line: 3},
-		{command: "<compound>", target: `"$work_dir/boot-journal"`, line: 4},
-		{command: "<compound>", target: `"$work_dir/actual-host-image.json"`, line: 5},
-		{command: ":", target: `"$evidence_target"`, line: 7},
+		{command: "sed", fd: "1", op: ">", target: `"$work_dir/actual"`, line: 2},
+		{command: ":", fd: "1", op: ">", target: `"$work_dir/new-avcs"`, line: 3},
+		{command: "<compound>", fd: "1", op: ">", target: `"$work_dir/boot-journal"`, line: 4},
+		{command: "<compound>", fd: "1", op: ">", target: `"$work_dir/actual-host-image.json"`, line: 5},
+		{command: ":", fd: "1", op: ">", target: `"$evidence_target"`, line: 7},
+		{command: "journalctl", fd: "2", op: ">", target: `"$work_dir/new-avcs"`, line: 8},
 	}, imageShellOutputWrites(t, imageShellTopLevel(overwrite)...),
 		"redirection writes to evidence files must remain visible to the writer-set guard")
 }

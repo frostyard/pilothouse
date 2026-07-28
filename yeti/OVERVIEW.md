@@ -2557,17 +2557,25 @@ separately to the independently probed expected file and decoded broker file;
 the expected and actual host-image normalizers likewise accept only their
 respective `bootc status` and broker-response inputs. Every critical evidence
 file has a complete, exact redirection-writer set and all of those writers must
+use the reviewed command, stdout descriptor, operator and literal target, then
 precede its comparison/scan; generic copy/move/truncate/stream writers and
 every alternate sort are forbidden on the guest evidence path. Redirection-only
 and compound-command statements are recorded too, and every output target must
 be one reviewed literal path, so variable and `/./` path aliases cannot evade
 the writer set. The broker query helper's complete curl/output/status body is
 exact-pinned because its legitimate destination is necessarily a parameter.
+Execution wrappers such as `env`, `nice`, `nohup`, `setsid`, `timeout`, `find`
+and `xargs` are forbidden on that path so they cannot hide a path-qualified or
+dynamically selected writer.
 The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Both scans
-and both evidence comparisons must be direct foreground top-level statements,
-so an unreachable outer branch cannot preserve their AST while skipping them.
+and every core slot/SELinux/capability/host-image assertion or normalizer must
+be direct foreground top-level fatal statements, so an unreachable outer branch
+cannot preserve their AST while skipping them. The unique cursor
+writer/decode/nonempty chain is ordered before both exact broker calls, and its
+assignment set is closed, so moving or recapturing the cursor cannot exclude the
+operations under test.
 Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
