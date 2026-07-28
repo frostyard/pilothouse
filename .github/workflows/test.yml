@@ -25,7 +25,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Keep this aligned with GOLANGCI_LINT_VERSION in the Makefile so
+          # make docker-ci and the credential-free CI gate cannot drift.
+          version: v2.11.4
 
   security:
     name: Security Scan
