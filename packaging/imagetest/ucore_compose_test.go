@@ -51,6 +51,7 @@ func TestUCoreComposeResolvesVerifiesAndBuildsTwoLocalImages(t *testing.T) {
 	expectedManifest := `{
 		"schema": 1,
 		"kind": "pilothouse-ucore-image-fixture",
+		"producer_uid": ` + fmt.Sprint(os.Geteuid()) + `,
 		"source": "ghcr.io/ublue-os/ucore:latest",
 		"source_index_digest": "` + testIndexDigest + `",
 		"source_linux_amd64_digest": "` + testMemberDigest + `",

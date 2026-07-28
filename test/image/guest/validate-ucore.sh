@@ -1,0 +1,263 @@
+#!/bin/sh
+# Runs inside the ephemeral uCore guest as root. This does not repeat the #67
+# package-install suite; it checks only image-host facts and uses one broker
+# login as the prerequisite for reading Pilothouse's advertised capabilities.
+set -eu
+
+CREDENTIALS=/root/pilothouse-image-credentials.json
+BROKER_SOCKET=/run/pilothouse/broker.sock
+CAPABILITY_QUERY=org.frostyard.pilothouse.capabilities.list
+HOST_IMAGE_QUERY=org.frostyard.pilothouse.maintenance.host_image_status
+
+fail() {
+    printf 'ucore guest: %s\n' "$*" >&2
+    exit 1
+}
+
+log() {
+    printf 'ucore guest: %s\n' "$*"
+}
+
+[ "$(id -u)" = 0 ] || fail "validation must run as root"
+for tool in bootc chpasswd cmp curl getenforce getent grep journalctl jq \
+    podman sed systemctl useradd usermod; do
+    command -v "$tool" >/dev/null 2>&1 ||
+        fail "required image-host tool is unavailable: $tool"
+done
+
+case "${1-}" in
+    prepare)
+        [ -f "$CREDENTIALS" ] || fail "credentials file is missing"
+        username="$(jq -er '.username' "$CREDENTIALS")" ||
+            fail "credentials carry no username"
+        password="$(jq -er '.password' "$CREDENTIALS")" ||
+            fail "credentials carry no password"
+        getent group wheel >/dev/null 2>&1 || fail "uCore has no wheel administrator group"
+        if ! id "$username" >/dev/null 2>&1; then
+            useradd --create-home --groups wheel "$username"
+        else
+            usermod --append --groups wheel "$username"
+        fi
+        printf '%s:%s\n' "$username" "$password" | chpasswd
+        unset password
+        log "prepared the ephemeral administrator used to read broker capabilities"
+        exit 0
+        ;;
+    validate)
+        expected_slot="${2-}"
+        case "$expected_slot" in baseline | update) ;; *) fail "validate needs baseline or update" ;; esac
+        ;;
+    *)
+        fail "usage: validate-ucore.sh prepare | validate baseline|update"
+        ;;
+esac
+
+[ "$(cat /usr/lib/pilothouse-image-test/slot)" = "$expected_slot" ] ||
+    fail "booted /usr marker does not identify the expected $expected_slot deployment"
+[ "$(getenforce)" = Enforcing ] ||
+    fail "SELinux is not enforcing"
+[ -S "$BROKER_SOCKET" ] ||
+    fail "the image-booted broker socket is unavailable"
+bootc status --json >/dev/null ||
+    fail "bootc status is not functional on the booted image"
+
+work_dir="$(mktemp -d)"
+chmod 0700 "$work_dir"
+cleanup() {
+    rm -f "$work_dir/login.json" "$work_dir/login-body.json" \
+        "$work_dir/query.json" "$work_dir/query-body.json" \
+        "$work_dir/auth.header" "$work_dir/actual-unsorted" \
+        "$work_dir/actual" "$work_dir/expected" \
+        "$work_dir/host-image.json" "$work_dir/bootc-status.json" \
+        "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" \
+        "$work_dir/cursor-journal" \
+        "$work_dir/new-avcs" "$work_dir/boot-journal"
+    rmdir "$work_dir"
+}
+trap cleanup EXIT
+
+username="$(jq -er '.username' "$CREDENTIALS")" ||
+    fail "credentials carry no username"
+password="$(jq -er '.password' "$CREDENTIALS")" ||
+    fail "credentials carry no password"
+
+PILOTHOUSE_IMAGE_TEST_USERNAME="$username" \
+    PILOTHOUSE_IMAGE_TEST_PASSWORD="$password" \
+    jq -n '{
+        username: env.PILOTHOUSE_IMAGE_TEST_USERNAME,
+        password: env.PILOTHOUSE_IMAGE_TEST_PASSWORD,
+        remote: "ucore-image-test"
+    }' >"$work_dir/login.json"
+unset password PILOTHOUSE_IMAGE_TEST_PASSWORD
+
+login_status="$(
+    curl --silent --show-error --max-time 30 \
+        --unix-socket "$BROKER_SOCKET" \
+        --request POST \
+        --header 'Content-Type: application/json' \
+        --data-binary @"$work_dir/login.json" \
+        --output "$work_dir/login-body.json" \
+        --write-out '%{http_code}' \
+        http://localhost/v1/login
+)" || fail "broker login did not complete"
+[ "$login_status" = 200 ] ||
+    fail "broker login returned HTTP $login_status, expected 200"
+
+token="$(jq -er '.token' "$work_dir/login-body.json")" ||
+    fail "broker login returned no token"
+PILOTHOUSE_IMAGE_TEST_TOKEN="$token" \
+    jq -nj '"Authorization: Bearer " + env.PILOTHOUSE_IMAGE_TEST_TOKEN' \
+    >"$work_dir/auth.header"
+unset token PILOTHOUSE_IMAGE_TEST_TOKEN
+printf '%s\n' '{"parameters":{}}' >"$work_dir/query.json"
+
+journalctl --no-pager --lines 0 --show-cursor >"$work_dir/cursor-journal" ||
+    fail "could not capture the journal cursor before the image-host queries"
+journal_cursor="$(sed -n 's/^-- cursor: //p' "$work_dir/cursor-journal")" ||
+    fail "could not decode the journal cursor before the image-host queries"
+[ -n "$journal_cursor" ] ||
+    fail "journalctl returned no cursor before the image-host queries"
+
+broker_query() {
+    query_id="$1"
+    output="$2"
+    status="$(
+        curl --silent --show-error --max-time 30 \
+            --unix-socket "$BROKER_SOCKET" \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header @"$work_dir/auth.header" \
+            --data-binary @"$work_dir/query.json" \
+            --output "$output" \
+            --write-out '%{http_code}' \
+            "http://localhost/v1/queries/$query_id"
+    )" || fail "$query_id did not complete"
+    [ "$status" = 200 ] ||
+        fail "$query_id returned HTTP $status, expected 200"
+}
+
+broker_query "$CAPABILITY_QUERY" "$work_dir/query-body.json"
+jq -ser '
+    if length == 1 and
+       (.[0].result.capabilities |
+            type == "array" and
+            all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    then .[0].result.capabilities[]
+    else error("want exactly one response with canonical capability identifiers")
+    end
+' "$work_dir/query-body.json" \
+    >"$work_dir/actual-unsorted" ||
+    fail "could not decode the broker's advertised capability list"
+LC_ALL=C sort -u "$work_dir/actual-unsorted" >"$work_dir/actual" ||
+    fail "could not normalize the broker's advertised capability list"
+
+# Build the expectation from independent host observations. The four opt-in
+# dependencies are deliberately absent: the packaged uCore unit configures
+# none of them, even though Podman itself is present in the base image.
+: >"$work_dir/expected"
+[ -d /run/systemd/system ] &&
+    systemctl show-environment >/dev/null 2>&1 &&
+    printf '%s\n' systemd >>"$work_dir/expected"
+journalctl --no-pager --lines 0 >/dev/null 2>&1 &&
+    printf '%s\n' journald >>"$work_dir/expected"
+systemd-sysext list >/dev/null 2>&1 &&
+    printf '%s\n' sysext >>"$work_dir/expected"
+bootc status --json >/dev/null 2>&1 &&
+    printf '%s\n' bootc >>"$work_dir/expected"
+rpm-ostree status --json >/dev/null 2>&1 &&
+    printf '%s\n' rpm-ostree >>"$work_dir/expected"
+
+if systemctl list-unit-files bootc-fetch-apply-updates.timer --no-legend |
+    grep -q '^bootc-fetch-apply-updates\.timer[[:space:]]' &&
+   systemctl list-unit-files bootc-fetch-apply-updates.service --no-legend |
+    grep -q '^bootc-fetch-apply-updates\.service[[:space:]]'; then
+    printf '%s\n' autoupdate-bootc >>"$work_dir/expected"
+fi
+if systemctl list-unit-files rpm-ostreed-automatic.timer --no-legend |
+    grep -q '^rpm-ostreed-automatic\.timer[[:space:]]' &&
+   systemctl list-unit-files rpm-ostreed-automatic.service --no-legend |
+    grep -q '^rpm-ostreed-automatic\.service[[:space:]]'; then
+    printf '%s\n' autoupdate-rpm-ostree >>"$work_dir/expected"
+fi
+LC_ALL=C sort -u -o "$work_dir/expected" "$work_dir/expected" ||
+    fail "could not normalize independently observed image capabilities"
+
+grep -qx bootc "$work_dir/actual" ||
+    fail "Pilothouse did not advertise bootc on the bootc host"
+cmp -s "$work_dir/expected" "$work_dir/actual" ||
+    fail "advertised capabilities do not exactly match independently observed image capabilities"
+
+bootc status --json >"$work_dir/bootc-status.json" ||
+    fail "could not capture bootc's deployment slots for the host-image comparison"
+jq -e '
+    def observed($slot):
+        .status[$slot] as $entry |
+        if $entry == null then null
+        else {
+            image: ($entry.image.image.image // ""),
+            digest: ($entry.image.imageDigest // "")
+        }
+        end;
+    {
+        booted: observed("booted"),
+        staged: observed("staged"),
+        rollback: observed("rollback")
+    }
+' "$work_dir/bootc-status.json" >"$work_dir/expected-host-image.json" ||
+    fail "could not normalize bootc's deployment slots"
+jq -e '
+    .booted.image | type == "string" and length > 0
+' "$work_dir/expected-host-image.json" >/dev/null ||
+    fail "bootc reports no named booted deployment"
+jq -e '
+    .booted.digest | type == "string" and
+        test("^sha256:[0-9a-f]{64}$")
+' "$work_dir/expected-host-image.json" >/dev/null ||
+    fail "bootc reports no digest-identified booted deployment"
+
+broker_query "$HOST_IMAGE_QUERY" "$work_dir/host-image.json"
+jq -e '
+    .result.bootc_available == true
+' "$work_dir/host-image.json" >/dev/null ||
+    fail "Pilothouse's host-image query reports bootc unavailable"
+jq -e '
+    def reported($entry):
+        if $entry == null then null
+        else {
+            image: ($entry.image // ""),
+            digest: ($entry.digest // "")
+        }
+        end;
+    .result | {
+        booted: reported(.booted),
+        staged: reported(.staged),
+        rollback: reported(.rollback)
+    }
+' "$work_dir/host-image.json" >"$work_dir/actual-host-image.json" ||
+    fail "could not normalize Pilothouse's host-image deployment slots"
+cmp -s "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" ||
+    fail "Pilothouse's host-image deployment slots do not exactly match bootc status"
+
+# Fail on every AVC created during the controlled broker-query window, and on
+# any current-boot AVC that names Pilothouse. This is an enforcing smoke test,
+# not a claim that the RPM provides a dedicated Pilothouse SELinux domain.
+journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs" ||
+    fail "could not read the journal after the image-host query cursor"
+jq -Rse '
+    test("avc:[[:space:]]+denied"; "i") | not
+' "$work_dir/new-avcs" >/dev/null ||
+    fail "an unexpected SELinux AVC denial occurred during image-host validation"
+journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||
+    fail "could not read the current boot journal for Pilothouse AVC denials"
+jq -Rse '
+    [
+        splits("\n") |
+        select(
+            test("avc:[[:space:]]+denied"; "i") and
+            test("pilothouse|pilothoused|/run/pilothouse|/var/lib/pilothouse"; "i")
+        )
+    ] | length == 0
+' "$work_dir/boot-journal" >/dev/null ||
+    fail "the current boot contains a Pilothouse-related SELinux AVC denial"
+
+log "$expected_slot deployment is enforcing, capability-truthful and AVC-clean"

@@ -133,6 +133,16 @@ test/image/compose-ucore.sh
                       baseline/update derivatives in workspace-local Podman
                       storage; no workflow invokes it yet (see "Image-tier
                       uCore composition" below)
+test/image/ucore-vm-test.sh
+                      fourth #80 slice: consumes those two local images,
+                      installs the baseline through bootc's composefs path,
+                      boots QEMU/OVMF, validates enforcing SELinux and truthful
+                      capabilities, switches to the update through guest-local
+                      containers-storage, then rolls back with digest-slot
+                      continuity checks. It quiesces every live resource it
+                      owns but leaves exact-store reset and workspace deletion
+                      to the later enclosing job (see "Image-tier uCore VM
+                      consumer" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It includes
@@ -2427,7 +2437,11 @@ then runs `bootc container lint`. The build context is only the released-RPM
 fixture directory, never the workspace-local container store. The output
 manifest records the source digests, both local refs and IDs, and all five
 storage paths. There is no push, upload, host-store image or workflow wiring
-in this slice.
+in this slice. It also records the composer's effective UID. A composition
+intended for the VM consumer must be run as UID 0: bootc disk installation is
+rootful, and rootful Podman cannot safely reopen a rootless store. Compose,
+consume, exact-store reset and workspace removal therefore stay in one
+rootful ownership domain.
 
 `packaging/imagetest/ucore_compose_test.go` executes the real composer only
 against bounded fake Skopeo, Cosign and Podman tools through the image tier's
@@ -2442,10 +2456,245 @@ instruction parser prevents commented-out local-RPM installation or
 `bootc container lint` from satisfying the Containerfile contract, and a
 SHA-256 assertion pins the vendored key.
 
-Later #80 slices boot those fixtures, exercise bootc update/rollback, wire the
-job, and enforce the SELinux/capability assertions. The enforcing-SELinux
-check looks for unexpected AVC denials but does not claim a dedicated
-Pilothouse confined domain; the released RPM ships no such policy today.
+The fourth slice consumes these fixtures as described next. Workflow wiring
+and the enclosing acquire/compose/reset/remove lifecycle remain later #80
+slices.
+
+**Image-tier uCore VM consumer (#80, fourth slice).**
+`test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH [--ssh-port PORT]` is a
+root-only consumer of a completed `fixture-ucore-images/fixture.json`. It
+accepts no source image or artifact argument. Before booting anything it
+requires the manifest's graphroot, imagestore, runroot, libpod tmpdir, image
+tmpdir and storage configuration to equal their fixed paths below the supplied
+canonical workspace, requires the baseline/update refs to share the one
+fixture prefix, requires the recorded producer UID to be 0, and re-inspects
+both local IDs. Every Podman call carries the
+same explicit remote-off, root, imagestore, runroot, tmpdir, no-events,
+overlay-driver and configuration isolation as the composer.
+
+The baseline goes through `bootc install to-disk --generic-image
+--via-loopback --skip-fetch-check --composefs-backend --filesystem btrfs`.
+The host creates a sparse 20-GiB disk and passes one run-local root SSH public
+key through bootc's `--root-ssh-authorized-keys` option. It does not mount or
+write a guessed partition, so bootc owns the layout and SELinux labeling.
+QEMU runs as a foreground child of the harness (backgrounded only by the
+owning shell), with
+KVM, q35, OVMF pflash, a raw virtio disk and one loopback SSH forward. Its
+serial output and stderr remain on the caller's standard streams instead of
+growing unbounded workspace log files. SSH connection attempts, copies and
+every synchronous Podman operation have explicit timeouts.
+
+`test/image/guest/validate-ucore.sh` is copied into the guest and invoked
+through an explicit `sh` interpreter. It creates one random-credential,
+wheel-group account solely because the broker capability and host-image
+queries require authentication; this is a prerequisite, not a repetition of
+#67's PAM positive/negative matrix. It neither restarts nor asserts activation
+of the services #67 already covers. On the baseline, update and rolled-back
+baseline it requires the immutable `/usr/lib/pilothouse-image-test/slot`
+marker, enforcing SELinux and a functional `bootc status --json`. It compares
+the broker's exact sorted capability list with a list produced independently
+from systemd, journal, sysext, bootc, rpm-ostree and automatic-update unit-file
+observations. The response must be one JSON document containing only canonical
+lowercase capability identifiers; embedded line breaks and other output-shape
+injections are rejected before `jq -r` can turn them into comparison lines.
+Opt-in capabilities remain absent because the packaged unit configures none.
+It also requires the read-only host-image broker query to
+report bootc available. Shape alone is insufficient: the broker's booted,
+staged and rollback image/digest pairs are normalized and compared exactly
+with an independent `bootc status --json` captured in the same guest phase.
+
+The SELinux smoke establishes a journal cursor immediately before the two
+broker reads and fails on any AVC denial after that cursor. It separately
+scans the current boot for AVC denials naming Pilothouse, its daemon, runtime
+directory or state directory. The test does not claim a dedicated Pilothouse
+SELinux domain; the released RPM ships no policy. It intentionally does not
+repeat #67's directory ownership, root-login rejection, wrong-password,
+journald read-back, runtime sentinel or plain-reboot posture assertions.
+
+For update transfer, the host exports the already-local update fixture as a
+job-local OCI archive, copies it into the guest, loads it with Podman and calls
+`bootc switch --transport containers-storage`; there is no local registry and
+no push. Before reboot the staged image name and digest must be present. After
+reboot, that exact staged digest must be booted and the former booted digest
+must occupy rollback. `bootc rollback` plus a second proven reboot must reverse
+those two digests and restore the baseline slot marker.
+
+The runner never uses `setsid`, `nohup`, daemonization or recursive deletion.
+Its exit path stops and waits for QEMU, force-removes and waits for the one
+named bootc-install container, enumerates and detaches every loop device backed
+by the exact private disk (including one a killed installer left behind), and
+verifies no loop reference remains. It retains both
+the VM fixture directory and private container store. The later enclosing job
+must invoke acquisition and composition with a bounded log sink, wait for
+their helpers and this consumer, reset the exact private store and wait for
+that reset, then remove the workspace. No workflow invokes the image tier yet.
+The install-to-VM handoff has its own direct fatal loop-detach check: it is
+ordered after the exact bootc install and before update export or QEMU work, so
+the VM never opens a disk that the installer still holds through a loop device.
+QEMU is the only background statement in the runner's complete AST, including
+all function bodies. Bash coprocesses, shell coprocess/disown forms and any
+additional process substitution are forbidden; the only process substitution
+is the consumed `awk` input in the exact `detach_disk_loops` body. Every other
+helper remains synchronous, so no untracked child can retain CI descriptors
+past cleanup. The SSH/SCP and Podman operations that can wait on external
+systems retain their explicit timeouts. All runner function bodies are exact,
+including usage and OVMF discovery.
+All `losetup` and private-store Podman invocations are closed to their reviewed
+query/detach and inspect/install/save/named-remove forms. On success, cleanup is
+immediately followed by trap disarm, which is the penultimate statement; the
+exact PASS log is last. No process, loop or container can be created after the
+last verified cleanup.
+
+`packaging/imagetest/ucore_vm_test.go` parses both harnesses with
+`mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
+function body or the top-level main region. Named functions must have exactly
+one definition across the complete AST, and each script's complete function
+name set is fixed so a new function cannot shadow `set`, `trap`, `timeout`,
+`cmp` or another reviewed builtin/program. The reviewed shell error modes must
+be the first executable statements; dynamic `eval`/source calls are forbidden.
+Alias, `shopt`, `enable` and hash-table mutation are forbidden as well, so
+later exact command nodes cannot be rebound after parsing; quoted command names,
+`command`/`builtin` options and repeated wrapper prefixes are normalized for
+that check. Every command position (including a wrapped effective command) must
+resolve statically from literal or quoted AST word parts; command names carrying
+shell escapes and parameter expansions are rejected rather than normalized, so
+they cannot hide a trap or teardown bypass.
+The runner main path's complete ordered effective-command sequence is fixed,
+including multiplicity. An otherwise unknown outer wrapper cannot introduce a
+dynamic interpreter or alternate guest bridge while evading the argv scans.
+Its complete output-writer and descriptor-routing set is fixed too, and both
+firmware copies are exact direct foreground statements with no redirection.
+Together those guards keep the canonical guest validator unchanged between its
+source check and the reviewed guest copy.
+The non-returning `fail` implementations are exact, as are the resource teardown
+and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
+argument vector rather than pieced together from subsequences; unique install,
+switch and foreground-QEMU actions must occur exactly once across the whole
+AST. Quoted or unquoted path-qualified Podman/QEMU executables are normalized
+for the same policy. The QEMU statement itself must be backgrounded and
+immediately followed by its `$!` capture, and the EXIT trap must be one direct,
+foreground parent-shell statement armed before the first disk/resource mutation
+and disarmed only after one direct, fatal explicit cleanup. The fixture storage
+paths, Podman argument array, QEMU PID and observed deployment-slot identities
+become readonly after their separately fail-closed captures. Their assignment
+sets are exact, so cleanup cannot be redirected to a different container store
+or disk and update/rollback comparisons cannot be made self-referential. The
+capture and matching readonly declaration sequences are contiguous top-level
+statements; an indirect `read` or other mutation cannot be inserted into the
+gap before protection. Every statement in those sequences is foreground,
+non-negated and unredirected, so a background readonly declaration cannot
+confine protection to a subshell. The same parent-shell execution rule applies
+to every runner readonly declaration, including the disk, update archive, SSH
+key, credentials, firmware and named install-container identities.
+The canonical workspace and SSH port likewise become readonly immediately
+after the exact port-validation statement and before root checks, fixture paths
+or privileged container mounts use them; later code cannot redirect the
+installer's bind mount to another host path. The canonical equality statement,
+port validation and readonly declaration are contiguous, and the complete
+workspace/canonical-workspace/port assignment sets are exact.
+Comparisons and
+critical evidence calls must feed `|| fail`. Capability sorting is pinned
+separately to the independently probed expected file and decoded broker file;
+the expected and actual host-image normalizers likewise accept only their
+respective `bootc status` and broker-response inputs. Every critical evidence
+file has a complete, exact redirection-writer set and all of those writers must
+use the reviewed command, file descriptor, operator and literal target, then
+precede its comparison/scan; generic copy/move/truncate/stream writers and
+every alternate sort are forbidden on the guest evidence path. Redirection-only
+and compound-command statements are recorded too. The write-capable `<>` form
+and every `<&`/`>&` descriptor duplication are covered alongside ordinary
+output redirections. A critical writer statement must contain its one reviewed
+redirection and no additional descriptor routing, so a later `1>&3` cannot
+leave an empty evidence file behind. Every pathname target must be one reviewed
+literal path, so descriptor changes, variable targets and `/./` path aliases
+cannot evade the writer set. The broker query
+helper's complete curl/output/status body is exact-pinned because its legitimate
+destination is necessarily a parameter. The guest main path also has a closed
+allowlist of effective command names; `stdbuf`, `chroot`, `awk`, shell
+interpreters and any other unreviewed execution layer fail the guard before
+they can hide a writer. Its only four command-prefix assignment sites are
+closed as well: the two `LC_ALL=C` sorts and the two credential-to-`jq`
+environment projections. Assignment-only statements have a closed name set,
+with the constants, expected slot and work directory values pinned; a
+standalone or prefixed `PATH=...` cannot alter how an otherwise reviewed
+command resolves or make phase identity self-referential. Mutable tools on the
+evidence path are narrowed further to their reviewed read-only argument vectors:
+`journalctl`, `systemctl`, `bootc`, `rpm-ostree`, `systemd-sysext` and `sed`
+cannot gain vacuum, service mutation, deployment mutation or file-writing
+modes. The guest has exactly one direct `trap cleanup EXIT`, and both that
+invocation and the cleanup body are exact, so an EXIT trap cannot replace a
+validation failure with success. Its `log` helper is exact too, and Bash's
+variable-writing `printf -v` extension is forbidden on the main path so a
+reviewed assignment cannot be changed without appearing in the assignment
+audit.
+The two AVC scans use
+`jq -Rse` predicates whose false result, read error or malformed execution all
+feed the same fatal edge, leaving no mutable shell status variable. Both scans
+and every core slot/SELinux/capability/host-image assertion or normalizer must
+be direct foreground top-level fatal statements, so an unreachable outer branch
+cannot preserve their AST while skipping them. The unique cursor
+writer/decode/nonempty chain is ordered before both exact broker calls, and its
+assignment set is closed, so moving or recapturing the cursor cannot exclude the
+operations under test. Both broker calls must in turn precede the controlled
+window's journal writer, which must precede the broad AVC predicate; the scan
+cannot be moved ahead of the operations it is meant to observe.
+Successful top-level
+shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
+plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
+command green. All three guest validation invocations must be direct, foreground
+top-level statements, not calls parked behind a false conditional, and their
+line ordering is anchored respectively before the switch, after the
+staged-to-booted continuity proofs, and after the rollback continuity proofs.
+The staged name/digest shape assertion and all four post-reboot deployment-slot
+comparisons are likewise direct foreground fatal statements. The staged proof
+is ordered after both status captures and before the first reboot; wrapping
+continuity or cleanup in an unreachable branch cannot leave the recursive AST
+looking valid. Direct fatal guards inspect both child statements for negation
+and backgrounding, while the outer `||` cannot carry a redirection, so
+`! cmp ... || fail` cannot invert an evidence oracle while retaining the
+expected command node.
+The runner's main path has closed sets for `guest_copy`, `guest_run` and
+`guest_run_long`: it may transfer only the reviewed validator, credentials and
+local update archive, then issue only the reviewed setup, archive removal,
+local-image load, switch and rollback commands. The SSH-up, SSH-down,
+broker-ready and reboot function bodies are exact alongside the copy/run
+wrappers. The runner first canonicalizes the script file itself with
+`readlink -f`; that path and its derived directory become readonly immediately,
+and the validator declaration is pinned to
+`$SCRIPT_DIR/guest/validate-ucore.sh`; a readable empty file cannot be
+substituted at the source end. The source must be a non-symlink, nonempty,
+readable regular file. Invoking the runner through a symlink still resolves the
+repository's real validator rather than a sibling of the symlink. An extra
+host-to-guest command therefore cannot
+replace the copied validator while source guards continue inspecting the
+pristine repository file. The runner's `log` body is exact as well, so the
+post-reboot broker-ready log calls cannot hide an unreviewed guest mutation.
+Manifest extraction, fixed-storage comparison and the bounded private-Podman
+wrapper bodies are exact too; their reviewed calls cannot be retained while a
+function body skips path containment or cleanup work.
+Direct main-path SSH/SCP/SFTP/rsync calls and shell/network execution wrappers
+are forbidden. Guest execution and transfer must cross the exact
+`guest_run*`/`guest_probe`/`guest_copy` bodies; a raw SSH command cannot replace
+the validator outside the closed wrapper-call sets. The low-level
+`guest_probe` and `guest_run_timeout` helpers have zero direct main-path
+callsites and may occur only inside their exact higher-level wrapper bodies.
+Every derived resource declaration—VM directory, disk, update archive, SSH key,
+credentials, firmware paths and install-container name—also has one pinned
+readonly value, not merely a pinned variable name.
+Outside the exact reviewed guest wrappers, interpreters, privilege/process
+wrappers and bridge programs are rejected anywhere in a main-path argv, not
+only in command position. A `timeout bash -c ...` layer therefore cannot hide
+raw SSH behind an otherwise bounded outer command.
+Whole-file
+negative policies include nested function bodies and recognize direct or
+wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
+extra bootc switches/QEMU processes and registry forms. It deliberately does
+not search raw shell text: comments, string literals, no-op copies and commands
+moved into an uncalled decoy function cannot satisfy the guards. The guest also
+requires exactly one capability-response JSON document and binds `jq`, `sort`,
+journal and AVC-filter failures directly to fatal edges so pipeline or
+line-filter status semantics cannot turn malformed evidence or an inspection
+error into a clean result.
 
 **Still out of scope for this package.**
 

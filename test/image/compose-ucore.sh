@@ -218,6 +218,7 @@ update_id="$(
 
 readonly OUTPUT_MANIFEST="${OUTPUT_DIR}/fixture.json"
 jq -n \
+    --argjson producer_uid "$EUID" \
     --arg index "$index_digest" \
     --arg member "$member_digest" \
     --arg baseline_ref "$BASELINE_REF" \
@@ -233,6 +234,7 @@ jq -n \
     '{
         schema: 1,
         kind: "pilothouse-ucore-image-fixture",
+        producer_uid: $producer_uid,
         source: "ghcr.io/ublue-os/ucore:latest",
         source_index_digest: $index,
         source_linux_amd64_digest: $member,

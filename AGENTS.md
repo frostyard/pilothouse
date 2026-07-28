@@ -56,12 +56,33 @@ Storage environment and late general-configuration overrides are cleared,
 file events are disabled, and remote Podman selection is disabled. Never
 substitute the host store, push either image, or remove that directory
 independently of the enclosing workspace.
+For a VM run, invoke composition as root. Its manifest records the producer
+UID, and the VM consumer rejects a store not produced by UID 0; compose,
+consume, exact-store reset and workspace removal must stay in that one
+rootful ownership domain.
 The composer retains its store and does not claim to clean up detached tool
 helpers or bound caller-owned stdout/stderr storage. The later job
 orchestrator must bound its log sink, terminate and wait for composer/tool
 helpers, then reset this exact Podman store and wait for reset to finish, and
-only then remove the whole ephemeral workspace. That orchestrator is not part
-of this slice.
+only then remove the whole ephemeral workspace.
+
+`sudo test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH` consumes that
+composed fixture. It installs the baseline with bootc's generic-image,
+loopback, btrfs and composefs path, passes an ephemeral SSH key through
+bootc's supported install option, boots
+under QEMU/KVM with OVMF, and checks the image-host deltas that #67 does not:
+enforcing SELinux without new or Pilothouse-related AVC denials, an exact
+broker capability set derived from independent guest probes, a usable bootc
+host-image report, staged-to-booted update continuity, rollback-slot
+continuity, and the reverse transition after `bootc rollback`. The update
+travels as a job-local OCI archive and is switched through guest-local
+containers-storage; never add a registry or external push. The runner owns and
+waits for QEMU and its named install container, and detaches every loop device
+backed by its exact disk, but
+it does not recursively delete the VM directory or reset the image store.
+The still-later enclosing job owns acquisition/composition invocation, a
+bounded log sink, exact-store reset after all children have stopped, workspace
+removal and CI wiring.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
