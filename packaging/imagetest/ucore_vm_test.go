@@ -195,11 +195,12 @@ type imageShellAssignment struct {
 }
 
 type imageShellWrite struct {
-	command string
-	fd      string
-	op      string
-	target  string
-	line    uint
+	command          string
+	fd               string
+	op               string
+	target           string
+	descriptorTarget bool
+	line             uint
 }
 
 type imageShellWriter struct {
@@ -344,6 +345,32 @@ func imageRequireFailingTest(t *testing.T, roots []syntax.Node, condition string
 	require.Equalf(t, 1, matches, "%s must occur exactly once as the left side of || fail", condition)
 }
 
+func imageRequireDirectFailingTest(t *testing.T, file *syntax.File, condition string) {
+	t.Helper()
+	matches := 0
+	for _, statement := range file.Stmts {
+		binary, ok := statement.Cmd.(*syntax.BinaryCmd)
+		if !ok || binary.Op.String() != "||" {
+			continue
+		}
+		clause, ok := binary.X.Cmd.(*syntax.TestClause)
+		if !ok || imageShellRender(t, clause) != condition {
+			continue
+		}
+		failure, ok := binary.Y.Cmd.(*syntax.CallExpr)
+		if !ok || len(failure.Args) == 0 || imageShellRender(t, failure.Args[0]) != "fail" {
+			continue
+		}
+		matches++
+		require.False(t, statement.Background)
+		require.False(t, statement.Negated)
+		require.Empty(t, statement.Redirs)
+	}
+	require.Equalf(t, 1, matches,
+		"critical comparison %s must be one direct foreground top-level || fail statement",
+		condition)
+}
+
 func imageFailingTestLine(t *testing.T, roots []syntax.Node, condition string) uint {
 	t.Helper()
 	var lines []uint
@@ -442,6 +469,32 @@ func imageShellAssignments(t *testing.T, roots ...syntax.Node) []imageShellAssig
 	return assignments
 }
 
+func imageShellAssignmentOnlyCalls(t *testing.T, roots ...syntax.Node) [][]string {
+	t.Helper()
+	var calls [][]string
+	for _, root := range roots {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if node == nil {
+				return true
+			}
+			if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+				return false
+			}
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 {
+				return true
+			}
+			assignments := make([]string, 0, len(call.Assigns))
+			for _, assignment := range call.Assigns {
+				assignments = append(assignments, imageShellRender(t, assignment))
+			}
+			calls = append(calls, assignments)
+			return true
+		})
+	}
+	return calls
+}
+
 func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrite {
 	t.Helper()
 	var writes []imageShellWrite
@@ -473,30 +526,30 @@ func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrit
 					continue
 				}
 				op := redirect.Op.String()
+				descriptorTarget := false
 				switch op {
 				case ">", ">>", ">|", "&>", "<>":
-				case ">&":
+				case ">&", "<&":
 					target, static := imageShellStaticWord(redirect.Word)
-					if static && (target == "-" ||
-						(target != "" && strings.Trim(target, "0123456789") == "")) {
-						continue
-					}
+					descriptorTarget = static && (target == "-" ||
+						(target != "" && strings.Trim(target, "0123456789") == ""))
 				default:
 					continue
 				}
 				fd := "1"
-				if op == "<>" {
+				if op == "<>" || op == "<&" {
 					fd = "0"
 				}
 				if redirect.N != nil {
 					fd = redirect.N.Value
 				}
 				writes = append(writes, imageShellWrite{
-					command: command,
-					fd:      fd,
-					op:      op,
-					target:  imageShellRender(t, redirect.Word),
-					line:    statement.Pos().Line(),
+					command:          command,
+					fd:               fd,
+					op:               op,
+					target:           imageShellRender(t, redirect.Word),
+					descriptorTarget: descriptorTarget,
+					line:             statement.Pos().Line(),
 				})
 			}
 			return true
@@ -548,6 +601,15 @@ func imageRequireExactCallCount(t *testing.T, calls []imageShellCall, count int,
 	t.Helper()
 	require.Equalf(t, count, countImageShellCalls(calls, want...),
 		"want exactly %d executable calls with args %#v; parsed calls: %#v", count, want, calls)
+}
+
+func imageCallMatchesAny(call imageShellCall, allowed ...[]string) bool {
+	for _, want := range allowed {
+		if slices.Equal(call.args, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func imageExactCallLine(t *testing.T, calls []imageShellCall, want ...string) uint {
@@ -1102,6 +1164,7 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 		{"assert_storage_path", `"$storage_config"`, `"$IMAGE_DIR/storage.conf"`},
 	} {
 		imageRequireCall(t, topCalls, path...)
+		imageRequireDirectCall(t, file, path...)
 	}
 	manifestTrustCall := []string{
 		"jq", "-e",
@@ -1110,7 +1173,9 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	}
 	imageRequireCall(t, topCalls, manifestTrustCall...)
 	imageRequireFailingCall(t, topLevel, manifestTrustCall...)
+	imageRequireDirectFailingCall(t, file, manifestTrustCall...)
 	imageRequireFailingTest(t, topLevel, `[[ $EUID -eq 0 ]]`)
+	imageRequireDirectFailingTest(t, file, `[[ $EUID -eq 0 ]]`)
 	imageRequireFailingTest(t, topLevel, `[[ "$actual_id" == "$expected_id" ]]`)
 	imageRequireFailingTest(t, topLevel, `[[ "${baseline_ref%:*}" == "${update_ref%:*}" ]]`)
 
@@ -1213,7 +1278,11 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		`[[ "$(guest_status_digest rollback)" == "$pre_rollback_booted" ]]`,
 	} {
 		imageRequireFailingTest(t, topLevel, continuity)
+		imageRequireDirectFailingTest(t, file, continuity)
 	}
+	stagedShapeCondition := `[[ "$staged_name" == "$update_ref" && "$staged_digest" =~ $DIGEST_PATTERN ]]`
+	imageRequireFailingTest(t, topLevel, stagedShapeCondition)
+	imageRequireDirectFailingTest(t, file, stagedShapeCondition)
 	imageRequireCall(t, mainCalls, "run_guest_validation", "update")
 	require.Equal(t, 2, countImageShellCalls(mainCalls, "run_guest_validation", "baseline"),
 		"the baseline must be checked both before update and after rollback")
@@ -1265,6 +1334,9 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"update and rollback must each use one direct proven reboot")
 
 	switchLine := imageExactCallLine(t, mainCalls, switchCall...)
+	stagedNameLine := imageExactCallLine(t, mainCalls, "guest_status_name", "staged")
+	stagedDigestLine := imageExactCallLine(t, mainCalls, "guest_status_digest", "staged")
+	stagedShapeLine := imageFailingTestLine(t, topLevel, stagedShapeCondition)
 	rollbackLine := imageExactCallLine(t, mainCalls, "guest_run_long", "bootc", "rollback")
 	updateContinuityLines := []uint{
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest booted)" == "$staged_digest" ]]`),
@@ -1275,6 +1347,11 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		imageFailingTestLine(t, topLevel, `[[ "$(guest_status_digest rollback)" == "$pre_rollback_booted" ]]`),
 	}
 	require.Less(t, baselineValidationLines[0], switchLine)
+	require.Less(t, switchLine, stagedNameLine)
+	require.Less(t, switchLine, stagedDigestLine)
+	require.Less(t, stagedNameLine, stagedShapeLine)
+	require.Less(t, stagedDigestLine, stagedShapeLine)
+	require.Less(t, stagedShapeLine, rebootLines[0])
 	require.Less(t, switchLine, rebootLines[0])
 	for _, continuityLine := range updateContinuityLines {
 		require.Less(t, rebootLines[0], continuityLine)
@@ -1329,7 +1406,6 @@ if kill -0 "$pid" 2>/dev/null; then
 fi
 wait "$pid" 2>/dev/null || true
 kill -0 "$pid" 2>/dev/null && return 1
-qemu_pid=""
 `)
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "remove_install_container", `
 podman_fixture 2m rm --force --ignore "$INSTALL_CONTAINER" >/dev/null
@@ -1411,10 +1487,86 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 			}
 		}
 	}
-	require.Contains(t,
-		imageShellAssignments(t, imageShellTopLevel(file)...),
-		imageShellAssignment{name: "qemu_pid", value: "$!"},
-	)
+	topAssignments := imageShellAssignments(t, imageShellTopLevel(file)...)
+	var criticalAssignmentValues = map[string][]string{
+		"storage_root":   {`"$(manifest_value '.storage.root')"`, ""},
+		"image_store":    {`"$(manifest_value '.storage.imagestore')"`, ""},
+		"run_root":       {`"$(manifest_value '.storage.runroot')"`, ""},
+		"podman_tmpdir":  {`"$(manifest_value '.storage.podman_tmpdir')"`, ""},
+		"image_tmpdir":   {`"$(manifest_value '.storage.image_tmpdir')"`, ""},
+		"storage_config": {`"$(manifest_value '.storage.config')"`, ""},
+		"DISK_IMAGE":     {`"$VM_DIR/disk.raw"`},
+		"INSTALL_CONTAINER": {
+			`"pilothouse-image-install-$ssh_port"`,
+		},
+		"qemu_pid": {"$!"},
+		"baseline_booted": {
+			`"$(guest_status_digest booted)"`, "",
+		},
+		"staged_name": {
+			`"$(guest_status_name staged)"`, "",
+		},
+		"staged_digest": {
+			`"$(guest_status_digest staged)"`, "",
+		},
+		"pre_rollback_booted": {
+			`"$(guest_status_digest booted)"`, "",
+		},
+		"pre_rollback_target": {
+			`"$(guest_status_digest rollback)"`, "",
+		},
+	}
+	observedCriticalAssignments := map[string][]string{}
+	for _, assignment := range topAssignments {
+		if _, critical := criticalAssignmentValues[assignment.name]; critical {
+			observedCriticalAssignments[assignment.name] = append(
+				observedCriticalAssignments[assignment.name],
+				assignment.value,
+			)
+		}
+	}
+	require.Equal(t, criticalAssignmentValues, observedCriticalAssignments,
+		"cleanup resource identities and the owned QEMU PID must not be reassigned")
+	criticalReadonlySets := map[string][]string{
+		"fixture-refs": {
+			"baseline_ref", "baseline_id", "update_ref", "update_id",
+		},
+		"fixture-storage": {
+			"storage_root", "image_store", "run_root", "podman_tmpdir",
+			"image_tmpdir", "storage_config",
+		},
+		"podman": {"podman_args"},
+		"qemu":   {"qemu_pid"},
+		"baseline-slot": {
+			"baseline_booted",
+		},
+		"staged-slots": {
+			"staged_name", "staged_digest",
+		},
+		"rollback-slots": {
+			"pre_rollback_booted", "pre_rollback_target",
+		},
+	}
+	observedReadonlySets := map[string][]string{}
+	for _, statement := range file.Stmts {
+		declaration, ok := statement.Cmd.(*syntax.DeclClause)
+		if !ok || declaration.Variant == nil || declaration.Variant.Value != "readonly" {
+			continue
+		}
+		var names []string
+		for _, assignment := range declaration.Args {
+			if assignment.Name != nil {
+				names = append(names, assignment.Name.Value)
+			}
+		}
+		for key, want := range criticalReadonlySets {
+			if slices.Equal(names, want) {
+				observedReadonlySets[key] = names
+			}
+		}
+	}
+	require.Equal(t, criticalReadonlySets, observedReadonlySets,
+		"fixture paths, Podman argv and the captured QEMU PID must become readonly")
 
 	stopNode := imageShellFunction(t, imageVMRunnerPath, file, "stop_qemu")
 	stopCalls := imageShellCalls(t, stopNode)
@@ -1438,6 +1590,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 
 	mainCalls := topCalls
 	imageRequireFailingCall(t, imageShellTopLevel(file), "cleanup")
+	imageRequireDirectFailingCall(t, file, "cleanup")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "-", "EXIT")
 	var armLine, firstResourceLine, cleanupLine, disarmLine uint
@@ -1535,12 +1688,12 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		"QEMU must be followed immediately by qemu_pid=$!")
 	pidStatement := file.Stmts[qemuStatement+1]
 	require.False(t, pidStatement.Background)
-	pidCapture, ok := pidStatement.Cmd.(*syntax.CallExpr)
-	require.True(t, ok, "QEMU must be followed immediately by an assignment statement")
-	require.Empty(t, pidCapture.Args)
-	require.Len(t, pidCapture.Assigns, 1)
-	require.Equal(t, "qemu_pid", pidCapture.Assigns[0].Name.Value)
-	require.Equal(t, "$!", imageShellRender(t, pidCapture.Assigns[0].Value))
+	pidCapture, ok := pidStatement.Cmd.(*syntax.DeclClause)
+	require.True(t, ok, "QEMU must be followed immediately by a readonly PID capture")
+	require.Equal(t, "readonly", pidCapture.Variant.Value)
+	require.Len(t, pidCapture.Args, 1)
+	require.Equal(t, "qemu_pid", pidCapture.Args[0].Name.Value)
+	require.Equal(t, "$!", imageShellRender(t, pidCapture.Args[0].Value))
 	for _, call := range allCalls {
 		if imageCallContainsProgram(call, "qemu-system-x86_64") {
 			require.Equal(t, qemuCall, call.args,
@@ -1577,6 +1730,17 @@ status="$(
 [ "$status" = 200 ] ||
     fail "$query_id returned HTTP $status, expected 200"
 `)
+	imageRequireExactFunction(t, imageVMGuestPath, file, syntax.LangPOSIX, "cleanup", `
+rm -f "$work_dir/login.json" "$work_dir/login-body.json" \
+    "$work_dir/query.json" "$work_dir/query-body.json" \
+    "$work_dir/auth.header" "$work_dir/actual-unsorted" \
+    "$work_dir/actual" "$work_dir/expected" \
+    "$work_dir/host-image.json" "$work_dir/bootc-status.json" \
+    "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" \
+    "$work_dir/cursor-journal" \
+    "$work_dir/new-avcs" "$work_dir/boot-journal"
+rmdir "$work_dir"
+`)
 	loginCurlCall := []string{
 		"curl", "--silent", "--show-error", "--max-time", "30",
 		"--unix-socket", `"$BROKER_SOCKET"`,
@@ -1589,6 +1753,8 @@ status="$(
 	}
 	imageRequireExactCallCount(t, topCalls, 1, loginCurlCall...)
 	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
+	imageRequireExactCallCount(t, topCalls, 1, "trap", "cleanup", "EXIT")
+	imageRequireDirectCall(t, file, "trap", "cleanup", "EXIT")
 	for _, call := range topCalls {
 		command := imageCallEffectiveCommand(call)
 		if command == "exit" {
@@ -1597,6 +1763,36 @@ status="$(
 		}
 		require.NotContains(t, []string{"exec", "return"}, command,
 			"the guest main path must not gain an alternate early termination command")
+		if filepath.Base(command) == "trap" {
+			require.Equal(t, []string{"trap", "cleanup", "EXIT"}, call.args,
+				"the guest must retain only its reviewed cleanup EXIT trap")
+		}
+	}
+	assignmentOnlyCalls := imageShellAssignmentOnlyCalls(t, topLevel...)
+	var assignmentOnlyNames []string
+	for _, assignments := range assignmentOnlyCalls {
+		require.Len(t, assignments, 1,
+			"each reviewed assignment-only statement must assign exactly one variable")
+		name, _, found := strings.Cut(assignments[0], "=")
+		require.True(t, found)
+		assignmentOnlyNames = append(assignmentOnlyNames, name)
+	}
+	require.ElementsMatch(t, []string{
+		"CREDENTIALS", "BROKER_SOCKET", "CAPABILITY_QUERY", "HOST_IMAGE_QUERY",
+		"username", "password", "expected_slot", "work_dir", "username", "password",
+		"login_status", "token", "journal_cursor",
+	}, assignmentOnlyNames,
+		"the guest main path must retain only its reviewed assignment-only statements")
+	topAssignments := imageShellAssignments(t, topLevel...)
+	for _, want := range []imageShellAssignment{
+		{name: "CREDENTIALS", value: "/root/pilothouse-image-credentials.json"},
+		{name: "BROKER_SOCKET", value: "/run/pilothouse/broker.sock"},
+		{name: "CAPABILITY_QUERY", value: "org.frostyard.pilothouse.capabilities.list"},
+		{name: "HOST_IMAGE_QUERY", value: "org.frostyard.pilothouse.maintenance.host_image_status"},
+		{name: "expected_slot", value: `"${2-}"`},
+		{name: "work_dir", value: `"$(mktemp -d)"`},
+	} {
+		require.Contains(t, topAssignments, want)
 	}
 
 	slotMarkerCall := []string{
@@ -1799,6 +1995,7 @@ status="$(
 	for target := range criticalWrites {
 		observedWrites[target] = map[imageShellWriter]int{}
 	}
+	writesByLine := map[uint][]imageShellWrite{}
 	allowedOutputTargets := map[string]bool{
 		"/dev/null":                            true,
 		`"$work_dir/login.json"`:               true,
@@ -1815,8 +2012,11 @@ status="$(
 		`"$work_dir/boot-journal"`:             true,
 	}
 	for _, write := range imageShellOutputWrites(t, topLevel...) {
-		require.Truef(t, allowedOutputTargets[write.target],
-			"guest output redirection must use one reviewed literal target; got %#v", write)
+		writesByLine[write.line] = append(writesByLine[write.line], write)
+		if !write.descriptorTarget {
+			require.Truef(t, allowedOutputTargets[write.target],
+				"guest output redirection must use one reviewed literal target; got %#v", write)
+		}
 		if _, critical := criticalWrites[write.target]; !critical {
 			continue
 		}
@@ -1829,7 +2029,26 @@ status="$(
 	}
 	require.Equal(t, criticalWrites, observedWrites,
 		"critical evidence files must have only their reviewed redirection writers")
+	for target, lines := range writeLines {
+		for _, line := range lines {
+			require.Lenf(t, writesByLine[line], 1,
+				"the statement writing %s must have no additional descriptor routing", target)
+		}
+	}
 
+	reviewedJournalCalls := [][]string{
+		cursorJournalCall,
+		{"journalctl", "--no-pager", "--lines", "0"},
+		windowJournalCall,
+		bootJournalCall,
+	}
+	reviewedSystemctlCalls := [][]string{
+		{"systemctl", "show-environment"},
+		{"systemctl", "list-unit-files", "bootc-fetch-apply-updates.timer", "--no-legend"},
+		{"systemctl", "list-unit-files", "bootc-fetch-apply-updates.service", "--no-legend"},
+		{"systemctl", "list-unit-files", "rpm-ostreed-automatic.timer", "--no-legend"},
+		{"systemctl", "list-unit-files", "rpm-ostreed-automatic.service", "--no-legend"},
+	}
 	for _, call := range topCalls {
 		require.Falsef(t,
 			imageCallIsForbiddenEvidenceMutator(call),
@@ -1849,6 +2068,31 @@ status="$(
 				"the guest must use only the two reviewed capability sort calls: %#v", call.args)
 			require.Equal(t, []string{"LC_ALL=C"}, call.assignments,
 				"each reviewed capability sort must retain its exact locale assignment")
+		}
+		switch filepath.Base(command) {
+		case "bootc":
+			require.Equal(t, bootcStatusCall, call.args,
+				"bootc may only provide the reviewed read-only status observation")
+		case "journalctl":
+			require.True(t, imageCallMatchesAny(call, reviewedJournalCalls...),
+				"journalctl may only perform the four reviewed read-only observations: %#v",
+				call.args)
+		case "rpm-ostree":
+			require.Equal(t, []string{"rpm-ostree", "status", "--json"}, call.args,
+				"rpm-ostree may only provide the reviewed read-only status observation")
+		case "sed":
+			require.Equal(t, cursorDecodeCall, call.args,
+				"sed may only decode the reviewed journal cursor")
+		case "systemctl":
+			require.True(t, imageCallMatchesAny(call, reviewedSystemctlCalls...),
+				"systemctl may only perform the reviewed read-only capability observations: %#v",
+				call.args)
+		case "systemd-sysext":
+			require.Equal(t, []string{"systemd-sysext", "list"}, call.args,
+				"systemd-sysext may only provide the reviewed read-only list observation")
+		case "trap":
+			require.Equal(t, []string{"trap", "cleanup", "EXIT"}, call.args,
+				"the guest must not replace its reviewed cleanup EXIT trap")
 		}
 	}
 	var assignedCalls []imageShellCall
@@ -2108,6 +2352,7 @@ a\lias trap=:
 	require.False(t, imageCallHasStaticCommand(dynamicCalls[0]),
 		"dynamic command positions must be rejected before executable policy checks")
 	wrappedEvidence := imageParseShellSource(t, "wrapped-evidence.sh", `
+PATH=/tmp
 PATH=/tmp stdbuf -o0 sort -o "$work_dir/actual" "$work_dir/expected"
 chroot / sort -u "$work_dir/expected"
 awk '{print}' "$work_dir/expected"
@@ -2116,6 +2361,9 @@ awk '{print}' "$work_dir/expected"
 	require.Len(t, wrappedCalls, 3)
 	require.Equal(t, []string{"PATH=/tmp"}, wrappedCalls[0].assignments,
 		"prefix assignments must remain attached to the command they modify")
+	require.Equal(t, [][]string{{"PATH=/tmp"}},
+		imageShellAssignmentOnlyCalls(t, imageShellTopLevel(wrappedEvidence)...),
+		"standalone assignments must remain visible outside the prefix-assignment call set")
 	for _, call := range wrappedCalls {
 		require.Falsef(t, imageGuestCommandIsReviewed(call),
 			"execution wrapper or alternate output program must not enter the guest allowlist: %#v",
@@ -2131,6 +2379,7 @@ evidence_target="$work_dir/actual"
 journalctl 2>"$work_dir/new-avcs"
 cat "$work_dir/expected" 0<>"$work_dir/actual"
 cat "$work_dir/expected" >&"$work_dir/actual"
+journalctl 3>&1 >"$work_dir/new-avcs" 1>&3
 	`, syntax.LangPOSIX)
 	require.ElementsMatch(t, []imageShellWrite{
 		{command: "sed", fd: "1", op: ">", target: `"$work_dir/actual"`, line: 2},
@@ -2141,6 +2390,9 @@ cat "$work_dir/expected" >&"$work_dir/actual"
 		{command: "journalctl", fd: "2", op: ">", target: `"$work_dir/new-avcs"`, line: 8},
 		{command: "cat", fd: "0", op: "<>", target: `"$work_dir/actual"`, line: 9},
 		{command: "cat", fd: "1", op: ">&", target: `"$work_dir/actual"`, line: 10},
+		{command: "journalctl", fd: "3", op: ">&", target: "1", descriptorTarget: true, line: 11},
+		{command: "journalctl", fd: "1", op: ">", target: `"$work_dir/new-avcs"`, line: 11},
+		{command: "journalctl", fd: "1", op: ">&", target: "3", descriptorTarget: true, line: 11},
 	}, imageShellOutputWrites(t, imageShellTopLevel(overwrite)...),
 		"write-capable redirections to evidence files must remain visible to the writer-set guard")
 }

@@ -2551,7 +2551,12 @@ AST. Quoted or unquoted path-qualified Podman/QEMU executables are normalized
 for the same policy. The QEMU statement itself must be backgrounded and
 immediately followed by its `$!` capture, and the EXIT trap must be one direct,
 foreground parent-shell statement armed before the first disk/resource mutation
-and disarmed only after explicit cleanup. Comparisons and
+and disarmed only after one direct, fatal explicit cleanup. The fixture storage
+paths, Podman argument array, QEMU PID and observed deployment-slot identities
+become readonly after their separately fail-closed captures. Their assignment
+sets are exact, so cleanup cannot be redirected to a different container store
+or disk and update/rollback comparisons cannot be made self-referential.
+Comparisons and
 critical evidence calls must feed `|| fail`. Capability sorting is pinned
 separately to the independently probed expected file and decoded broker file;
 the expected and actual host-image normalizers likewise accept only their
@@ -2560,18 +2565,29 @@ file has a complete, exact redirection-writer set and all of those writers must
 use the reviewed command, file descriptor, operator and literal target, then
 precede its comparison/scan; generic copy/move/truncate/stream writers and
 every alternate sort are forbidden on the guest evidence path. Redirection-only
-and compound-command statements are recorded too. The write-capable `<>` and
-non-numeric `>&` forms are covered alongside ordinary output redirections, and
-every target must be one reviewed literal path, so descriptor changes, variable
-targets and `/./` path aliases cannot evade the writer set. The broker query
+and compound-command statements are recorded too. The write-capable `<>` form
+and every `<&`/`>&` descriptor duplication are covered alongside ordinary
+output redirections. A critical writer statement must contain its one reviewed
+redirection and no additional descriptor routing, so a later `1>&3` cannot
+leave an empty evidence file behind. Every pathname target must be one reviewed
+literal path, so descriptor changes, variable targets and `/./` path aliases
+cannot evade the writer set. The broker query
 helper's complete curl/output/status body is exact-pinned because its legitimate
 destination is necessarily a parameter. The guest main path also has a closed
 allowlist of effective command names; `stdbuf`, `chroot`, `awk`, shell
 interpreters and any other unreviewed execution layer fail the guard before
 they can hide a writer. Its only four command-prefix assignment sites are
 closed as well: the two `LC_ALL=C` sorts and the two credential-to-`jq`
-environment projections. A `PATH=...` or similar prefix cannot alter how an
-otherwise reviewed command resolves.
+environment projections. Assignment-only statements have a closed name set,
+with the constants, expected slot and work directory values pinned; a
+standalone or prefixed `PATH=...` cannot alter how an otherwise reviewed
+command resolves or make phase identity self-referential. Mutable tools on the
+evidence path are narrowed further to their reviewed read-only argument vectors:
+`journalctl`, `systemctl`, `bootc`, `rpm-ostree`, `systemd-sysext` and `sed`
+cannot gain vacuum, service mutation, deployment mutation or file-writing
+modes. The guest has exactly one direct `trap cleanup EXIT`, and both that
+invocation and the cleanup body are exact, so an EXIT trap cannot replace a
+validation failure with success.
 The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Both scans
@@ -2588,6 +2604,11 @@ command green. All three guest validation invocations must be direct, foreground
 top-level statements, not calls parked behind a false conditional, and their
 line ordering is anchored respectively before the switch, after the
 staged-to-booted continuity proofs, and after the rollback continuity proofs.
+The staged name/digest shape assertion and all four post-reboot deployment-slot
+comparisons are likewise direct foreground fatal statements. The staged proof
+is ordered after both status captures and before the first reboot; wrapping
+continuity or cleanup in an unreachable branch cannot leave the recursive AST
+looking valid.
 Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,

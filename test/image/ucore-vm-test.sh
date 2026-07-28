@@ -103,6 +103,8 @@ run_root="$(manifest_value '.storage.runroot')"
 podman_tmpdir="$(manifest_value '.storage.podman_tmpdir')"
 image_tmpdir="$(manifest_value '.storage.image_tmpdir')"
 storage_config="$(manifest_value '.storage.config')"
+readonly baseline_ref baseline_id update_ref update_id
+readonly storage_root image_store run_root podman_tmpdir image_tmpdir storage_config
 
 [[ "$baseline_ref" =~ $REF_PATTERN && "$baseline_ref" == *:baseline ]] ||
     fail "fixture baseline ref is invalid"
@@ -147,6 +149,7 @@ podman_args=(
     --events-backend none
     --storage-driver overlay
 )
+readonly -a podman_args
 
 podman_fixture() {
     TMPDIR="$image_tmpdir" timeout --signal=TERM --kill-after=30s "$1" \
@@ -170,8 +173,6 @@ readonly OVMF_CODE="${VM_DIR}/OVMF_CODE.fd"
 readonly OVMF_VARS="${VM_DIR}/OVMF_VARS.fd"
 readonly INSTALL_CONTAINER="pilothouse-image-install-${ssh_port}"
 
-qemu_pid=""
-
 stop_qemu() {
     local pid="${qemu_pid:-}"
     [[ -n "$pid" ]] || return 0
@@ -188,7 +189,6 @@ stop_qemu() {
     fi
     wait "$pid" 2>/dev/null || true
     kill -0 "$pid" 2>/dev/null && return 1
-    qemu_pid=""
 }
 
 remove_install_container() {
@@ -412,7 +412,7 @@ qemu-system-x86_64 \
     -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22" \
     -device virtio-net-pci,netdev=net0 \
     </dev/null &
-qemu_pid=$!
+readonly qemu_pid=$!
 wait_for_ssh
 wait_for_broker
 
@@ -430,6 +430,7 @@ guest_run chmod 0600 /root/pilothouse-image-credentials.json
 guest_run sh /root/validate-ucore.sh prepare
 
 baseline_booted="$(guest_status_digest booted)"
+readonly baseline_booted
 run_guest_validation baseline
 
 log "loading the private update archive and staging it through containers-storage"
@@ -439,6 +440,7 @@ guest_run rm -f /var/tmp/pilothouse-image-update.oci
 guest_run_long bootc switch --quiet --transport containers-storage "$update_ref"
 staged_name="$(guest_status_name staged)"
 staged_digest="$(guest_status_digest staged)"
+readonly staged_name staged_digest
 [[ "$staged_name" == "$update_ref" && "$staged_digest" =~ $DIGEST_PATTERN ]] ||
     fail "bootc did not stage the expected update fixture"
 
@@ -452,6 +454,7 @@ run_guest_validation update
 log "rolling back and proving the deployment slots reverse"
 pre_rollback_booted="$(guest_status_digest booted)"
 pre_rollback_target="$(guest_status_digest rollback)"
+readonly pre_rollback_booted pre_rollback_target
 guest_run_long bootc rollback
 reboot_guest
 [[ "$(guest_status_digest booted)" == "$pre_rollback_target" ]] ||
