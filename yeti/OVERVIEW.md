@@ -118,6 +118,15 @@ test/vm/              the booted-VM harness (Layer B, #67). vm-boot-test.sh is t
                       packaging/workflow_vm_job_test.go guard it structurally
                       without executing it (see the four "Booted-VM harness"
                       sections below)
+test/image/releaserpm/
+                      test-only Go command for #80's released-RPM fixture.
+                      It resolves the latest stable GitHub release, selects
+                      exactly one x86_64 RPM, verifies release size and SHA-256
+                      while downloading, and writes an explicit manifest plus
+                      RPM below a caller-owned ephemeral workspace. It is not a
+                      shipped binary and no workflow invokes acquisition yet;
+                      ordinary repository gates still analyze and test it (see
+                      "Image-tier released-RPM fixture" below)
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It also
@@ -2266,9 +2275,8 @@ parent exit, a bounded direct non-shell tool, no-op composition, the capture
 read limit, and tool lookup.
 Daemonizing into a different session or process group is outside the helper's
 contract and must be rejected by later shell-harness policy.
-Workspace lifecycle, cleanup, destination containment,
-released-RPM resolution, images, registries, VMs, SELinux, update/rollback and
-CI wiring remain later #80 slices.
+Whole-workspace lifecycle and cleanup, images, registries, VMs, SELinux,
+update/rollback and CI wiring remain later #80 slices.
 
 `packaging/imagetest/image_process_test.go` now enforces the image-tier process
 contract over every live, non-empty Go file in that isolated test subpackage
@@ -2313,6 +2321,55 @@ shadowing, ill-typed constants, forbidden imports and build constraints.
 This is a closed enumeration of direct Go surfaces, not a claim that arbitrary
 future dependencies cannot spawn; adding a dependency or spawning mechanism
 requires an explicit guard and specification expansion.
+
+**Image-tier released-RPM fixture (#80, second slice).**
+`test/image/releaserpm` is a repository test command, not a product binary and
+not a package input. Its only CLI is
+`go run ./test/image/releaserpm --workspace ABSOLUTE_PATH`. The workspace must
+already exist, be a canonical absolute real directory rather than a symlink,
+must be private to one invocation and not be mutated concurrently, and must
+not contain `fixture-release-rpm`; the command creates that directory at
+`0700` and refuses reuse instead of replacing caller data. On failure,
+including failure to write the manifest path to standard output, it removes
+only the known files it created and then removes the directory nonrecursively.
+Unknown entries are never recursively deleted. On success it deliberately
+leaves the fixture for the later image composer, whose enclosing ephemeral
+workspace owns final cleanup.
+
+Discovery is fixed to GitHub's
+`/repos/frostyard/pilothouse/releases/latest` API. The response is bounded to
+1 MiB and must identify a positive-ID, non-draft, non-prerelease release with
+a strictly valid semantic-version tag. Exactly one asset name may end in
+`.x86_64.rpm`; that asset must have a positive ID, the exact tag-correlated
+`frostyard-pilothouse-<version>-1.x86_64.rpm` basename, a size in
+`(0, 256 MiB]`, a lowercase `sha256:` digest, and the exact query-free
+`https://github.com/frostyard/pilothouse/releases/download/<tag>/<name>` URL.
+Userinfo is forbidden. This makes `latest` a one-time discovery input rather
+than a filename used again later.
+
+The download is bounded to the advertised size plus one sentinel byte and is
+accepted only when HTTP `Content-Length` (when present), bytes written and
+streaming SHA-256 all match the same release metadata. Partial files are
+`0600`, synchronized and published without replacing an existing destination
+only after verification. The
+`0600` JSON manifest records schema/kind, release and asset IDs, tag, name,
+size, digest, validated release-asset URL and the fixture-relative artifact
+basename; it carries no token or host-absolute path. `GITHUB_TOKEN` is optional
+for API rate limits and is attached only to `api.github.com` or `github.com`,
+only over HTTPS on the default or explicit 443 port, and never to an allowed
+`githubusercontent.com` redirect. Redirects have the same scheme and port
+restriction. The command performs no install, image operation, upload,
+publication or retention.
+
+`main_test.go` uses an in-memory HTTP transport: no test reaches the network.
+It proves the happy-path bytes, manifest, modes, request media types and lack
+of partial files; rejects ambiguous architecture selection, unstable or
+unidentified releases, unsafe metadata, oversized assets, URL disagreement,
+HTTP/size/digest failures (including unknown-length short and overlong
+streams) and non-canonical destinations; proves cancellation, response-body
+closure and close-error rollback, standard-output rollback, known-entry-only
+cleanup and no-replace collision preservation; and pins redirect and token
+scheme/host/port/userinfo containment.
 
 Later #80 slices use `ghcr.io/ublue-os/ucore:latest` for discovery only. A job
 must resolve it once to a signature-verified immutable linux/amd64 digest and

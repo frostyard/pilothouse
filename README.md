@@ -228,6 +228,25 @@ denials — and bootc update/rollback of an ephemeral uCore-derived image
 containing the last released x86_64 RPM. The issue does not test `.deb`
 layering or Snosi-built sysext delivery.
 
+The released-RPM fixture producer now lives at `test/image/releaserpm`. It is
+test infrastructure, not a shipped binary. No workflow invokes acquisition
+yet; ordinary repository test, vet and lint gates still analyze this package:
+
+```bash
+go run ./test/image/releaserpm --workspace /absolute/path/to/ephemeral-workspace
+```
+
+It queries this repository's latest stable semantic-version GitHub release,
+requires the exactly tag-correlated Pilothouse x86_64 RPM, and verifies the
+release asset's recorded byte size and SHA-256 while downloading. It creates a new
+`fixture-release-rpm/fixture.json` and the verified RPM below the supplied
+workspace; an existing fixture directory is an error. Supply a private
+workspace that no other process mutates during the invocation. Failures,
+including an inability to report the manifest path, roll back only entries
+created by the invocation and never recursively delete unknown entries. The
+caller owns cleanup after success, and the helper never pushes or uploads an
+artifact or image.
+
 ### Create a release
 
 `make bump` verifies the project in the development container, calculates the
