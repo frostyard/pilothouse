@@ -2175,7 +2175,8 @@ they guard is `contract.go` itself, so the way to demonstrate they fire is a
 dependency or binary destination, or a deleted row), never a checked-in mutation
 of `.goreleaser.yaml`.
 
-**Portability: four tiers, and why they must not be blurred.** The one claim
+**Artifact-contract portability: four tiers, and why they must not be
+blurred.** The one claim
 that holds without qualification across all of this work is: **no file added by
 the artifact-contract phase executes an external command.** That phase is #70's,
 and it added only files in `packaging/` itself; the extractors added since are a
@@ -2232,12 +2233,94 @@ differ, and a sentence true of one is false of another.
 Because of (c), no sentence anywhere may claim that the `packaging` package's
 *whole test suite* runs no external command, nor that the contract tests *as a
 group* operate only over embedded bytes — the drift guards do not. Claims have
-to name the tier they describe. `grep -lE 'os/exec|exec\.Command' packaging/*.go`
-listing exactly `postinstall_test.go`, `units_test.go` and
-`verify_install_test.go` is the mechanical form of the global guarantee;
-adding tier (d) left that listing byte-for-byte unchanged, and the
-install-validation guards in `verify_install_test.go` are the one addition
-since.
+to name the tier they describe. At this commit,
+`grep -lE 'os/exec|exec\.Command' packaging/*.go` lists exactly
+`postinstall_test.go`, `units_test.go`, `verify_install_test.go` and
+`vm_harness_test.go`. The extractors in tier (d) and the image-test subpackage
+remain outside that non-recursive listing. Within `packaging/imagetest`,
+`image_child_test.go` imports `os/exec`, while `image_process_test.go` is a
+textual match only because its adversarial source fixtures contain both search
+terms. The VM and image harnesses are later test-infrastructure layers, not a
+fifth artifact-contract tier, and these greps are source inventories rather
+than proof of which files execute children.
+
+**Image-tier process-test foundation (#80, first slice).**
+`packaging/imagetest/image_child_test.go` adds deterministic test support only;
+there is no `test/image/` shell harness yet. One `t.TempDir()` owns `cwd`, `home`,
+`runner`, `tmp` and `bin` subdirectories. This is the complete test-owned
+workspace advertised through environment and cwd, not a filesystem or network
+namespace. Children receive only the explicit environment. The tier's sole
+child constructor applies a one-second context deadline, starts a dedicated
+process group and kills the whole group on expiry. Stdout and stderr use
+anonymous regular files created below `tmp`: inherited descriptors cannot
+hold a pipe open, no named filesystem entry remains for the child to reopen,
+and a no-op child leaves a whole-sandbox snapshot unchanged. A read retains
+at most 4 MiB and reads one additional sentinel byte to reject larger output;
+this is a read-side memory bound, not a write-side disk quota. A recursive
+snapshot records each entry's stat-backed type,
+ordinary and special permission bits, size, streaming SHA-256 digest for
+regular-file content, and symlink target. Isolated self-tests prove each
+recorded field, the layout and non-inherited environment, separated output
+and exit status, same-process-group cleanup after both timeout and normal
+parent exit, a bounded direct non-shell tool, no-op composition, the capture
+read limit, and tool lookup.
+Daemonizing into a different session or process group is outside the helper's
+contract and must be rejected by later shell-harness policy.
+Workspace lifecycle, cleanup, destination containment,
+released-RPM resolution, images, registries, VMs, SELinux, update/rollback and
+CI wiring remain later #80 slices.
+
+`packaging/imagetest/image_process_test.go` now enforces the image-tier process
+contract over every live, non-empty Go file in that isolated test subpackage
+with Go's parser and AST,
+not source-text matching. It resolves import names structurally; rejects
+alternate, dot and blank imports of the restricted packages; closes the
+allowed `os/exec`, `context`, `os.StartProcess` and build-constraint surface;
+and permits only the four named, shape- and count-pinned `syscall` selectors
+needed to create and kill the child process group. The isolated package cannot
+reach legacy unexported packaging-test helpers, every new local helper joins
+the audited file set, and new dependencies are rejected. Restricted import
+names may not be shadowed. The one
+`CommandContext` must consume the uniquely bound timeout context in
+`imageRunChild`; neither that context nor its uniquely bound cancel function
+may be reassigned, aliased by address or used anywhere beyond their exact
+binding/call/defer positions. The resulting `command` may not be aliased or
+used to mutate its cancellation or process identity outside the pinned
+process-group flow. Process-group setup, cancellation registration and
+the single `Run` execution must be unconditional top-level runner statements;
+the cancellation callback has a pinned two-statement straight-line body, and
+the runner has exactly one final direct result return. Critical predeclared
+identifiers used by those checks may not be shadowed. The constructor call may
+not hide in a function literal, and the context cancel must be deferred
+directly in the runner body. A small `go/constant` evaluator
+proves the package timeout is in `(0, 10s]`. The guard includes one deliberately
+invalid temporary source fixture so a vacuous implementation cannot pass.
+`image_guard_anchor_test.go` is compiled independently and fails if either
+guarded file gains a build constraint or if the guard and process-group
+runtime proofs lose any named, top-level `func(*testing.T)` test.
+
+The guard is also validated differentially through the same directory-audit
+entry point. Hand-written expectations are compared as exact finding
+multisets including file and line, retaining duplicate rule/detail violations.
+Clean and unusually reformatted
+sources prove the guard is structural rather than text-shaped; negative
+fixtures cover import aliases and shadows, every closed spawning surface,
+hidden helpers in the complete package set, timeout bounds and context flow,
+direct and indirect mutation, command alias and field mutation, nested calls
+and cancellation, conditional process setup/cancellation/execution, pinned
+process group syscalls, missing execution, early return, predeclared-name
+shadowing, ill-typed constants, forbidden imports and build constraints.
+This is a closed enumeration of direct Go surfaces, not a claim that arbitrary
+future dependencies cannot spawn; adding a dependency or spawning mechanism
+requires an explicit guard and specification expansion.
+
+Later #80 slices use `ghcr.io/ublue-os/ucore:latest` for discovery only. A job
+must resolve it once to a signature-verified immutable linux/amd64 digest and
+use that digest throughout. The two local variants and their storage are
+ephemeral: no image push, artifact upload, publication or retention is
+permitted. The enforcing-SELinux check looks for unexpected AVC denials but
+does not claim a dedicated Pilothouse confined domain; the released RPM ships
+no such policy today.
 
 **Still out of scope for this package.**
 
@@ -3024,7 +3107,9 @@ anything aliased from one, joins the set, so an inequality reintroduced under a
 fresh name — or written inline with no variable at all — is still caught.
 
 **At this commit the harness run ends there.** The guest's SELinux audit
-posture, image-based hosts and sysext delivery are #80's.
+posture and image-based hosts are #80's. Its image path installs the last
+released x86_64 RPM while building an ephemeral uCore-derived image; `.deb`
+layering and Snosi sysext delivery are explicitly outside that issue.
 `.github/workflows/packaging.yml`'s `vm-boot` job is what invokes all of this
 (see "Booted-VM harness: the CI job (`vm-boot`)" below).
 
@@ -3163,10 +3248,11 @@ cannot: units activating on a booted host, systemd itself creating
 broker socket at `0660 root:pilothouse`, PAM authenticating a real non-root
 administrator through the running stack, journald reachable through the
 broker's own journal query, and the whole posture surviving a real reboot. It
-does **not** cover image-based hosts (uCore/cayo), SELinux AVC assertion or
+does **not** cover image-based hosts (uCore), SELinux AVC assertion or
 policy qualification — the Fedora guest stays enforcing, but nothing scans or
-classifies the audit log — or sysext/bootc delivery. All of those are
-**#80**'s.
+classifies the audit log — or bootc update/rollback of an ephemeral
+uCore-derived image containing the last released x86_64 RPM. Those are
+**#80**'s; `.deb` layering and Snosi sysext delivery are not.
 
 ### Artifact extraction (`packaging/extract`)
 

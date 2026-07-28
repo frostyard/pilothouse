@@ -222,9 +222,11 @@ artifact the build job produced.
 
 What it deliberately does **not** cover, all of which is
 [#80](https://github.com/frostyard/pilothouse/issues/80): image-based hosts
-(uCore/cayo), SELinux AVC assertions and policy qualification — the Fedora
+(uCore), SELinux AVC assertions and policy qualification — the Fedora
 guest stays enforcing, but the job neither scans the audit log nor classifies
-denials — and sysext or bootc delivery.
+denials — and bootc update/rollback of an ephemeral uCore-derived image
+containing the last released x86_64 RPM. The issue does not test `.deb`
+layering or Snosi-built sysext delivery.
 
 ### Create a release
 
