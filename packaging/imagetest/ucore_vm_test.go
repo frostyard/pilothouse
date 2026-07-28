@@ -358,11 +358,26 @@ func imageCallContainsArgument(call imageShellCall, want string) bool {
 
 func imageCallContainsProgram(call imageShellCall, want string) bool {
 	for _, argument := range call.args {
-		if argument == want || filepath.Base(argument) == want {
+		literal := strings.Trim(argument, `"'`)
+		if literal == want || filepath.Base(literal) == want {
 			return true
 		}
 	}
 	return false
+}
+
+func imageCallMutatesShellResolution(call imageShellCall) bool {
+	if len(call.args) == 0 {
+		return false
+	}
+	commandIndex := 0
+	if slices.Contains([]string{"builtin", "command"}, call.args[0]) && len(call.args) > 1 {
+		commandIndex = 1
+	}
+	return slices.Contains(
+		[]string{"alias", "enable", "eval", "hash", "shopt", "source", "unalias", "."},
+		call.args[commandIndex],
+	)
 }
 
 func imageCallInvokesHostProgram(call imageShellCall, program string) bool {
@@ -395,15 +410,9 @@ func imageRequireExactShellMode(t *testing.T, file *syntax.File, want ...string)
 			require.Equal(t, want, call.args,
 				"the reviewed shell error mode must be the only invocation of set")
 		}
-		for _, dynamic := range []string{"eval", "source", "."} {
-			invoked := len(call.args) > 0 && call.args[0] == dynamic
-			if len(call.args) > 1 && slices.Contains([]string{"command", "builtin"}, call.args[0]) {
-				invoked = invoked || call.args[1] == dynamic
-			}
-			require.Falsef(t, invoked,
-				"dynamic shell evaluation could replace the reviewed error mode or safety functions: %#v",
-				call.args)
-		}
+		require.Falsef(t, imageCallMutatesShellResolution(call),
+			"shell resolution mutation could replace the reviewed error mode or safety commands: %#v",
+			call.args)
 	}
 }
 
@@ -861,6 +870,20 @@ local source="$1" destination="$2"
 timeout --signal=TERM --kill-after=10s 20m \
     scp "${ssh_common_options[@]}" -P "$ssh_port" -- "$source" "root@127.0.0.1:$destination"
 `)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_digest", `
+local slot="$1"
+guest_run bootc status --format json |
+    jq -er --arg slot "$slot" '.status[$slot].image.imageDigest // empty'
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "guest_status_name", `
+local slot="$1"
+guest_run bootc status --format json |
+    jq -er --arg slot "$slot" '.status[$slot].image.image.image // empty'
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "run_guest_validation", `
+local expected_slot="$1"
+guest_run sh /root/validate-ucore.sh validate "$expected_slot"
+`)
 
 	for _, escape := range []string{"setsid", "nohup", "disown", "daemonize"} {
 		for _, call := range allCalls {
@@ -924,6 +947,34 @@ timeout --signal=TERM --kill-after=10s 20m \
 		"the EXIT cleanup trap must be armed before disk, installer, or QEMU resources are created")
 	require.Less(t, cleanupLine, disarmLine,
 		"success-path cleanup must finish before the EXIT trap is disarmed")
+	directTrapStatements := map[string]int{"arm": 0, "disarm": 0}
+	for _, statement := range file.Stmts {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok {
+			continue
+		}
+		var args []string
+		for _, word := range call.Args {
+			args = append(args, imageShellRender(t, word))
+		}
+		kind := ""
+		switch {
+		case slices.Equal(args, []string{"trap", "'cleanup_on_exit $?'", "EXIT"}):
+			kind = "arm"
+		case slices.Equal(args, []string{"trap", "-", "EXIT"}):
+			kind = "disarm"
+		}
+		if kind == "" {
+			continue
+		}
+		directTrapStatements[kind]++
+		require.False(t, statement.Background,
+			"the parent harness must execute the EXIT trap statement")
+		require.False(t, statement.Negated)
+		require.Empty(t, statement.Redirs)
+	}
+	require.Equal(t, map[string]int{"arm": 1, "disarm": 1}, directTrapStatements,
+		"trap arm and disarm must each be one direct parent-shell statement")
 	for _, call := range allCalls {
 		for _, arg := range call.args {
 			require.NotContains(t, arg, "${loop_device}p3")
@@ -995,6 +1046,20 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	allCalls := imageShellAllCalls(t, file)
+	topAssignments := imageShellAssignments(t, topLevel...)
+	for _, statusVariable := range []string{
+		"window_avc_status", "avc_status", "pilothouse_avc_status",
+	} {
+		initializations := 0
+		for _, assignment := range topAssignments {
+			if assignment == (imageShellAssignment{name: statusVariable, value: "0"}) {
+				initializations++
+			}
+		}
+		require.Equalf(t, 1, initializations,
+			"%s must be initialized to zero exactly once before grep captures its status",
+			statusVariable)
+	}
 	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
 	for _, call := range topCalls {
 		if len(call.args) > 0 && call.args[0] == "exit" {
@@ -1282,8 +1347,17 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 		args: []string{"guest_run_long", "podman", "load", "--input", "/tmp/update.oci"},
 	}, "podman"))
 	require.True(t, imageCallContainsProgram(imageShellCall{
-		args: []string{"/usr/bin/qemu-system-x86_64", "-S"},
+		args: []string{`"/usr/bin/qemu-system-x86_64"`, "-S"},
 	}, "qemu-system-x86_64"))
+	for _, call := range []imageShellCall{
+		{args: []string{"alias", "timeout=true"}},
+		{args: []string{"shopt", "-s", "expand_aliases"}},
+		{args: []string{"command", "eval", "'set +e'"}},
+		{args: []string{"builtin", "source", "/tmp/mutate-shell"}},
+	} {
+		require.Truef(t, imageCallMutatesShellResolution(call),
+			"must reject shell-resolution mutation %#v", call.args)
+	}
 }
 
 func TestUCoreVMRunnerRejectsRelativeWorkspaceBeforeMutation(t *testing.T) {

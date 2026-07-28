@@ -2536,16 +2536,20 @@ one definition across the complete AST, and each script's complete function
 name set is fixed so a new function cannot shadow `set`, `trap`, `timeout`,
 `cmp` or another reviewed builtin/program. The reviewed shell error modes must
 be the first executable statements; dynamic `eval`/source calls are forbidden.
+Alias, `shopt`, `enable` and hash-table mutation are forbidden as well, so
+later exact command nodes cannot be rebound after parsing.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
 switch and foreground-QEMU actions must occur exactly once across the whole
-AST. The QEMU statement itself must be backgrounded and immediately followed by
-its `$!` capture, and the EXIT trap must be armed before the first disk/resource
-mutation and disarmed only after explicit cleanup. Comparisons and
+AST. Quoted or unquoted path-qualified Podman/QEMU executables are normalized
+for the same policy. The QEMU statement itself must be backgrounded and
+immediately followed by its `$!` capture, and the EXIT trap must be one direct,
+foreground parent-shell statement armed before the first disk/resource mutation
+and disarmed only after explicit cleanup. Comparisons and
 critical evidence calls must feed `|| fail`, while the three `grep` probes must
-feed their named `$?` captures and separately reject both inspection errors and
-forbidden AVC matches. Whole-file
+start from an exact zero status, feed their named `$?` captures and separately
+reject both inspection errors and forbidden AVC matches. Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,
 extra bootc switches/QEMU processes and registry forms. It deliberately does
