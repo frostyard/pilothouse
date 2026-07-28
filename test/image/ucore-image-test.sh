@@ -47,7 +47,7 @@ done
 [[ $EUID -eq 0 ]] ||
     fail "the image lifecycle must run as root"
 
-for tool in bash go mktemp podman readlink rm setsid tail timeout; do
+for tool in bash go mkdir podman readlink rm setsid sleep tail timeout; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "required tool is unavailable: $tool"
 done
@@ -57,7 +57,13 @@ workspace_parent="${RUNNER_TEMP:-/tmp}"
     fail "RUNNER_TEMP must name a real absolute directory"
 workspace_parent="$(cd -- "$workspace_parent" && pwd -P)"
 readonly workspace_parent
-workspace="$(mktemp -d -- "${workspace_parent}/pilothouse-ucore-image.XXXXXXXX")"
+workspace_nonce=""
+read -r workspace_nonce </proc/sys/kernel/random/uuid ||
+    fail "cannot read a private workspace nonce"
+[[ "$workspace_nonce" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] ||
+    fail "the private workspace nonce is malformed"
+readonly workspace_nonce
+workspace="${workspace_parent}/pilothouse-ucore-image.${workspace_nonce}"
 readonly workspace
 readonly image_dir="${workspace}/fixture-ucore-images"
 readonly storage_root="${image_dir}/storage"
@@ -67,16 +73,25 @@ readonly podman_tmpdir="${image_dir}/libpod-tmp"
 readonly image_tmpdir="${image_dir}/image-tmp"
 readonly storage_config="${image_dir}/storage.conf"
 current_phase_pid=""
+cleanup_active=0
+termination_status=0
 
 handle_signal() {
     local signal_name="$1"
     local exit_status="$2"
     local phase_pid="$current_phase_pid"
 
+    trap '' INT TERM
+    termination_status="$exit_status"
     if [[ -n "$phase_pid" ]]; then
         kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
         wait "$phase_pid" 2>/dev/null || true
         current_phase_pid=""
+    fi
+    if ((cleanup_active != 0)); then
+        trap 'handle_signal INT 130' INT
+        trap 'handle_signal TERM 143' TERM
+        return 0
     fi
     exit "$exit_status"
 }
@@ -88,6 +103,7 @@ run_bounded() {
     local phase_log="${workspace}/${phase}.log"
     local status
     local pending_signal=""
+    local phase_group_ready=0
 
     log "starting ${phase}"
     trap 'pending_signal=INT' INT
@@ -98,6 +114,15 @@ run_bounded() {
     ) >"$phase_log" 2>&1 &
     current_phase_pid=$!
     local phase_pid="$current_phase_pid"
+    while ((phase_group_ready == 0)); do
+        if kill -0 -- "-$phase_pid" 2>/dev/null; then
+            phase_group_ready=1
+        elif ! kill -0 -- "$phase_pid" 2>/dev/null; then
+            break
+        else
+            sleep 0.01
+        fi
+    done
     trap 'handle_signal INT 130' INT
     trap 'handle_signal TERM 143' TERM
     case "$pending_signal" in
@@ -151,6 +176,7 @@ reset_private_store() {
 cleanup() {
     local cleanup_status=0
 
+    cleanup_active=1
     reset_private_store || cleanup_status=1
     rm -rf --one-file-system -- "$workspace" || cleanup_status=1
     return "$cleanup_status"
@@ -160,9 +186,13 @@ cleanup_on_exit() {
     local status="$1"
     local cleanup_status=0
 
-    trap - EXIT INT TERM
+    cleanup_active=1
+    trap - EXIT
     cleanup || cleanup_status=$?
-    if ((status == 0 && cleanup_status != 0)); then
+    trap - INT TERM
+    if ((termination_status != 0)); then
+        status="$termination_status"
+    elif ((status == 0 && cleanup_status != 0)); then
         status="$cleanup_status"
     fi
     exit "$status"
@@ -172,6 +202,7 @@ trap 'cleanup_on_exit $?' EXIT
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
 
+mkdir -m 0700 -- "$workspace"
 cd -- "$REPOSITORY_ROOT"
 run_bounded acquire-release-rpm 5m \
     go run ./test/image/releaserpm --workspace "$workspace"
@@ -180,6 +211,12 @@ run_bounded compose-ucore 75m \
 run_bounded validate-ucore-vm 75m \
     bash "$SCRIPT_DIR/ucore-vm-test.sh" --workspace "$workspace"
 
-cleanup || fail "exact-store reset or workspace removal failed"
+cleanup_status=0
+cleanup || cleanup_status=$?
 trap - EXIT INT TERM
+if ((termination_status != 0)); then
+    exit "$termination_status"
+fi
+((cleanup_status == 0)) ||
+    fail "exact-store reset or workspace removal failed"
 log "PASS: uCore image lifecycle validated and removed"

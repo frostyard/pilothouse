@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,17 +27,36 @@ func TestUCoreImageOrchestratorLifecycleIsClosed(t *testing.T) {
 	for _, call := range allCalls {
 		require.Truef(t, imageCallHasStaticCommand(call),
 			"the lifecycle command position must be static: %#v", call.args)
+		require.Emptyf(t, call.assignments,
+			"the lifecycle may not prefix executable calls with assignments: %#v", call.args)
 		require.Falsef(t, imageCallMutatesShellResolution(call),
 			"the lifecycle must not redefine shell command resolution: %#v", call.args)
 	}
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "usage", `
+echo "usage: ucore-image-test.sh --run-id LOWERCASE_ID" >&2
+`)
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "fail", `
+echo "ucore-image-test: $*" >&2
+exit 1
+`)
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "log", `
+echo "ucore-image-test: $*"
+`)
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "handle_signal", `
 local signal_name="$1"
 local exit_status="$2"
 local phase_pid="$current_phase_pid"
+trap '' INT TERM
+termination_status="$exit_status"
 if [[ -n "$phase_pid" ]]; then
     kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
     wait "$phase_pid" 2>/dev/null || true
     current_phase_pid=""
+fi
+if ((cleanup_active != 0)); then
+    trap 'handle_signal INT 130' INT
+    trap 'handle_signal TERM 143' TERM
+    return 0
 fi
 exit "$exit_status"
 `)
@@ -47,6 +67,7 @@ shift 2
 local phase_log="${workspace}/${phase}.log"
 local status
 local pending_signal=""
+local phase_group_ready=0
 log "starting ${phase}"
 trap 'pending_signal=INT' INT
 trap 'pending_signal=TERM' TERM
@@ -56,6 +77,15 @@ trap 'pending_signal=TERM' TERM
 ) >"$phase_log" 2>&1 &
 current_phase_pid=$!
 local phase_pid="$current_phase_pid"
+while ((phase_group_ready == 0)); do
+    if kill -0 -- "-$phase_pid" 2>/dev/null; then
+        phase_group_ready=1
+    elif ! kill -0 -- "$phase_pid" 2>/dev/null; then
+        break
+    else
+        sleep 0.01
+    fi
+done
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
 case "$pending_signal" in
@@ -75,6 +105,7 @@ return "$status"
 `)
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "cleanup", `
 local cleanup_status=0
+cleanup_active=1
 reset_private_store || cleanup_status=1
 rm -rf --one-file-system -- "$workspace" || cleanup_status=1
 return "$cleanup_status"
@@ -82,9 +113,13 @@ return "$cleanup_status"
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "cleanup_on_exit", `
 local status="$1"
 local cleanup_status=0
-trap - EXIT INT TERM
+cleanup_active=1
+trap - EXIT
 cleanup || cleanup_status=$?
-if ((status == 0 && cleanup_status != 0)); then
+trap - INT TERM
+if ((termination_status != 0)); then
+    status="$termination_status"
+elif ((status == 0 && cleanup_status != 0)); then
     status="$cleanup_status"
 fi
 exit "$status"
@@ -138,6 +173,66 @@ run_bounded reset-private-store 10m \
 		imageRequireExactCallCount(t, allCalls, 1, phase...)
 		imageRequireDirectCall(t, file, phase...)
 	}
+	imageRequireExactTopLevelSequence(
+		t,
+		imageOrchestratorPath,
+		file,
+		syntax.LangBash,
+		`
+trap 'cleanup_on_exit $?' EXIT
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+mkdir -m 0700 -- "$workspace"
+cd -- "$REPOSITORY_ROOT"
+run_bounded acquire-release-rpm 5m \
+    go run ./test/image/releaserpm --workspace "$workspace"
+run_bounded compose-ucore 75m \
+    bash "$SCRIPT_DIR/compose-ucore.sh" --workspace "$workspace" --run-id "$run_id"
+run_bounded validate-ucore-vm 75m \
+    bash "$SCRIPT_DIR/ucore-vm-test.sh" --workspace "$workspace"
+cleanup_status=0
+cleanup || cleanup_status=$?
+trap - EXIT INT TERM
+if ((termination_status != 0)); then
+    exit "$termination_status"
+fi
+((cleanup_status == 0)) ||
+    fail "exact-store reset or workspace removal failed"
+log "PASS: uCore image lifecycle validated and removed"
+`,
+	)
+	require.Equal(t, []imageShellAssignment{
+		{name: "LOG_KIB", value: "4096"},
+		{name: "LOG_BYTES", value: "$((LOG_KIB*1024))"},
+		{name: "SCRIPT_PATH", value: `"$(readlink -f -- "${BASH_SOURCE[0]}")"`},
+		{name: "SCRIPT_PATH", value: ""},
+		{name: "SCRIPT_DIR", value: `"$(dirname -- "$SCRIPT_PATH")"`},
+		{name: "SCRIPT_DIR", value: ""},
+		{name: "REPOSITORY_ROOT", value: `"$(cd -- "$SCRIPT_DIR/../.."&&pwd -P)"`},
+		{name: "REPOSITORY_ROOT", value: ""},
+		{name: "run_id", value: `""`},
+		{name: "run_id", value: `"$2"`},
+		{name: "workspace_parent", value: `"${RUNNER_TEMP:-/tmp}"`},
+		{name: "workspace_parent", value: `"$(cd -- "$workspace_parent"&&pwd -P)"`},
+		{name: "workspace_parent", value: ""},
+		{name: "workspace_nonce", value: `""`},
+		{name: "workspace_nonce", value: ""},
+		{name: "workspace", value: `"$workspace_parent/pilothouse-ucore-image.$workspace_nonce"`},
+		{name: "workspace", value: ""},
+		{name: "image_dir", value: `"$workspace/fixture-ucore-images"`},
+		{name: "storage_root", value: `"$image_dir/storage"`},
+		{name: "image_store", value: `"$image_dir/imagestore"`},
+		{name: "run_root", value: `"$image_dir/runroot"`},
+		{name: "podman_tmpdir", value: `"$image_dir/libpod-tmp"`},
+		{name: "image_tmpdir", value: `"$image_dir/image-tmp"`},
+		{name: "storage_config", value: `"$image_dir/storage.conf"`},
+		{name: "current_phase_pid", value: `""`},
+		{name: "cleanup_active", value: "0"},
+		{name: "termination_status", value: "0"},
+		{name: "cleanup_status", value: "0"},
+		{name: "cleanup_status", value: "$?"},
+	}, imageShellAssignments(t, imageShellTopLevel(file)...),
+		"the complete top-level assignment set must reject command-resolution and control-flow mutation")
 	var topCommandSequence []string
 	for _, call := range topCalls {
 		topCommandSequence = append(
@@ -148,14 +243,14 @@ run_bounded reset-private-store 10m \
 	require.Equal(t, []string{
 		"set", "readlink", "dirname", "cd", "pwd", "usage", "exit", "shift",
 		"usage", "exit", "fail", "fail", ".", "fail", "fail", "cd", "pwd",
-		"mktemp", "trap", "trap", "trap", "cd", "run_bounded", "run_bounded",
-		"run_bounded", "cleanup", "fail", "trap", "log",
+		"read", "fail", "fail", "trap", "trap", "trap", "mkdir", "cd",
+		"run_bounded", "run_bounded", "run_bounded", "cleanup", "trap", "exit",
+		"fail", "log",
 	}, topCommandSequence,
 		"the complete top-level command order must keep traps ahead of all phases and forbid success shortcuts")
 	imageRequireOrderedCalls(t, topCalls,
-		"run_bounded", "run_bounded", "run_bounded", "cleanup", "trap", "log",
+		"mkdir", "run_bounded", "run_bounded", "run_bounded", "cleanup", "trap", "log",
 	)
-	imageRequireDirectFailingCall(t, file, "cleanup")
 	imageRequireExactCallCount(t, topCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
 	imageRequireDirectCall(t, file, "trap", "'cleanup_on_exit $?'", "EXIT")
 	imageRequireDirectCall(t, file, "trap", "'handle_signal INT 130'", "INT")
@@ -213,13 +308,52 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 	}
 }
 
+func TestUCoreImageOrchestratorGuardSeesAssignmentOnlyCommandShadow(t *testing.T) {
+	source := imageReadHarness(t, imageOrchestratorPath)
+	shadowed := strings.Replace(
+		source,
+		"termination_status=0\n",
+		"termination_status=0\nBASH_CMDS[setsid]=/usr/bin/true\n",
+		1,
+	)
+	require.NotEqual(t, source, shadowed)
+
+	baselineFile := imageParseShellSource(
+		t,
+		imageOrchestratorPath,
+		source,
+		syntax.LangBash,
+	)
+	shadowedFile := imageParseShellSource(
+		t,
+		"shadowed-"+imageOrchestratorPath,
+		shadowed,
+		syntax.LangBash,
+	)
+	baseline := imageShellAssignments(t, imageShellTopLevel(baselineFile)...)
+	shadowedAssignments := imageShellAssignments(t, imageShellTopLevel(shadowedFile)...)
+	require.Len(t, shadowedAssignments, len(baseline)+1)
+	require.NotEqual(t, baseline, shadowedAssignments,
+		"the lifecycle's exact top-level assignment guard must reject command-cache mutation")
+
+	var shadows []imageShellAssignment
+	for _, assignment := range shadowedAssignments {
+		if assignment.name == "BASH_CMDS" {
+			shadows = append(shadows, assignment)
+		}
+	}
+	require.Equal(t, []imageShellAssignment{
+		{name: "BASH_CMDS", value: "/usr/bin/true"},
+	}, shadows)
+}
+
 func TestUCoreImageOrchestratorOwnsOnePrivateWorkspace(t *testing.T) {
 	file := imageParseShell(t, imageOrchestratorPath, syntax.LangBash)
 	allCalls := imageShellAllCalls(t, file)
 	topCalls := imageShellCalls(t, imageShellTopLevel(file)...)
 
 	imageRequireExactCallCount(t, allCalls, 1,
-		"mktemp", "-d", "--", `"$workspace_parent/pilothouse-ucore-image.XXXXXXXX"`,
+		"mkdir", "-m", "0700", "--", `"$workspace"`,
 	)
 	imageRequireExactCallCount(t, allCalls, 1,
 		"rm", "-rf", "--one-file-system", "--", `"$workspace"`,
@@ -273,5 +407,7 @@ func TestUCoreImageOrchestratorOwnsOnePrivateWorkspace(t *testing.T) {
 func TestUCoreImageOrchestratorIsExecutable(t *testing.T) {
 	info, err := os.Stat(filepath.Join(imageRepositoryRoot(t), imageOrchestratorPath))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	require.NotZerof(t, info.Mode().Perm()&0o111,
+		"%s is executed as a program and must be committed executable (100755); mode is %v",
+		imageOrchestratorPath, info.Mode())
 }

@@ -35,9 +35,10 @@ semantic-version release once, accepts exactly the tag-correlated
 SHA-256 while downloading, and creates a fresh
 `fixture-release-rpm/fixture.json` plus the RPM inside the caller-owned
 workspace. It never publishes, uploads, installs or retains anything on its
-own; the later image orchestrator owns workspace cleanup. The workspace must
-be private to one invocation and not concurrently mutated. Do not point it at
-a reused fixture directory or substitute a branch artifact.
+own; `test/image/ucore-image-test.sh`, the landed lifecycle owner, owns
+workspace cleanup. The workspace must be private to one invocation and not
+concurrently mutated. Do not point it at a reused fixture directory or
+substitute a branch artifact.
 
 `test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID`
 consumes that released-RPM fixture from the same private, non-concurrently
@@ -83,9 +84,11 @@ of that complete lifecycle. It creates one mode-0700 workspace below
 `RUNNER_TEMP`, runs acquisition, composition and the VM consumer synchronously
 with both wall-clock and 4 MiB log-file limits, resets the exact private Podman
 store synchronously, and only then recursively removes the workspace. Each
-bounded phase owns one separate process group, records its PID, forwards
-INT/TERM to the group and waits before cleanup. Its EXIT/INT/TERM path performs
-the same reset-then-remove sequence.
+bounded phase owns one separate process group, records its PID, waits for group
+readiness, then forwards INT/TERM to the group and reaps it before cleanup.
+Cleanup latches any further termination request until exact-store reset and
+workspace removal finish. Its EXIT/INT/TERM path performs the same
+reset-then-remove sequence.
 `.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
 provides the required `--imagestore` option. The job runs on every push to
 `main` and on a pull request only while the `vm-boot` label is present. It is

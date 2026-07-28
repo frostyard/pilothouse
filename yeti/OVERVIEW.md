@@ -146,9 +146,10 @@ test/image/ucore-vm-test.sh
 test/image/ucore-image-test.sh
                       fifth #80 slice and root-only lifecycle owner. It runs
                       acquisition, composition and VM validation as bounded
-                      foreground phases, resets the exact private Podman store,
-                      waits, then removes its private workspace. image-tier.yml
-                      invokes it on main and on vm-boot-labelled pull requests
+                      process groups, waits for group readiness, forwards and
+                      reaps signals, resets the exact private Podman store, then
+                      removes its private workspace. image-tier.yml invokes it
+                      on main and on vm-boot-labelled pull requests
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It includes
@@ -2712,10 +2713,12 @@ outer deadlines are 5, 75 and 75 minutes; the inner tools retain their narrower
 deadlines. Each phase writes through a 4 MiB file-size limit to a phase-local
 regular file, then emits at most that many bytes to the job log. `run_bounded`
 creates exactly one separate-session background process group, records its
-PID, waits for it, and clears the PID only after the wait. INT/TERM is forwarded
-to that entire group and waited before EXIT cleanup proceeds; behavioral tests
-send INT and TERM to the orchestrator alone and prove the child is gone. The
-outer shell creates no coprocess, disowned or process-substitution children.
+PID, confirms the group exists, waits for it, and clears the PID only after the
+wait. INT/TERM received during launch is latched until that readiness check;
+then it is forwarded to the entire group and waited before EXIT cleanup
+proceeds. Behavioral tests cover INT and TERM both before and after group
+readiness and prove the phase process is gone. The outer shell creates no
+coprocess, disowned or process-substitution children.
 
 The success path and the EXIT/INT/TERM path converge on the same cleanup
 function. If composition reached the point where its exact regular,
@@ -2730,6 +2733,12 @@ quiescent workspace is removed so derived images are not retained. Successful
 cleanup is followed by trap disarm and the final PASS line.
 If no configuration exists, all three store roots must also be absent; a
 partial or redirected store cannot turn reset into a successful no-op.
+The cleanup frame latches any further INT/TERM, forwards it to a live reset
+group if necessary, waits, and still reaches workspace removal; the most recent
+termination status is returned only after cleanup finishes. Cleanup traps are
+armed before the workspace directory is created, and the UUID-derived target
+is fixed first, so a signal around creation can remove either the just-created
+directory or the still-absent target without leaking it.
 
 `.github/workflows/image-tier.yml` carries one `ucore-vm` job. It runs on every
 push to `main`; for pull requests it runs only while the `vm-boot` label is

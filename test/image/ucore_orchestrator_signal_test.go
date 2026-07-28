@@ -41,22 +41,34 @@ func TestUCoreOrchestratorForwardsSignalsAndWaits(t *testing.T) {
 	})
 	require.Len(t, functions, 3)
 
-	for _, testCase := range []struct {
-		name       string
-		signal     syscall.Signal
-		exitStatus int
-	}{
-		{name: "INT", signal: syscall.SIGINT, exitStatus: 130},
-		{name: "TERM", signal: syscall.SIGTERM, exitStatus: 143},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			testUCoreOrchestratorSignal(
-				t,
-				functions,
-				testCase.signal,
-				testCase.exitStatus,
-			)
-		})
+	for _, cleanupActive := range []bool{false, true} {
+		for _, delayGroup := range []bool{false, true} {
+			for _, testCase := range []struct {
+				name       string
+				signal     syscall.Signal
+				exitStatus int
+			}{
+				{name: "INT", signal: syscall.SIGINT, exitStatus: 130},
+				{name: "TERM", signal: syscall.SIGTERM, exitStatus: 143},
+			} {
+				name := fmt.Sprintf(
+					"%s/cleanup=%t/before-group=%t",
+					testCase.name,
+					cleanupActive,
+					delayGroup,
+				)
+				t.Run(name, func(t *testing.T) {
+					testUCoreOrchestratorSignal(
+						t,
+						functions,
+						testCase.signal,
+						testCase.exitStatus,
+						cleanupActive,
+						delayGroup,
+					)
+				})
+			}
+		}
 	}
 }
 
@@ -65,11 +77,15 @@ func testUCoreOrchestratorSignal(
 	functions map[string]string,
 	signal syscall.Signal,
 	exitStatus int,
+	cleanupActive bool,
+	delayGroup bool,
 ) {
 	t.Helper()
 
 	sandbox := t.TempDir()
 	childPIDPath := filepath.Join(sandbox, "child.pid")
+	groupDelayPIDPath := filepath.Join(sandbox, "group-delay.pid")
+	cleanupContinuedPath := filepath.Join(sandbox, "cleanup-continued")
 	probePath := filepath.Join(sandbox, "signal-probe.sh")
 	probe := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
@@ -77,17 +93,52 @@ readonly LOG_KIB=64
 readonly LOG_BYTES=$((LOG_KIB * 1024))
 workspace="$1"
 current_phase_pid=""
+cleanup_active=%d
+termination_status=0
 %s
 %s
 %s
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
+phase_status=0
 run_bounded signal-probe 30s bash -c \
-    'printf "%%s\n" "$BASHPID" >"$1"; exec sleep 30' probe "$2"
-`, functions["log"], functions["handle_signal"], functions["run_bounded"])
+    'printf "%%s\n" "$BASHPID" >"$1"; exec sleep 30' probe "$2" ||
+    phase_status=$?
+if ((cleanup_active != 0)); then
+    printf 'continued\n' >"$3"
+    exit "$termination_status"
+fi
+exit "$phase_status"
+`, boolInt(cleanupActive), functions["log"], functions["handle_signal"], functions["run_bounded"])
 	require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
 
-	command := exec.Command("bash", probePath, sandbox, childPIDPath)
+	command := exec.Command(
+		"bash",
+		probePath,
+		sandbox,
+		childPIDPath,
+		cleanupContinuedPath,
+	)
+	realSetsid, lookErr := exec.LookPath("setsid")
+	require.NoError(t, lookErr)
+	wrapperDir := filepath.Join(sandbox, "bin")
+	require.NoError(t, os.Mkdir(wrapperDir, 0o700))
+	wrapperPath := filepath.Join(wrapperDir, "setsid")
+	wrapper := `#!/bin/sh
+printf '%s\n' "$$" >"$SIGNAL_GROUP_DELAY_PID_PATH"
+if [ "$SIGNAL_DELAY_GROUP" = 1 ]; then
+    sleep 0.1
+fi
+exec "$SIGNAL_REAL_SETSID" "$@"
+`
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0o700))
+	command.Env = append(
+		os.Environ(),
+		"PATH="+wrapperDir+":"+os.Getenv("PATH"),
+		"SIGNAL_DELAY_GROUP="+strconv.Itoa(boolInt(delayGroup)),
+		"SIGNAL_GROUP_DELAY_PID_PATH="+groupDelayPIDPath,
+		"SIGNAL_REAL_SETSID="+realSetsid,
+	)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -98,27 +149,21 @@ run_bounded signal-probe 30s bash -c \
 		if command.Process != nil {
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		}
-		if childPIDBytes, readErr := os.ReadFile(childPIDPath); readErr == nil {
-			if childPID, parseErr := strconv.Atoi(strings.TrimSpace(string(childPIDBytes))); parseErr == nil {
-				_ = syscall.Kill(-childPID, syscall.SIGKILL)
+		for _, pidPath := range []string{childPIDPath, groupDelayPIDPath} {
+			if pidBytes, readErr := os.ReadFile(pidPath); readErr == nil {
+				if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes))); parseErr == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
+				}
 			}
 		}
 	})
 
-	var childPID int
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		childPIDBytes, readErr := os.ReadFile(childPIDPath)
-		if readErr == nil {
-			var parseErr error
-			childPID, parseErr = strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
-			require.NoError(t, parseErr)
-			break
-		}
-		require.True(t, errors.Is(readErr, os.ErrNotExist), readErr)
-		time.Sleep(10 * time.Millisecond)
+	signalTargetPIDPath := childPIDPath
+	if delayGroup {
+		signalTargetPIDPath = groupDelayPIDPath
 	}
-	require.NotZero(t, childPID, "the bounded phase never reported its child PID")
+	signalTargetPID := waitForPIDFile(t, signalTargetPIDPath)
 
 	require.NoError(t, command.Process.Signal(signal))
 	waitResult := make(chan error, 1)
@@ -141,12 +186,47 @@ run_bounded signal-probe 30s bash -c \
 		)
 	}
 
-	deadline = time.Now().Add(3 * time.Second)
+	if cleanupActive {
+		continued, readErr := os.ReadFile(cleanupContinuedPath)
+		require.NoError(t, readErr,
+			"a follow-on signal must return to the cleanup frame")
+		require.Equal(t, "continued\n", string(continued))
+	} else {
+		_, readErr := os.Stat(cleanupContinuedPath)
+		require.ErrorIs(t, readErr, os.ErrNotExist)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if killErr := syscall.Kill(childPID, 0); errors.Is(killErr, syscall.ESRCH) {
+		if killErr := syscall.Kill(signalTargetPID, 0); errors.Is(killErr, syscall.ESRCH) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("phase child %d survived orchestrator %s forwarding", childPID, signal)
+	t.Fatalf("phase process %d survived orchestrator %s forwarding", signalTargetPID, signal)
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		pidBytes, readErr := os.ReadFile(path)
+		if readErr == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+			require.NoError(t, parseErr)
+			return pid
+		}
+		require.True(t, errors.Is(readErr, os.ErrNotExist), readErr)
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the bounded phase never reported its process PID in %s", path)
+	return 0
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
