@@ -2756,12 +2756,16 @@ upload or download, and no publication command. The artifact under test
 remains the released-RPM fixture selected by the acquisition phase.
 
 `packaging/imagetest/ucore_orchestrator_test.go` parses the lifecycle owner with
-the shared shell AST helpers. It pins the exact function set, static command
-resolution, top-level trap/phase/success order, phase argv, reset and cleanup
-bodies, one owned background process group, bounded timeout/tail/ulimit calls,
-one recursive deletion target, readonly derived paths, trap suffix and absence
-of publication. `test/image/ucore_orchestrator_signal_test.go` exercises real
-TERM forwarding and child reaping. `packaging/workflow_image_tier_test.go`
+the shared shell AST helpers. It pins every non-function top-level statement
+including expansions and redirections, function declaration order and
+undecorated shape, the exact function set and bodies, static command resolution,
+phase argv, one owned background process group, bounded timeout/tail/ulimit
+calls, one ownership-gated recursive deletion target, readonly derived paths
+and absence of publication. Its negative mutations cover command-cache
+assignment, a constant UUID source, a declaration-level side effect and a
+cleanup function moved below its trap. `test/image/ucore_orchestrator_signal_test.go`
+exercises INT/TERM before and after group readiness, cleanup-active return and
+owned/unowned workspace cleanup. `packaging/workflow_image_tier_test.go`
 decodes the live YAML and fixes its complete permission map and ordered step
 bodies in addition to its trigger, label, runner and timeout, so an added
 upload step or a fail-open suffix is visible.

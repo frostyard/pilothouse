@@ -22,6 +22,9 @@ SCRIPT_DIR="$(dirname -- "$SCRIPT_PATH")"
 readonly SCRIPT_DIR
 REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 readonly REPOSITORY_ROOT
+usage() { :; }
+fail() { :; }
+log() { :; }
 run_id=""
 while (($#)); do
     case "$1" in
@@ -68,6 +71,11 @@ current_phase_pid=""
 cleanup_active=0
 termination_status=0
 workspace_created=0
+handle_signal() { :; }
+run_bounded() { :; }
+reset_private_store() { :; }
+cleanup() { :; }
+cleanup_on_exit() { :; }
 trap 'cleanup_on_exit $?' EXIT
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
@@ -118,6 +126,11 @@ func TestUCoreImageOrchestratorLifecycleIsClosed(t *testing.T) {
 		imageOrchestratorExpectedTopLevel(t),
 		imageOrchestratorNonFunctionTopLevel(t, file),
 		"every non-function top-level statement, expansion and redirection must be reviewed exactly",
+	)
+	require.Equal(t,
+		imageOrchestratorExpectedTopLevelShape(t),
+		imageOrchestratorTopLevelShape(t, file),
+		"function declaration placement and declaration shape must be reviewed exactly",
 	)
 	imageRequireUniqueFunctions(t, imageOrchestratorPath, file)
 	imageRequireExactFunctionSet(t, imageOrchestratorPath, file,
@@ -454,6 +467,67 @@ func TestUCoreImageOrchestratorGuardRejectsConstantWorkspaceNonce(t *testing.T) 
 	)
 }
 
+func TestUCoreImageOrchestratorGuardRejectsDecoratedFunctionDeclaration(t *testing.T) {
+	source := imageReadHarness(t, imageOrchestratorPath)
+	const reviewed = `return "$status"
+}
+
+reset_private_store()`
+	const decorated = `return "$status"
+} <"${BASH_CMDS[setsid]:=/usr/bin/true}"
+
+reset_private_store()`
+	mutated := strings.Replace(source, reviewed, decorated, 1)
+	require.NotEqual(t, source, mutated)
+
+	mutatedFile := imageParseShellSource(
+		t,
+		"decorated-function-"+imageOrchestratorPath,
+		mutated,
+		syntax.LangBash,
+	)
+	require.Equal(t,
+		imageOrchestratorExpectedTopLevel(t),
+		imageOrchestratorNonFunctionTopLevel(t, mutatedFile),
+		"the mutation must exercise the function-declaration seam rather than a non-function statement",
+	)
+	require.NotEqual(t,
+		imageOrchestratorExpectedTopLevelShape(t),
+		imageOrchestratorTopLevelShape(t, mutatedFile),
+		"the declaration-shape guard must reject side-effecting function redirections",
+	)
+}
+
+func TestUCoreImageOrchestratorGuardRejectsLateCleanupDeclaration(t *testing.T) {
+	source := imageReadHarness(t, imageOrchestratorPath)
+	start := strings.Index(source, "\ncleanup_on_exit() {")
+	require.NotEqual(t, -1, start)
+	start++
+	const closingMarker = "\n}\n\ntrap 'cleanup_on_exit $?' EXIT"
+	closing := strings.Index(source[start:], closingMarker)
+	require.NotEqual(t, -1, closing)
+	end := start + closing + len("\n}")
+	declaration := source[start:end]
+	mutated := source[:start] + source[end:] + "\n" + declaration + "\n"
+
+	mutatedFile := imageParseShellSource(
+		t,
+		"late-cleanup-"+imageOrchestratorPath,
+		mutated,
+		syntax.LangBash,
+	)
+	require.Equal(t,
+		imageOrchestratorExpectedTopLevel(t),
+		imageOrchestratorNonFunctionTopLevel(t, mutatedFile),
+		"the mutation must preserve every non-function statement",
+	)
+	require.NotEqual(t,
+		imageOrchestratorExpectedTopLevelShape(t),
+		imageOrchestratorTopLevelShape(t, mutatedFile),
+		"the top-level shape guard must reject a cleanup declaration after its trap and callers",
+	)
+}
+
 func TestUCoreImageOrchestratorOwnsOnePrivateWorkspace(t *testing.T) {
 	file := imageParseShell(t, imageOrchestratorPath, syntax.LangBash)
 	allCalls := imageShellAllCalls(t, file)
@@ -521,6 +595,17 @@ func imageOrchestratorExpectedTopLevel(t *testing.T) []string {
 	return imageOrchestratorNonFunctionTopLevel(t, expected)
 }
 
+func imageOrchestratorExpectedTopLevelShape(t *testing.T) []string {
+	t.Helper()
+	expected := imageParseShellSource(
+		t,
+		"reviewed-shape-"+imageOrchestratorPath,
+		imageOrchestratorReviewedTopLevel,
+		syntax.LangBash,
+	)
+	return imageOrchestratorTopLevelShape(t, expected)
+}
+
 func imageOrchestratorNonFunctionTopLevel(t *testing.T, file *syntax.File) []string {
 	t.Helper()
 
@@ -530,6 +615,31 @@ func imageOrchestratorNonFunctionTopLevel(t *testing.T, file *syntax.File) []str
 			continue
 		}
 		statements = append(statements, imageShellRender(t, statement))
+	}
+	return statements
+}
+
+func imageOrchestratorTopLevelShape(t *testing.T, file *syntax.File) []string {
+	t.Helper()
+
+	statements := make([]string, 0, len(file.Stmts))
+	for _, statement := range file.Stmts {
+		declaration, isFunction := statement.Cmd.(*syntax.FuncDecl)
+		if !isFunction {
+			statements = append(statements, imageShellRender(t, statement))
+			continue
+		}
+
+		marker := "function:" + declaration.Name.Value
+		decoratedBody := declaration.Body != nil &&
+			(declaration.Body.Background || declaration.Body.Coprocess ||
+				declaration.Body.Disown || declaration.Body.Negated ||
+				len(declaration.Body.Redirs) != 0)
+		if statement.Background || statement.Coprocess || statement.Disown ||
+			statement.Negated || len(statement.Redirs) != 0 || decoratedBody {
+			marker += ":decorated:" + imageShellRender(t, statement)
+		}
+		statements = append(statements, marker)
 	}
 	return statements
 }
