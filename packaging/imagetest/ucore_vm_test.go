@@ -1468,6 +1468,36 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	mainCalls := imageShellCalls(t, topLevel...)
 	allCalls := imageShellAllCalls(t, file)
+	var commandSequence []string
+	for _, call := range mainCalls {
+		commandSequence = append(
+			commandSequence,
+			filepath.Base(imageCallEffectiveCommand(call)),
+		)
+	}
+	require.Equal(t, []string{
+		"set", "readlink", "dirname", "usage", "exit", "shift", "usage", "exit",
+		"shift", "usage", "exit", "fail", "cd", "pwd", "fail", "fail", "fail", ".",
+		"fail", "fail", "ss", "grep", "fail", "fail", "mkdir", "fail", "jq", "fail",
+		"manifest_value", "manifest_value", "manifest_value", "manifest_value",
+		"manifest_value", "manifest_value", "manifest_value", "manifest_value",
+		"manifest_value", "manifest_value", "fail", "fail", "fail", "fail", "fail",
+		"assert_storage_path", "assert_storage_path", "assert_storage_path",
+		"assert_storage_path", "assert_storage_path", "assert_storage_path", "fail",
+		"unset", "podman_fixture", "fail", "trap", "log", "truncate", "ssh-keygen",
+		"podman_fixture", "detach_disk_loops", "fail", "log", "podman_fixture", "fail",
+		"find_ovmf", "fail", "cp", "cp", "log", "qemu-system-x86_64",
+		"wait_for_ssh", "wait_for_broker", "openssl", "jq", "chmod", "unset",
+		"guest_copy", "guest_copy", "guest_run", "guest_run", "guest_run",
+		"guest_status_digest", "run_guest_validation", "log", "guest_copy",
+		"guest_run_long", "guest_run", "guest_run_long", "guest_status_name",
+		"guest_status_digest", "fail", "reboot_guest", "guest_status_digest", "fail",
+		"guest_status_digest", "fail", "run_guest_validation", "log",
+		"guest_status_digest", "guest_status_digest", "guest_run_long", "reboot_guest",
+		"guest_status_digest", "fail", "guest_status_digest", "fail",
+		"run_guest_validation", "cleanup", "fail", "trap", "log",
+	}, commandSequence,
+		"the runner main path's effective command sequence and multiplicity are closed")
 
 	installCall := []string{
 		"podman_fixture", "45m", "run",
@@ -2192,15 +2222,36 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	require.Equal(t, 1, backgroundStatements,
 		"the owned QEMU process must be the runner's only top-level background job")
 	var allBackgroundLines []uint
+	var coprocessLines []uint
+	var disownedLines []uint
+	var processSubstitutions []string
 	syntax.Walk(file, func(node syntax.Node) bool {
-		statement, ok := node.(*syntax.Stmt)
-		if ok && statement.Background {
-			allBackgroundLines = append(allBackgroundLines, statement.Pos().Line())
+		switch typed := node.(type) {
+		case *syntax.Stmt:
+			if typed.Background {
+				allBackgroundLines = append(allBackgroundLines, typed.Pos().Line())
+			}
+			if typed.Coprocess || typed.Disown {
+				disownedLines = append(disownedLines, typed.Pos().Line())
+			}
+		case *syntax.CoprocClause:
+			coprocessLines = append(coprocessLines, typed.Pos().Line())
+		case *syntax.ProcSubst:
+			processSubstitutions = append(
+				processSubstitutions,
+				imageShellRender(t, typed),
+			)
 		}
 		return true
 	})
 	require.Equal(t, []uint{file.Stmts[qemuStatement].Pos().Line()}, allBackgroundLines,
 		"the owned QEMU process must be the only background statement in the complete runner AST")
+	require.Empty(t, coprocessLines,
+		"the runner must not create unowned Bash coprocesses")
+	require.Empty(t, disownedLines,
+		"the runner must not create shell coprocess or disowned jobs")
+	require.Equal(t, []string{`<(awk -F: '{print $1}' <<<"$listing")`}, processSubstitutions,
+		"the exact detach_disk_loops input must be the runner's only process substitution")
 	require.Less(t, qemuStatement+1, len(file.Stmts),
 		"QEMU must be followed immediately by qemu_pid=$!")
 	pidStatement := file.Stmts[qemuStatement+1]

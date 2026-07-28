@@ -2532,10 +2532,13 @@ The install-to-VM handoff has its own direct fatal loop-detach check: it is
 ordered after the exact bootc install and before update export or QEMU work, so
 the VM never opens a disk that the installer still holds through a loop device.
 QEMU is the only background statement in the runner's complete AST, including
-all function bodies; every other helper remains synchronous, so no untracked
-child can retain CI descriptors past cleanup. The SSH/SCP and Podman operations
-that can wait on external systems retain their explicit timeouts. All runner
-function bodies are exact, including usage and OVMF discovery.
+all function bodies. Bash coprocesses, shell coprocess/disown forms and any
+additional process substitution are forbidden; the only process substitution
+is the consumed `awk` input in the exact `detach_disk_loops` body. Every other
+helper remains synchronous, so no untracked child can retain CI descriptors
+past cleanup. The SSH/SCP and Podman operations that can wait on external
+systems retain their explicit timeouts. All runner function bodies are exact,
+including usage and OVMF discovery.
 All `losetup` and private-store Podman invocations are closed to their reviewed
 query/detach and inspect/install/save/named-remove forms. On success, cleanup is
 immediately followed by trap disarm, which is the penultimate statement; the
@@ -2556,6 +2559,9 @@ that check. Every command position (including a wrapped effective command) must
 resolve statically from literal or quoted AST word parts; command names carrying
 shell escapes and parameter expansions are rejected rather than normalized, so
 they cannot hide a trap or teardown bypass.
+The runner main path's complete ordered effective-command sequence is fixed,
+including multiplicity. An otherwise unknown outer wrapper cannot introduce a
+dynamic interpreter or alternate guest bridge while evading the argv scans.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
