@@ -443,13 +443,16 @@ func imageShellOutputWrites(t *testing.T, roots ...syntax.Node) []imageShellWrit
 			if !ok {
 				return true
 			}
-			call, ok := statement.Cmd.(*syntax.CallExpr)
-			if !ok || len(call.Args) == 0 {
-				return true
-			}
-			command, static := imageShellStaticWord(call.Args[0])
-			if !static {
-				command = imageShellRender(t, call.Args[0])
+			command := "<compound>"
+			if call, isCall := statement.Cmd.(*syntax.CallExpr); isCall {
+				command = "<redirection-only>"
+				if len(call.Args) > 0 {
+					var static bool
+					command, static = imageShellStaticWord(call.Args[0])
+					if !static {
+						command = imageShellRender(t, call.Args[0])
+					}
+				}
 			}
 			for _, redirect := range statement.Redirs {
 				switch redirect.Op.String() {
@@ -1437,6 +1440,23 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	allCalls := imageShellAllCalls(t, file)
+	imageRequireExactFunction(t, imageVMGuestPath, file, syntax.LangPOSIX, "broker_query", `
+query_id="$1"
+output="$2"
+status="$(
+    curl --silent --show-error --max-time 30 \
+        --unix-socket "$BROKER_SOCKET" \
+        --request POST \
+        --header 'Content-Type: application/json' \
+        --header @"$work_dir/auth.header" \
+        --data-binary @"$work_dir/query.json" \
+        --output "$output" \
+        --write-out '%{http_code}' \
+        "http://localhost/v1/queries/$query_id"
+)" || fail "$query_id did not complete"
+[ "$status" = 200 ] ||
+    fail "$query_id returned HTTP $status, expected 200"
+`)
 	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
 	for _, call := range topCalls {
 		command := imageCallEffectiveCommand(call)
@@ -1575,7 +1595,24 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	for target := range criticalWrites {
 		observedWrites[target] = map[string]int{}
 	}
+	allowedOutputTargets := map[string]bool{
+		"/dev/null":                            true,
+		`"$work_dir/login.json"`:               true,
+		`"$work_dir/auth.header"`:              true,
+		`"$work_dir/query.json"`:               true,
+		`"$work_dir/cursor-journal"`:           true,
+		`"$work_dir/actual-unsorted"`:          true,
+		`"$work_dir/actual"`:                   true,
+		`"$work_dir/expected"`:                 true,
+		`"$work_dir/bootc-status.json"`:        true,
+		`"$work_dir/expected-host-image.json"`: true,
+		`"$work_dir/actual-host-image.json"`:   true,
+		`"$work_dir/new-avcs"`:                 true,
+		`"$work_dir/boot-journal"`:             true,
+	}
 	for _, write := range imageShellOutputWrites(t, topLevel...) {
+		require.Truef(t, allowedOutputTargets[write.target],
+			"guest output redirection must use one reviewed literal target; got %#v", write)
 		if _, critical := criticalWrites[write.target]; !critical {
 			continue
 		}
@@ -1591,10 +1628,11 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 			"the guest evidence path must not gain a non-redirection file mutator: %#v",
 			call.args)
 		command := imageCallEffectiveCommand(call)
-		if command == "sort" &&
-			(slices.Contains(call.args, "-o") || slices.Contains(call.args, "--output")) {
-			require.Equal(t, expectedCapabilitySortCall, call.args,
-				"the only in-place sort must normalize independent expected capabilities")
+		if command == "sort" {
+			require.True(t,
+				slices.Equal(call.args, expectedCapabilitySortCall) ||
+					slices.Equal(call.args, actualCapabilitySortCall),
+				"the guest must use only the two reviewed capability sort calls: %#v", call.args)
 		}
 	}
 
@@ -1818,10 +1856,17 @@ a\lias trap=:
 	overwrite := imageParseShellSource(t, "evidence-overwrite.sh", `
 sed -n p "$work_dir/expected" >"$work_dir/actual"
 : >"$work_dir/new-avcs"
+>"$work_dir/boot-journal"
+{ :; } >"$work_dir/actual-host-image.json"
+evidence_target="$work_dir/actual"
+: >"$evidence_target"
 `, syntax.LangPOSIX)
 	require.ElementsMatch(t, []imageShellWrite{
 		{command: "sed", target: `"$work_dir/actual"`, line: 2},
 		{command: ":", target: `"$work_dir/new-avcs"`, line: 3},
+		{command: "<compound>", target: `"$work_dir/boot-journal"`, line: 4},
+		{command: "<compound>", target: `"$work_dir/actual-host-image.json"`, line: 5},
+		{command: ":", target: `"$evidence_target"`, line: 7},
 	}, imageShellOutputWrites(t, imageShellTopLevel(overwrite)...),
 		"redirection writes to evidence files must remain visible to the writer-set guard")
 }

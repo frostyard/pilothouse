@@ -2558,7 +2558,12 @@ the expected and actual host-image normalizers likewise accept only their
 respective `bootc status` and broker-response inputs. Every critical evidence
 file has a complete, exact redirection-writer set and all of those writers must
 precede its comparison/scan; generic copy/move/truncate/stream writers and
-alternate in-place sorts are forbidden on the guest evidence path. The two AVC scans use
+every alternate sort are forbidden on the guest evidence path. Redirection-only
+and compound-command statements are recorded too, and every output target must
+be one reviewed literal path, so variable and `/./` path aliases cannot evade
+the writer set. The broker query helper's complete curl/output/status body is
+exact-pinned because its legitimate destination is necessarily a parameter.
+The two AVC scans use
 `jq -Rse` predicates whose false result, read error or malformed execution all
 feed the same fatal edge, leaving no mutable shell status variable. Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
