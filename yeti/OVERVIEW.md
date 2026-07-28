@@ -2529,14 +2529,17 @@ that reset, then remove the workspace. No workflow invokes the image tier yet.
 `packaging/imagetest/ucore_vm_test.go` parses both harnesses with
 `mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
 function body or the top-level main region. Named functions must have exactly
-one definition, and call guards bind both the executable name and its parsed
-argument sequence. Whole-file negative policies include nested function bodies
-and recognize wrapped/alternate push, recursive-removal and registry forms. It
-deliberately does not search raw shell text: comments, string literals, no-op
-copies and commands moved into an uncalled decoy function cannot satisfy the
-guards. The guest also captures `jq`, `sort`, journal and AVC-filter statuses
-separately so POSIX pipeline or `grep` status semantics cannot turn malformed
-evidence or an inspection error into a clean result.
+one definition across the complete AST. Critical calls are matched as one exact
+argument vector rather than pieced together from subsequences, and comparison
+guards must be the left side of `|| fail`. Whole-file negative policies include
+nested function bodies and recognize wrapped/alternate push, any recursive
+removal, extra bootc switches and registry forms. It deliberately does not
+search raw shell text: comments, string literals, no-op copies and commands
+moved into an uncalled decoy function cannot satisfy the guards. The guest also
+requires exactly one capability-response JSON document and captures `jq`,
+`sort`, journal and AVC-filter statuses separately so POSIX pipeline or `grep`
+status semantics cannot turn malformed evidence or an inspection error into a
+clean result.
 
 **Still out of scope for this package.**
 

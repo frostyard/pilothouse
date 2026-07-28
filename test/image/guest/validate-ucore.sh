@@ -138,11 +138,11 @@ broker_query() {
 }
 
 broker_query "$CAPABILITY_QUERY" "$work_dir/query-body.json"
-jq -er '
-    .result.capabilities |
-    if type == "array" and all(.[]; type == "string")
-    then .[]
-    else error("capabilities must be an array of strings")
+jq -ser '
+    if length == 1 and
+       (.[0].result.capabilities | type == "array" and all(.[]; type == "string"))
+    then .[0].result.capabilities[]
+    else error("want exactly one response whose capabilities are an array of strings")
     end
 ' "$work_dir/query-body.json" \
     >"$work_dir/actual-unsorted" ||
