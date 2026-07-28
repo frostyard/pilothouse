@@ -1498,6 +1498,38 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"run_guest_validation", "cleanup", "fail", "trap", "log",
 	}, commandSequence,
 		"the runner main path's effective command sequence and multiplicity are closed")
+	mainWrites := imageShellOutputWrites(t, topLevel...)
+	for index := range mainWrites {
+		mainWrites[index].line = 0
+	}
+	require.Equal(t, []imageShellWrite{
+		{
+			command: "command",
+			fd:      "1",
+			op:      ">",
+			target:  "/dev/null",
+		},
+		{
+			command:          "command",
+			fd:               "2",
+			op:               ">&",
+			target:           "1",
+			descriptorTarget: true,
+		},
+		{
+			command: "jq",
+			fd:      "1",
+			op:      ">",
+			target:  "/dev/null",
+		},
+		{
+			command: "jq",
+			fd:      "1",
+			op:      ">",
+			target:  `"$CREDENTIALS"`,
+		},
+	}, mainWrites,
+		"the runner main path's output writers and descriptor routing are closed")
 
 	installCall := []string{
 		"podman_fixture", "45m", "run",
@@ -1529,6 +1561,12 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 		"--output", `"$UPDATE_ARCHIVE"`, `"$update_ref"`,
 	}
 	imageRequireCall(t, mainCalls, updateSaveCall...)
+	imageRequireDirectCall(t, file,
+		"cp", "--", `"${firmware%%|*}"`, `"$OVMF_CODE"`,
+	)
+	imageRequireDirectCall(t, file,
+		"cp", "--", `"${firmware#*|}"`, `"$OVMF_VARS"`,
+	)
 	imageRequireDirectFailingCall(t, file, "detach_disk_loops")
 	installLine := imageExactCallLine(t, allCalls, installCall...)
 	postInstallDetachLine := imageExactCallLine(t, mainCalls, "detach_disk_loops")

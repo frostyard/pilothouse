@@ -2562,6 +2562,10 @@ they cannot hide a trap or teardown bypass.
 The runner main path's complete ordered effective-command sequence is fixed,
 including multiplicity. An otherwise unknown outer wrapper cannot introduce a
 dynamic interpreter or alternate guest bridge while evading the argv scans.
+Its complete output-writer and descriptor-routing set is fixed too, and both
+firmware copies are exact direct foreground statements with no redirection.
+Together those guards keep the canonical guest validator unchanged between its
+source check and the reviewed guest copy.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
 argument vector rather than pieced together from subsequences; unique install,
