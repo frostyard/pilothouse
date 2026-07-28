@@ -1097,11 +1097,6 @@ func imageRequireOrderedCalls(t *testing.T, calls []imageShellCall, names ...str
 	require.Failf(t, "missing ordered executable calls", "want command names %#v; parsed calls: %#v", names, calls)
 }
 
-func imageRequireDeclaration(t *testing.T, declarations []imageShellDeclaration, want imageShellDeclaration) {
-	t.Helper()
-	require.Contains(t, declarations, want)
-}
-
 func imageCallPublishes(call imageShellCall) bool {
 	for index, argument := range call.args {
 		switch argument {
