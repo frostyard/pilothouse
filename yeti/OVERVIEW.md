@@ -2558,7 +2558,15 @@ sets are exact, so cleanup cannot be redirected to a different container store
 or disk and update/rollback comparisons cannot be made self-referential. The
 capture and matching readonly declaration sequences are contiguous top-level
 statements; an indirect `read` or other mutation cannot be inserted into the
-gap before protection.
+gap before protection. Every statement in those sequences is foreground,
+non-negated and unredirected, so a background readonly declaration cannot
+confine protection to a subshell. The same parent-shell execution rule applies
+to every runner readonly declaration, including the disk, update archive, SSH
+key, credentials, firmware and named install-container identities.
+The canonical workspace and SSH port likewise become readonly immediately
+after the exact port-validation statement and before root checks, fixture paths
+or privileged container mounts use them; later code cannot redirect the
+installer's bind mount to another host path.
 Comparisons and
 critical evidence calls must feed `|| fail`. Capability sorting is pinned
 separately to the independently probed expected file and decoded broker file;
@@ -2602,7 +2610,9 @@ be direct foreground top-level fatal statements, so an unreachable outer branch
 cannot preserve their AST while skipping them. The unique cursor
 writer/decode/nonempty chain is ordered before both exact broker calls, and its
 assignment set is closed, so moving or recapturing the cursor cannot exclude the
-operations under test.
+operations under test. Both broker calls must in turn precede the controlled
+window's journal writer, which must precede the broad AVC predicate; the scan
+cannot be moved ahead of the operations it is meant to observe.
 Successful top-level
 shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
@@ -2623,9 +2633,16 @@ The runner's main path has closed sets for `guest_copy`, `guest_run` and
 local update archive, then issue only the reviewed setup, archive removal,
 local-image load, switch and rollback commands. The SSH-up, SSH-down,
 broker-ready and reboot function bodies are exact alongside the copy/run
-wrappers. An extra host-to-guest command therefore cannot replace the copied
-validator while source guards continue inspecting the pristine repository
-file.
+wrappers. The runner's own directory capture becomes readonly immediately and
+the validator declaration is pinned to
+`$SCRIPT_DIR/guest/validate-ucore.sh`; a readable empty file cannot be
+substituted at the source end. An extra host-to-guest command therefore cannot
+replace the copied validator while source guards continue inspecting the
+pristine repository file. The runner's `log` body is exact as well, so the
+post-reboot broker-ready log calls cannot hide an unreviewed guest mutation.
+Manifest extraction, fixed-storage comparison and the bounded private-Podman
+wrapper bodies are exact too; their reviewed calls cannot be retained while a
+function body skips path containment or cleanup work.
 Whole-file
 negative policies include nested function bodies and recognize direct or
 wrapped host Podman bypasses, wrapped/alternate push, any recursive removal,

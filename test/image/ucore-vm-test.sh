@@ -58,6 +58,7 @@ if [[ ! "$ssh_port" =~ ^[0-9]+$ ]] ||
    ((ssh_port < 1024 || ssh_port > 65535)); then
     fail "--ssh-port must be an integer from 1024 through 65535"
 fi
+readonly workspace canonical_workspace ssh_port
 [[ $EUID -eq 0 ]] ||
     fail "bootc install and loop-device setup require root; run this fixture consumer through sudo"
 

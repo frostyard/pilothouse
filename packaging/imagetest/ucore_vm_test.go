@@ -533,6 +533,12 @@ func imageRequireContiguousAssignmentSets(
 		}
 		if matched {
 			matches++
+			for offset := range want {
+				statement := file.Stmts[start+offset]
+				require.False(t, statement.Background)
+				require.False(t, statement.Negated)
+				require.Empty(t, statement.Redirs)
+			}
 		}
 	}
 	require.Equalf(t, 1, matches,
@@ -1187,6 +1193,9 @@ func TestUCoreVMHarnessModesAndShellcheck(t *testing.T) {
 echo "ucore-vm-test: $*" >&2
 exit 1
 `)
+			imageRequireExactFunction(t, path, file, language, "log", `
+echo "ucore-vm-test: $*"
+`)
 		} else {
 			imageRequireExactFunctionSet(t, path, file,
 				"fail", "log", "cleanup", "broker_query",
@@ -1211,6 +1220,68 @@ func TestUCoreVMRunnerConsumesOnlyThePrivateComposedFixture(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	topDeclarations := imageShellDeclarations(t, topLevel...)
+	imageRequireDeclaration(t, topDeclarations, imageShellDeclaration{
+		variant: "readonly", name: "GUEST_SCRIPT",
+		value: `"$SCRIPT_DIR/guest/validate-ucore.sh"`,
+	})
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "manifest_value", `
+local expression="$1"
+jq -er "$expression | select(type == \"string\" and length > 0)" "$IMAGE_MANIFEST"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "assert_storage_path", `
+local actual="$1" expected="$2"
+[[ "$actual" == "$expected" ]] ||
+    fail "fixture storage path escaped its fixed workspace location: $actual"
+`)
+	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "podman_fixture", `
+TMPDIR="$image_tmpdir" timeout --signal=TERM --kill-after=30s "$1" \
+    podman "${podman_args[@]}" "${@:2}"
+`)
+	var scriptPathAssignments []imageShellAssignment
+	for _, assignment := range imageShellAssignments(t, topLevel...) {
+		if assignment.name == "SCRIPT_DIR" {
+			scriptPathAssignments = append(scriptPathAssignments, assignment)
+		}
+	}
+	require.Equal(t, []imageShellAssignment{
+		{name: "SCRIPT_DIR", value: `"$(cd "$(dirname "${BASH_SOURCE[0]}")"&&pwd)"`},
+		{name: "SCRIPT_DIR", value: ""},
+	}, scriptPathAssignments,
+		"the repository script directory must have one reviewed capture and immediate readonly")
+	imageRequireContiguousAssignmentSets(t, file,
+		[]string{"SCRIPT_DIR"},
+		[]string{"SCRIPT_DIR"},
+		[]string{"GUEST_SCRIPT"},
+	)
+	var workspaceReadonlyIndex = -1
+	for index, statement := range file.Stmts {
+		declaration, ok := statement.Cmd.(*syntax.DeclClause)
+		if !ok || declaration.Variant == nil || declaration.Variant.Value != "readonly" {
+			continue
+		}
+		if slices.Equal(imageShellStatementAssignmentNames(statement),
+			[]string{"workspace", "canonical_workspace", "ssh_port"}) {
+			require.Equal(t, -1, workspaceReadonlyIndex,
+				"workspace identity must become readonly exactly once")
+			workspaceReadonlyIndex = index
+		}
+	}
+	require.Positive(t, workspaceReadonlyIndex,
+		"workspace identity must become readonly after argument validation")
+	expectedPortValidation := imageParseShellSource(t, "expected-port-validation.sh", `
+if [[ ! "$ssh_port" =~ ^[0-9]+$ ]] ||
+   ((ssh_port < 1024 || ssh_port > 65535)); then
+    fail "--ssh-port must be an integer from 1024 through 65535"
+fi
+`, syntax.LangBash)
+	require.Len(t, expectedPortValidation.Stmts, 1)
+	require.Equal(t,
+		imageShellRender(t, expectedPortValidation.Stmts[0]),
+		imageShellRender(t, file.Stmts[workspaceReadonlyIndex-1]),
+		"workspace and port must become readonly immediately after the exact port validation")
+	require.False(t, file.Stmts[workspaceReadonlyIndex].Background)
+	require.False(t, file.Stmts[workspaceReadonlyIndex].Negated)
+	require.Empty(t, file.Stmts[workspaceReadonlyIndex].Redirs)
 
 	imageRequireDeclaration(t, topDeclarations, imageShellDeclaration{
 		variant: "readonly", name: "IMAGE_DIR", value: `"$workspace/fixture-ucore-images"`,
@@ -1696,6 +1767,16 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		"rollback-slots": {
 			"pre_rollback_booted", "pre_rollback_target",
 		},
+		"image-dir":         {"IMAGE_DIR"},
+		"image-manifest":    {"IMAGE_MANIFEST"},
+		"vm-dir":            {"VM_DIR"},
+		"disk-image":        {"DISK_IMAGE"},
+		"update-archive":    {"UPDATE_ARCHIVE"},
+		"ssh-key":           {"SSH_KEY"},
+		"credentials":       {"CREDENTIALS"},
+		"ovmf-code":         {"OVMF_CODE"},
+		"ovmf-vars":         {"OVMF_VARS"},
+		"install-container": {"INSTALL_CONTAINER"},
 	}
 	observedReadonlySets := map[string][]string{}
 	for _, statement := range file.Stmts {
@@ -1703,6 +1784,10 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 		if !ok || declaration.Variant == nil || declaration.Variant.Value != "readonly" {
 			continue
 		}
+		require.False(t, statement.Background,
+			"runner readonly declarations must execute in the parent shell")
+		require.False(t, statement.Negated)
+		require.Empty(t, statement.Redirs)
 		var names []string
 		for _, assignment := range declaration.Args {
 			if assignment.Name != nil {
@@ -2322,6 +2407,8 @@ printf 'ucore guest: %s\n' "$*"
 	require.Less(t, cursorDecodeLine, cursorNonemptyLine)
 	require.Less(t, cursorNonemptyLine, capabilityBrokerLine)
 	require.Less(t, cursorNonemptyLine, hostBrokerLine)
+	require.Less(t, capabilityBrokerLine, writeLines[`"$work_dir/new-avcs"`][0])
+	require.Less(t, hostBrokerLine, writeLines[`"$work_dir/new-avcs"`][0])
 	require.Less(t,
 		capabilityBrokerLine,
 		imageExactCallLine(t, topCalls, capabilityDecodeCall...),
