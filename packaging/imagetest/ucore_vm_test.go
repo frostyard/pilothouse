@@ -352,13 +352,13 @@ func countImageShellCalls(calls []imageShellCall, want ...string) int {
 	return count
 }
 
-func imageCallContainsArgument(call imageShellCall, want string) bool {
-	return slices.Contains(call.args, want)
+func imageShellLiteral(argument string) string {
+	return strings.Trim(argument, `"'`)
 }
 
 func imageCallContainsProgram(call imageShellCall, want string) bool {
 	for _, argument := range call.args {
-		literal := strings.Trim(argument, `"'`)
+		literal := imageShellLiteral(argument)
 		if literal == want || filepath.Base(literal) == want {
 			return true
 		}
@@ -370,14 +370,30 @@ func imageCallMutatesShellResolution(call imageShellCall) bool {
 	if len(call.args) == 0 {
 		return false
 	}
-	commandIndex := 0
-	if slices.Contains([]string{"builtin", "command"}, call.args[0]) && len(call.args) > 1 {
-		commandIndex = 1
+	for _, argument := range call.args {
+		if slices.Contains(
+			[]string{"alias", "enable", "eval", "hash", "shopt", "source", "unalias"},
+			imageShellLiteral(argument),
+		) {
+			return true
+		}
 	}
-	return slices.Contains(
-		[]string{"alias", "enable", "eval", "hash", "shopt", "source", "unalias", "."},
-		call.args[commandIndex],
-	)
+	commandIndex := 0
+	for commandIndex < len(call.args) {
+		command := imageShellLiteral(call.args[commandIndex])
+		if command != "builtin" && command != "command" {
+			break
+		}
+		commandIndex++
+		for commandIndex < len(call.args) {
+			option := imageShellLiteral(call.args[commandIndex])
+			if !strings.HasPrefix(option, "-") {
+				break
+			}
+			commandIndex++
+		}
+	}
+	return commandIndex < len(call.args) && imageShellLiteral(call.args[commandIndex]) == "."
 }
 
 func imageCallInvokesHostProgram(call imageShellCall, program string) bool {
@@ -406,7 +422,10 @@ func imageRequireExactShellMode(t *testing.T, file *syntax.File, want ...string)
 	require.Equal(t, want, firstArgs,
 		"the shell error mode must be established before any other executable statement")
 	for _, call := range allCalls {
-		if imageCallContainsArgument(call, "set") {
+		for _, argument := range call.args {
+			if imageShellLiteral(argument) != "set" {
+				continue
+			}
 			require.Equal(t, want, call.args,
 				"the reviewed shell error mode must be the only invocation of set")
 		}
@@ -799,6 +818,28 @@ func TestUCoreVMRunnerUsesComposefsAndLocalUpdateTransport(t *testing.T) {
 func TestUCoreVMRunnerOwnsAndWaitsForEveryLiveResource(t *testing.T) {
 	file := imageParseShell(t, imageVMRunnerPath, syntax.LangBash)
 	allCalls := imageShellAllCalls(t, file)
+	topCalls := imageShellCalls(t, imageShellTopLevel(file)...)
+	imageRequireExactCallCount(t, topCalls, 3, "exit", "2")
+	for _, call := range topCalls {
+		command := imageShellLiteral(call.args[0])
+		if command == "exit" {
+			require.Equal(t, []string{"exit", "2"}, call.args,
+				"the runner must not gain a successful early exit before VM evidence")
+		}
+		require.NotContains(t, []string{"exec", "return"}, command,
+			"the runner main path must not gain an alternate early termination command")
+	}
+	imageRequireExactCallCount(t, allCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
+	imageRequireExactCallCount(t, allCalls, 2, "trap", "-", "EXIT")
+	for _, call := range allCalls {
+		if !imageCallContainsProgram(call, "trap") {
+			continue
+		}
+		require.True(t,
+			slices.Equal(call.args, []string{"trap", "'cleanup_on_exit $?'", "EXIT"}) ||
+				slices.Equal(call.args, []string{"trap", "-", "EXIT"}),
+			"the harness must not install an additional signal/error trap: %#v", call.args)
+	}
 	imageRequireExactFunction(t, imageVMRunnerPath, file, syntax.LangBash, "stop_qemu", `
 local pid="${qemu_pid:-}"
 [[ -n "$pid" ]] || return 0
@@ -922,7 +963,7 @@ guest_run sh /root/validate-ucore.sh validate "$expected_slot"
 	)
 	imageRequireCall(t, detachCalls, "losetup", "-j", `"$DISK_IMAGE"`)
 
-	mainCalls := imageShellCalls(t, imageShellTopLevel(file)...)
+	mainCalls := topCalls
 	imageRequireFailingCall(t, imageShellTopLevel(file), "cleanup")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "'cleanup_on_exit $?'", "EXIT")
 	imageRequireExactCallCount(t, mainCalls, 1, "trap", "-", "EXIT")
@@ -1046,27 +1087,78 @@ func TestUCoreGuestChecksOnlyImageHostDeltas(t *testing.T) {
 	topLevel := imageShellTopLevel(file)
 	topCalls := imageShellCalls(t, topLevel...)
 	allCalls := imageShellAllCalls(t, file)
-	topAssignments := imageShellAssignments(t, topLevel...)
 	for _, statusVariable := range []string{
 		"window_avc_status", "avc_status", "pilothouse_avc_status",
 	} {
-		initializations := 0
-		for _, assignment := range topAssignments {
-			if assignment == (imageShellAssignment{name: statusVariable, value: "0"}) {
-				initializations++
+		type statusWrite struct {
+			value string
+			line  uint
+		}
+		var writes []statusWrite
+		for _, root := range topLevel {
+			syntax.Walk(root, func(node syntax.Node) bool {
+				if node == nil {
+					return true
+				}
+				if _, nestedFunction := node.(*syntax.FuncDecl); nestedFunction {
+					return false
+				}
+				assignment, ok := node.(*syntax.Assign)
+				if !ok || assignment.Name == nil || assignment.Name.Value != statusVariable {
+					return true
+				}
+				value := ""
+				if assignment.Value != nil {
+					value = imageShellRender(t, assignment.Value)
+				}
+				writes = append(writes, statusWrite{value: value, line: assignment.Pos().Line()})
+				return true
+			})
+		}
+		require.Lenf(t, writes, 2,
+			"%s may only be initialized and then assigned the exact grep status", statusVariable)
+		var initializationLine, captureLine uint
+		for _, write := range writes {
+			switch write.value {
+			case "0":
+				require.Zero(t, initializationLine, "%s has duplicate zero initialization", statusVariable)
+				initializationLine = write.line
+			case "$?":
+				require.Zero(t, captureLine, "%s has duplicate status capture", statusVariable)
+				captureLine = write.line
+			default:
+				require.Failf(t, "unexpected AVC status assignment",
+					"%s is assigned %q on line %d", statusVariable, write.value, write.line)
 			}
 		}
-		require.Equalf(t, 1, initializations,
-			"%s must be initialized to zero exactly once before grep captures its status",
-			statusVariable)
+		require.NotZero(t, initializationLine)
+		require.NotZero(t, captureLine)
+		require.Lessf(t, initializationLine, captureLine,
+			"%s must start at zero before grep can assign its status", statusVariable)
+
+		directInitializations := 0
+		for _, statement := range file.Stmts {
+			call, ok := statement.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
+				continue
+			}
+			assignment := call.Assigns[0]
+			if assignment.Name != nil && assignment.Name.Value == statusVariable &&
+				assignment.Value != nil && imageShellRender(t, assignment.Value) == "0" {
+				directInitializations++
+			}
+		}
+		require.Equalf(t, 1, directInitializations,
+			"%s zero initialization must be one unconditional top-level statement", statusVariable)
 	}
 	imageRequireExactCallCount(t, allCalls, 1, "exit", "0")
 	for _, call := range topCalls {
-		if len(call.args) > 0 && call.args[0] == "exit" {
+		command := imageShellLiteral(call.args[0])
+		if command == "exit" {
 			require.Equal(t, []string{"exit", "0"}, call.args,
 				"the reviewed prepare branch must be the guest harness's only successful early exit")
 		}
-		require.NotContains(t, []string{"exec", "return"}, call.args[0],
+		require.NotContains(t, []string{"exec", "return"}, command,
 			"the guest main path must not gain an alternate early termination command")
 	}
 
@@ -1193,7 +1285,7 @@ func TestUCoreGuestCapabilityDecoderRejectsLineInjection(t *testing.T) {
 	jq := imageRequireTool(t, "jq")
 
 	require.NoError(t, os.WriteFile(input, []byte(
-		`{"result":{"capabilities":["bootc`+"\n"+`journald`+"\n"+`systemd"]}}`+"\n",
+		`{"result":{"capabilities":["bootc\njournald\nsystemd"]}}`+"\n",
 	), 0o600))
 	injected := imageRunChild(t, sandbox, jq, "-ser", imageCapabilityJQProgram, input)
 	require.Error(t, injected.Err)
@@ -1306,6 +1398,21 @@ grep evidence input || evidence_status=$?
 		"evidence_status",
 		"grep", "evidence", "input",
 	), "the status-capture guard must recognize one exact command-to-$? assignment")
+
+	resolutionMutation := imageParseShellSource(t, "resolution-mutation.sh", `
+command -- eval 'set +e'
+command command shopt -s expand_aliases
+command command alias timeout=true
+`, syntax.LangBash)
+	for _, call := range imageShellCalls(t, imageShellTopLevel(resolutionMutation)...) {
+		require.Truef(t, imageCallMutatesShellResolution(call),
+			"parsed shell-resolution mutation must be rejected: %#v", call.args)
+	}
+	quotedSet := imageParseShellSource(t, "quoted-set.sh", `"set" +e`, syntax.LangBash)
+	quotedSetCalls := imageShellCalls(t, imageShellTopLevel(quotedSet)...)
+	require.Len(t, quotedSetCalls, 1)
+	require.Equal(t, "set", imageShellLiteral(quotedSetCalls[0].args[0]),
+		"quoted builtin names must normalize before the exact error-mode check")
 }
 
 func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
@@ -1353,6 +1460,9 @@ func TestImageShellNegativePoliciesCoverAlternateArgv(t *testing.T) {
 		{args: []string{"alias", "timeout=true"}},
 		{args: []string{"shopt", "-s", "expand_aliases"}},
 		{args: []string{"command", "eval", "'set +e'"}},
+		{args: []string{"command", "--", "eval", "'set +e'"}},
+		{args: []string{"command", "command", "shopt", "-s", "expand_aliases"}},
+		{args: []string{"command", "command", "alias", "trap=:"}},
 		{args: []string{"builtin", "source", "/tmp/mutate-shell"}},
 	} {
 		require.Truef(t, imageCallMutatesShellResolution(call),
