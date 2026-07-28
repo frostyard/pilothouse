@@ -1,6 +1,8 @@
 # Image-based host validation for issue #80. This workflow uses the last
-# released x86_64 RPM, not a pull-request artifact, and creates only ephemeral
-# local uCore derivatives. It publishes and uploads nothing.
+# released x86_64 RPM as its packaging substrate and overlays executables built
+# from the checked-out head, so a pull request exercises its own code without a
+# branch package. It creates only ephemeral local uCore derivatives and
+# publishes or uploads nothing.
 name: Image tier
 
 on:
@@ -17,9 +19,9 @@ permissions:
 
 jobs:
   ucore-vm:
-    name: Boot uCore and validate the last released RPM
-    # ubuntu-26.04 carries Podman 5, whose --imagestore option is required to
-    # keep every image-test byte in the job-local private store.
+    name: Boot uCore with released packaging and checked-out executables
+    # ubuntu-26.04 carries Podman 5, whose --imagestore option keeps the
+    # composed-image container storage isolated in the job-local private store.
     runs-on: ubuntu-26.04
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')
     timeout-minutes: 180
@@ -42,10 +44,15 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Install QEMU and OVMF
+      # e2fsprogs supplies mkfs.ext4 for the read-only fixture disk that carries
+      # the shared OCI layout without growing the VM's writable overlay.
+      - name: Install QEMU, OVMF, fixture-disk and native build tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y ovmf qemu-system-x86
+          sudo apt-get install -y e2fsprogs libpam0g-dev libsystemd-dev ovmf qemu-system-x86 qemu-utils xz-utils
+
+      - name: Build the checked-out Pilothouse executables
+        run: make build
 
       - name: Verify the private-store tool contract
         run: |
@@ -59,6 +66,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sudo -n env "PATH=$PATH" "GITHUB_TOKEN=$GITHUB_TOKEN" "RUNNER_TEMP=$RUNNER_TEMP" \
+          sudo -n env "PATH=$PATH" "GITHUB_TOKEN=$GITHUB_TOKEN" \
             bash test/image/ucore-image-test.sh \
             --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

@@ -40,16 +40,32 @@ workspace cleanup. The workspace must be private to one invocation and not
 concurrently mutated. Do not point it at a reused fixture directory or
 substitute a branch artifact.
 
-`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID`
+`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --bin-dir
+ABSOLUTE_PATH --run-id LOWERCASE_ID`
 consumes that released-RPM fixture from the same private, non-concurrently
 mutated workspace. It resolves `ghcr.io/ublue-os/ucore:latest` once, verifies
 both the index and its sole linux/amd64 member with the reviewed key in
 `test/image/ucore/cosign.pub`, then uses only the member digest. It rechecks
 the RPM size and SHA-256 before building distinct `baseline` and `update`
-derivatives with repositories and build networking disabled. Podman graph,
-image, run and both temporary-storage roots are below
-`fixture-ucore-images`. Explicit general/storage configuration selectors
-disable normal system and per-user Podman configuration: general configuration
+derivatives with repositories and build networking disabled. It also requires
+the checked-out `pilothouse` and `pilothoused` executables from `--bin-dir`,
+digest-rechecks them in the private context and resulting image, and records
+their digests. The released RPM remains the packaging substrate; overlaying
+the checked-out executables makes the pull-request gate exercise its own code
+without requiring a branch package. The derivative enables the packaged
+broker and web units so each bootc transition starts them; this is fixture
+composition, while the guest validator still does not repeat #67's activation
+assertions. The `v0.6.0` RPM carries the Debian PAM
+service file, so the composer applies the reviewed Fedora policy only for
+immutable release ID `358276825`, asset ID `486354638`, tag `v0.6.0`, and
+matching RPM basename; it verifies both the installed bad-file digest and
+replacement digest, and applies no override to any other release identity.
+The consumer enforces that exact identity if and only if the override is
+selected. Its private build context contains only verified copies of that RPM,
+reviewed policy and the two checked-out executables. Podman graph, image, run and both
+temporary-storage roots are below `fixture-ucore-images`. Explicit
+general/storage configuration selectors disable normal system and per-user
+Podman configuration: general configuration
 uses the explicit empty `/dev/null` file, while a generated private
 `storage.conf` repeats the graph, image and run paths plus driver; the libpod
 and download temporary paths are pinned separately by `--tmpdir` and `TMPDIR`.
@@ -65,35 +81,70 @@ The composer retains its store and does not claim to clean up detached tool
 helpers or bound caller-owned stdout/stderr storage.
 
 `sudo test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH` consumes that
-composed fixture. It installs the baseline with bootc's generic-image,
-loopback, btrfs and composefs path, passes an ephemeral SSH key through
-bootc's supported install option, boots
-under QEMU/KVM with OVMF, and checks the image-host deltas that #67 does not:
-enforcing SELinux without new or Pilothouse-related AVC denials, an exact
+composed fixture. It checksum-verifies the official Fedora CoreOS stable QEMU
+image selected by the stream metadata, boots a private qcow2 overlay with an
+ephemeral Ignition key for the unprivileged `core` account, and attaches one
+read-only ext4 disk containing one shared local OCI layout with both fixtures.
+It requires both loaded Podman image IDs to equal the fixture manifest exactly
+and reaches uCore with
+`bootc switch --transport containers-storage`. This is the path uCore's own VM
+harness recommends: `bootc install to-disk` on FCOS/uCore omits the
+`LABEL=boot` partition that its GRUB configuration searches for. Do not
+reinstate that known-unbootable installer path or weaken either FCOS checksum.
+It boots under QEMU/KVM with OVMF and checks the image-host deltas that #67
+does not:
+enforcing SELinux without unexpected or Pilothouse-related AVC denials (the
+only classified exceptions are uCore's explicitly permissive
+`coreos_boot_mount_generator_t` boot-domain records and at most two exact
+enforcing `chcon`/`mac_admin` capability-probe records from `bootc status`), an exact
 broker capability set derived from independent guest probes, a usable bootc
 host-image report, staged-to-booted update continuity, rollback-slot
-continuity, and the reverse transition after `bootc rollback`. The update
-travels as a job-local OCI archive and is switched through guest-local
-containers-storage; never add a registry or external push. The runner owns and
-waits for QEMU and its named install container, and detaches every loop device
-backed by its exact disk, but
-it does not recursively delete the VM directory or reset the image store.
+continuity, and the reverse transition after `bootc rollback`. The consumer
+uses Skopeo to export both refs into one OCI layout with shared compressed
+blobs, matches both config digests to the manifest, empties the isolated
+private host image store and proves it empty before downloading FCOS. Broker
+readiness is checked with the fixed non-interactive sudo channel because
+`core` cannot traverse the correctly protected mode-0750 runtime directory.
+The compressed FCOS input is capped;
+its declared uncompressed size may not exceed 4 GiB, and the verified copy is
+removed after decompression. After the private store is emptied, the capped OCI
+layout is copied into a sparse no-journal ext4 carrier and the standalone
+layout is recursively removed from its one fixed transient path before the
+FCOS download. The guest mounts that disk read-only and Skopeo streams both OCI
+refs into containers-storage, avoiding compressed Docker-archive loading's
+full uncompressed temporary tar. The source layout and sparse carrier
+temporarily coexist only while the carrier is populated. This ordering is
+load-bearing on the standard runner, and the outer lifecycle refuses to start
+with less than 10 GiB free. The update is switched from the already-verified
+guest-local containers-storage; never add a registry or external push. Privileged guest
+operations go only through `sudo -n` from `core`. The runner owns and waits for
+QEMU, but it does not recursively delete the VM directory or perform the
+owner's final image-store reset; its only recursive deletion is the fixed
+standalone OCI layout after carrier construction.
 
 `test/image/ucore-image-test.sh --run-id LOWERCASE_ID` is the root-only owner
-of that complete lifecycle. It creates one mode-0700 workspace below
-`RUNNER_TEMP`, runs acquisition, composition and the VM consumer synchronously
-with both wall-clock and 4 MiB log-file limits, resets the exact private Podman
-store synchronously, and only then recursively removes the workspace. Each
-bounded phase owns one separate process group, records its PID, waits for group
-readiness, then forwards INT/TERM to the group and reaps it before cleanup.
+of that complete lifecycle. It creates one unpredictable mode-0700 workspace
+below `/var/tmp`, runs acquisition, composition and the VM consumer synchronously
+with both wall-clock and 4 MiB retained-log limits, resets the exact private
+Podman store synchronously, and only then recursively removes the workspace.
+The output cap is applied by a streaming collector below the same timeout-owned
+process group and never as a process file-size limit, so it cannot constrain
+phase artifacts or outlive the deadline. Each bounded phase records the group
+PID, waits for group readiness, forwards INT/TERM to the group, and rejects and
+terminates descendants that survive their direct command before cleanup. The
+collector ignores soft INT/TERM to drain diagnostics after producer shutdown;
+the bounded KILL escalation still terminates it if it cannot drain.
 Once a signal handler begins, reentrant INT/TERM is deliberately ignored so
 bounded exact-store reset and workspace removal cannot be interrupted. Its
 EXIT/INT/TERM path performs the same reset-then-remove sequence.
+If the reset group survives bounded TERM/KILL escalation, removal is refused
+and the workspace is preserved rather than deleted beneath a live process.
 `.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
 provides the required `--imagestore` option. The job runs on every push to
 `main` and on a pull request only while the `vm-boot` label is present. It is
 not a required check, uses the last released RPM rather than a branch package,
-and never uploads or publishes a package, image, disk or log artifact.
+overlays locally built checked-out executables, and never uploads or publishes
+a package, image, disk or log artifact.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses
@@ -146,7 +197,8 @@ local tools for the first two tiers' contracts; there is deliberately **no**
 local `make` target for the `vm-boot` tier.
 
 Second, `.github/workflows/image-tier.yml` acquires the last released x86_64
-RPM, composes signed ephemeral uCore derivatives and validates their
+RPM as its packaging substrate, builds and overlays the checked-out
+executables, composes signed ephemeral uCore derivatives and validates their
 update/rollback lifecycle under QEMU/KVM. It needs root, live KVM, network
 access, Podman 5, cosign and up to 180 minutes on the GitHub-hosted
 `ubuntu-26.04` image. It cannot run inside the development container or the

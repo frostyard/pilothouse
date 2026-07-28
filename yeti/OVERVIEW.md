@@ -130,19 +130,20 @@ test/image/releaserpm/
                       "Image-tier released-RPM fixture" below)
 test/image/compose-ucore.sh
                       third #80 slice: verifies the uCore index and linux/amd64
-                      member, revalidates the released RPM, and builds distinct
-                      baseline/update derivatives in workspace-local Podman
-                      storage (see "Image-tier uCore composition" below)
+                      member, revalidates the released RPM and checked-out
+                      executables, and builds distinct baseline/update
+                      derivatives in workspace-local Podman storage (see
+                      "Image-tier uCore composition" below)
 test/image/ucore-vm-test.sh
                       fourth #80 slice: consumes those two local images,
-                      installs the baseline through bootc's composefs path,
-                      boots QEMU/OVMF, validates enforcing SELinux and truthful
-                      capabilities, switches to the update through guest-local
-                      containers-storage, then rolls back with digest-slot
-                      continuity checks. It quiesces every live resource it
-                      owns but leaves exact-store reset and workspace deletion
-                      to the enclosing lifecycle owner (see "Image-tier uCore VM
-                      consumer" below)
+                      boots an official checksum-verified Fedora CoreOS QEMU
+                      disk, switches it to the baseline through guest-local
+                      containers-storage, validates enforcing SELinux and
+                      truthful capabilities, switches to the update, then
+                      rolls back with digest-slot continuity checks. It
+                      quiesces every live resource it owns but leaves
+                      exact-store reset and workspace deletion to the enclosing
+                      lifecycle owner (see "Image-tier uCore VM consumer" below)
 test/image/ucore-image-test.sh
                       fifth #80 slice and root-only lifecycle owner. It runs
                       acquisition, composition and VM validation as bounded
@@ -640,7 +641,14 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   defensive backstop for directly-injected test fakes. `QueryStorageState`
   itself, registered separately against the plain, non-systemd
   `storageManager`, remains unconditional per `docs/capabilities.md`'s
-  documented exception.
+  documented exception. The one live systemd D-Bus connection is opened
+  through `connectSystemd` with a five-second *wait* bound, but its godbus
+  lifetime uses a separately cancellable context: godbus closes a connection
+  when its construction context ends, so attaching the five-second context
+  would make every systemd-backed manager fail shortly after startup. A
+  timeout cancels the connection attempt, a connector that still returns late
+  has its connection closed, and a successful connection retains the context
+  until daemon shutdown.
 - **Maintenance: guarded registration plus a real handler-level degrade.**
   `registerMaintenance` (`cmd/pilothoused/main.go`) is the next conversion:
   it takes the probed `capability.Set` and no-ops both
@@ -2396,7 +2404,8 @@ cleanup and no-replace collision preservation; and pins redirect and token
 scheme/host/port/userinfo containment.
 
 **Image-tier uCore composition (#80, third slice).**
-`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID`
+`test/image/compose-ucore.sh --workspace ABSOLUTE_PATH --bin-dir ABSOLUTE_PATH
+--run-id LOWERCASE_ID`
 consumes the second slice's manifest and RPM from the same private,
 non-concurrently mutated workspace. It rechecks the artifact's exact basename,
 size and SHA-256 before making any image operation, so mutation between
@@ -2440,25 +2449,63 @@ released RPM; their immutable
 `/usr/lib/pilothouse-image-test/slot` markers create two deployments for the
 later bootc switch/rollback test. The Containerfile installs only the local
 RPM with every package repository disabled and build networking set to none,
-then runs `bootc container lint`. The build context is only the released-RPM
-fixture directory, never the workspace-local container store. The output
-manifest records the source digests, both local refs and IDs, and all five
-storage paths. There is no push, upload or host-store image. It also records
-the composer's effective UID. A composition
-intended for the VM consumer must be run as UID 0: bootc disk installation is
-rootful, and rootful Podman cannot safely reopen a rootless store. Compose,
-consume, exact-store reset and workspace removal therefore stay in one
-rootful ownership domain.
+then overlays the `pilothouse` and `pilothoused` executables built from the
+checked-out head. The composer requires those two regular executable inputs
+from the explicit canonical `--bin-dir`, records their SHA-256 values, copies
+them into the private build context, passes the digests into the offline build,
+and the Containerfile verifies the installed bytes. The release RPM is
+therefore the immutable packaging/image-delivery substrate, while the
+checked-out executables make a pull-request run exercise the current broker
+capability and host-image queries. This split is necessary because v0.6.0
+predates both queries; treating its unknown-query 403 as current behavior
+would falsely claim the acceptance requirement was tested.
+The latest release is currently `v0.6.0`, whose RPM predates the per-format
+packaging correction and contains the Debian `@include common-auth` PAM
+service rather than Fedora's `password-auth` service. That would make the
+authentication prerequisite fail on uCore even though #80 explicitly assumes
+#67's PAM contract. The composer therefore selects compatibility value
+`v0.6.0-debian-pam` only for the immutable GitHub release ID `358276825` and
+asset ID `486354638` with their matching tag and basename; all other release
+identities select `none`. The Containerfile first requires the installed
+legacy policy to have SHA-256
+`0e8ab613d8bb5d197ce6ce92d0e67098e70ae0de60eea5678cac8c20e8227992`,
+then replaces it with `packaging/rpm/pilothouse.pam`, whose independently
+checked SHA-256 is
+`af72dc5708248288d056e3ef7d8188d6c24b6991f1f2b50e4805e2108f505993`.
+The compatibility choice and release identity are recorded in the image
+fixture manifest, including the RPM basename. The VM consumer requires the
+legacy compatibility value if and only if all four selector inputs match; a
+legacy identity paired with `none`, or a different identity paired with the
+legacy value, is rejected. This does not mask a future packaging regression:
+every future release receives no override.
+
+It then enables `pilothoused.service` and `pilothouse.service` in the
+ephemeral derivative so systemd starts them after every bootc transition,
+before running `bootc container lint`. This image-build prerequisite does not
+turn the guest validation into a duplicate of #67's activation contract: the
+guest neither starts/restarts the units nor asserts their enablement state.
+The private build context is below `fixture-ucore-images` and contains only
+digest-rechecked copies of the released RPM, reviewed Fedora PAM policy and
+two checked-out executables, never the workspace-local container store. The
+output manifest records the release and compatibility identity, executable
+source and digests, source-image digests, both local refs and IDs, and all five
+storage paths. There is no push, upload or host-store image. It
+also records the composer's effective UID. A composition intended for the VM
+consumer must be run as UID 0 because composition, the consumer's destructive
+post-export store emptying, final exact-store reset and workspace cleanup
+deliberately share one rootful ownership domain. Rootful Podman cannot safely
+reopen a rootless store.
 
 `packaging/imagetest/ucore_compose_test.go` executes the real composer only
 against bounded fake Skopeo, Cosign and Podman tools through the image tier's
 sole one-second test process helper. That deadline bounds fake-test failures;
 it is not a production composition runner. Strict fake argv and environment
-checks prove immutable
-digest, offline build, local-storage and remote-mode boundaries. The suite
-also proves both signature-failure positions, the raw-index byte cap,
-ambiguous-member rejection, retained partial storage, exact manifest
-contents, distinct slots and absence of a push. An effective
+checks prove immutable digest, offline build, the exact legacy-release PAM
+compatibility selector, the four-file private build context, checked-out
+executable digests, local-storage and remote-mode boundaries. The suite also proves both signature-failure
+positions, the raw-index byte cap, ambiguous-member rejection, retained
+partial storage, exact manifest contents, distinct slots and absence of a
+push. An effective
 instruction parser prevents commented-out local-RPM installation or
 `bootc container lint` from satisfying the Containerfile contract, and a
 SHA-256 assertion pins the vendored key.
@@ -2474,21 +2521,57 @@ requires the manifest's graphroot, imagestore, runroot, libpod tmpdir, image
 tmpdir and storage configuration to equal their fixed paths below the supplied
 canonical workspace, requires the baseline/update refs to share the one
 fixture prefix, requires the recorded producer UID to be 0, and re-inspects
-both local IDs. Every Podman call carries the
+both local IDs. It is a narrow consumer rather than a read-only one: after
+export it removes every image from that isolated store and proves the image
+list empty, releasing the separately tagged base as well as both derivatives,
+while the outer lifecycle owner retains responsibility for the final
+store reset. Every Podman call carries the
 same explicit remote-off, root, imagestore, runroot, tmpdir, no-events,
 overlay-driver and configuration isolation as the composer.
 
-The baseline goes through `bootc install to-disk --generic-image
---via-loopback --skip-fetch-check --composefs-backend --filesystem btrfs`.
-The host creates a sparse 20-GiB disk and passes one run-local root SSH public
-key through bootc's `--root-ssh-authorized-keys` option. It does not mount or
-write a guessed partition, so bootc owns the layout and SELinux labeling.
+The baseline deliberately does **not** go through `bootc install to-disk`.
+uCore's own `ucore/vm-test.sh` records that this FCOS/uCore combination does
+not create a `LABEL=boot` partition while FCOS sets `skip-boot-uuid=true`;
+GRUB therefore stops at `no such device: boot`. The supported bootstrap is the
+official Fedora CoreOS QEMU disk. The consumer resolves the x86-64 `qcow2.xz`
+from the stable stream JSON, requires the download URL to stay under
+`builds.coreos.fedoraproject.org`, validates the metadata's compressed
+SHA-256, reads the xz index and rejects a declared uncompressed size above
+4 GiB before decompression, then validates the independent uncompressed
+SHA-256 and deletes the compressed copy. It
+then creates a private 40-GiB qcow2 overlay and an Ignition document carrying
+one run-local key for the unprivileged `core` account. Skopeo exports both local
+uCore refs into one OCI layout; its ref annotations must be exactly `baseline`
+and `update`, its config digests must equal the fixture manifest's image IDs,
+and shared compressed layer blobs occupy the layout only once. The isolated
+host image store is then emptied and proved empty. The layout is capped at 3
+GiB, copied into a sparse 3.5-GiB no-journal ext4 fixture disk with
+`mkfs.ext4 -d`, and recursively removed from its one fixed transient path
+before the FCOS download is materialized.
+QEMU attaches that disk as a second read-only virtio drive. The guest mounts it
+by the fixed filesystem label with read-only, noload, nosuid, nodev, noexec and
+an explicit SELinux container-file context. FCOS's Skopeo streams `baseline`
+and `update` from the mounted OCI layout into root containers-storage. This
+avoids the full uncompressed random-access temporary tar that containers/image
+creates for a compressed Docker archive. Both loaded
+Podman image IDs must equal their manifest IDs exactly; the fixture disk is unmounted
+before the baseline is staged with
+`bootc switch --transport containers-storage`; the first proven reboot is the
+transition from FCOS to the baseline under test. All privileged guest calls
+use `sudo -n`. The update later switches from the same already-verified
+guest-local store.
 QEMU runs as a foreground child of the harness (backgrounded only by the
 owning shell), with
-KVM, q35, OVMF pflash, a raw virtio disk and one loopback SSH forward. Its
+KVM, q35, OVMF pflash, one writable qcow2 virtio boot disk, one read-only raw
+ext4 virtio fixture carrier, the Ignition fw_cfg and one loopback SSH forward.
+Its
 serial output and stderr remain on the caller's standard streams instead of
 growing unbounded workspace log files. SSH connection attempts, copies and
-every synchronous Podman operation have explicit timeouts.
+every synchronous Podman or Skopeo operation have explicit timeouts.
+Broker readiness uses `guest_sudo test -S /run/pilothouse/broker.sock`:
+`RuntimeDirectoryMode=0750` deliberately prevents the unprivileged `core`
+account from traversing `/run/pilothouse`, so an unprivileged `test -S` would
+be a permanent false negative even while the broker is healthy.
 
 `test/image/guest/validate-ucore.sh` is copied into the guest and invoked
 through an explicit `sh` interpreter. It creates one random-credential,
@@ -2510,46 +2593,83 @@ staged and rollback image/digest pairs are normalized and compared exactly
 with an independent `bootc status --json` captured in the same guest phase.
 
 The SELinux smoke establishes a journal cursor immediately before the two
-broker reads and fails on any AVC denial after that cursor. It separately
+broker reads and fails on any AVC denial after that cursor except delayed
+uCore boot records whose source context is exactly
+`system_u:system_r:coreos_boot_mount_generator_t:s0` and which explicitly
+carry `permissive=1`. uCore emits those upstream boot-generator records even
+while the system is globally enforcing; the narrow domain-plus-permissive
+classification prevents them from obscuring the controlled application
+window without excusing an enforcing denial.
+
+The other classified record is bootc's own SELinux capability probe. Before
+answering `bootc status --json`, bootc deliberately runs `chcon` with an
+invalid label to discover whether it has `mac_admin`; upstream's generated
+TMT configuration calls the resulting AVC expected and informational
+([bootc commit `24ee5eac`](https://github.com/bootc-dev/bootc/blob/24ee5eac452bd590fb8eff92714994ae66ca611a/crates/xtask/src/tmt.rs#L1229-L1240)).
+The scanner accepts at most two records total in the controlled two-query
+journal window, matching the two probe attempts observed in the enforcing
+uCore guest, and only when the permission, command, capability number, source
+and target contexts, class, and `permissive=0` value all match exactly. A
+third record or any near-miss is unexpected and fails. This constrained
+classification avoids granting the broker the much broader `install_t`
+privilege just to silence a read-only upstream probe.
+
+On failure the scanner emits at most the first 20 rejected journal records,
+keeping diagnostics bounded while identifying the exact denial. It separately
 scans the current boot for AVC denials naming Pilothouse, its daemon, runtime
 directory or state directory. The test does not claim a dedicated Pilothouse
 SELinux domain; the released RPM ships no policy. It intentionally does not
 repeat #67's directory ownership, root-login rejection, wrong-password,
 journald read-back, runtime sentinel or plain-reboot posture assertions.
 
-For update transfer, the host exports the already-local update fixture as a
-job-local OCI archive, copies it into the guest, loads it with Podman and calls
-`bootc switch --transport containers-storage`; there is no local registry and
-no push. Before reboot the staged image name and digest must be present. After
-reboot, that exact staged digest must be booted and the former booted digest
-must occupy rollback. `bootc rollback` plus a second proven reboot must reverse
-those two digests and restore the baseline slot marker.
+The host exports both already-local fixtures as one job-local OCI layout; there
+is no local registry and no push. Its two refs share compressed layer blobs.
+Emptying the isolated image store before
+the FCOS download, deleting the verified compressed FCOS image after
+decompression, building the sparse fixture disk only after the store is empty,
+and deleting its standalone OCI layout before FCOS acquisition are
+load-bearing peak-disk controls for the standard runner. During carrier
+construction the standalone layout and the carrier's allocated data blocks
+briefly coexist; neither the private image store nor FCOS overlaps that step.
+The layout is capped at 3 GiB and the sparse carrier's logical size at 3.5
+GiB under the outer 10 GiB free-space preflight. The baseline is switched first
+from the FCOS bootstrap. Its staged
+name must match the manifested local
+reference and its staged digest must be a canonical SHA-256. Each OCI ref's
+config digest is checked against the manifest before carrier construction, and
+its loaded guest Podman image ID is checked against that manifest again after
+import.
+That exact staged digest must be booted afterward. The update was loaded and
+identity-checked in the same stream, then follows the same local switch path.
+After
+its reboot, the exact staged update digest must be booted and the former
+baseline digest must occupy rollback. `bootc rollback` plus a third proven
+reboot must reverse those two digests and restore the baseline slot marker.
 
-The runner never uses `setsid`, `nohup`, daemonization or recursive deletion.
-Its exit path stops and waits for QEMU, force-removes and waits for the one
-named bootc-install container, enumerates and detaches every loop device backed
-by the exact private disk (including one a killed installer left behind), and
-verifies no loop reference remains. It retains both
-the VM fixture directory and private container store. The enclosing lifecycle
-owner invokes acquisition and composition with a bounded log sink, waits for
-their helpers and this consumer, resets the exact private store and waits for
-that reset, then removes the workspace.
-The install-to-VM handoff has its own direct fatal loop-detach check: it is
-ordered after the exact bootc install and before update export or QEMU work, so
-the VM never opens a disk that the installer still holds through a loop device.
+The runner never uses `setsid`, `nohup` or daemonization. Its only recursive
+deletion targets the fixed transient OCI layout after carrier construction;
+the VM directory remains the outer lifecycle owner's responsibility.
+Its exit path stops and waits for QEMU. It retains the VM fixture directory and
+empty private-store structure. The
+enclosing lifecycle owner invokes
+acquisition and composition with a bounded log sink, waits for their helpers
+and this consumer, resets the exact private store and waits for that reset,
+then removes the workspace.
+Before acquisition, that owner requires at least 10 GiB available on the
+workspace filesystem; insufficient capacity is a named preflight failure rather
+than a late ENOSPC during composition or guest import.
 QEMU is the only background statement in the runner's complete AST, including
 all function bodies. Bash coprocesses, shell coprocess/disown forms and any
-additional process substitution are forbidden; the only process substitution
-is the consumed `awk` input in the exact `detach_disk_loops` body. Every other
-helper remains synchronous, so no untracked child can retain CI descriptors
-past cleanup. The SSH/SCP and Podman operations that can wait on external
-systems retain their explicit timeouts. All runner function bodies are exact,
-including usage and OVMF discovery.
-All `losetup` and private-store Podman invocations are closed to their reviewed
-query/detach and inspect/install/save/named-remove forms. On success, cleanup is
-immediately followed by trap disarm, which is the penultimate statement; the
-exact PASS log is last. No process, loop or container can be created after the
-last verified cleanup.
+process substitution are forbidden. Every other helper remains synchronous,
+so no untracked child can retain CI descriptors past cleanup. The download,
+SSH/SCP, Podman and Skopeo operations that can wait on external systems retain
+their explicit timeouts. The private-store Podman invocations are closed to
+exact fixture-ID inspection, all-image removal inside that isolated store and
+the empty image-list proof. Bounded Skopeo calls are closed to the two
+containers-storage-to-OCI exports and raw inspection of the resulting OCI
+refs. On success, cleanup is immediately followed by trap disarm, which is the
+penultimate statement; the exact PASS log is last. No process can be created
+after the last verified cleanup.
 
 `packaging/imagetest/ucore_vm_test.go` parses both harnesses with
 `mvdan.cc/sh/v3/syntax` and inspects executable calls in either the selected
@@ -2574,11 +2694,11 @@ Together those guards keep the canonical guest validator unchanged between its
 source check and the reviewed guest copy.
 The non-returning `fail` implementations are exact, as are the resource teardown
 and bounded SSH/SCP wrapper bodies. Critical calls are matched as one exact
-argument vector rather than pieced together from subsequences; unique install,
-switch and foreground-QEMU actions must occur exactly once across the whole
-AST. Quoted or unquoted path-qualified Podman/QEMU executables are normalized
-for the same policy. The QEMU statement itself must be backgrounded and
-immediately followed by its `$!` capture, and the EXIT trap must be one direct,
+argument vector rather than pieced together from subsequences; the unique
+baseline switch, update switch and QEMU action must occur exactly once across
+the whole AST. Quoted or unquoted path-qualified Podman/QEMU executables are
+normalized for the same policy. The QEMU statement itself must be backgrounded
+and immediately followed by its `$!` capture, and the EXIT trap must be one direct,
 foreground parent-shell statement armed before the first disk/resource mutation
 and disarmed only after one direct, fatal explicit cleanup. The fixture storage
 paths, Podman argument array, QEMU PID and observed deployment-slot identities
@@ -2590,12 +2710,14 @@ statements; an indirect `read` or other mutation cannot be inserted into the
 gap before protection. Every statement in those sequences is foreground,
 non-negated and unredirected, so a background readonly declaration cannot
 confine protection to a subshell. The same parent-shell execution rule applies
-to every runner readonly declaration, including the disk, update archive, SSH
-key, credentials, firmware and named install-container identities.
+to every runner readonly declaration, including the FCOS stream URL, compressed
+archive, verified backing image, disk overlay, Ignition config, the shared OCI
+fixture layout, its size limits, ext4 carrier, filesystem label, guest device
+and mountpoint, SSH key, credentials and firmware identities.
 The canonical workspace and SSH port likewise become readonly immediately
-after the exact port-validation statement and before root checks, fixture paths
-or privileged container mounts use them; later code cannot redirect the
-installer's bind mount to another host path. The canonical equality statement,
+after the exact port-validation statement and before root checks or fixture
+paths use them; later code cannot redirect the bootstrap or archives to another
+host path. The canonical equality statement,
 port validation and readonly declaration are contiguous, and the complete
 workspace/canonical-workspace/port assignment sets are exact.
 Comparisons and
@@ -2649,22 +2771,25 @@ shortcuts are rejected, and the runner's complete trap set is the one EXIT arm
 plus its two reviewed disarms; an ERR/DEBUG/RETURN override cannot make a failed
 command green. All three guest validation invocations must be direct, foreground
 top-level statements, not calls parked behind a false conditional, and their
-line ordering is anchored respectively before the switch, after the
-staged-to-booted continuity proofs, and after the rollback continuity proofs.
-The staged name/digest shape assertion and all four post-reboot deployment-slot
-comparisons are likewise direct foreground fatal statements. The staged proof
-is ordered after both status captures and before the first reboot; wrapping
+line ordering is anchored respectively after the FCOS-to-baseline continuity
+proof and before the update switch, after the update continuity proofs, and
+after the rollback continuity proofs. The baseline/update staged name/digest
+shape assertions and all five post-reboot deployment-slot comparisons are
+likewise direct foreground fatal statements. Each staged proof is ordered
+after its two status captures and before its corresponding reboot; wrapping
 continuity or cleanup in an unreachable branch cannot leave the recursive AST
 looking valid. Direct fatal guards inspect both child statements for negation
 and backgrounding, while the outer `||` cannot carry a redirection, so
 `! cmp ... || fail` cannot invert an evidence oracle while retaining the
 expected command node.
-The runner's main path has closed sets for `guest_copy`, `guest_run` and
-`guest_run_long`: it may transfer only the reviewed validator, credentials and
-local update archive, then issue only the reviewed setup, archive removal,
-local-image load, switch and rollback commands. The SSH-up, SSH-down,
-broker-ready and reboot function bodies are exact alongside the copy/run
-wrappers. The runner first canonicalizes the script file itself with
+The runner's main path has closed sets for `guest_copy`, `guest_run`,
+`guest_sudo` and `guest_sudo_long`: it may copy only the validator and
+credentials; create and restrictively mount the fixed ext4 carrier; perform
+exactly two OCI-to-containers-storage Skopeo copies; unmount and remove the
+mountpoint; then issue only the reviewed setup, baseline/update switches and
+rollback commands. The SSH-up, fixture-device, boot-ID-change, broker-ready
+and reboot function bodies are exact alongside the copy/run/sudo wrappers. The runner first
+canonicalizes the script file itself with
 `readlink -f`; that path and its derived directory become readonly immediately,
 and the validator declaration is pinned to
 `$SCRIPT_DIR/guest/validate-ucore.sh`; a readable empty file cannot be
@@ -2684,9 +2809,11 @@ are forbidden. Guest execution and transfer must cross the exact
 the validator outside the closed wrapper-call sets. The low-level
 `guest_probe` and `guest_run_timeout` helpers have zero direct main-path
 callsites and may occur only inside their exact higher-level wrapper bodies.
-Every derived resource declaration—VM directory, disk, update archive, SSH key,
-credentials, firmware paths and install-container name—also has one pinned
-readonly value, not merely a pinned variable name.
+Every derived resource declaration—VM directory, FCOS stream/download/backing
+paths, qcow2 overlay, Ignition config, OCI fixture layout, ext4 carrier,
+filesystem label, guest device and mountpoint, SSH key, credentials and
+firmware paths—also has one pinned readonly value, not merely a pinned
+variable name.
 Outside the exact reviewed guest wrappers, interpreters, privilege/process
 wrappers and bridge programs are rejected anywhere in a main-path argv, not
 only in command position. A `timeout bash -c ...` layer therefore cannot hide
@@ -2705,16 +2832,24 @@ error into a clean result.
 **Image-tier lifecycle and CI wiring (#80, fifth slice).**
 `test/image/ucore-image-test.sh --run-id LOWERCASE_ID` is the root-only owner
 of one complete image-tier run. It accepts no workspace path. Instead it
-canonicalizes the repository and `RUNNER_TEMP`, creates one unpredictable
-mode-0700 workspace below that runner-owned parent, and derives every RPM,
+canonicalizes the repository, creates one unpredictable mode-0700 workspace
+below `/var/tmp`, and derives every RPM,
 image-store and VM path from that workspace. Acquisition, composition and VM
 validation are three direct synchronous `run_bounded` calls. Their respective
 outer deadlines are 5, 75 and 75 minutes; the inner tools retain their narrower
-deadlines. Each phase writes through a 4 MiB file-size limit to a phase-local
-regular file, then emits at most that many bytes to the job log. `run_bounded`
-creates exactly one separate-session background process group, records its
-PID, confirms the group exists, waits for it, and clears the PID only after the
-wait. INT/TERM received during launch is latched until that readiness check;
+deadlines. `capture-bounded-output.sh` runs the command and a `tail` collector
+beneath the same timeout-owned process group, retaining at most 4 MiB in the
+phase-local regular log. It does not set a process file-size limit, so
+compilers, image builders and other phase commands can create artifacts larger
+than the log bound, while the outer timeout still covers collection and a
+writer that keeps the stream open. `run_bounded` creates exactly one
+separate-session background process group, records its PID, confirms the group
+exists, waits for its leader, and rejects and terminates any same-group
+descendant that survives the direct command before clearing the PID. The tail
+collector ignores soft INT/TERM so producer shutdown yields EOF and flushes
+the retained diagnostics; the owner's follow-on TERM/KILL escalation still
+bounds a collector that cannot drain after `timeout` exits. INT/TERM received
+during launch is latched until that readiness check;
 then it is forwarded to the entire group and waited before EXIT cleanup
 proceeds. Behavioral tests cover INT and TERM both before and after group
 readiness and prove the phase process is gone. The outer shell creates no
@@ -2731,6 +2866,10 @@ finished does cleanup recursively remove the one generated workspace with
 `--one-file-system`. A reset failure still makes the job fail, but the already
 quiescent workspace is removed so derived images are not retained. Successful
 cleanup is followed by trap disarm and the final PASS line.
+If bounded TERM/KILL escalation cannot quiesce the reset group,
+`current_phase_pid` remains set and cleanup refuses recursive removal, leaving
+the runner-owned workspace for runner teardown rather than deleting storage
+beneath a live process.
 If no configuration exists, all three store roots must also be absent; a
 partial or redirected store cannot turn reset into a successful no-op.
 Once a signal handler begins, it deliberately ignores reentrant INT/TERM while
@@ -2747,21 +2886,26 @@ push to `main`; for pull requests it runs only while the `vm-boot` label is
 present, and `opened`, `synchronize`, `reopened` and `labeled` triggers ensure
 the label certifies the current head. The job uses `ubuntu-26.04` specifically:
 that runner provides Podman 5 and the `--imagestore` option the private-store
-contract requires. It sets up Go, installs QEMU/OVMF and cosign, enables live
-KVM, checks `/dev/kvm` and the Podman option, then invokes the lifecycle owner
-once through explicit root `bash` with explicit PATH, token and runner-temp
+contract requires. It sets up Go, installs the native PAM/systemd headers plus
+QEMU/OVMF and cosign, builds the checked-out executables without GoReleaser,
+enables live KVM, checks `/dev/kvm` and the Podman option, then invokes the
+lifecycle owner once through explicit root `bash` with explicit PATH and token
 values. It has read-only contents permission, no dependency on the branch's
 GoReleaser package job, no repository `secrets.*` reference, no artifact
-upload or download, and no publication command. The artifact under test
-remains the released-RPM fixture selected by the acquisition phase.
+upload or download, and no publication command. The packaging substrate
+remains the released-RPM fixture selected by acquisition; the two local
+executables are the checked-out behavior under test.
 
 `packaging/imagetest/ucore_orchestrator_test.go` parses the lifecycle owner with
 the shared shell AST helpers. It pins every non-function top-level statement
 including expansions and redirections, function declaration order and
 undecorated shape, the exact function set and bodies, static command resolution,
-phase argv, one owned background process group, bounded timeout/tail/ulimit
-calls, one ownership-gated recursive deletion target, readonly derived paths
-and absence of publication. Its negative mutations cover command-cache
+phase argv, one timeout-owned background process group containing the output
+collector, bounded timeout and tail calls, one ownership-gated recursive
+deletion target, readonly derived paths and absence of publication. Behavioral
+regressions prove a phase can create an artifact larger than 4 MiB while its
+retained log remains capped, and that output-inheriting or output-closing
+descendants cannot outlive the phase. The negative mutations cover command-cache
 assignment, a constant UUID source, a declaration-level side effect and a
 cleanup function moved below its trap. `test/image/ucore_orchestrator_signal_test.go`
 exercises INT/TERM before and after group readiness, cleanup-active return and
@@ -2793,8 +2937,10 @@ upload step or a fail-open suffix is visible.
   in `test/vm` (it boots a guest, installs the package, starts both units,
   asserts the systemd-created directories, the broker socket's ownership and
   mode, that the broker is live, that PAM authenticates a real non-root
-  administrator through the running stack, that the daemon reads a record
-  it emitted itself back through the broker's journal query, and that the
+  administrator through the running stack (with each login-evidence cursor
+  captured from the same unit-filtered journal stream that consumes it), that
+  the daemon reads a record it emitted itself back through the broker's
+  journal query, and that the
   posture survives a real reboot) and `.github/workflows/packaging.yml`'s
   `vm-boot` job runs it; see M1 above
   for why an artifact cannot prove ownership and why `Entry.Owner`/
@@ -3136,12 +3282,16 @@ This section covers the pinning table and the host-side fetcher:
   non-archive `releases/42/...` path 404s and must not be "fixed" back. Both
   entries are amd64/x86_64 only, matching the two container images the install
   matrix already uses, and both paths are immutable: a `latest`-style URL would
-  move out from under the digest.
+  move out from under the digest. The table is inert data, not a sourced shell
+  program: every non-comment line must be one unique
+  `VM_IMAGE_<FAMILY>_<FIELD>="value"` assignment.
 - **`test/vm/lib/images.sh`** is a **sourced** bash library (no shebang, `set
   -euo pipefail`, committed non-executable) exposing
-  `fetch_image <family> <cache-dir>`. It reads the family's row from
-  `images.env`, downloads over HTTPS into the cache directory, and dispatches to
-  `sha256sum`/`sha512sum` per the declared algorithm. A mismatch prints **both**
+  `fetch_image <family> <cache-dir>`. It parses the family's row from
+  `images.env` without evaluation, rejecting malformed or duplicate fields even
+  when `VM_IMAGES_ENV` redirects the table path, then downloads over HTTPS into
+  the cache directory and dispatches to `sha256sum`/`sha512sum` per the declared
+  algorithm. A mismatch prints **both**
   the expected and the actual digest and exits non-zero; a file already in the
   cache is re-verified before it is reused, so a truncated or tampered copy
   cannot be handed to a caller. On success the verified path is the function's
@@ -3175,9 +3325,12 @@ time.** `create_run_workspace` makes the per-run directory with mode `0700`;
 (`ssh-keygen -t ed25519 -N ''`) and two passwords (`openssl rand`, falling back
 to `/dev/urandom`; never a literal), recording them in `creds.env` as
 `PH_ADMIN_USER`, `PH_ADMIN_PASSWORD` and `PH_ROOT_PASSWORD`. No guest-side
-command generates anything. Every function that touches a credential disables
-shell tracing first, and nothing echoes a password or a private key, so no
-generated value can reach a job log.
+command generates anything. The ambient administrator name must match the
+single-token Linux account grammar `^[a-z_][a-z0-9_-]{0,31}$` before it can be
+written unquoted into either generated format; `creds.env` is structurally
+closed to exactly those three safe assignments. Every function that touches a
+credential disables shell tracing first, and nothing echoes a password or a
+private key, so no generated value can reach a job log.
 
 `write_cloud_init_seed` takes the **family** as an argument and emits the
 NoCloud `meta-data`/`user-data`; `build_seed_iso` packs them into a `cidata`
@@ -3234,9 +3387,10 @@ requires **exactly one** of its two paths to be a guest path, recognised by its
 leading `~`: that keeps a single audited site where a guest end of a copy is
 constructed, and makes a host-to-host or guest-to-guest call fail by name
 instead of copying locally. `reboot_guest`
-issues the reboot through `guest_sudo` and then waits for the **pre-reboot**
-sshd to stop answering (`SSH_GONE_TIMEOUT`) before waiting for sshd to return,
-so a readiness check cannot be satisfied by the daemon that is about to die.
+issues the reboot through `guest_sudo` and then uses a bounded
+`SSH_REBOOT_TIMEOUT` poll until SSH can read a boot ID different from the one
+captured before the reboot. A changed kernel boot ID directly proves a new
+boot; successful retrieval also proves that SSH on that new boot is reachable.
 
 Three things keep that sequence from passing without proving a reboot, and each
 closes a hole the SSH probes cannot close by themselves:
@@ -3249,15 +3403,13 @@ closes a hole the SSH probes cannot close by themselves:
   this replaced made a rejected escalation indistinguishable from the expected
   disconnect, and the wait loop then reported the real failure as a shutdown
   timeout.
-- **Disappearance requires `SSH_GONE_CONFIRMATIONS` consecutive unanswered
-  probes** (default 3), with the counter reset the moment the guest answers.
-  A single transient refusal against a guest that never rebooted would
-  otherwise end the wait, after which `wait_for_ssh` would be satisfied by the
-  very sshd that was supposed to die.
 - **The guest's `boot_id` is compared across the reboot.** `guest_boot_id`
   reads `/proc/sys/kernel/random/boot_id`, which the kernel regenerates on
-  every boot; `reboot_guest` captures it before and after and fails if it is
-  unchanged. This is the only assertion here that cannot be satisfied by an
+  every boot; `reboot_guest` captures it before and polls for a different
+  non-empty value afterward. The poll intentionally does not require an
+  observed SSH outage: a fast reboot can complete between two probes, while a
+  changed boot ID cannot be supplied by the old boot. This is the only
+  assertion here that cannot be satisfied by an
   sshd that merely restarted, and it cannot fail on a genuine reboot, so it is
   immune to how the probes happen to fall.
 
@@ -3507,9 +3659,10 @@ The orchestrator retrieves and prints that state and dumps `systemctl status`
 and `journalctl` for both units (`dump_pre_reboot_diagnostics`) **before** it
 issues the reboot: a guest that never comes back cannot be asked anything
 afterwards, and this is the evidence that case is diagnosed from alongside the
-continuous serial console log. `reboot_guest` then waits for the **pre-reboot
-sshd to stop answering** before waiting for sshd to return, and compares boot
-ids, so no post-reboot check can be answered by the sshd that was about to die;
+continuous serial console log. `reboot_guest` then polls through the reboot
+until SSH returns a changed kernel boot ID, so no post-reboot check can be
+answered by the sshd from the prior boot, even when the reboot is too fast for
+the polling cadence to observe an outage;
 the post-reboot script re-reads `/proc/sys/kernel/random/boot_id` and fails if
 it matches the recorded one.
 

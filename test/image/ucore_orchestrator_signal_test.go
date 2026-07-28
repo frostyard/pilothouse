@@ -32,14 +32,14 @@ func TestUCoreOrchestratorForwardsSignalsAndWaits(t *testing.T) {
 			return true
 		}
 		switch declaration.Name.Value {
-		case "log", "handle_signal", "run_bounded":
+		case "log", "handle_signal", "stop_phase_group", "run_bounded":
 			var rendered bytes.Buffer
 			require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
 			functions[declaration.Name.Value] = rendered.String()
 		}
 		return true
 	})
-	require.Len(t, functions, 3)
+	require.Len(t, functions, 4)
 
 	for _, cleanupActive := range []bool{false, true} {
 		for _, delayGroup := range []bool{false, true} {
@@ -69,6 +69,29 @@ func TestUCoreOrchestratorForwardsSignalsAndWaits(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestUCoreVMReadonlyEnvironmentRejectsArithmeticMutation(t *testing.T) {
+	for _, name := range []string{"PATH", "CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF"} {
+		t.Run(name, func(t *testing.T) {
+			script := `
+set -eu
+PATH=/usr/bin:/bin
+readonly PATH
+CONTAINERS_CONF=/dev/null
+CONTAINERS_STORAGE_CONF=/var/tmp/pilothouse-image-test/storage.conf
+export CONTAINERS_CONF CONTAINERS_STORAGE_CONF
+readonly CONTAINERS_CONF CONTAINERS_STORAGE_CONF
+(($MUTATION_TARGET=1))
+`
+			command := exec.Command("bash", "-c", script)
+			command.Env = append(os.Environ(), "MUTATION_TARGET="+name)
+			output, err := command.CombinedOutput()
+			require.Error(t, err,
+				"bash arithmetic assignment must not mutate readonly %s", name)
+			require.Contains(t, string(output), "readonly variable")
+		})
 	}
 }
 
@@ -109,6 +132,7 @@ reset_marker="$2"
 state_path="$3"
 workspace_created=%d
 cleanup_active=0
+current_phase_pid=""
 reset_private_store() {
     printf 'reset\n' >"$reset_marker"
 }
@@ -151,6 +175,199 @@ printf '%%s\n' "$workspace_created" >"$state_path"
 	}
 }
 
+func TestUCoreOrchestratorCleanupPreservesWorkspaceForSurvivingReset(t *testing.T) {
+	source, err := os.ReadFile("ucore-image-test.sh")
+	require.NoError(t, err)
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(bytes.NewReader(source), "ucore-image-test.sh")
+	require.NoError(t, err)
+
+	var cleanupFunction string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, ok := node.(*syntax.FuncDecl)
+		if !ok || declaration.Name == nil || declaration.Name.Value != "cleanup" {
+			return true
+		}
+		var rendered bytes.Buffer
+		require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
+		cleanupFunction = rendered.String()
+		return false
+	})
+	require.NotEmpty(t, cleanupFunction)
+
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	require.NoError(t, os.Mkdir(workspace, 0o700))
+	markerPath := filepath.Join(workspace, "survivor-marker")
+	require.NoError(t, os.WriteFile(markerPath, []byte("keep\n"), 0o600))
+	resultPath := filepath.Join(sandbox, "cleanup-result")
+	probePath := filepath.Join(sandbox, "surviving-reset-probe.sh")
+	probe := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+workspace="$1"
+result_path="$2"
+workspace_created=1
+cleanup_active=0
+current_phase_pid=""
+reset_private_store() {
+    current_phase_pid="surviving-reset-group"
+    return 1
+}
+%s
+cleanup_result=0
+cleanup || cleanup_result=$?
+printf '%%s\n' "$cleanup_result" >"$result_path"
+`, cleanupFunction)
+	require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
+
+	output, runErr := exec.Command("bash", probePath, workspace, resultPath).CombinedOutput()
+	require.NoError(t, runErr, string(output))
+	result, readErr := os.ReadFile(resultPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "1\n", string(result))
+	marker, readErr := os.ReadFile(markerPath)
+	require.NoError(t, readErr,
+		"cleanup must preserve a workspace while its reset group survives")
+	require.Equal(t, "keep\n", string(marker))
+}
+
+func TestUCoreOrchestratorCapsOnlyRetainedOutput(t *testing.T) {
+	source, err := os.ReadFile("ucore-image-test.sh")
+	require.NoError(t, err)
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(bytes.NewReader(source), "ucore-image-test.sh")
+	require.NoError(t, err)
+
+	functions := map[string]string{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, ok := node.(*syntax.FuncDecl)
+		if !ok || declaration.Name == nil {
+			return true
+		}
+		switch declaration.Name.Value {
+		case "log", "handle_signal", "stop_phase_group", "run_bounded":
+			var rendered bytes.Buffer
+			require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
+			functions[declaration.Name.Value] = rendered.String()
+		}
+		return true
+	})
+	require.Len(t, functions, 4)
+
+	sandbox := t.TempDir()
+	artifactPath := filepath.Join(sandbox, "large-artifact")
+	probePath := filepath.Join(sandbox, "output-cap-probe.sh")
+	scriptDir, err := os.Getwd()
+	require.NoError(t, err)
+	probe := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+readonly LOG_BYTES=65536
+readonly SCRIPT_DIR=%q
+workspace="$1"
+current_phase_pid=""
+cleanup_active=0
+termination_status=0
+%s
+%s
+%s
+%s
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+run_bounded output-cap-probe 30s bash -c \
+    'dd if=/dev/zero of="$1" bs=1M count=5 status=none
+     dd if=/dev/zero bs=1M count=5 status=none' probe "$2"
+`, scriptDir, functions["log"], functions["handle_signal"], functions["stop_phase_group"], functions["run_bounded"])
+	require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
+
+	output, runErr := exec.Command("bash", probePath, sandbox, artifactPath).CombinedOutput()
+	require.NoError(t, runErr, string(output))
+
+	artifact, statErr := os.Stat(artifactPath)
+	require.NoError(t, statErr)
+	require.EqualValues(t, 5*1024*1024, artifact.Size(),
+		"the retained-output cap must not become a phase-wide file-size limit")
+	phaseLog, statErr := os.Stat(filepath.Join(sandbox, "output-cap-probe.log"))
+	require.NoError(t, statErr)
+	require.EqualValues(t, 65536, phaseLog.Size(),
+		"the retained phase log must stay at its configured bound")
+}
+
+func TestUCoreOrchestratorRejectsSurvivingPhaseDescendants(t *testing.T) {
+	source, err := os.ReadFile("ucore-image-test.sh")
+	require.NoError(t, err)
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(bytes.NewReader(source), "ucore-image-test.sh")
+	require.NoError(t, err)
+
+	functions := map[string]string{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, ok := node.(*syntax.FuncDecl)
+		if !ok || declaration.Name == nil {
+			return true
+		}
+		switch declaration.Name.Value {
+		case "log", "handle_signal", "stop_phase_group", "run_bounded":
+			var rendered bytes.Buffer
+			require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
+			functions[declaration.Name.Value] = rendered.String()
+		}
+		return true
+	})
+	require.Len(t, functions, 4)
+
+	for _, testCase := range []struct {
+		name             string
+		childRedirection string
+	}{
+		{name: "inherits-output", childRedirection: ""},
+		{name: "closes-output", childRedirection: ">/dev/null 2>&1"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			sandbox := t.TempDir()
+			childPIDPath := filepath.Join(sandbox, "descendant.pid")
+			probePath := filepath.Join(sandbox, "descendant-probe.sh")
+			scriptDir, getwdErr := os.Getwd()
+			require.NoError(t, getwdErr)
+			probe := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+readonly LOG_BYTES=65536
+readonly SCRIPT_DIR=%q
+workspace="$1"
+current_phase_pid=""
+cleanup_active=0
+termination_status=0
+%s
+%s
+%s
+%s
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+phase_status=0
+run_bounded descendant-probe 1s bash -c \
+    'printf "diagnostic-marker\n"
+     sleep 30 %s & printf "%%s\n" "$!" >"$1"' probe "$2" ||
+    phase_status=$?
+((phase_status != 0))
+`, scriptDir, functions["log"], functions["handle_signal"], functions["stop_phase_group"], functions["run_bounded"], testCase.childRedirection)
+			require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
+
+			started := time.Now()
+			output, runErr := exec.Command("bash", probePath, sandbox, childPIDPath).CombinedOutput()
+			require.NoError(t, runErr, string(output))
+			require.Less(t, time.Since(started), 8*time.Second,
+				"the bounded phase must not wait indefinitely for a surviving descendant")
+
+			childPID := waitForPIDFile(t, childPIDPath)
+			require.ErrorIs(t, syscall.Kill(childPID, 0), syscall.ESRCH,
+				"the surviving same-group descendant must be terminated and reaped")
+			phaseLog, readErr := os.ReadFile(filepath.Join(sandbox, "descendant-probe.log"))
+			require.NoError(t, readErr)
+			require.Contains(t, string(phaseLog), "diagnostic-marker\n",
+				"soft termination must let the collector flush bounded diagnostics")
+		})
+	}
+}
+
 func testUCoreOrchestratorSignal(
 	t *testing.T,
 	functions map[string]string,
@@ -166,14 +383,18 @@ func testUCoreOrchestratorSignal(
 	groupDelayPIDPath := filepath.Join(sandbox, "group-delay.pid")
 	cleanupContinuedPath := filepath.Join(sandbox, "cleanup-continued")
 	probePath := filepath.Join(sandbox, "signal-probe.sh")
+	scriptDir, err := os.Getwd()
+	require.NoError(t, err)
 	probe := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 readonly LOG_KIB=64
 readonly LOG_BYTES=$((LOG_KIB * 1024))
+readonly SCRIPT_DIR=%q
 workspace="$1"
 current_phase_pid=""
 cleanup_active=%d
 termination_status=0
+%s
 %s
 %s
 %s
@@ -188,7 +409,7 @@ if ((cleanup_active != 0)); then
     exit "$termination_status"
 fi
 exit "$phase_status"
-`, boolInt(cleanupActive), functions["log"], functions["handle_signal"], functions["run_bounded"])
+`, scriptDir, boolInt(cleanupActive), functions["log"], functions["handle_signal"], functions["stop_phase_group"], functions["run_bounded"])
 	require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
 
 	command := exec.Command(

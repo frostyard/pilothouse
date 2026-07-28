@@ -1,15 +1,19 @@
 package packaging
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // The booted-VM harness (Layer B, #67) lives outside this Go package, in
@@ -66,7 +70,6 @@ const (
 // programs, and are therefore committed non-executable. Executed scripts land in
 // a separate set as they are added, so the two categories cannot blur.
 var vmSourcedScripts = []string{
-	vmImagesEnvPath,
 	vmImagesLibPath,
 	vmCloudInitLibPath,
 	vmVMLibPath,
@@ -110,24 +113,27 @@ func readVMHarnessFile(t *testing.T, path string) string {
 	return string(raw)
 }
 
-// loadVMImagePins parses test/vm/images.env. The file is plain `NAME="value"`
-// assignments precisely so this guard can read it without sourcing it — no
-// guard test may execute any part of the harness.
-func loadVMImagePins(t *testing.T) map[string]vmImagePin {
-	t.Helper()
-
+func parseVMImagePins(source string) (map[string]vmImagePin, error) {
 	pins := map[string]vmImagePin{}
+	seen := map[string]bool{}
 
-	for _, line := range strings.Split(readVMHarnessFile(t, vmImagesEnvPath), "\n") {
+	for index, line := range strings.Split(source, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
 		match := vmImagesEnvAssignment.FindStringSubmatch(line)
-		require.NotNilf(t, match, "%s: line %q is neither a comment nor a VM_IMAGE_<FAMILY>_<FIELD>=\"value\" assignment", vmImagesEnvPath, line)
+		if match == nil {
+			return nil, fmt.Errorf("%s:%d is neither a comment nor a VM_IMAGE_<FAMILY>_<FIELD>=\"value\" assignment", vmImagesEnvPath, index+1)
+		}
 
 		family := strings.ToLower(match[1])
+		key := family + ":" + match[2]
+		if seen[key] {
+			return nil, fmt.Errorf("%s:%d duplicates %s", vmImagesEnvPath, index+1, key)
+		}
+		seen[key] = true
 		pin := pins[family]
 
 		switch match[2] {
@@ -142,7 +148,38 @@ func loadVMImagePins(t *testing.T) map[string]vmImagePin {
 		pins[family] = pin
 	}
 
+	return pins, nil
+}
+
+// loadVMImagePins parses test/vm/images.env with the same inert assignment
+// grammar as images.sh. Neither production nor the guard sources the table, so
+// an override can redirect the data path but cannot add executable shell.
+func loadVMImagePins(t *testing.T) map[string]vmImagePin {
+	t.Helper()
+
+	pins, err := parseVMImagePins(readVMHarnessFile(t, vmImagesEnvPath))
+	require.NoError(t, err)
 	return pins
+}
+
+func TestVMImagesEnvParserRejectsExecutableAndDuplicateRows(t *testing.T) {
+	source := readVMHarnessFile(t, vmImagesEnvPath)
+	info, err := os.Stat(vmImagesEnvPath)
+	require.NoError(t, err)
+	require.Zerof(t, info.Mode().Perm()&0o111,
+		"%s is inert data and must not be executable", vmImagesEnvPath)
+
+	_, err = parseVMImagePins(
+		`VM_IMAGE_DEBIAN_URL="$(echo exit 0 > $HARNESS_DIR/guest/check-pam.sh)"` + "\n" + source)
+	require.ErrorContains(t, err, "duplicates debian:URL",
+		"a shell-looking value remains inert and cannot hide behind a later duplicate pin")
+
+	_, err = parseVMImagePins(
+		`VM_IMAGE_DEBIAN_URL="https://example.invalid/duplicate.qcow2"` + "\n" + source)
+	require.ErrorContains(t, err, "duplicates debian:URL")
+
+	_, err = parseVMImagePins("echo executable-shell\n" + source)
+	require.ErrorContains(t, err, "is neither a comment nor")
 }
 
 // TestVMImagesEnvPinsBothFamilies pins that every family the harness boots has a
@@ -261,6 +298,15 @@ func TestVMImagesLibVerifiesAgainstThePin(t *testing.T) {
 	script := readVMHarnessFile(t, vmImagesLibPath)
 
 	require.Contains(t, script, "fetch_image()", "%s must define fetch_image", vmImagesLibPath)
+	load := shellFunctionBody(t, vmImagesLibPath, script, "load_image_pin")
+	require.NotContains(t, load, `. "$table"`,
+		"%s must parse the possibly overridden image table as inert data, never source it", vmImagesLibPath)
+	require.Contains(t, load, `while IFS= read -r line || [ -n "$line" ]; do`,
+		"%s must read the table one inert line at a time", vmImagesLibPath)
+	require.Contains(t, load, `duplicates $key`,
+		"%s must reject duplicate fields instead of letting a later value conceal an earlier row", vmImagesLibPath)
+	require.Contains(t, load, `done <"$table"`,
+		"%s must feed the table as input, not execute it", vmImagesLibPath)
 
 	for _, tool := range []string{"sha256sum", "sha512sum"} {
 		require.Containsf(t, script, tool,
@@ -379,6 +425,9 @@ func TestVMLibIsEntirelySourced(t *testing.T) {
 func TestVMCloudInitGeneratesCredentialsOnTheHost(t *testing.T) {
 	script := readVMHarnessFile(t, vmCloudInitLibPath)
 
+	require.Contains(t, script, `if [[ ! "$CLOUDINIT_ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then`,
+		"%s must reject ambient administrator names that could inject shell or YAML syntax", vmCloudInitLibPath)
+
 	workspace := shellFunctionBody(t, vmCloudInitLibPath, script, "create_run_workspace")
 	require.Contains(t, workspace, `chmod 0700 "$1"`,
 		"%s: the run workspace must be created with mode 0700", vmCloudInitLibPath)
@@ -395,6 +444,23 @@ func TestVMCloudInitGeneratesCredentialsOnTheHost(t *testing.T) {
 		require.Containsf(t, generate, name+"=$",
 			"%s: creds.env must carry %s, assigned from a generated value", vmCloudInitLibPath, name)
 	}
+	require.Equal(t, 1, strings.Count(generate, `PH_ADMIN_USER=$CLOUDINIT_ADMIN_USER
+PH_ADMIN_PASSWORD=$admin_password
+PH_ROOT_PASSWORD=$root_password`),
+		"%s: creds.env must contain exactly the reviewed three-assignment schema", vmCloudInitLibPath)
+
+	require.NoError(t, vmValidateCredentialsOutput(
+		"PH_ADMIN_USER=pilotadmin\n"+
+			"PH_ADMIN_PASSWORD=Abcdefghijklmnopqrstuv12\n"+
+			"PH_ROOT_PASSWORD=Zyxwvutsrqponmlkjihgfe98\n"))
+	require.ErrorContains(t, vmValidateCredentialsOutput(
+		"PH_ADMIN_USER=pilotadmin\n"+
+			"fail() { :; }\n"+
+			"PH_ADMIN_USER=pilotadmin\n"+
+			"PH_ADMIN_PASSWORD=Abcdefghijklmnopqrstuv12\n"+
+			"PH_ROOT_PASSWORD=Zyxwvutsrqponmlkjihgfe98\n"),
+		"exactly three assignments",
+		"an expanded creds.env containing executable injection must fail output-level validation")
 
 	password := shellFunctionBody(t, vmCloudInitLibPath, script, "generate_password")
 	require.Contains(t, password, "openssl rand -base64",
@@ -647,7 +713,7 @@ func TestVMSSHUsesTheAdministratorIdentity(t *testing.T) {
 	require.Contains(t, target, `printf '%s@%s\n' "$(guest_admin_user)" "$VM_SSH_HOST"`,
 		"%s: the guest destination must be built from the administrator account", vmSSHLibPath)
 
-	for _, name := range []string{"guest_run", "guest_copy"} {
+	for _, name := range []string{"guest_run_timeout", "guest_copy"} {
 		body := shellFunctionBody(t, vmSSHLibPath, script, name)
 		require.Containsf(t, body, `target="$(guest_target)"`,
 			"%s: %s must address the guest as the administrator account, resolving the destination into a variable so a failure there stops the run",
@@ -707,57 +773,80 @@ func TestVMSSHForwardEndpointAgrees(t *testing.T) {
 	}
 }
 
-// TestVMSSHWaitsAreBoundedAndOrdered pins the SSH lifecycle: an explicit
-// bounded readiness timeout, and a reboot that waits for the pre-reboot sshd to
-// go away before waiting for sshd to return — otherwise the readiness check
-// would be satisfied by the sshd that is about to die.
+// TestVMSSHWaitsAreBoundedAndOrdered pins the SSH lifecycle: first-boot
+// readiness is bounded, and reboot completion is proved by polling for a
+// changed kernel boot_id. Requiring an observed SSH outage is incorrect: a
+// sufficiently fast reboot can complete between two probes.
 func TestVMSSHWaitsAreBoundedAndOrdered(t *testing.T) {
 	script := readVMHarnessFile(t, vmSSHLibPath)
 
 	require.Contains(t, script, `SSH_READY_TIMEOUT="${SSH_READY_TIMEOUT:-300}"`,
 		"%s must state the SSH readiness timeout as an explicit bounded constant", vmSSHLibPath)
-	require.Contains(t, script, `SSH_GONE_TIMEOUT="${SSH_GONE_TIMEOUT:-120}"`,
-		"%s must state the pre-reboot disappearance timeout as an explicit bounded constant", vmSSHLibPath)
+	require.Contains(t, script, `SSH_REBOOT_TIMEOUT="${SSH_REBOOT_TIMEOUT:-120}"`,
+		"%s must state the boot-id transition timeout as an explicit bounded constant", vmSSHLibPath)
+
+	probe := shellFunctionBody(t, vmSSHLibPath, script, "guest_probe")
+	require.Contains(t, probe, `guest_run_timeout 15s "$@"`,
+		"%s: every polling probe needs a wall-clock bound covering connected and remote-command hangs", vmSSHLibPath)
+	runTimeout := shellFunctionBody(t, vmSSHLibPath, script, "guest_run_timeout")
+	require.Contains(t, runTimeout, `timeout --signal=TERM --kill-after=10s "$duration"`,
+		"%s: the sole raw SSH site must apply an explicit wall-clock bound", vmSSHLibPath)
+	require.Contains(t, runTimeout, `ssh "${GUEST_SSH_OPTS[@]}"`,
+		"%s: guest_run_timeout must apply its wall-clock bound directly to SSH", vmSSHLibPath)
+
+	answers := shellFunctionBody(t, vmSSHLibPath, script, "guest_answers_ssh")
+	require.Contains(t, answers, `guest_probe true`,
+		"%s: readiness and diagnostics probes must use the wall-clock-bounded SSH wrapper", vmSSHLibPath)
+	bootID := shellFunctionBody(t, vmSSHLibPath, script, "guest_boot_id")
+	require.Contains(t, bootID, `guest_probe cat /proc/sys/kernel/random/boot_id`,
+		"%s: each reboot-transition probe must be wall-clock bounded", vmSSHLibPath)
 
 	ready := shellFunctionBody(t, vmSSHLibPath, script, "wait_for_ssh")
-	require.Contains(t, ready, `[ "$waited" -lt "$SSH_READY_TIMEOUT" ]`,
-		"%s: wait_for_ssh must be bounded by SSH_READY_TIMEOUT", vmSSHLibPath)
+	require.Contains(t, ready, `deadline=$((SECONDS + SSH_READY_TIMEOUT))`,
+		"%s: wait_for_ssh must derive a real wall-clock deadline from SSH_READY_TIMEOUT", vmSSHLibPath)
+	require.Contains(t, ready, `while ((SECONDS < deadline)); do`,
+		"%s: wait_for_ssh must test elapsed wall time rather than a synthetic sleep counter", vmSSHLibPath)
 	require.Contains(t, ready, "assertion failed: the guest did not answer ssh within",
 		"%s: wait_for_ssh must name the failing assertion on expiry", vmSSHLibPath)
 
-	gone := shellFunctionBody(t, vmSSHLibPath, script, "wait_for_ssh_gone")
-	require.Contains(t, gone, `[ "$waited" -lt "$SSH_GONE_TIMEOUT" ]`,
-		"%s: wait_for_ssh_gone must be bounded by SSH_GONE_TIMEOUT", vmSSHLibPath)
-	require.Contains(t, gone, "assertion failed: the pre-reboot sshd was still answering",
-		"%s: wait_for_ssh_gone must name the failing assertion on expiry", vmSSHLibPath)
-	require.Contains(t, gone, `[ "$misses" -ge "$SSH_GONE_CONFIRMATIONS" ]`,
-		"%s: wait_for_ssh_gone must require consecutive unanswered probes; one transient refusal against a guest that never rebooted would otherwise end the wait", vmSSHLibPath)
+	changed := shellFunctionBody(t, vmSSHLibPath, script, "wait_for_boot_id_change")
+	require.Contains(t, changed, `deadline=$((SECONDS + SSH_REBOOT_TIMEOUT))`,
+		"%s: wait_for_boot_id_change must derive a real wall-clock deadline from SSH_REBOOT_TIMEOUT", vmSSHLibPath)
+	require.Contains(t, changed, `while ((SECONDS < deadline)); do`,
+		"%s: wait_for_boot_id_change must test elapsed wall time rather than a synthetic sleep counter", vmSSHLibPath)
+	require.Contains(t, changed, `after="$(guest_boot_id 2>/dev/null)"`,
+		"%s: wait_for_boot_id_change must poll the guest's kernel boot_id through the unreachable interval", vmSSHLibPath)
+	require.Contains(t, changed, `[ -n "$after" ] && [ "$after" != "$before" ]`,
+		"%s: wait_for_boot_id_change must accept only a non-empty boot_id different from the pre-reboot value", vmSSHLibPath)
+	require.Contains(t, changed, "assertion failed: boot_id did not change",
+		"%s: wait_for_boot_id_change must name the failing assertion on expiry", vmSSHLibPath)
+	require.NotContains(t, script, "wait_for_ssh_gone",
+		"%s must not require observing an SSH outage; a fast reboot can complete between probes", vmSSHLibPath)
 
 	reboot := shellFunctionBody(t, vmSSHLibPath, script, "reboot_guest")
-	require.Contains(t, reboot, "guest_sudo systemctl reboot",
-		"%s: reboot_guest must issue the reboot through the escalation wrapper, which passes -n", vmSSHLibPath)
+	require.Contains(t, reboot, "guest_sudo_probe systemctl reboot",
+		"%s: reboot_guest must issue the reboot through the short bounded escalation wrapper, which passes -n", vmSSHLibPath)
 
 	require.NotContains(t, reboot, "|| true",
 		"%s: reboot_guest must not discard the reboot command's status; a rejected non-interactive escalation would then be indistinguishable from the expected disconnect and would surface as a misleading shutdown timeout", vmSSHLibPath)
 	require.NotContains(t, reboot, ">/dev/null 2>&1",
 		"%s: reboot_guest must capture the reboot command's output so a real failure can be reported with its stderr", vmSSHLibPath)
 	require.Contains(t, reboot, `[ "$status" -ne 0 ] && [ "$status" -ne 255 ]`,
-		"%s: reboot_guest must treat only the connection-drop status as the expected symptom and fail on every other non-zero status", vmSSHLibPath)
+		"%s: reboot_guest must treat only the connection-drop or bounded-probe status as an expected symptom and fail on every other non-zero status", vmSSHLibPath)
+	require.Contains(t, reboot, `[ "$status" -ne 124 ]`,
+		"%s: reboot_guest must accept the short wrapper's timeout after a successfully dispatched reboot", vmSSHLibPath)
 
-	require.Contains(t, reboot, `[ "$after" = "$before" ]`,
-		"%s: reboot_guest must compare the guest's boot_id across the reboot; the SSH probes alone cannot distinguish a real reboot from an sshd that merely restarted", vmSSHLibPath)
+	require.Contains(t, reboot, `after="$(wait_for_boot_id_change "$before")"`,
+		"%s: reboot_guest must wait for a changed boot_id; an SSH readiness probe alone cannot distinguish a new boot from the old sshd", vmSSHLibPath)
 	require.Contains(t, script, "/proc/sys/kernel/random/boot_id",
 		"%s must read the guest's boot_id, which changes on every boot, as the deterministic proof that the machine restarted", vmSSHLibPath)
 
-	away := strings.Index(reboot, "wait_for_ssh_gone")
-	back := strings.Index(reboot, "\n    wait_for_ssh\n")
-	require.GreaterOrEqual(t, away, 0, "%s: reboot_guest must wait for the pre-reboot sshd to go away", vmSSHLibPath)
-	require.GreaterOrEqual(t, back, 0, "%s: reboot_guest must wait for sshd to return", vmSSHLibPath)
-	require.Less(t, away, back,
-		"%s: reboot_guest must wait for the pre-reboot sshd to go away BEFORE waiting for sshd to return", vmSSHLibPath)
-
-	require.Less(t, back, strings.Index(reboot, `[ "$after" = "$before" ]`),
-		"%s: reboot_guest must compare boot_id only after the guest is reachable again", vmSSHLibPath)
+	dispatch := strings.Index(reboot, "guest_sudo_probe systemctl reboot")
+	transition := strings.Index(reboot, `wait_for_boot_id_change "$before"`)
+	require.GreaterOrEqual(t, dispatch, 0, "%s: reboot_guest must dispatch the reboot", vmSSHLibPath)
+	require.GreaterOrEqual(t, transition, 0, "%s: reboot_guest must wait for the boot_id transition", vmSSHLibPath)
+	require.Less(t, dispatch, transition,
+		"%s: reboot_guest must dispatch the reboot BEFORE polling for the boot_id transition", vmSSHLibPath)
 }
 
 // vmCredentialAssignment matches an assignment whose name ends in `password` or
@@ -1627,7 +1716,370 @@ func TestVMHarnessNeverWeakensSELinuxOrRetainsArtifacts(t *testing.T) {
 // vmCheckPamPath is the guest-side PAM check. Everything below reads it as
 // text; nothing here executes it, and nothing here re-derives its assertions
 // from the file itself.
-const vmCheckPamPath = vmGuestDir + "/check-pam.sh"
+const (
+	vmCheckPamPath        = vmGuestDir + "/check-pam.sh"
+	vmInstallPackagePath  = vmGuestDir + "/install-package.sh"
+	vmCheckActivationPath = vmGuestDir + "/check-activation.sh"
+)
+
+const (
+	vmCheckPAMNormalizedProgramSHA256 = "06204c6fa937aeff090a53d77e527e25806e00b934a361bb065ea3827fe17a1a"
+	vmGuestLibraryNormalizedSHA256    = "856fba29f3d9f140efa6a6fb3b40e67ee926f50383adfe69107b8f76c9ba3825"
+	vmCredentialsGeneratorSHA256      = "756411b43641a9b86db342719fd75cdba7f0ee87db0c6cd19efe982b5c4938cf"
+	vmOrchestratorNormalizedSHA256    = "6b9c10656a9baf5054945ebc33c651e1e35cae8f2567997dd6065f6ebf926875"
+	vmImagesLibraryNormalizedSHA256   = "dd7849b024cbeae52ff92e2464e2e8282ff6a4c4a333adea4136ea58c351ab37"
+	vmVMLibraryNormalizedSHA256       = "92af990d8a1e8a91410e8da265ba6a7bb05e59887953f0a36233d557b836c5e4"
+	vmSSHLibraryNormalizedSHA256      = "b69784594900242a15546bd71c9598ca23a4bdc6e48355a34edcb7fc7dd4517d"
+	vmDiagnosticsNormalizedSHA256     = "1b38b1b39502242aa500c628dbfea6abb5cd5b128a37caca00dcd6b0aa9c29de"
+	vmInstallPackageNormalizedSHA256  = "21579dda09907c45dd0ef7e6dead30512ef19c3d76d802548306cc140887733c"
+	vmCheckActivationNormalizedSHA256 = "313082e8b089d383b9fceeee98dc55dde1b0e0435627264db0666c5ae8231b9e"
+)
+
+func vmShellStaticWord(word *syntax.Word) (string, bool) {
+	var value strings.Builder
+	var appendParts func([]syntax.WordPart) bool
+	appendParts = func(parts []syntax.WordPart) bool {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				if strings.Contains(part.Value, `\`) {
+					return false
+				}
+				value.WriteString(part.Value)
+			case *syntax.SglQuoted:
+				if part.Dollar && strings.Contains(part.Value, `\`) {
+					return false
+				}
+				value.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				if !appendParts(part.Parts) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	if !appendParts(word.Parts) {
+		return "", false
+	}
+	return value.String(), true
+}
+
+func vmRenderShellNode(node syntax.Node) (string, error) {
+	var normalized strings.Builder
+	if err := syntax.NewPrinter().Print(&normalized, node); err != nil {
+		return "", err
+	}
+	return normalized.String(), nil
+}
+
+func vmValidateCredentialsOutput(output string) error {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(output), "generated-creds.env")
+	if err != nil {
+		return err
+	}
+	names := []string{"PH_ADMIN_USER", "PH_ADMIN_PASSWORD", "PH_ROOT_PASSWORD"}
+	if len(file.Stmts) != len(names) {
+		return fmt.Errorf("credentials output must contain exactly three assignments, got %d statements", len(file.Stmts))
+	}
+	for index, statement := range file.Stmts {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok || statement.Negated || statement.Background || len(statement.Redirs) != 0 ||
+			len(call.Args) != 0 || len(call.Assigns) != 1 {
+			return fmt.Errorf("credentials statement %d is not one direct assignment", index+1)
+		}
+		assignment := call.Assigns[0]
+		if assignment.Name == nil || assignment.Name.Value != names[index] || assignment.Value == nil {
+			return fmt.Errorf("credentials statement %d must assign %s", index+1, names[index])
+		}
+		value, static := vmShellStaticWord(assignment.Value)
+		if !static {
+			return fmt.Errorf("credentials statement %d has a non-literal value", index+1)
+		}
+		if index == 0 {
+			if !regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`).MatchString(value) {
+				return fmt.Errorf("administrator name is not one safe account token")
+			}
+		} else if !regexp.MustCompile(`^[A-Za-z0-9]{24}$`).MatchString(value) {
+			return fmt.Errorf("credential %s is not one 24-character alphanumeric token", names[index])
+		}
+	}
+	return nil
+}
+
+// vmValidatePAMJournalProgram closes the executable structure around the PAM
+// journal evidence. The more descriptive assertions below explain individual
+// contracts, while this validator prevents an unreviewed statement, dynamic
+// parent-shell writer, function override or successful early exit from
+// preserving those local assertions while bypassing the evidence at runtime.
+// The closure includes the same-shell guest library and the host library that
+// generates its one runtime-sourced credentials file; otherwise a dependency
+// could redefine a helper or mutate a cursor without changing check-pam.sh.
+type vmPAMProgramSources struct {
+	checkPAM, guestLibrary, credentialsGenerator string
+	orchestrator, imagesLibrary, vmLibrary       string
+	sshLibrary, diagnosticsLibrary               string
+	installPackage, checkActivation              string
+}
+
+func vmReadPAMProgramSources(t *testing.T) vmPAMProgramSources {
+	t.Helper()
+	return vmPAMProgramSources{
+		checkPAM:             readVMHarnessFile(t, vmCheckPamPath),
+		guestLibrary:         readVMHarnessFile(t, vmGuestLibPath),
+		credentialsGenerator: readVMHarnessFile(t, vmCloudInitLibPath),
+		orchestrator:         readVMHarnessFile(t, vmOrchestratorPath),
+		imagesLibrary:        readVMHarnessFile(t, vmImagesLibPath),
+		vmLibrary:            readVMHarnessFile(t, vmVMLibPath),
+		sshLibrary:           readVMHarnessFile(t, vmSSHLibPath),
+		diagnosticsLibrary:   readVMHarnessFile(t, vmDiagnosticsLibPath),
+		installPackage:       readVMHarnessFile(t, vmInstallPackagePath),
+		checkActivation:      readVMHarnessFile(t, vmCheckActivationPath),
+	}
+}
+
+func vmValidatePAMJournalProgram(sources vmPAMProgramSources) error {
+	script := sources.checkPAM
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(script), vmCheckPamPath)
+	if err != nil {
+		return err
+	}
+
+	relevantFunctions := map[string]int{
+		"journal_cursor":        0,
+		"journal_records_since": 0,
+		"web_login":             0,
+	}
+	criticalWrites := map[string]int{
+		"login_cursor": 0,
+		"login_status": 0,
+		"root_cursor":  0,
+		"root_status":  0,
+	}
+	forbiddenCommands := map[string]bool{
+		"alias":   true,
+		"builtin": true,
+		"command": true,
+		"eval":    true,
+		"exec":    true,
+		"exit":    true,
+		"getopts": true,
+		"read":    true,
+		"return":  true,
+		"source":  true,
+		"unalias": true,
+		"unset":   true,
+	}
+	var sourceCalls, setCalls, trapCalls, requireRootCalls []string
+	var violation error
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if violation != nil {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil {
+				if _, relevant := relevantFunctions[node.Name.Value]; relevant {
+					relevantFunctions[node.Name.Value]++
+				}
+			}
+		case *syntax.Assign:
+			if node.Name != nil {
+				if _, critical := criticalWrites[node.Name.Value]; critical {
+					criticalWrites[node.Name.Value]++
+				}
+			}
+		case *syntax.ForClause:
+			if words, ok := node.Loop.(*syntax.WordIter); ok && words.Name != nil {
+				if _, critical := criticalWrites[words.Name.Value]; critical {
+					criticalWrites[words.Name.Value]++
+				}
+			}
+		case *syntax.ParamExp:
+			if node.Param != nil && node.Exp != nil &&
+				(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) {
+				if _, critical := criticalWrites[node.Param.Value]; critical {
+					criticalWrites[node.Param.Value]++
+				}
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
+			}
+			command, static := vmShellStaticWord(node.Args[0])
+			if !static {
+				break
+			}
+			if forbiddenCommands[command] {
+				violation = fmt.Errorf("forbidden dynamic or terminating command %q", command)
+				return false
+			}
+			rendered, renderErr := vmRenderShellNode(node)
+			if renderErr != nil {
+				violation = renderErr
+				return false
+			}
+			switch command {
+			case ".":
+				sourceCalls = append(sourceCalls, rendered)
+			case "require_root":
+				requireRootCalls = append(requireRootCalls, rendered)
+			case "set":
+				setCalls = append(setCalls, rendered)
+			case "trap":
+				trapCalls = append(trapCalls, rendered)
+			}
+		}
+		return true
+	})
+	if violation != nil {
+		return violation
+	}
+	for name, declarations := range relevantFunctions {
+		if declarations != 1 {
+			return fmt.Errorf("evidence function %s must be declared exactly once, got %d", name, declarations)
+		}
+	}
+	for name, writes := range criticalWrites {
+		if writes != 1 {
+			return fmt.Errorf("critical variable %s must have exactly one static write, got %d", name, writes)
+		}
+	}
+	gotCalls := map[string][]string{
+		"source":       sourceCalls,
+		"set":          setCalls,
+		"trap":         trapCalls,
+		"require_root": requireRootCalls,
+	}
+	for name, want := range map[string][]string{
+		"source":       {`. "$(dirname "$0")/lib.sh"`, `. /etc/os-release`},
+		"set":          {`set -eu`},
+		"trap":         {`trap 'rm -rf "$WORK_DIR"' EXIT`},
+		"require_root": {`require_root`},
+	} {
+		if !slices.Equal(gotCalls[name], want) {
+			return fmt.Errorf("%s must contain exactly the reviewed %s call, got %v", vmCheckPamPath, name, gotCalls[name])
+		}
+	}
+
+	for name, statement := range map[string]string{
+		"source":       `. "$(dirname "$0")/lib.sh"`,
+		"set":          `set -eu`,
+		"trap":         `trap 'rm -rf "$WORK_DIR"' EXIT`,
+		"require_root": `require_root`,
+	} {
+		topLevel := 0
+		for _, candidate := range file.Stmts {
+			rendered, renderErr := vmRenderShellNode(candidate)
+			if renderErr != nil {
+				return renderErr
+			}
+			if rendered == statement {
+				topLevel++
+			}
+		}
+		if topLevel != 1 {
+			return fmt.Errorf("%s must contain the reviewed %s call once as a direct top-level statement", vmCheckPamPath, name)
+		}
+	}
+
+	normalized, err := vmRenderShellNode(file)
+	if err != nil {
+		return err
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(normalized)))
+	if digest != vmCheckPAMNormalizedProgramSHA256 {
+		return fmt.Errorf("normalized executable program digest is %s, want %s", digest, vmCheckPAMNormalizedProgramSHA256)
+	}
+
+	for _, dependency := range []struct {
+		name, path, source, want string
+		language                 syntax.LangVariant
+	}{
+		{
+			name:     "guest library",
+			path:     vmGuestLibPath,
+			source:   sources.guestLibrary,
+			want:     vmGuestLibraryNormalizedSHA256,
+			language: syntax.LangPOSIX,
+		},
+		{
+			name:     "credentials generator",
+			path:     vmCloudInitLibPath,
+			source:   sources.credentialsGenerator,
+			want:     vmCredentialsGeneratorSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "VM orchestrator",
+			path:     vmOrchestratorPath,
+			source:   sources.orchestrator,
+			want:     vmOrchestratorNormalizedSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "image library",
+			path:     vmImagesLibPath,
+			source:   sources.imagesLibrary,
+			want:     vmImagesLibraryNormalizedSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "VM library",
+			path:     vmVMLibPath,
+			source:   sources.vmLibrary,
+			want:     vmVMLibraryNormalizedSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "SSH library",
+			path:     vmSSHLibPath,
+			source:   sources.sshLibrary,
+			want:     vmSSHLibraryNormalizedSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "diagnostics library",
+			path:     vmDiagnosticsLibPath,
+			source:   sources.diagnosticsLibrary,
+			want:     vmDiagnosticsNormalizedSHA256,
+			language: syntax.LangBash,
+		},
+		{
+			name:     "pre-PAM package installer",
+			path:     vmInstallPackagePath,
+			source:   sources.installPackage,
+			want:     vmInstallPackageNormalizedSHA256,
+			language: syntax.LangPOSIX,
+		},
+		{
+			name:     "pre-PAM activation check",
+			path:     vmCheckActivationPath,
+			source:   sources.checkActivation,
+			want:     vmCheckActivationNormalizedSHA256,
+			language: syntax.LangPOSIX,
+		},
+	} {
+		dependencyFile, parseErr := syntax.NewParser(syntax.Variant(dependency.language)).
+			Parse(strings.NewReader(dependency.source), dependency.path)
+		if parseErr != nil {
+			return parseErr
+		}
+		normalizedDependency, renderErr := vmRenderShellNode(dependencyFile)
+		if renderErr != nil {
+			return renderErr
+		}
+		dependencyDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(normalizedDependency)))
+		if dependencyDigest != dependency.want {
+			return fmt.Errorf("%s normalized executable digest is %s, want %s", dependency.name, dependencyDigest, dependency.want)
+		}
+	}
+	return nil
+}
 
 // TestVMGuestDirectRouteSendsItsOwnRemote pins the reusable authenticated
 // direct-socket helper in guest/lib.sh, and above all the one value that keeps
@@ -1811,8 +2263,22 @@ func TestVMCheckPamRunsTheThreeLoginsInOrderWithExactStatuses(t *testing.T) {
 // request it is about, and each matched on the record's parsed JSON msg field
 // rather than on a substring of the line.
 func TestVMCheckPamBoundsBothJournalAssertionsWithCursors(t *testing.T) {
-	script := readVMHarnessFile(t, vmCheckPamPath)
+	sources := vmReadPAMProgramSources(t)
+	script := sources.checkPAM
+	require.NoError(t, vmValidatePAMJournalProgram(sources))
 
+	cursor := shellFunctionBody(t, vmCheckPamPath, script, "journal_cursor")
+	require.Equal(t, `    journalctl --unit "$1" --no-pager --lines=1 --output json >"$WORK_DIR/cursor.json" ||
+        fail "could not read $1's journal to capture a cursor"
+
+    journal_cursor_value="$(jq -r '.__CURSOR // empty' <"$WORK_DIR/cursor.json")" ||
+        fail "could not read a cursor out of the journal's last record"
+
+    [ -n "$journal_cursor_value" ] ||
+        fail "the journal returned no cursor; an unbounded journal search is not evidence about one login"
+
+    printf '%s\n' "$journal_cursor_value"`, cursor,
+		"%s: journal_cursor must retain its exact reviewed executable body", vmCheckPamPath)
 	records := shellFunctionBody(t, vmCheckPamPath, script, "journal_records_since")
 	require.Contains(t, records, `journalctl --unit "$1" --after-cursor "$2"`,
 		"%s: every journal search must be bounded by the cursor captured for it", vmCheckPamPath)
@@ -1826,29 +2292,74 @@ func TestVMCheckPamBoundsBothJournalAssertionsWithCursors(t *testing.T) {
 	require.NotContains(t, records, "journalctl --unit \"$1\" --after-cursor \"$2\" --no-pager --output json |",
 		"%s: the journal read must be checked on its own, not through a pipeline whose status is jq's", vmCheckPamPath)
 
-	// "Immediately before" is asserted literally: the cursor capture is the
-	// statement directly preceding the POST it bounds.
-	code := vmCodeLines(script)
+	// Parse the whole program rather than scanning normalized text. This makes
+	// unreachable or nested decoys visible, pins each critical variable to one
+	// write, and requires the cursor capture and the POST it bounds to be
+	// adjacent direct foreground statements at file scope.
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(script), vmCheckPamPath)
+	require.NoError(t, err)
 
-	for cursor, post := range map[string]string{
-		"login_cursor=$(journal_cursor)": "login_status=$(web_login ",
-		"root_cursor=$(journal_cursor)":  "root_status=$(web_login ",
-	} {
-		at := -1
+	render := func(node syntax.Node) string {
+		var normalized strings.Builder
+		require.NoError(t, syntax.NewPrinter().Print(&normalized, node))
+		return normalized.String()
+	}
 
-		for index, line := range code {
-			if line == cursor {
-				at = index
-
-				break
+	var cursorCalls []string
+	criticalWrites := map[string]int{
+		"login_cursor": 0,
+		"login_status": 0,
+		"root_cursor":  0,
+		"root_status":  0,
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			if len(node.Args) > 0 && render(node.Args[0]) == "journal_cursor" {
+				cursorCalls = append(cursorCalls, render(node))
+			}
+		case *syntax.Assign:
+			if node.Name != nil {
+				if _, critical := criticalWrites[node.Name.Value]; critical {
+					criticalWrites[node.Name.Value]++
+				}
 			}
 		}
+		return true
+	})
+	require.Equal(t, []string{
+		`journal_cursor "$WEB_UNIT"`,
+		`journal_cursor "$BROKER_UNIT"`,
+	}, cursorCalls, "%s must contain exactly the two reviewed journal_cursor calls", vmCheckPamPath)
+	for name, writes := range criticalWrites {
+		require.Equalf(t, 1, writes, "%s must assign %s exactly once across the entire program", vmCheckPamPath, name)
+	}
 
-		require.GreaterOrEqualf(t, at, 0, "%s must capture `%s`", vmCheckPamPath, cursor)
-		require.Lessf(t, at+1, len(code), "%s must post the login after capturing `%s`", vmCheckPamPath, cursor)
-		require.Truef(t, strings.HasPrefix(code[at+1], post),
-			"%s: `%s` must be captured immediately before the login POST it bounds, but the next statement is `%s`",
-			vmCheckPamPath, cursor, code[at+1])
+	expectedPairs := []string{
+		`login_cursor="$(journal_cursor "$WEB_UNIT")"
+login_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/username" "$WORK_DIR/admin-secret")" ||
+    fail "POST /login for the administrator did not complete within ${WEB_REQUEST_TIMEOUT_SECONDS}s"`,
+		`root_cursor="$(journal_cursor "$BROKER_UNIT")"
+root_status="$(web_login "$WORK_DIR/csrf" "$WORK_DIR/root-username" "$WORK_DIR/root-secret")" ||
+    fail "POST /login for root did not complete within ${WEB_REQUEST_TIMEOUT_SECONDS}s"`,
+	}
+	for _, expectedSource := range expectedPairs {
+		expected, parseErr := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+			Parse(strings.NewReader(expectedSource), "expected-cursor-login-pair.sh")
+		require.NoError(t, parseErr)
+		require.Len(t, expected.Stmts, 2)
+
+		matches := 0
+		for index := 0; index+1 < len(file.Stmts); index++ {
+			if render(file.Stmts[index]) == render(expected.Stmts[0]) &&
+				render(file.Stmts[index+1]) == render(expected.Stmts[1]) {
+				matches++
+			}
+		}
+		require.Equalf(t, 1, matches,
+			"%s must contain the reviewed cursor capture and login POST exactly once as adjacent direct top-level statements:\n%s",
+			vmCheckPamPath, expectedSource)
 	}
 
 	// The negative assertion is on the WEB unit: refreshCapabilities logs from
@@ -1879,6 +2390,129 @@ func TestVMCheckPamBoundsBothJournalAssertionsWithCursors(t *testing.T) {
 		"%s must match msg, user and error on the parsed record, not a substring of the line", vmCheckPamPath)
 	require.Contains(t, script, `[ -n "$root_record_found" ] ||`,
 		"%s must fail by name when the broker logged no such record", vmCheckPamPath)
+}
+
+func TestVMCheckPamJournalProgramGuardRejectsBypasses(t *testing.T) {
+	sources := vmReadPAMProgramSources(t)
+	script := sources.checkPAM
+	require.NoError(t, vmValidatePAMJournalProgram(sources))
+
+	mutations := map[string]struct {
+		old, new string
+		error    string
+	}{
+		"early successful exit": {
+			old:   "require_root\n",
+			new:   "require_root\nexit 0\n",
+			error: `forbidden dynamic or terminating command "exit"`,
+		},
+		"dynamic eval writer": {
+			old:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\n",
+			new:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\neval 'login_cursor=$(journal_cursor \"$WEB_UNIT\")'\n",
+			error: `forbidden dynamic or terminating command "eval"`,
+		},
+		"read writer": {
+			old:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\n",
+			new:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\nread login_cursor <\"$WORK_DIR/cursor.json\"\n",
+			error: `forbidden dynamic or terminating command "read"`,
+		},
+		"unset writer": {
+			old:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\n",
+			new:   "sleep \"$JOURNAL_SETTLE_SECONDS\"\nunset login_cursor\n",
+			error: `forbidden dynamic or terminating command "unset"`,
+		},
+		"extra parent source": {
+			old:   "load_credentials\n",
+			new:   "load_credentials\n. \"$WORK_DIR/bypass.sh\"\n",
+			error: "must contain exactly the reviewed source call",
+		},
+		"function override": {
+			old:   "journal_records_since() {",
+			new:   "journal_cursor() {\n    printf '%s\\n' bypass\n}\n\njournal_records_since() {",
+			error: "evidence function journal_cursor must be declared exactly once",
+		},
+		"EXIT trap override": {
+			old:   `trap 'rm -rf "$WORK_DIR"' EXIT`,
+			new:   `trap 'exit 0' EXIT`,
+			error: "must contain exactly the reviewed trap call",
+		},
+	}
+	for name, mutation := range mutations {
+		t.Run(name, func(t *testing.T) {
+			require.Contains(t, script, mutation.old, "mutation anchor drifted")
+			mutated := sources
+			mutated.checkPAM = strings.Replace(script, mutation.old, mutation.new, 1)
+			require.ErrorContains(t,
+				vmValidatePAMJournalProgram(mutated),
+				mutation.error)
+		})
+	}
+
+	t.Run("sourced guest library mutation", func(t *testing.T) {
+		anchor := `guest_log() {
+    printf 'guest: %s\n' "$*"
+}`
+		mutated := `guest_log() {
+    printf 'guest: %s\n' "$*"
+    login_cursor="$(journal_cursor "$WEB_UNIT")"
+}`
+		require.Contains(t, sources.guestLibrary, anchor, "guest library mutation anchor drifted")
+		mutatedSources := sources
+		mutatedSources.guestLibrary = strings.Replace(sources.guestLibrary, anchor, mutated, 1)
+		require.ErrorContains(t,
+			vmValidatePAMJournalProgram(mutatedSources),
+			"guest library normalized executable digest")
+	})
+
+	t.Run("sourced library failure override", func(t *testing.T) {
+		anchor := "set -eu\n"
+		require.Contains(t, sources.guestLibrary, anchor, "guest library mutation anchor drifted")
+		mutatedSources := sources
+		mutatedSources.guestLibrary = strings.Replace(sources.guestLibrary, anchor, "set -eu\nalias exit=:\n", 1)
+		require.ErrorContains(t,
+			vmValidatePAMJournalProgram(mutatedSources),
+			"guest library normalized executable digest")
+	})
+
+	t.Run("runtime credentials schema mutation", func(t *testing.T) {
+		anchor := `PH_ROOT_PASSWORD=$root_password
+EOF`
+		mutated := `PH_ROOT_PASSWORD=$root_password
+guest_log() { login_cursor="$(journal_cursor "$WEB_UNIT")"; }
+EOF`
+		require.Contains(t, sources.credentialsGenerator, anchor, "credentials generator mutation anchor drifted")
+		mutatedSources := sources
+		mutatedSources.credentialsGenerator = strings.Replace(sources.credentialsGenerator, anchor, mutated, 1)
+		require.ErrorContains(t,
+			vmValidatePAMJournalProgram(mutatedSources),
+			"credentials generator normalized executable digest")
+	})
+
+	t.Run("unreachable orchestrator invocation", func(t *testing.T) {
+		anchor := "    guest_run sudo -n sh '~/vm-boot/guest/check-pam.sh'\n"
+		mutated := "    if [[ -z \"$HARNESS_DIR\" ]]; then\n" + anchor + "    fi\n"
+		require.Contains(t, sources.orchestrator, anchor, "orchestrator mutation anchor drifted")
+		mutatedSources := sources
+		mutatedSources.orchestrator = strings.Replace(sources.orchestrator, anchor, mutated, 1)
+		require.ErrorContains(t,
+			vmValidatePAMJournalProgram(mutatedSources),
+			"VM orchestrator normalized executable digest")
+	})
+
+	t.Run("predecessor guest program mutation", func(t *testing.T) {
+		anchor := "require_root\n"
+		require.Contains(t, sources.checkActivation, anchor, "activation mutation anchor drifted")
+		mutatedSources := sources
+		mutatedSources.checkActivation = strings.Replace(
+			sources.checkActivation,
+			anchor,
+			anchor+"guest_log \"unexpected pre-PAM mutation\"\n",
+			1,
+		)
+		require.ErrorContains(t,
+			vmValidatePAMJournalProgram(mutatedSources),
+			"pre-PAM activation check normalized executable digest")
+	})
 }
 
 // TestVMCheckPamProvesTheAdminGroupFunctionally pins the direct-route half:
@@ -2520,10 +3154,10 @@ func TestVMOrchestratorCapturesAndDumpsBeforeItReboots(t *testing.T) {
 		"%s: the pre-reboot dump must announce itself; a silent dump is the failure mode this file exists to prevent", vmDiagnosticsLibPath)
 
 	// reboot_guest is what makes the post-reboot check unable to pass against
-	// the pre-reboot sshd. The full ordering guard lives in
+	// the previous boot. The full ordering guard lives in
 	// TestVMSSHWaitsAreBoundedAndOrdered; this is the part the reboot half
 	// depends on directly.
 	reboot := shellFunctionBody(t, vmSSHLibPath, readVMHarnessFile(t, vmSSHLibPath), "reboot_guest")
-	require.Less(t, strings.Index(reboot, "wait_for_ssh_gone"), strings.Index(reboot, "\n    wait_for_ssh\n"),
-		"%s: reboot_guest must wait for the pre-reboot sshd to become unreachable BEFORE waiting for sshd to return, or the post-reboot checks could be answered by the sshd that was about to die", vmSSHLibPath)
+	require.Contains(t, reboot, `after="$(wait_for_boot_id_change "$before")"`,
+		"%s: reboot_guest must wait until SSH on the new boot returns a changed boot_id, or the post-reboot checks could run against the previous boot", vmSSHLibPath)
 }

@@ -127,9 +127,9 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # able to fail the run either — not even by being missing.
 
 # The reboot really happened. The orchestrator's reboot_guest already proved
-# this host-side by waiting for the pre-reboot sshd to go away and comparing
-# boot ids; asserting it again from inside the guest means this script cannot
-# be green against the machine that captured the state.
+# this host-side by waiting until SSH could read a changed boot id; asserting
+# it again from inside the guest means this script cannot be green against the
+# machine that captured the state.
 boot_id="$(cat /proc/sys/kernel/random/boot_id)" ||
     fail "could not read the guest's boot id after the reboot"
 

@@ -1442,12 +1442,13 @@ func TestConnectSystemdNeverCallsConnectWithoutSystemdCapability(t *testing.T) {
 	called := false
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	client := connectSystemd(context.Background(), capability.New(capability.Docker, capability.Journald), func(context.Context) (*dbus.Conn, error) {
+	client, cancelConnection := connectSystemd(context.Background(), capability.New(capability.Docker, capability.Journald), func(context.Context) (*dbus.Conn, error) {
 		called = true
 		return &dbus.Conn{}, nil
 	}, logger)
 
 	assert.Nil(t, client)
+	assert.Nil(t, cancelConnection)
 	assert.False(t, called, "connect must never be invoked when the Systemd capability is absent")
 }
 
@@ -1455,24 +1456,117 @@ func TestConnectSystemdReturnsNilAndWarnsWhenConnectFails(t *testing.T) {
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, nil))
 
-	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+	client, cancelConnection := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
 		return nil, errors.New("dial unix /run/systemd/private: connect: no such file or directory")
 	}, logger)
 
 	assert.Nil(t, client)
+	assert.Nil(t, cancelConnection)
 	assert.Contains(t, logged.String(), "systemd connection unavailable")
+	assert.Contains(t, logged.String(), "level=WARN")
+}
+
+func TestConnectSystemdRejectsNilSuccessfulConnection(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+
+	client, cancelConnection := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+		return nil, nil
+	}, logger)
+
+	assert.Nil(t, client)
+	assert.Nil(t, cancelConnection)
+	assert.Contains(t, logged.String(), "connector returned a nil systemd connection")
 	assert.Contains(t, logged.String(), "level=WARN")
 }
 
 func TestConnectSystemdReturnsConnectionWhenCapabilityPresentAndConnectSucceeds(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	want := &dbus.Conn{}
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
+	var connectionCtx context.Context
 
-	client := connectSystemd(context.Background(), capability.New(capability.Systemd), func(context.Context) (*dbus.Conn, error) {
+	client, cancelConnection := connectSystemd(attemptCtx, capability.New(capability.Systemd), func(ctx context.Context) (*dbus.Conn, error) {
+		connectionCtx = ctx
 		return want, nil
 	}, logger)
 
 	assert.Same(t, want, client)
+	require.NotNil(t, cancelConnection)
+	cancelAttempt()
+	assert.NoError(t, connectionCtx.Err(),
+		"the bounded dial wait must not become the successful connection's lifetime")
+	cancelConnection()
+	assert.ErrorIs(t, connectionCtx.Err(), context.Canceled,
+		"the returned cancellation function must own the successful connection's lifetime")
+}
+
+func TestConnectSystemdCancelsTimedOutConnectAndWarnsPromptly(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
+	cancelAttempt()
+	connectReturned := make(chan struct{})
+
+	type result struct {
+		client           *dbus.Conn
+		cancelConnection context.CancelFunc
+	}
+	done := make(chan result, 1)
+	go func() {
+		client, cancelConnection := connectSystemd(attemptCtx, capability.New(capability.Systemd), func(ctx context.Context) (*dbus.Conn, error) {
+			<-ctx.Done()
+			close(connectReturned)
+			return nil, ctx.Err()
+		}, logger)
+		done <- result{client: client, cancelConnection: cancelConnection}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connectSystemd did not return promptly after its wait context ended")
+	}
+	assert.Nil(t, got.client)
+	assert.Nil(t, got.cancelConnection)
+	assert.Contains(t, logged.String(), "systemd connection unavailable")
+	assert.Contains(t, logged.String(), "level=WARN")
+	select {
+	case <-connectReturned:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out connector did not observe cancellation")
+	}
+}
+
+func TestConnectSystemdClosesLateSuccessAfterTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
+	cancelAttempt()
+	want := &dbus.Conn{}
+	closed := make(chan *dbus.Conn, 1)
+
+	client, cancelConnection := connectSystemdWithCloser(
+		attemptCtx,
+		capability.New(capability.Systemd),
+		func(ctx context.Context) (*dbus.Conn, error) {
+			<-ctx.Done()
+			return want, nil
+		},
+		func(client *dbus.Conn) {
+			closed <- client
+		},
+		logger,
+	)
+
+	assert.Nil(t, client)
+	assert.Nil(t, cancelConnection)
+	select {
+	case got := <-closed:
+		assert.Same(t, want, got)
+	case <-time.After(time.Second):
+		t.Fatal("late successful connection was not closed")
+	}
 }
 
 func TestConnectDockerNeverConstructsClientWhenEndpointUnset(t *testing.T) {
@@ -1608,11 +1702,12 @@ func TestStorageInventoryIsRegisteredAndFunctionalWithoutSystemd(t *testing.T) {
 
 	// No Systemd capability: connectSystemd (already proven above to never
 	// invoke connect in this case) yields a nil client.
-	client := connectSystemd(context.Background(), capability.New(), func(context.Context) (*dbus.Conn, error) {
+	client, cancelConnection := connectSystemd(context.Background(), capability.New(), func(context.Context) (*dbus.Conn, error) {
 		t.Fatal("connect must never be invoked when the Systemd capability is absent")
 		return nil, nil
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Nil(t, client)
+	require.Nil(t, cancelConnection)
 
 	managers, err := buildSystemdManagers(client, storageManager, []string{"backup.timer"}, time.Hour, nil, nil)
 	require.NoError(t, err, "construction must never fail fatally because systemd is absent")

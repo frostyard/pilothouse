@@ -11,11 +11,41 @@ import (
 )
 
 const imageOrchestratorPath = "test/image/ucore-image-test.sh"
+const boundedOutputCollectorPath = "test/image/capture-bounded-output.sh"
+
+const boundedOutputCollectorReviewedTopLevel = `
+set -euo pipefail
+(($# >= 3)) || {
+    echo "capture-bounded-output: expected LOG_PATH LOG_BYTES COMMAND..." >&2
+    exit 2
+}
+readonly phase_log="$1"
+readonly log_bytes="$2"
+shift 2
+[[ "$phase_log" == /* ]] || {
+    echo "capture-bounded-output: LOG_PATH must be absolute" >&2
+    exit 2
+}
+[[ "$log_bytes" =~ ^[1-9][0-9]*$ ]] || {
+    echo "capture-bounded-output: LOG_BYTES must be a positive integer" >&2
+    exit 2
+}
+set +e
+command "$@" 2>&1 |
+    command env --ignore-signal=INT --ignore-signal=TERM \
+        tail -c "$log_bytes" >"$phase_log"
+pipeline_status=("${PIPESTATUS[@]}")
+set -e
+if ((pipeline_status[1] != 0)); then
+    exit "${pipeline_status[1]}"
+fi
+exit "${pipeline_status[0]}"
+`
 
 const imageOrchestratorReviewedTopLevel = `
 set -euo pipefail
-readonly LOG_KIB=4096
-readonly LOG_BYTES=$((LOG_KIB * 1024))
+readonly LOG_BYTES=4194304
+readonly MIN_FREE_KIB=10485760
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_PATH
 SCRIPT_DIR="$(dirname -- "$SCRIPT_PATH")"
@@ -43,13 +73,13 @@ done
     fail "--run-id must match [a-z0-9][a-z0-9-]{0,31}"
 [[ $EUID -eq 0 ]] ||
     fail "the image lifecycle must run as root"
-for tool in bash go mkdir podman readlink rm setsid sleep tail timeout; do
+for tool in bash df go mkdir podman readlink rm setsid sleep tail timeout; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "required tool is unavailable: $tool"
 done
-workspace_parent="${RUNNER_TEMP:-/tmp}"
+workspace_parent="/var/tmp"
 [[ "$workspace_parent" == /* && -d "$workspace_parent" && ! -L "$workspace_parent" ]] ||
-    fail "RUNNER_TEMP must name a real absolute directory"
+    fail "/var/tmp must be a real absolute directory"
 workspace_parent="$(cd -- "$workspace_parent" && pwd -P)"
 readonly workspace_parent
 workspace_nonce=""
@@ -72,6 +102,7 @@ cleanup_active=0
 termination_status=0
 workspace_created=0
 handle_signal() { :; }
+stop_phase_group() { :; }
 run_bounded() { :; }
 reset_private_store() { :; }
 cleanup() { :; }
@@ -99,11 +130,20 @@ case "$workspace_signal" in
     INT) handle_signal INT 130 ;;
     TERM) handle_signal TERM 143 ;;
 esac
+available_kib="$(df --output=avail -k "$workspace" | tail -n 1)"
+readonly available_kib
+[[ "$available_kib" =~ ^[[:space:]]*[0-9]+$ ]] ||
+    fail "could not determine available workspace disk"
+((available_kib >= MIN_FREE_KIB)) ||
+    fail "image lifecycle requires at least 10 GiB free in $workspace"
 cd -- "$REPOSITORY_ROOT"
 run_bounded acquire-release-rpm 5m \
     go run ./test/image/releaserpm --workspace "$workspace"
 run_bounded compose-ucore 75m \
-    bash "$SCRIPT_DIR/compose-ucore.sh" --workspace "$workspace" --run-id "$run_id"
+    bash "$SCRIPT_DIR/compose-ucore.sh" \
+    --workspace "$workspace" \
+    --bin-dir "$REPOSITORY_ROOT/bin" \
+    --run-id "$run_id"
 run_bounded validate-ucore-vm 75m \
     bash "$SCRIPT_DIR/ucore-vm-test.sh" --workspace "$workspace"
 cleanup_status=0
@@ -135,7 +175,7 @@ func TestUCoreImageOrchestratorLifecycleIsClosed(t *testing.T) {
 	imageRequireUniqueFunctions(t, imageOrchestratorPath, file)
 	imageRequireExactFunctionSet(t, imageOrchestratorPath, file,
 		"usage", "fail", "log", "handle_signal", "run_bounded",
-		"reset_private_store", "cleanup", "cleanup_on_exit",
+		"stop_phase_group", "reset_private_store", "cleanup", "cleanup_on_exit",
 	)
 	imageRequireExactShellMode(t, file, "set", "-euo", "pipefail")
 	for _, call := range allCalls {
@@ -165,7 +205,10 @@ termination_status="$exit_status"
 if [[ -n "$phase_pid" ]]; then
     kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
     wait "$phase_pid" 2>/dev/null || true
-    current_phase_pid=""
+    stop_phase_group "$phase_pid" || true
+    if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+        current_phase_pid=""
+    fi
 fi
 if ((cleanup_active != 0)); then
     trap 'handle_signal INT 130' INT
@@ -173,6 +216,28 @@ if ((cleanup_active != 0)); then
     return 0
 fi
 exit "$exit_status"
+`)
+	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "stop_phase_group", `
+local phase_pid="$1"
+local attempts=0
+if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+    return 0
+fi
+kill -TERM -- "-$phase_pid" 2>/dev/null || true
+while kill -0 -- "-$phase_pid" 2>/dev/null && ((attempts < 300)); do
+    sleep 0.1
+    attempts=$((attempts + 1))
+done
+if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+    return 0
+fi
+kill -KILL -- "-$phase_pid" 2>/dev/null || true
+attempts=0
+while kill -0 -- "-$phase_pid" 2>/dev/null && ((attempts < 50)); do
+    sleep 0.1
+    attempts=$((attempts + 1))
+done
+! kill -0 -- "-$phase_pid" 2>/dev/null
 `)
 	imageRequireExactFunction(t, imageOrchestratorPath, file, syntax.LangBash, "run_bounded", `
 local phase="$1"
@@ -186,9 +251,10 @@ log "starting ${phase}"
 trap 'pending_signal=INT' INT
 trap 'pending_signal=TERM' TERM
 (
-    ulimit -f "$LOG_KIB"
-    exec setsid timeout --signal=TERM --kill-after=30s "$duration" "$@"
-) >"$phase_log" 2>&1 &
+    exec setsid timeout --signal=TERM --kill-after=30s "$duration" \
+        bash "$SCRIPT_DIR/capture-bounded-output.sh" \
+        "$phase_log" "$LOG_BYTES" "$@"
+) &
 current_phase_pid=$!
 local phase_pid="$current_phase_pid"
 while ((phase_group_ready == 0)); do
@@ -211,7 +277,13 @@ if wait "$phase_pid"; then
 else
     status=$?
 fi
-current_phase_pid=""
+if kill -0 -- "-$phase_pid" 2>/dev/null; then
+    status=1
+    stop_phase_group "$phase_pid" || true
+fi
+if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+    current_phase_pid=""
+fi
 printf '%s\n' "----- ${phase} log (maximum ${LOG_BYTES} bytes) -----"
 tail -c "$LOG_BYTES" -- "$phase_log" || status=1
 printf '%s\n' "----- end ${phase} log -----"
@@ -223,7 +295,15 @@ cleanup_active=1
 if ((workspace_created == 0)); then
     return 0
 fi
+if [[ -n "$current_phase_pid" ]]; then
+    echo "ucore-image-test: refusing cleanup while a phase process group survives" >&2
+    return 1
+fi
 reset_private_store || cleanup_status=1
+if [[ -n "$current_phase_pid" ]]; then
+    echo "ucore-image-test: refusing workspace removal while the reset process group survives" >&2
+    return 1
+fi
 if rm -rf --one-file-system -- "$workspace"; then
     workspace_created=0
 else
@@ -283,7 +363,9 @@ run_bounded reset-private-store 10m \
 		{
 			"run_bounded", "compose-ucore", "75m",
 			"bash", `"$SCRIPT_DIR/compose-ucore.sh"`,
-			"--workspace", `"$workspace"`, "--run-id", `"$run_id"`,
+			"--workspace", `"$workspace"`,
+			"--bin-dir", `"$REPOSITORY_ROOT/bin"`,
+			"--run-id", `"$run_id"`,
 		},
 		{
 			"run_bounded", "validate-ucore-vm", "75m",
@@ -295,8 +377,8 @@ run_bounded reset-private-store 10m \
 		imageRequireDirectCall(t, file, phase...)
 	}
 	require.Equal(t, []imageShellAssignment{
-		{name: "LOG_KIB", value: "4096"},
-		{name: "LOG_BYTES", value: "$((LOG_KIB*1024))"},
+		{name: "LOG_BYTES", value: "4194304"},
+		{name: "MIN_FREE_KIB", value: "10485760"},
 		{name: "SCRIPT_PATH", value: `"$(readlink -f -- "${BASH_SOURCE[0]}")"`},
 		{name: "SCRIPT_PATH", value: ""},
 		{name: "SCRIPT_DIR", value: `"$(dirname -- "$SCRIPT_PATH")"`},
@@ -305,7 +387,7 @@ run_bounded reset-private-store 10m \
 		{name: "REPOSITORY_ROOT", value: ""},
 		{name: "run_id", value: `""`},
 		{name: "run_id", value: `"$2"`},
-		{name: "workspace_parent", value: `"${RUNNER_TEMP:-/tmp}"`},
+		{name: "workspace_parent", value: `"/var/tmp"`},
 		{name: "workspace_parent", value: `"$(cd -- "$workspace_parent"&&pwd -P)"`},
 		{name: "workspace_parent", value: ""},
 		{name: "workspace_nonce", value: `""`},
@@ -325,6 +407,8 @@ run_bounded reset-private-store 10m \
 		{name: "workspace_created", value: "0"},
 		{name: "workspace_signal", value: `""`},
 		{name: "workspace_created", value: "1"},
+		{name: "available_kib", value: `"$(df --output=avail -k "$workspace"|tail -n 1)"`},
+		{name: "available_kib", value: ""},
 		{name: "cleanup_status", value: "0"},
 		{name: "cleanup_status", value: "$?"},
 	}, imageShellAssignments(t, imageShellTopLevel(file)...),
@@ -341,7 +425,8 @@ run_bounded reset-private-store 10m \
 		"usage", "exit", "fail", "fail", ".", "fail", "fail", "cd", "pwd",
 		"read", "fail", "fail", "trap", "trap", "trap", "trap", "trap",
 		"mkdir", "trap", "trap", "handle_signal", "handle_signal", "fail",
-		"trap", "trap", "handle_signal", "handle_signal", "cd", "run_bounded",
+		"trap", "trap", "handle_signal", "handle_signal", "df", "tail", "fail",
+		"fail", "cd", "run_bounded",
 		"run_bounded", "run_bounded", "cleanup", "trap", "exit", "fail", "log",
 	}, topCommandSequence,
 		"the complete top-level command order must keep traps ahead of all phases and forbid success shortcuts")
@@ -368,12 +453,9 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 
 	imageRequireExactCallCount(t, runCalls, 1,
 		"exec", "setsid", "timeout", "--signal=TERM", "--kill-after=30s",
-		`"$duration"`, `"$@"`,
+		`"$duration"`, "bash", `"$SCRIPT_DIR/capture-bounded-output.sh"`,
+		`"$phase_log"`, `"$LOG_BYTES"`, `"$@"`,
 	)
-	imageRequireExactCallCount(t, runCalls, 1,
-		"tail", "-c", `"$LOG_BYTES"`, "--", `"$phase_log"`,
-	)
-	imageRequireExactCallCount(t, runCalls, 1, "ulimit", "-f", `"$LOG_KIB"`)
 
 	var asynchronous []uint
 	var substitutions []uint
@@ -391,7 +473,7 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 		return true
 	})
 	require.Len(t, asynchronous, 1,
-		"run_bounded's one owned process-group job must be the only asynchronous statement")
+		"run_bounded's timeout-owned process group must be the only asynchronous statement")
 	require.Empty(t, substitutions,
 		"the outer owner needs no implicit process-substitution children")
 
@@ -400,6 +482,65 @@ func TestUCoreImageOrchestratorBoundsOutputAndProcesses(t *testing.T) {
 			require.Falsef(t, imageCallContainsProgram(call, forbidden),
 				"the outer owner may not detach a child through %s", forbidden)
 		}
+	}
+}
+
+func TestUCoreImageBoundedOutputCollectorIsClosed(t *testing.T) {
+	file := imageParseShell(t, boundedOutputCollectorPath, syntax.LangBash)
+	expectedFile := imageParseShellSource(
+		t,
+		"reviewed-"+boundedOutputCollectorPath,
+		boundedOutputCollectorReviewedTopLevel,
+		syntax.LangBash,
+	)
+	require.Equal(t,
+		imageOrchestratorNonFunctionTopLevel(t, expectedFile),
+		imageOrchestratorNonFunctionTopLevel(t, file),
+		"every collector statement, expansion and redirection must be reviewed exactly",
+	)
+
+	functionCount := 0
+	var asynchronous []uint
+	var substitutions []uint
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.FuncDecl:
+			functionCount++
+		case *syntax.Stmt:
+			if typed.Background || typed.Coprocess || typed.Disown {
+				asynchronous = append(asynchronous, typed.Pos().Line())
+			}
+		case *syntax.CoprocClause:
+			asynchronous = append(asynchronous, typed.Pos().Line())
+		case *syntax.ProcSubst:
+			substitutions = append(substitutions, typed.Pos().Line())
+		}
+		return true
+	})
+	require.Zero(t, functionCount,
+		"the collector may not hide alternate execution paths in functions")
+	require.Empty(t, asynchronous,
+		"the collector must keep both pipeline processes inside its caller-owned group")
+	require.Empty(t, substitutions,
+		"the collector may not create implicit children outside its reviewed pipeline")
+
+	calls := imageShellAllCalls(t, file)
+	imageRequireExactCallCount(t, calls, 1, "command", `"$@"`)
+	imageRequireExactCallCount(t, calls, 1,
+		"command", "env", "--ignore-signal=INT", "--ignore-signal=TERM",
+		"tail", "-c", `"$log_bytes"`,
+	)
+	for _, call := range calls {
+		if !imageCallHasStaticCommand(call) {
+			require.Equal(t, []string{"command", `"$@"`}, call.args,
+				"the reviewed argv behind the command builtin must be the only dynamic resolution")
+		}
+		require.Emptyf(t, call.assignments,
+			"the collector may not prefix executable calls with assignments: %#v", call.args)
+		require.Falsef(t, imageCallMutatesShellResolution(call),
+			"the collector must not redefine shell command resolution: %#v", call.args)
+		require.False(t, imageCallPublishes(call),
+			"the collector may not publish output: %#v", call.args)
 	}
 }
 

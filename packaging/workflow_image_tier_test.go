@@ -90,7 +90,7 @@ func TestImageTierWorkflowTriggerAndJobBoundary(t *testing.T) {
 
 	job, ok := workflow.Jobs[imageTierJobName]
 	require.True(t, ok)
-	require.Equal(t, "Boot uCore and validate the last released RPM", job.Name)
+	require.Equal(t, "Boot uCore with released packaging and checked-out executables", job.Name)
 	require.Equal(t, "ubuntu-26.04", job.RunsOn,
 		"Podman 5's --imagestore support is required for the private-store contract")
 	require.Equal(t, 180, job.TimeoutMinutes)
@@ -132,9 +132,13 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 				"sudo udevadm trigger --name-match=kvm\n",
 		},
 		{
-			Name: "Install QEMU and OVMF",
+			Name: "Install QEMU, OVMF, fixture-disk and native build tooling",
 			Run: "sudo apt-get update\n" +
-				"sudo apt-get install -y ovmf qemu-system-x86\n",
+				"sudo apt-get install -y e2fsprogs libpam0g-dev libsystemd-dev ovmf qemu-system-x86 qemu-utils xz-utils\n",
+		},
+		{
+			Name: "Build the checked-out Pilothouse executables",
+			Run:  "make build",
 		},
 		{
 			Name: "Verify the private-store tool contract",
@@ -147,7 +151,7 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 		{
 			Name: "Compose, boot, validate and remove the uCore fixtures",
 			Env:  map[string]string{"GITHUB_TOKEN": "${{ github.token }}"},
-			Run: "sudo -n env \"PATH=$PATH\" \"GITHUB_TOKEN=$GITHUB_TOKEN\" \"RUNNER_TEMP=$RUNNER_TEMP\" \\\n" +
+			Run: "sudo -n env \"PATH=$PATH\" \"GITHUB_TOKEN=$GITHUB_TOKEN\" \\\n" +
 				"  bash test/image/ucore-image-test.sh \\\n" +
 				"  --run-id \"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\n",
 		},

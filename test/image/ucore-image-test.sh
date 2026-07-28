@@ -4,8 +4,8 @@
 # exact private Podman store, and only then remove the workspace.
 set -euo pipefail
 
-readonly LOG_KIB=4096
-readonly LOG_BYTES=$((LOG_KIB * 1024))
+readonly LOG_BYTES=4194304
+readonly MIN_FREE_KIB=10485760
 
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly SCRIPT_PATH
@@ -47,14 +47,14 @@ done
 [[ $EUID -eq 0 ]] ||
     fail "the image lifecycle must run as root"
 
-for tool in bash go mkdir podman readlink rm setsid sleep tail timeout; do
+for tool in bash df go mkdir podman readlink rm setsid sleep tail timeout; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "required tool is unavailable: $tool"
 done
 
-workspace_parent="${RUNNER_TEMP:-/tmp}"
+workspace_parent="/var/tmp"
 [[ "$workspace_parent" == /* && -d "$workspace_parent" && ! -L "$workspace_parent" ]] ||
-    fail "RUNNER_TEMP must name a real absolute directory"
+    fail "/var/tmp must be a real absolute directory"
 workspace_parent="$(cd -- "$workspace_parent" && pwd -P)"
 readonly workspace_parent
 workspace_nonce=""
@@ -87,7 +87,10 @@ handle_signal() {
     if [[ -n "$phase_pid" ]]; then
         kill "-${signal_name}" -- "-${phase_pid}" 2>/dev/null || true
         wait "$phase_pid" 2>/dev/null || true
-        current_phase_pid=""
+        stop_phase_group "$phase_pid" || true
+        if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+            current_phase_pid=""
+        fi
     fi
     if ((cleanup_active != 0)); then
         trap 'handle_signal INT 130' INT
@@ -95,6 +98,30 @@ handle_signal() {
         return 0
     fi
     exit "$exit_status"
+}
+
+stop_phase_group() {
+    local phase_pid="$1"
+    local attempts=0
+
+    if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+        return 0
+    fi
+    kill -TERM -- "-$phase_pid" 2>/dev/null || true
+    while kill -0 -- "-$phase_pid" 2>/dev/null && ((attempts < 300)); do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+        return 0
+    fi
+    kill -KILL -- "-$phase_pid" 2>/dev/null || true
+    attempts=0
+    while kill -0 -- "-$phase_pid" 2>/dev/null && ((attempts < 50)); do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    ! kill -0 -- "-$phase_pid" 2>/dev/null
 }
 
 run_bounded() {
@@ -110,9 +137,10 @@ run_bounded() {
     trap 'pending_signal=INT' INT
     trap 'pending_signal=TERM' TERM
     (
-        ulimit -f "$LOG_KIB"
-        exec setsid timeout --signal=TERM --kill-after=30s "$duration" "$@"
-    ) >"$phase_log" 2>&1 &
+        exec setsid timeout --signal=TERM --kill-after=30s "$duration" \
+            bash "$SCRIPT_DIR/capture-bounded-output.sh" \
+            "$phase_log" "$LOG_BYTES" "$@"
+    ) &
     current_phase_pid=$!
     local phase_pid="$current_phase_pid"
     while ((phase_group_ready == 0)); do
@@ -135,7 +163,13 @@ run_bounded() {
     else
         status=$?
     fi
-    current_phase_pid=""
+    if kill -0 -- "-$phase_pid" 2>/dev/null; then
+        status=1
+        stop_phase_group "$phase_pid" || true
+    fi
+    if ! kill -0 -- "-$phase_pid" 2>/dev/null; then
+        current_phase_pid=""
+    fi
 
     printf '%s\n' "----- ${phase} log (maximum ${LOG_BYTES} bytes) -----"
     tail -c "$LOG_BYTES" -- "$phase_log" || status=1
@@ -181,7 +215,15 @@ cleanup() {
     if ((workspace_created == 0)); then
         return 0
     fi
+    if [[ -n "$current_phase_pid" ]]; then
+        echo "ucore-image-test: refusing cleanup while a phase process group survives" >&2
+        return 1
+    fi
     reset_private_store || cleanup_status=1
+    if [[ -n "$current_phase_pid" ]]; then
+        echo "ucore-image-test: refusing workspace removal while the reset process group survives" >&2
+        return 1
+    fi
     if rm -rf --one-file-system -- "$workspace"; then
         workspace_created=0
     else
@@ -230,11 +272,20 @@ case "$workspace_signal" in
     INT) handle_signal INT 130 ;;
     TERM) handle_signal TERM 143 ;;
 esac
+available_kib="$(df --output=avail -k "$workspace" | tail -n 1)"
+readonly available_kib
+[[ "$available_kib" =~ ^[[:space:]]*[0-9]+$ ]] ||
+    fail "could not determine available workspace disk"
+((available_kib >= MIN_FREE_KIB)) ||
+    fail "image lifecycle requires at least 10 GiB free in $workspace"
 cd -- "$REPOSITORY_ROOT"
 run_bounded acquire-release-rpm 5m \
     go run ./test/image/releaserpm --workspace "$workspace"
 run_bounded compose-ucore 75m \
-    bash "$SCRIPT_DIR/compose-ucore.sh" --workspace "$workspace" --run-id "$run_id"
+    bash "$SCRIPT_DIR/compose-ucore.sh" \
+    --workspace "$workspace" \
+    --bin-dir "$REPOSITORY_ROOT/bin" \
+    --run-id "$run_id"
 run_bounded validate-ucore-vm 75m \
     bash "$SCRIPT_DIR/ucore-vm-test.sh" --workspace "$workspace"
 

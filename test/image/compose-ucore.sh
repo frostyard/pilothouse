@@ -7,16 +7,22 @@ readonly UCORE_REPOSITORY="ghcr.io/ublue-os/ucore"
 readonly UCORE_DISCOVERY_REF="${UCORE_REPOSITORY}:latest"
 readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 readonly RAW_INDEX_LIMIT=$((4 * 1024 * 1024))
+readonly LEGACY_PAM_RELEASE_ID=358276825
+readonly LEGACY_PAM_ASSET_ID=486354638
+readonly LEGACY_PAM_COMPATIBILITY="v0.6.0-debian-pam"
+readonly PAM_POLICY_SHA256="af72dc5708248288d056e3ef7d8188d6c24b6991f1f2b50e4805e2108f505993"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 readonly UCORE_DIR="${SCRIPT_DIR}/ucore"
+readonly PAM_POLICY="${SCRIPT_DIR}/../../packaging/rpm/pilothouse.pam"
 
 usage() {
-    echo "usage: compose-ucore.sh --workspace ABSOLUTE_PATH --run-id LOWERCASE_ID" >&2
+    echo "usage: compose-ucore.sh --workspace ABSOLUTE_PATH --bin-dir ABSOLUTE_PATH --run-id LOWERCASE_ID" >&2
     exit 2
 }
 
 workspace=""
+bin_dir=""
 run_id=""
 while (($#)); do
     case "$1" in
@@ -30,24 +36,38 @@ while (($#)); do
             run_id="$2"
             shift 2
             ;;
+        --bin-dir)
+            (($# >= 2)) || usage
+            bin_dir="$2"
+            shift 2
+            ;;
         *)
             usage
             ;;
     esac
 done
 
-[[ -n "$workspace" && -n "$run_id" ]] || usage
+[[ -n "$workspace" && -n "$bin_dir" && -n "$run_id" ]] || usage
 [[ "$workspace" == /* && "$workspace" != */../* && "$workspace" != */./* ]] ||
     { echo "workspace must be an absolute clean path" >&2; exit 1; }
+[[ "$bin_dir" == /* && "$bin_dir" != */../* && "$bin_dir" != */./* ]] ||
+    { echo "bin dir must be an absolute clean path" >&2; exit 1; }
 [[ -d "$workspace" && ! -L "$workspace" ]] ||
     { echo "workspace must be a real directory" >&2; exit 1; }
+[[ -d "$bin_dir" && ! -L "$bin_dir" ]] ||
+    { echo "bin dir must be a real directory" >&2; exit 1; }
 canonical_workspace="$(realpath -e -- "$workspace")"
 [[ "$canonical_workspace" == "$workspace" ]] ||
     { echo "workspace must already be canonical" >&2; exit 1; }
+canonical_bin_dir="$(realpath -e -- "$bin_dir")"
+[[ "$canonical_bin_dir" == "$bin_dir" ]] ||
+    { echo "bin dir must already be canonical" >&2; exit 1; }
+readonly PILOTHOUSE_BINARY="${canonical_bin_dir}/pilothouse"
+readonly PILOTHOUSED_BINARY="${canonical_bin_dir}/pilothoused"
 [[ "$run_id" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
     { echo "run id must match [a-z0-9][a-z0-9-]{0,31}" >&2; exit 1; }
 
-for tool in awk cosign head jq podman sha256sum skopeo timeout; do
+for tool in awk cosign head install jq podman sha256sum skopeo stat timeout; do
     command -v "$tool" >/dev/null ||
         { echo "required tool is unavailable: $tool" >&2; exit 1; }
 done
@@ -59,15 +79,29 @@ readonly RPM_MANIFEST="${workspace}/fixture-release-rpm/fixture.json"
 rpm_metadata="$(
     jq -er '
         if .schema == 1 and .kind == "pilothouse-release-rpm-fixture" and
+           (.release_id | type) == "number" and
+           (.asset_id | type) == "number" and
+           (.tag | type) == "string" and
            (.artifact | type) == "string" and
            (.digest | type) == "string" and
            (.size | type) == "number"
-        then [.artifact, .digest, (.size | tostring)] | @tsv
+        then [
+            (.release_id | tostring),
+            (.asset_id | tostring),
+            .tag,
+            .artifact,
+            .digest,
+            (.size | tostring)
+        ] | @tsv
         else error("invalid released-RPM fixture manifest")
         end
     ' "$RPM_MANIFEST"
 )"
-IFS=$'\t' read -r artifact rpm_digest rpm_size <<< "$rpm_metadata"
+IFS=$'\t' read -r release_id asset_id release_tag artifact rpm_digest rpm_size <<< "$rpm_metadata"
+[[ "$release_id" =~ ^[1-9][0-9]*$ && "$asset_id" =~ ^[1-9][0-9]*$ ]] ||
+    { echo "released-RPM identity is invalid" >&2; exit 1; }
+[[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] ||
+    { echo "released-RPM tag is invalid" >&2; exit 1; }
 [[ "$artifact" =~ ^frostyard-pilothouse-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?-1\.x86_64\.rpm$ ]] ||
     { echo "released-RPM artifact name is invalid" >&2; exit 1; }
 [[ "$rpm_digest" =~ $DIGEST_PATTERN && "$rpm_size" =~ ^[1-9][0-9]*$ ]] ||
@@ -81,10 +115,47 @@ readonly RPM_PATH="${workspace}/fixture-release-rpm/${artifact}"
     { echo "released-RPM artifact size no longer matches its manifest" >&2; exit 1; }
 [[ "sha256:$(sha256sum -- "$RPM_PATH" | awk '{print $1}')" == "$rpm_digest" ]] ||
     { echo "released-RPM artifact digest no longer matches its manifest" >&2; exit 1; }
+[[ -f "$PAM_POLICY" && ! -L "$PAM_POLICY" ]] ||
+    { echo "RPM PAM compatibility policy is missing or is not a regular file" >&2; exit 1; }
+[[ "$(sha256sum -- "$PAM_POLICY" | awk '{print $1}')" == "$PAM_POLICY_SHA256" ]] ||
+    { echo "RPM PAM compatibility policy no longer matches its reviewed digest" >&2; exit 1; }
+for branch_binary in "$PILOTHOUSE_BINARY" "$PILOTHOUSED_BINARY"; do
+    [[ -f "$branch_binary" && ! -L "$branch_binary" && -x "$branch_binary" ]] ||
+        { echo "current-branch executable is missing, linked or not executable: $branch_binary" >&2; exit 1; }
+done
+pilothouse_sha256="$(sha256sum -- "$PILOTHOUSE_BINARY" | awk '{print $1}')"
+pilothoused_sha256="$(sha256sum -- "$PILOTHOUSED_BINARY" | awk '{print $1}')"
+[[ "$pilothouse_sha256" =~ ^[0-9a-f]{64}$ && "$pilothoused_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    { echo "current-branch executable digest is invalid" >&2; exit 1; }
+readonly pilothouse_sha256 pilothoused_sha256
+
+pam_compatibility="none"
+if [[ "$release_id" == "$LEGACY_PAM_RELEASE_ID" &&
+      "$asset_id" == "$LEGACY_PAM_ASSET_ID" &&
+      "$release_tag" == "v0.6.0" &&
+      "$artifact" == "frostyard-pilothouse-0.6.0-1.x86_64.rpm" ]]; then
+    pam_compatibility="$LEGACY_PAM_COMPATIBILITY"
+fi
+readonly pam_compatibility
 
 readonly OUTPUT_DIR="${workspace}/fixture-ucore-images"
 mkdir -m 0700 -- "$OUTPUT_DIR" ||
     { echo "create fresh uCore fixture directory: $OUTPUT_DIR" >&2; exit 1; }
+readonly BUILD_CONTEXT="${OUTPUT_DIR}/build-context"
+mkdir -m 0700 -- "$BUILD_CONTEXT"
+install -m 0600 -- "$RPM_PATH" "${BUILD_CONTEXT}/${artifact}"
+install -m 0600 -- "$PAM_POLICY" "${BUILD_CONTEXT}/pilothouse-image-test.pam"
+install -m 0700 -- "$PILOTHOUSE_BINARY" "${BUILD_CONTEXT}/pilothouse"
+install -m 0700 -- "$PILOTHOUSED_BINARY" "${BUILD_CONTEXT}/pilothoused"
+[[ "$(stat -c %s -- "${BUILD_CONTEXT}/${artifact}")" == "$rpm_size" ]] ||
+    { echo "build-context RPM size does not match the release fixture" >&2; exit 1; }
+[[ "sha256:$(sha256sum -- "${BUILD_CONTEXT}/${artifact}" | awk '{print $1}')" == "$rpm_digest" ]] ||
+    { echo "build-context RPM digest does not match the release fixture" >&2; exit 1; }
+[[ "$(sha256sum -- "${BUILD_CONTEXT}/pilothouse-image-test.pam" | awk '{print $1}')" == "$PAM_POLICY_SHA256" ]] ||
+    { echo "build-context PAM policy does not match its reviewed digest" >&2; exit 1; }
+[[ "$(sha256sum -- "${BUILD_CONTEXT}/pilothouse" | awk '{print $1}')" == "$pilothouse_sha256" &&
+   "$(sha256sum -- "${BUILD_CONTEXT}/pilothoused" | awk '{print $1}')" == "$pilothoused_sha256" ]] ||
+    { echo "build-context executable does not match the current branch build" >&2; exit 1; }
 
 readonly RAW_INDEX="${OUTPUT_DIR}/index.json"
 index_digest="$(
@@ -198,7 +269,10 @@ for slot in baseline update; do
         --build-arg "UCORE_IMAGE=${BASE_REF}" \
         --build-arg "PILOTHOUSE_RPM=${artifact}" \
         --build-arg "IMAGE_TEST_SLOT=${slot}" \
-        "${workspace}/fixture-release-rpm"
+        --build-arg "PILOTHOUSE_PAM_COMPAT=${pam_compatibility}" \
+        --build-arg "PILOTHOUSE_SHA256=${pilothouse_sha256}" \
+        --build-arg "PILOTHOUSED_SHA256=${pilothoused_sha256}" \
+        "$BUILD_CONTEXT"
 done
 
 baseline_id="$(
@@ -219,6 +293,13 @@ update_id="$(
 readonly OUTPUT_MANIFEST="${OUTPUT_DIR}/fixture.json"
 jq -n \
     --argjson producer_uid "$EUID" \
+    --argjson release_id "$release_id" \
+    --argjson asset_id "$asset_id" \
+    --arg release_tag "$release_tag" \
+    --arg artifact "$artifact" \
+    --arg pam_compatibility "$pam_compatibility" \
+    --arg pilothouse_sha256 "sha256:${pilothouse_sha256}" \
+    --arg pilothoused_sha256 "sha256:${pilothoused_sha256}" \
     --arg index "$index_digest" \
     --arg member "$member_digest" \
     --arg baseline_ref "$BASELINE_REF" \
@@ -235,6 +316,18 @@ jq -n \
         schema: 1,
         kind: "pilothouse-ucore-image-fixture",
         producer_uid: $producer_uid,
+        release: {
+            id: $release_id,
+            asset_id: $asset_id,
+            tag: $release_tag,
+            artifact: $artifact,
+            pam_compatibility: $pam_compatibility
+        },
+        executables: {
+            source: "checked-out-head",
+            pilothouse_sha256: $pilothouse_sha256,
+            pilothoused_sha256: $pilothoused_sha256
+        },
         source: "ghcr.io/ublue-os/ucore:latest",
         source_index_digest: $index,
         source_linux_amd64_digest: $member,
