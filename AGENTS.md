@@ -61,10 +61,7 @@ UID, and the VM consumer rejects a store not produced by UID 0; compose,
 consume, exact-store reset and workspace removal must stay in that one
 rootful ownership domain.
 The composer retains its store and does not claim to clean up detached tool
-helpers or bound caller-owned stdout/stderr storage. The later job
-orchestrator must bound its log sink, terminate and wait for composer/tool
-helpers, then reset this exact Podman store and wait for reset to finish, and
-only then remove the whole ephemeral workspace.
+helpers or bound caller-owned stdout/stderr storage.
 
 `sudo test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH` consumes that
 composed fixture. It installs the baseline with bootc's generic-image,
@@ -80,9 +77,18 @@ containers-storage; never add a registry or external push. The runner owns and
 waits for QEMU and its named install container, and detaches every loop device
 backed by its exact disk, but
 it does not recursively delete the VM directory or reset the image store.
-The still-later enclosing job owns acquisition/composition invocation, a
-bounded log sink, exact-store reset after all children have stopped, workspace
-removal and CI wiring.
+
+`test/image/ucore-image-test.sh --run-id LOWERCASE_ID` is the root-only owner
+of that complete lifecycle. It creates one mode-0700 workspace below
+`RUNNER_TEMP`, runs acquisition, composition and the VM consumer as foreground
+phases with both wall-clock and 4 MiB log-file limits, resets the exact private
+Podman store in the foreground, and only then recursively removes the
+workspace. Its EXIT/INT/TERM path performs the same reset-then-remove sequence.
+`.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
+provides the required `--imagestore` option. The job runs on every push to
+`main` and on a pull request only while the `vm-boot` label is present. It is
+not a required check, uses the last released RPM rather than a branch package,
+and never uploads or publishes a package, image, disk or log artifact.
 
 Run releases with `make bump` from a clean, synchronized `main`. The target
 uses the development image for build dependencies, lint, and `svu`, then uses

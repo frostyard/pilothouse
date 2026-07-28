@@ -1,0 +1,64 @@
+# Image-based host validation for issue #80. This workflow uses the last
+# released x86_64 RPM, not a pull-request artifact, and creates only ephemeral
+# local uCore derivatives. It publishes and uploads nothing.
+name: Image tier
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # Presence matters: synchronizing an already-labelled pull request must
+    # validate its new head, not only the commit that was labelled.
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  ucore-vm:
+    name: Boot uCore and validate the last released RPM
+    # ubuntu-26.04 carries Podman 5, whose --imagestore option is required to
+    # keep every image-test byte in the job-local private store.
+    runs-on: ubuntu-26.04
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Enable KVM acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ovmf qemu-system-x86
+
+      - name: Verify the private-store tool contract
+        run: |
+          podman --version
+          podman --help | grep -F -- '--imagestore'
+          skopeo --version
+          cosign version
+          test -r /dev/kvm
+
+      - name: Compose, boot, validate and remove the uCore fixtures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sudo -n env "PATH=$PATH" "GITHUB_TOKEN=$GITHUB_TOKEN" "RUNNER_TEMP=$RUNNER_TEMP" \
+            bash test/image/ucore-image-test.sh \
+            --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

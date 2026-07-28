@@ -228,9 +228,9 @@ denials — and bootc update/rollback of an ephemeral uCore-derived image
 containing the last released x86_64 RPM. The issue does not test `.deb`
 layering or Snosi-built sysext delivery.
 
-The released-RPM fixture producer now lives at `test/image/releaserpm`. It is
-test infrastructure, not a shipped binary. No workflow invokes acquisition
-yet; ordinary repository test, vet and lint gates still analyze this package:
+The released-RPM fixture producer lives at `test/image/releaserpm`. It is test
+infrastructure, not a shipped binary. Ordinary repository test, vet and lint
+gates analyze this package:
 
 ```bash
 go run ./test/image/releaserpm --workspace /absolute/path/to/ephemeral-workspace
@@ -306,11 +306,24 @@ The VM consumer streams QEMU output to the caller-owned sink and bounds every
 other long-running child. On success and failure it stops and waits for QEMU,
 removes the named install container, and detaches every loop device backed by
 its exact disk. It deliberately retains `fixture-ucore-vm` and never resets or
-deletes the private Podman store. No workflow or enclosing production orchestrator
-invokes acquisition, composition and the VM consumer yet; that final job must
-bound its log sink, wait for every producer and consumer, reset this exact
-fixture store and wait for reset to finish, and only then remove the entire
-workspace.
+deletes the private Podman store.
+
+The enclosing production entry point owns the entire lifecycle:
+
+```bash
+sudo -n env "PATH=$PATH" "RUNNER_TEMP=$RUNNER_TEMP" \
+    bash test/image/ucore-image-test.sh --run-id local-run
+```
+
+It creates one private workspace, invokes acquisition, composition and VM
+validation as foreground phases with wall-clock and 4 MiB log-file bounds,
+resets the exact workspace-local Podman store in the foreground, and only then
+removes the workspace. Its signal and failure paths use the same cleanup
+ordering. `.github/workflows/image-tier.yml` runs this on `ubuntu-26.04`
+because Podman 5's `--imagestore` support is part of the isolation contract. It
+runs on every push to `main` and, for pull requests, only while the `vm-boot`
+label is present. The job uses the last released x86_64 RPM, uploads nothing
+and never publishes either derived image.
 
 ### Create a release
 

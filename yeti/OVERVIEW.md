@@ -124,15 +124,15 @@ test/image/releaserpm/
                       exactly one x86_64 RPM, verifies release size and SHA-256
                       while downloading, and writes an explicit manifest plus
                       RPM below a caller-owned ephemeral workspace. It is not a
-                      shipped binary and no workflow invokes acquisition yet;
-                      ordinary repository gates still analyze and test it (see
+                      shipped binary; ordinary repository gates still analyze
+                      and test it, while the image-tier workflow invokes it
+                      through the lifecycle owner (see
                       "Image-tier released-RPM fixture" below)
 test/image/compose-ucore.sh
                       third #80 slice: verifies the uCore index and linux/amd64
                       member, revalidates the released RPM, and builds distinct
                       baseline/update derivatives in workspace-local Podman
-                      storage; no workflow invokes it yet (see "Image-tier
-                      uCore composition" below)
+                      storage (see "Image-tier uCore composition" below)
 test/image/ucore-vm-test.sh
                       fourth #80 slice: consumes those two local images,
                       installs the baseline through bootc's composefs path,
@@ -141,8 +141,14 @@ test/image/ucore-vm-test.sh
                       containers-storage, then rolls back with digest-slot
                       continuity checks. It quiesces every live resource it
                       owns but leaves exact-store reset and workspace deletion
-                      to the later enclosing job (see "Image-tier uCore VM
+                      to the enclosing lifecycle owner (see "Image-tier uCore VM
                       consumer" below)
+test/image/ucore-image-test.sh
+                      fifth #80 slice and root-only lifecycle owner. It runs
+                      acquisition, composition and VM validation as bounded
+                      foreground phases, resets the exact private Podman store,
+                      waits, then removes its private workspace. image-tier.yml
+                      invokes it on main and on vm-boot-labelled pull requests
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It includes
@@ -2292,8 +2298,8 @@ parent exit, a bounded direct non-shell tool, no-op composition, the capture
 read limit, and tool lookup.
 Daemonizing into a different session or process group is outside the helper's
 contract and must be rejected by later shell-harness policy.
-Whole-workspace lifecycle and cleanup, images, registries, VMs, SELinux,
-update/rollback and CI wiring remain later #80 slices.
+Whole-workspace lifecycle and cleanup, images, VMs, SELinux, update/rollback
+and CI wiring are supplied by the subsequent #80 slices below.
 
 `packaging/imagetest/image_process_test.go` now enforces the image-tier process
 contract over every live, non-empty Go file in that isolated test subpackage
@@ -2395,16 +2401,16 @@ non-concurrently mutated workspace. It rechecks the artifact's exact basename,
 size and SHA-256 before making any image operation, so mutation between
 acquisition and composition is detected. The output directory
 `fixture-ucore-images` must not already exist. It is retained inside the
-caller-owned workspace on both success and failure; the eventual enclosing
-job removes the whole workspace only after all bounded children have exited.
+caller-owned workspace on both success and failure; the enclosing lifecycle
+owner removes the whole workspace only after all bounded children have exited.
 This deliberately avoids recursively deleting a container store while a
 failed builder may still have a helper process unwinding. The composer does
 not claim to contain a tool that deliberately detaches into another session,
 does not delete or reset its Podman store, and leaves tool progress on
-caller-owned stdout/stderr. The later production orchestrator must bound its
-log sink, terminate and wait for composer/tool helpers, then reset this exact
-Podman store and wait for reset to finish, and only then remove the enclosing
-workspace. That orchestrator is deliberately outside this composition slice.
+caller-owned stdout/stderr. The production lifecycle owner described in the
+fifth slice bounds its log sink, terminates and waits for composer/tool helpers,
+then resets this exact Podman store and waits for reset to finish, and only
+then removes the enclosing workspace.
 
 Source discovery is exactly `ghcr.io/ublue-os/ucore:latest`. Skopeo resolves
 that name once to the OCI index digest. Cosign verifies the digest with the
@@ -2436,8 +2442,8 @@ RPM with every package repository disabled and build networking set to none,
 then runs `bootc container lint`. The build context is only the released-RPM
 fixture directory, never the workspace-local container store. The output
 manifest records the source digests, both local refs and IDs, and all five
-storage paths. There is no push, upload, host-store image or workflow wiring
-in this slice. It also records the composer's effective UID. A composition
+storage paths. There is no push, upload or host-store image. It also records
+the composer's effective UID. A composition
 intended for the VM consumer must be run as UID 0: bootc disk installation is
 rootful, and rootful Podman cannot safely reopen a rootless store. Compose,
 consume, exact-store reset and workspace removal therefore stay in one
@@ -2456,9 +2462,8 @@ instruction parser prevents commented-out local-RPM installation or
 `bootc container lint` from satisfying the Containerfile contract, and a
 SHA-256 assertion pins the vendored key.
 
-The fourth slice consumes these fixtures as described next. Workflow wiring
-and the enclosing acquire/compose/reset/remove lifecycle remain later #80
-slices.
+The fourth slice consumes these fixtures as described next; the fifth owns
+their complete CI lifecycle.
 
 **Image-tier uCore VM consumer (#80, fourth slice).**
 `test/image/ucore-vm-test.sh --workspace ABSOLUTE_PATH [--ssh-port PORT]` is a
@@ -2524,10 +2529,10 @@ Its exit path stops and waits for QEMU, force-removes and waits for the one
 named bootc-install container, enumerates and detaches every loop device backed
 by the exact private disk (including one a killed installer left behind), and
 verifies no loop reference remains. It retains both
-the VM fixture directory and private container store. The later enclosing job
-must invoke acquisition and composition with a bounded log sink, wait for
-their helpers and this consumer, reset the exact private store and wait for
-that reset, then remove the workspace. No workflow invokes the image tier yet.
+the VM fixture directory and private container store. The enclosing lifecycle
+owner invokes acquisition and composition with a bounded log sink, waits for
+their helpers and this consumer, resets the exact private store and waits for
+that reset, then removes the workspace.
 The install-to-VM handoff has its own direct fatal loop-detach check: it is
 ordered after the exact bootc install and before update export or QEMU work, so
 the VM never opens a disk that the installer still holds through a loop device.
@@ -2695,6 +2700,55 @@ requires exactly one capability-response JSON document and binds `jq`, `sort`,
 journal and AVC-filter failures directly to fatal edges so pipeline or
 line-filter status semantics cannot turn malformed evidence or an inspection
 error into a clean result.
+
+**Image-tier lifecycle and CI wiring (#80, fifth slice).**
+`test/image/ucore-image-test.sh --run-id LOWERCASE_ID` is the root-only owner
+of one complete image-tier run. It accepts no workspace path. Instead it
+canonicalizes the repository and `RUNNER_TEMP`, creates one unpredictable
+mode-0700 workspace below that runner-owned parent, and derives every RPM,
+image-store and VM path from that workspace. Acquisition, composition and VM
+validation are three direct foreground `run_bounded` calls. Their respective
+outer deadlines are 5, 75 and 75 minutes; the inner tools retain their narrower
+deadlines. Each phase writes through a 4 MiB file-size limit to a phase-local
+regular file, then emits at most that many bytes to the job log. The outer
+shell creates no background, coprocess, disowned or process-substitution
+children.
+
+The success path and the EXIT/INT/TERM path converge on the same cleanup
+function. If composition reached the point where its exact regular,
+non-symlink `storage.conf` exists, cleanup runs `podman system reset --force`
+in the foreground with the
+same remote-off graphroot, imagestore, runroot, tmpdir, no-events, overlay and
+configuration selectors used by the producer and consumer. That reset has its
+own 10-minute/process-kill/log-size bound. Only after the reset command has
+finished does cleanup recursively remove the one generated workspace with
+`--one-file-system`. A reset failure still makes the job fail, but the already
+quiescent workspace is removed so derived images are not retained. Successful
+cleanup is followed by trap disarm and the final PASS line.
+If no configuration exists, all three store roots must also be absent; a
+partial or redirected store cannot turn reset into a successful no-op.
+
+`.github/workflows/image-tier.yml` carries one `ucore-vm` job. It runs on every
+push to `main`; for pull requests it runs only while the `vm-boot` label is
+present, and `opened`, `synchronize`, `reopened` and `labeled` triggers ensure
+the label certifies the current head. The job uses `ubuntu-26.04` specifically:
+that runner provides Podman 5 and the `--imagestore` option the private-store
+contract requires. It installs only QEMU/OVMF and cosign, enables live KVM,
+checks `/dev/kvm` and the Podman option, then invokes the lifecycle owner once
+through explicit root `bash` with explicit PATH, token and runner-temp values.
+It has read-only contents permission, no dependency on the branch's GoReleaser
+package job, no repository `secrets.*` reference, no artifact upload or
+download, and no publication command. The artifact under test remains the
+released-RPM fixture selected by the acquisition phase.
+
+`packaging/imagetest/ucore_orchestrator_test.go` parses the lifecycle owner with
+the shared shell AST helpers. It pins the phase argv and order, exact reset and
+cleanup bodies, foreground-only process model, bounded timeout/tail/ulimit
+calls, one recursive deletion target, readonly derived paths, trap suffix and
+absence of publication. `packaging/workflow_image_tier_test.go` decodes the
+live YAML and fixes its trigger, label, runner, timeout, action, KVM,
+private-store preflight, root invocation, permissions and no-retention
+contracts.
 
 **Still out of scope for this package.**
 
