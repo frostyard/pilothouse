@@ -316,6 +316,7 @@ func (a *imageAudit) inspectBuildConstraints(file imageParsedFile) {
 
 func (a *imageAudit) inspectImports(file imageParsedFile) {
 	allowedImports := map[string]bool{
+		"bytes":                               true,
 		"context":                             true,
 		"crypto/sha256":                       true,
 		"errors":                              true,
@@ -331,6 +332,7 @@ func (a *imageAudit) inspectImports(file imageParsedFile) {
 		"os/exec":                             true,
 		"path/filepath":                       true,
 		"sort":                                true,
+		"slices":                              true,
 		"strconv":                             true,
 		"strings":                             true,
 		"sync/atomic":                         true,
@@ -338,6 +340,7 @@ func (a *imageAudit) inspectImports(file imageParsedFile) {
 		"testing":                             true,
 		"time":                                true,
 		"github.com/stretchr/testify/require": true,
+		"mvdan.cc/sh/v3/syntax":               true,
 	}
 
 	for _, spec := range file.file.Imports {

@@ -66,10 +66,12 @@ chmod 0700 "$work_dir"
 cleanup() {
     rm -f "$work_dir/login.json" "$work_dir/login-body.json" \
         "$work_dir/query.json" "$work_dir/query-body.json" \
-        "$work_dir/auth.header" "$work_dir/actual" "$work_dir/expected" \
+        "$work_dir/auth.header" "$work_dir/actual-unsorted" \
+        "$work_dir/actual" "$work_dir/expected" \
         "$work_dir/host-image.json" "$work_dir/bootc-status.json" \
         "$work_dir/expected-host-image.json" "$work_dir/actual-host-image.json" \
-        "$work_dir/new-avcs" "$work_dir/boot-journal" \
+        "$work_dir/cursor-journal" \
+        "$work_dir/new-avcs" "$work_dir/window-avcs" "$work_dir/boot-journal" \
         "$work_dir/all-avcs" "$work_dir/pilothouse-avcs"
     rmdir "$work_dir"
 }
@@ -110,10 +112,10 @@ PILOTHOUSE_IMAGE_TEST_TOKEN="$token" \
 unset token PILOTHOUSE_IMAGE_TEST_TOKEN
 printf '%s\n' '{"parameters":{}}' >"$work_dir/query.json"
 
-journal_cursor="$(
-    journalctl --no-pager --lines 0 --show-cursor |
-        sed -n 's/^-- cursor: //p'
-)" || fail "could not establish a journal cursor before the image-host queries"
+journalctl --no-pager --lines 0 --show-cursor >"$work_dir/cursor-journal" ||
+    fail "could not capture the journal cursor before the image-host queries"
+journal_cursor="$(sed -n 's/^-- cursor: //p' "$work_dir/cursor-journal")" ||
+    fail "could not decode the journal cursor before the image-host queries"
 [ -n "$journal_cursor" ] ||
     fail "journalctl returned no cursor before the image-host queries"
 
@@ -136,8 +138,17 @@ broker_query() {
 }
 
 broker_query "$CAPABILITY_QUERY" "$work_dir/query-body.json"
-jq -er '.result.capabilities[]' "$work_dir/query-body.json" |
-    LC_ALL=C sort -u >"$work_dir/actual"
+jq -er '
+    .result.capabilities |
+    if type == "array" and all(.[]; type == "string")
+    then .[]
+    else error("capabilities must be an array of strings")
+    end
+' "$work_dir/query-body.json" \
+    >"$work_dir/actual-unsorted" ||
+    fail "could not decode the broker's advertised capability list"
+LC_ALL=C sort -u "$work_dir/actual-unsorted" >"$work_dir/actual" ||
+    fail "could not normalize the broker's advertised capability list"
 
 # Build the expectation from independent host observations. The four opt-in
 # dependencies are deliberately absent: the packaged uCore unit configures
@@ -234,8 +245,13 @@ fi
 # not a claim that the RPM provides a dedicated Pilothouse SELinux domain.
 journalctl --no-pager --after-cursor="$journal_cursor" -o cat >"$work_dir/new-avcs" ||
     fail "could not read the journal after the image-host query cursor"
-if grep -Eiq 'avc:[[:space:]]+denied' "$work_dir/new-avcs"; then
-    cat "$work_dir/new-avcs" >&2
+window_avc_status=0
+grep -Ei 'avc:[[:space:]]+denied' "$work_dir/new-avcs" \
+    >"$work_dir/window-avcs" || window_avc_status=$?
+[ "$window_avc_status" -le 1 ] ||
+    fail "could not filter the controlled broker-query window for AVC denials"
+if [ "$window_avc_status" -eq 0 ]; then
+    cat "$work_dir/window-avcs" >&2
     fail "an unexpected SELinux AVC denial occurred during image-host validation"
 fi
 journalctl --no-pager --boot -o cat >"$work_dir/boot-journal" ||

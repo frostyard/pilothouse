@@ -11,6 +11,7 @@ require (
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/lxc/incus/v7 v7.2.0
+	mvdan.cc/sh/v3 v3.13.1
 )
 
 require (
