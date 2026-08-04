@@ -187,3 +187,72 @@ func snapshotCreateLink(instance string) templ.SafeURL {
 func snapshotActionLink(instance, snapshot, action string) templ.SafeURL {
 	return templ.SafeURL("/incus/instances/" + url.PathEscape(instance) + "/snapshots/" + url.PathEscape(snapshot) + "/" + action)
 }
+
+func networkLink(project, name string) templ.SafeURL {
+	return templ.SafeURL("/incus/networks/" + url.PathEscape(name) + "?" + url.Values{"project": {project}}.Encode())
+}
+
+func profileLink(project, name string) templ.SafeURL {
+	return templ.SafeURL("/incus/profiles/" + url.PathEscape(name) + "?" + url.Values{"project": {project}}.Encode())
+}
+
+func managedLabel(managed bool) string {
+	if managed {
+		return "managed by Incus"
+	}
+	return "observed, not managed"
+}
+
+func networkSummary(detail NetworkDetail) string {
+	if detail.Description != "" {
+		return detail.Description
+	}
+	if detail.Managed {
+		return "A network Incus manages in the " + detail.Project + " project."
+	}
+	return "An interface Incus observes but does not manage."
+}
+
+func receivedLabel(detail NetworkDetail) string {
+	if detail.Counters == nil {
+		return "—"
+	}
+	return formatBytes(uint64(max(detail.Counters.BytesReceived, 0)))
+}
+
+func sentLabel(detail NetworkDetail) string {
+	if detail.Counters == nil {
+		return "—"
+	}
+	return formatBytes(uint64(max(detail.Counters.BytesSent, 0)))
+}
+
+func receivedPacketsLabel(detail NetworkDetail) string {
+	if detail.Counters == nil {
+		return "no counters reported"
+	}
+	return countLabel(int(detail.Counters.PacketsReceived), "packet")
+}
+
+func sentPacketsLabel(detail NetworkDetail) string {
+	if detail.Counters == nil {
+		return "no counters reported"
+	}
+	return countLabel(int(detail.Counters.PacketsSent), "packet")
+}
+
+// usedByLabel turns an Incus API reference such as
+// "/1.0/instances/web-test" into the bare name, keeping the full path as
+// secondary text so nothing is hidden.
+func usedByLabel(reference string) string {
+	trimmed := strings.TrimSuffix(reference, "/")
+	if index := strings.LastIndex(trimmed, "/"); index >= 0 {
+		if name := trimmed[index+1:]; name != "" {
+			if decoded, err := url.QueryUnescape(name); err == nil {
+				return decoded
+			}
+			return name
+		}
+	}
+	return reference
+}

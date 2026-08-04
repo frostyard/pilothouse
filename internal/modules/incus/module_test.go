@@ -88,6 +88,14 @@ func (host *fakeHost) Query(_ context.Context, id string, parameters map[string]
 			Instance: Instance{Name: parameters["name"], Running: true, Type: "Container"},
 			Project:  parameters["project"],
 		}
+	case broker.QueryIncusNetwork:
+		*target.(*NetworkDetail) = NetworkDetail{
+			Managed: true, Name: parameters["name"], Project: parameters["project"], Type: "bridge",
+		}
+	case broker.QueryIncusProfile:
+		*target.(*ProfileDetail) = ProfileDetail{
+			Name: parameters["name"], Project: parameters["project"],
+		}
 	case broker.QueryIncusLogs:
 		*target.(*Logs) = Logs{
 			Lines: []LogLine{{Message: "canned log line"}}, Name: parameters["name"],
@@ -175,6 +183,8 @@ func TestRoutesGateOnIncusAbsent(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/incus", nil),
 		httptest.NewRequest(http.MethodGet, "/incus/instances/api", nil),
 		httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/networks/incusbr0", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/profiles/default", nil),
 		httptest.NewRequest(http.MethodPost, "/incus/instances/api/start", nil),
 		httptest.NewRequest(http.MethodPost, "/incus/images/fingerprint/remove", nil),
 	} {
@@ -402,5 +412,45 @@ func TestInstanceActionMessagesReadAsEnglish(t *testing.T) {
 		mux.ServeHTTP(response, request)
 
 		assert.Contains(t, response.Header().Get("Location"), want, action)
+	}
+}
+
+func TestNetworkRouteQueriesNetwork(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/networks/incusbr0?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusNetwork, host.queryID)
+	assert.Equal(t, map[string]string{"name": "incusbr0", "project": "production"}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "incusbr0")
+}
+
+func TestProfileRouteQueriesProfile(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/profiles/default?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusProfile, host.queryID)
+	assert.Equal(t, map[string]string{"name": "default", "project": "production"}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "default")
+}
+
+func TestNetworkAndProfileRoutesReportBrokerFailure(t *testing.T) {
+	for _, path := range []string{"/incus/networks/incusbr0", "/incus/profiles/default"} {
+		host := &fakeHost{queryError: errors.New("broker: unavailable")}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equal(t, http.StatusServiceUnavailable, response.Code, path)
 	}
 }

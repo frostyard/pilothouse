@@ -1232,6 +1232,16 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 	}); err != nil {
 		return err
 	}
+	if err := queries.Register(broker.QueryIncusNetwork, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.NetworkDetail(ctx, parameters["project"], parameters["name"])
+	}); err != nil {
+		return err
+	}
+	if err := queries.Register(broker.QueryIncusProfile, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.ProfileDetail(ctx, parameters["project"], parameters["name"])
+	}); err != nil {
+		return err
+	}
 	if err := registerProjectActions(actions, []projectActionRegistration{
 		{id: broker.ActionIncusRemove, resource: "incus/instance", confirmation: true, handler: manager.Remove, parameter: "name"},
 		{id: broker.ActionIncusRemoveImage, resource: "incus/image", confirmation: true, handler: manager.RemoveImage, parameter: "fingerprint"},

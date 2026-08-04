@@ -142,6 +142,34 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			Eyebrow: "Instance diagnostics", Title: name + " logs",
 		})
 	}))
+	mux.HandleFunc("GET /incus/networks/{name}", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		project := r.URL.Query().Get("project")
+		value, err := queryNetwork(ctx, host, project, r.PathValue("name"))
+		if err != nil {
+			http.Error(w, "Failed to load the network. Please check that the Incus daemon is running.", http.StatusServiceUnavailable)
+			return
+		}
+		_ = host.Render(w, r, platform.Page{
+			Active: "incus", Body: NetworkPage(value),
+			Eyebrow: "Network detail", Title: value.Name,
+		})
+	}))
+	mux.HandleFunc("GET /incus/profiles/{name}", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		project := r.URL.Query().Get("project")
+		value, err := queryProfile(ctx, host, project, r.PathValue("name"))
+		if err != nil {
+			http.Error(w, "Failed to load the profile. Please check that the Incus daemon is running.", http.StatusServiceUnavailable)
+			return
+		}
+		_ = host.Render(w, r, platform.Page{
+			Active: "incus", Body: ProfilePage(value),
+			Eyebrow: "Profile detail", Title: value.Name,
+		})
+	}))
 	mux.HandleFunc("POST /incus/instances/{name}/{action}", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
 			return
@@ -249,6 +277,22 @@ func queryLogs(ctx context.Context, host platform.Host, project, name, source st
 		return Logs{}, err
 	}
 	return logs, nil
+}
+
+func queryNetwork(ctx context.Context, host platform.Host, project, name string) (NetworkDetail, error) {
+	var value NetworkDetail
+	if err := host.Query(ctx, broker.QueryIncusNetwork, map[string]string{"name": name, "project": project}, &value); err != nil {
+		return NetworkDetail{}, err
+	}
+	return value, nil
+}
+
+func queryProfile(ctx context.Context, host platform.Host, project, name string) (ProfileDetail, error) {
+	var value ProfileDetail
+	if err := host.Query(ctx, broker.QueryIncusProfile, map[string]string{"name": name, "project": project}, &value); err != nil {
+		return ProfileDetail{}, err
+	}
+	return value, nil
 }
 
 func projectUnavailable(err error) bool {

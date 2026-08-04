@@ -608,6 +608,18 @@ created outside Pilothouse under laxer names.
 When one variant of an action is materially more dangerous than another,
 give it its own fixed ID so the audit trail distinguishes them.
 
+`org.frostyard.pilothouse.incus.network` and
+`org.frostyard.pilothouse.incus.profile` are the read-only network and
+profile surfaces. The profile query **reuses the instance allowlists**
+because a profile carries the same configuration and device shape; the
+network query needs its **own** allowlist because an Incus network's secret
+surface is different (`bgp.peers.<name>.password` is a BGP session password,
+and the `ovn.*`/`tunnel.*` families carry credentials). Derive an allowlist
+from the resource's actual key space rather than assuming a sibling
+resource's list transfers — and when a cheap list model exposes a field the
+detail model filters, route the list through the same predicate so the
+summary cannot become a bypass.
+
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The
 `/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the

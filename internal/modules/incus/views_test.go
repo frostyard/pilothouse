@@ -275,3 +275,115 @@ func TestDetailPageRendersForceStopOnlyWhileRunning(t *testing.T) {
 	require.NoError(t, DetailPage(stopped, "token", true).Render(context.Background(), &output))
 	assert.NotContains(t, output.String(), "/incus/instances/api/stop-force")
 }
+
+func TestPageRendersNetworkAndProfileCards(t *testing.T) {
+	state := State{
+		Project: "production",
+		Networks: []Network{
+			{IPv4: "10.209.192.1/24", Managed: true, Name: "incusbr0", Status: "Created", Type: "bridge", UsedBy: 2},
+			{Managed: false, Name: "docker0", Type: "bridge"},
+		},
+		Profiles: []Profile{{Description: "Default Incus profile", Devices: 2, Name: "default", UsedBy: 1}},
+	}
+	var output strings.Builder
+	require.NoError(t, Page(state, "token", true).Render(context.Background(), &output))
+	html := output.String()
+
+	assert.Contains(t, html, "Networks")
+	assert.Contains(t, html, `href="/incus/networks/incusbr0?project=production"`)
+	assert.Contains(t, html, `href="/incus/networks/docker0?project=production"`)
+	assert.Contains(t, html, "Managed")
+	assert.Contains(t, html, "Observed")
+	assert.Contains(t, html, "10.209.192.1/24")
+
+	assert.Contains(t, html, "Profiles")
+	assert.Contains(t, html, `href="/incus/profiles/default?project=production"`)
+	assert.Contains(t, html, "Default Incus profile")
+	assert.NotContains(t, html, "@web.")
+}
+
+func TestNetworkPageRendersLeasesAndConfig(t *testing.T) {
+	detail := NetworkDetail{
+		Addresses: []string{"10.209.192.1/24"},
+		Config:    []ConfigEntry{{Key: "ipv4.nat", Value: "true"}},
+		Counters:  &TrafficCount{BytesReceived: 1048576, BytesSent: 2097152, PacketsReceived: 700, PacketsSent: 1},
+		HWAddr:    "00:16:3e:11:22:33", Leases: []NetworkLease{{Address: "10.209.192.235", Hostname: "web-test", HWAddr: "00:16:3e:17:6f:6c", Type: "dynamic"}},
+		LeasesAvailable: true, Managed: true, MTU: 1500, Name: "incusbr0",
+		Project: "production", State: "up", Status: "Created", Type: "bridge",
+		UsedBy: []string{"/1.0/instances/web-test"},
+	}
+	var output strings.Builder
+	require.NoError(t, NetworkPage(detail).Render(context.Background(), &output))
+	html := output.String()
+
+	for _, value := range []string{
+		"incusbr0", "DHCP leases", "10.209.192.235", "web-test", "dynamic",
+		"00:16:3e:11:22:33", "10.209.192.1/24", "ipv4.nat", "1.0 MiB", "2.0 MiB",
+		"managed by Incus", "700 packets", "1 packet",
+	} {
+		assert.Contains(t, html, value)
+	}
+	assert.NotContains(t, html, "@web.")
+}
+
+// TestNetworkPageDistinguishesUnmanagedFromEmpty proves an unmanaged
+// network says Incus tracks no leases for it, rather than showing the same
+// "no leases" text a managed network with none would show.
+func TestNetworkPageDistinguishesUnmanagedFromEmpty(t *testing.T) {
+	unmanaged := NetworkDetail{Leases: []NetworkLease{}, Name: "docker0", Project: "production", Type: "bridge"}
+	var output strings.Builder
+	require.NoError(t, NetworkPage(unmanaged).Render(context.Background(), &output))
+	assert.Contains(t, output.String(), "Incus does not manage this network, so it tracks no leases for it.")
+	assert.Contains(t, output.String(), "observed, not managed")
+	assert.Contains(t, output.String(), "<svg")
+
+	managed := NetworkDetail{Leases: []NetworkLease{}, LeasesAvailable: true, Managed: true, Name: "incusbr0", Project: "production", Type: "bridge"}
+	var empty strings.Builder
+	require.NoError(t, NetworkPage(managed).Render(context.Background(), &empty))
+	assert.Contains(t, empty.String(), "This network has issued no leases.")
+	assert.NotContains(t, empty.String(), "does not manage this network")
+}
+
+func TestProfilePageRendersDevicesAndUsedBy(t *testing.T) {
+	detail := ProfileDetail{
+		Config:      []ConfigEntry{{Key: "limits.memory", Value: "2GiB"}},
+		Description: "Default Incus profile",
+		Devices:     []Device{{Name: "eth0", Type: "nic", Properties: []ConfigEntry{{Key: "network", Value: "incusbr0"}}}},
+		Name:        "default", Project: "production",
+		UsedBy: []string{"/1.0/instances/web-test", "/1.0/instances/fedora"},
+	}
+	var output strings.Builder
+	require.NoError(t, ProfilePage(detail).Render(context.Background(), &output))
+	html := output.String()
+
+	for _, value := range []string{
+		"default", "Default Incus profile", "eth0", "network=incusbr0",
+		"limits.memory", "2GiB", "Used by", "web-test", "fedora", "2 references",
+	} {
+		assert.Contains(t, html, value)
+	}
+	assert.NotContains(t, html, "@web.")
+}
+
+// TestDetailPagesExposeNoMutationControl pins the read-only contract for
+// both new pages: neither renders a form, so neither can target a broker
+// action, and there is none in the vocabulary for them anyway.
+func TestDetailPagesExposeNoMutationControl(t *testing.T) {
+	var network strings.Builder
+	require.NoError(t, NetworkPage(NetworkDetail{
+		Config: []ConfigEntry{{Key: "ipv4.nat", Value: "true"}}, LeasesAvailable: true,
+		Leases: []NetworkLease{{Address: "10.0.0.1"}}, Managed: true, Name: "incusbr0",
+		Project: "production", UsedBy: []string{"/1.0/instances/api"},
+	}).Render(context.Background(), &network))
+	assert.NotContains(t, network.String(), "<form")
+	assert.NotContains(t, network.String(), "<button")
+
+	var profile strings.Builder
+	require.NoError(t, ProfilePage(ProfileDetail{
+		Config:  []ConfigEntry{{Key: "limits.memory", Value: "2GiB"}},
+		Devices: []Device{{Name: "eth0", Type: "nic"}}, Name: "default",
+		Project: "production", UsedBy: []string{"/1.0/instances/api"},
+	}).Render(context.Background(), &profile))
+	assert.NotContains(t, profile.String(), "<form")
+	assert.NotContains(t, profile.String(), "<button")
+}

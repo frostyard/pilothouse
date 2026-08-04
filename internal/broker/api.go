@@ -66,6 +66,8 @@ const (
 	QueryHostImageStatus  = "org.frostyard.pilothouse.maintenance.host_image_status"
 	QueryIncusInstance    = "org.frostyard.pilothouse.incus.instance"
 	QueryIncusLogs        = "org.frostyard.pilothouse.incus.logs"
+	QueryIncusNetwork     = "org.frostyard.pilothouse.incus.network"
+	QueryIncusProfile     = "org.frostyard.pilothouse.incus.profile"
 	QueryIncusState       = "org.frostyard.pilothouse.incus.state"
 	QueryJobs             = "org.frostyard.pilothouse.jobs.list"
 	QueryLogs             = "org.frostyard.pilothouse.logs.list"

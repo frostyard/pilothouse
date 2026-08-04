@@ -1414,6 +1414,14 @@ func (fakeIncusManager) DeleteSnapshot(context.Context, string, string, string) 
 func (fakeIncusManager) RestoreSnapshot(context.Context, string, string, string) error { return nil }
 func (fakeIncusManager) StopForce(context.Context, string, string) error               { return nil }
 
+func (fakeIncusManager) NetworkDetail(context.Context, string, string) (incus.NetworkDetail, error) {
+	return incus.NetworkDetail{}, nil
+}
+
+func (fakeIncusManager) ProfileDetail(context.Context, string, string) (incus.ProfileDetail, error) {
+	return incus.ProfileDetail{}, nil
+}
+
 func (fakeIncusManager) Detail(context.Context, string, string) (incus.Detail, error) {
 	return incus.Detail{}, nil
 }
@@ -1434,7 +1442,10 @@ func TestRegisterIncusNoOpsWithoutIncusCapability(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Systemd)))
 
-	for _, id := range []string{broker.QueryIncusState, broker.QueryIncusInstance, broker.QueryIncusLogs} {
+	for _, id := range []string{
+		broker.QueryIncusState, broker.QueryIncusInstance, broker.QueryIncusLogs,
+		broker.QueryIncusNetwork, broker.QueryIncusProfile,
+	} {
 		assert.False(t, queries.Registered(id))
 	}
 	for _, id := range []string{

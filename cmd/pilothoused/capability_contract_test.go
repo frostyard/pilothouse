@@ -108,9 +108,9 @@ func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 	return allOfPresent(caps, row.required)
 }
 
-// capabilityTable is the complete 60-row mirror of docs/capabilities.md.
+// capabilityTable is the complete 62-row mirror of docs/capabilities.md.
 // Every Action*/Query* constant declared in internal/broker/api.go (39
-// Action* + 21 Query*, the 21 including QueryCapabilities,
+// Action* + 23 Query*, the 23 including QueryCapabilities,
 // QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, and
 // the two Incus instance-depth queries QueryIncusInstance and
 // QueryIncusLogs) appears exactly once. QueryServicesJournal and
@@ -163,7 +163,7 @@ var capabilityTable = []capabilityRequirement{
 	{broker.ActionStorageMount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageUnmount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageDelete, inActions, []capability.ID{capability.Systemd}, false},
-	// Queries (21).
+	// Queries (23).
 	{broker.QueryActivity, inQueries, nil, false},
 	{broker.QueryAutoUpdateStatus, inQueries, []capability.ID{capability.Bootc, capability.RPMOStree}, true},
 	{broker.QueryBackupsState, inQueries, []capability.ID{capability.Systemd}, false},
@@ -174,6 +174,8 @@ var capabilityTable = []capabilityRequirement{
 	{broker.QueryHostImageStatus, inQueries, []capability.ID{capability.Bootc, capability.RPMOStree}, true},
 	{broker.QueryIncusInstance, inQueries, []capability.ID{capability.Incus}, false},
 	{broker.QueryIncusLogs, inQueries, []capability.ID{capability.Incus}, false},
+	{broker.QueryIncusNetwork, inQueries, []capability.ID{capability.Incus}, false},
+	{broker.QueryIncusProfile, inQueries, []capability.ID{capability.Incus}, false},
 	{broker.QueryIncusState, inQueries, []capability.ID{capability.Incus}, false},
 	{broker.QueryJobs, inQueries, nil, false},
 	{broker.QueryLogs, inQueries, []capability.ID{capability.Systemd, capability.Journald}, false},
@@ -189,7 +191,7 @@ var capabilityTable = []capabilityRequirement{
 
 // moduleLevelNoneIDs is the exact 7 broker IDs whose documented requirement
 // is "none" -- the only IDs a minimal (empty capability.Set) fixture should
-// register. Verified against capabilityTable at TestCapabilityTableHasExactlySixtyRows.
+// register. Verified against capabilityTable at TestCapabilityTableHasExactlySixtyTwoRows.
 var moduleLevelNoneIDs = []string{
 	broker.QueryFilesList,
 	broker.QueryFilesDownload,
@@ -274,7 +276,7 @@ func declaredBrokerIDs(t *testing.T) []declaredBrokerID {
 // against internal/broker/api.go's live Action*/Query* declarations in both
 // directions, so neither a new constant missing from the table nor a table
 // row naming an ID that no longer exists can survive. It also pins the
-// documented 39/21/60 totals to the parsed source rather than to the table,
+// documented 39/23/62 totals to the parsed source rather than to the table,
 // and cross-checks that an Action* constant is filed in an action registry
 // and a Query* constant in a query registry.
 func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
@@ -292,8 +294,8 @@ func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 39, declaredActions, "%s must declare 39 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Equal(t, 21, declaredQueries, "%s must declare 21 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Len(t, declared, 60, "%s must declare 60 broker IDs in total", brokerAPIPath)
+	assert.Equal(t, 23, declaredQueries, "%s must declare 23 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Len(t, declared, 62, "%s must declare 62 broker IDs in total", brokerAPIPath)
 
 	tableIDs := make(map[string]capabilityRequirement, len(capabilityTable))
 	for _, row := range capabilityTable {
@@ -423,8 +425,8 @@ func nonCommentMentions(t *testing.T, path string, source []byte, isGo bool, nee
 	return mentions
 }
 
-func TestCapabilityTableHasExactlySixtyRows(t *testing.T) {
-	require.Len(t, capabilityTable, 60, "docs/capabilities.md documents 60 broker IDs (39 Action* + 21 Query*, including QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, QueryIncusInstance, QueryIncusLogs, and the four Incus snapshot/force-stop actions)")
+func TestCapabilityTableHasExactlySixtyTwoRows(t *testing.T) {
+	require.Len(t, capabilityTable, 62, "docs/capabilities.md documents 62 broker IDs (39 Action* + 23 Query*, including QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, QueryIncusInstance, QueryIncusLogs, and the four Incus snapshot/force-stop actions)")
 	seen := make(map[string]bool, len(capabilityTable))
 	actionCount, queryCount := 0, 0
 	for _, row := range capabilityTable {
@@ -444,7 +446,7 @@ func TestCapabilityTableHasExactlySixtyRows(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 39, actionCount, "expected 39 Action* IDs")
-	assert.Equal(t, 21, queryCount, "expected 21 Query* IDs")
+	assert.Equal(t, 23, queryCount, "expected 23 Query* IDs")
 	none := 0
 	for _, row := range capabilityTable {
 		if len(row.required) == 0 {
@@ -767,12 +769,13 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 }
 
 // TestCapabilityContractAllOnReproducesPrePhaseBehavior asserts the all-on
-// fixture registers every one of the 60 IDs -- reproducing pre-phase
+// fixture registers every one of the 62 IDs -- reproducing pre-phase
 // behavior exactly for the 50 pre-existing Action*/Query* constants, plus
 // QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus,
 // QueryExtensionsState, and the six IDs the two Incus phases added
 // (QueryIncusInstance, QueryIncusLogs, the three snapshot actions, and
-// ActionIncusStopForce) -- 60 total, since every documented requirement is a
+// ActionIncusStopForce, QueryIncusNetwork and QueryIncusProfile) -- 62 total,
+// since every documented requirement is a
 // subset of the full capability vocabulary.
 func TestCapabilityContractAllOnReproducesPrePhaseBehavior(t *testing.T) {
 	registries := registerEverythingForFixture(t, capability.New(allCapabilityIDs...))

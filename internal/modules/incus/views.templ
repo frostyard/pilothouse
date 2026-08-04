@@ -147,6 +147,53 @@ templ Page(state State, csrf string, admin bool) {
 			}
 		</article>
 		<article class="card table-card">
+			<div class="table-toolbar"><h2>Networks</h2><span>{ countLabel(len(state.Networks), "network") }</span></div>
+			if len(state.Networks) == 0 {
+				<div class="empty-state">No networks were found.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Network</th><th>Type</th><th>Managed</th><th>IPv4</th><th>Used by</th></tr></thead><tbody>
+					for _, item := range state.Networks {
+						<tr>
+							<td>
+								if item.Managed {
+									<a href={ networkLink(state.Project, item.Name) }><strong>{ item.Name }</strong></a>
+								} else {
+									<a href={ networkLink(state.Project, item.Name) }>{ item.Name }</a>
+								}
+							</td>
+							<td>{ item.Type }</td>
+							<td>
+								if item.Managed {
+									<span class="badge active">Managed</span>
+								} else {
+									<span class="badge">Observed</span>
+								}
+							</td>
+							<td>{ firstValue(item.IPv4, "—") }</td>
+							<td>{ fmt.Sprint(item.UsedBy) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Profiles</h2><span>{ countLabel(len(state.Profiles), "profile") }</span></div>
+			if len(state.Profiles) == 0 {
+				<div class="empty-state">No profiles were found in the { state.Project } project.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Profile</th><th>Description</th><th>Devices</th><th>Used by</th></tr></thead><tbody>
+					for _, item := range state.Profiles {
+						<tr>
+							<td><a href={ profileLink(state.Project, item.Name) }><strong>{ item.Name }</strong></a></td>
+							<td>{ firstValue(item.Description, "—") }</td>
+							<td>{ fmt.Sprint(item.Devices) }</td>
+							<td>{ fmt.Sprint(item.UsedBy) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
 			<div class="table-toolbar"><h2>Storage pools</h2><span>{ fmt.Sprintf("%d total", len(state.Pools)) }</span></div>
 			if len(state.Pools) == 0 {
 				<div class="empty-state"><span class="card-icon orange">@web.Icon("incus")</span>No storage pools were found.</div>
@@ -393,4 +440,131 @@ templ snapshotAction(project, instance, snapshot, action, label, csrf, class str
 		<input type="hidden" name="project" value={ project }/>
 		<button class={ "button", class } type="submit">{ label }</button>
 	</form>
+}
+
+templ NetworkPage(detail NetworkDetail) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ detail.Name }</h2>
+				<p>{ networkSummary(detail) }</p>
+			</div>
+			<a class="button secondary" href={ projectLink(detail.Project) }>Back to Incus</a>
+		</div>
+		<section class="engine-stats" aria-label="Network summary">
+			<div class="engine-stat"><span>Type</span><strong>{ detail.Type }</strong><small>{ managedLabel(detail.Managed) }</small></div>
+			<div class="engine-stat"><span>State</span><strong>{ firstValue(detail.State) }</strong><small>MTU { fmt.Sprint(detail.MTU) }</small></div>
+			<div class="engine-stat"><span>Received</span><strong>{ receivedLabel(detail) }</strong><small>{ receivedPacketsLabel(detail) }</small></div>
+			<div class="engine-stat"><span>Sent</span><strong>{ sentLabel(detail) }</strong><small>{ sentPacketsLabel(detail) }</small></div>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Addresses</h2><span>{ firstValue(detail.HWAddr, "no hardware address") }</span></div>
+			if len(detail.Addresses) == 0 {
+				<div class="empty-state">No addresses are configured on this interface.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Address</th></tr></thead><tbody>
+					for _, address := range detail.Addresses {
+						<tr><td><span class="version">{ address }</span></td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>DHCP leases</h2><span>{ countLabel(len(detail.Leases), "lease") }</span></div>
+			if !detail.LeasesAvailable {
+				<div class="empty-state">
+					<span class="card-icon orange">@web.Icon("incus")</span>
+					Incus does not manage this network, so it tracks no leases for it.
+				</div>
+			} else if len(detail.Leases) == 0 {
+				<div class="empty-state">This network has issued no leases.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Address</th><th>Hostname</th><th>Hardware address</th><th>Type</th></tr></thead><tbody>
+					for _, lease := range detail.Leases {
+						<tr>
+							<td><span class="version">{ lease.Address }</span></td>
+							<td>{ firstValue(lease.Hostname, "—") }</td>
+							<td><span class="version">{ firstValue(lease.HWAddr, "—") }</span></td>
+							<td>{ firstValue(lease.Type, "—") }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Configuration</h2><span>Reviewed keys only</span></div>
+			<div class="page-intro">
+				<p>Pilothouse reports a fixed set of addressing, NAT, DHCP and DNS keys. BGP peer passwords, OVN and tunnel credentials are never read from the network.</p>
+			</div>
+			if len(detail.Config) == 0 {
+				<div class="empty-state">This network sets none of the reported configuration keys.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+					for _, item := range detail.Config {
+						<tr><td><span class="version">{ item.Key }</span></td><td>{ item.Value }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		@usedByCard(detail.UsedBy)
+	</div>
+}
+
+templ ProfilePage(detail ProfileDetail) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ detail.Name }</h2>
+				<p>{ firstValue(detail.Description, "No description.") }</p>
+			</div>
+			<a class="button secondary" href={ projectLink(detail.Project) }>Back to Incus</a>
+		</div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Devices</h2><span>{ countLabel(len(detail.Devices), "device") }</span></div>
+			if len(detail.Devices) == 0 {
+				<div class="empty-state">This profile attaches no devices.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Device</th><th>Type</th><th>Properties</th></tr></thead><tbody>
+					for _, item := range detail.Devices {
+						<tr>
+							<td><strong>{ item.Name }</strong></td>
+							<td>{ firstValue(item.Type) }</td>
+							<td>{ entryLabel(item.Properties) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Configuration</h2><span>Reviewed keys only</span></div>
+			<div class="page-intro">
+				<p>A profile applies to every instance that inherits it, so the same fixed key set applies here. Cloud-init payloads, environment variables, and raw passthrough configuration are never read from the profile.</p>
+			</div>
+			if len(detail.Config) == 0 {
+				<div class="empty-state">This profile sets none of the reported configuration keys.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+					for _, item := range detail.Config {
+						<tr><td><span class="version">{ item.Key }</span></td><td>{ item.Value }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		@usedByCard(detail.UsedBy)
+	</div>
+}
+
+templ usedByCard(usedBy []string) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Used by</h2><span>{ countLabel(len(usedBy), "reference") }</span></div>
+		if len(usedBy) == 0 {
+			<div class="empty-state">Nothing references this.</div>
+		} else {
+			<div class="mini-list">
+				for _, reference := range usedBy {
+					<div class="mini-row"><div><strong>{ usedByLabel(reference) }</strong><small>{ reference }</small></div></div>
+				}
+			</div>
+		}
+	</article>
 }

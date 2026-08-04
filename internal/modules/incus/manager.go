@@ -71,7 +71,9 @@ type State struct {
 	Buckets   []StorageBucket `json:"buckets"`
 	Images    []Image         `json:"images"`
 	Instances []Instance      `json:"instances"`
+	Networks  []Network       `json:"networks"`
 	Pools     []StoragePool   `json:"pools"`
+	Profiles  []Profile       `json:"profiles"`
 	Project   string          `json:"project"`
 	Projects  []Project       `json:"projects"`
 	Version   string          `json:"version"`
@@ -87,6 +89,8 @@ type Manager interface {
 	DeleteSnapshot(context.Context, string, string, string) error
 	Detail(context.Context, string, string) (Detail, error)
 	Logs(context.Context, string, string, string) (Logs, error)
+	NetworkDetail(context.Context, string, string) (NetworkDetail, error)
+	ProfileDetail(context.Context, string, string) (ProfileDetail, error)
 	Remove(context.Context, string, string) error
 	RemoveImage(context.Context, string, string) error
 	RestoreSnapshot(context.Context, string, string, string) error
@@ -105,6 +109,12 @@ type Client interface {
 	Instance(context.Context, string, string) (*api.InstanceFull, error)
 	Instances(context.Context, string) ([]api.InstanceFull, error)
 	Logfile(context.Context, string, string, string) (io.ReadCloser, error)
+	Network(context.Context, string, string) (*api.Network, error)
+	NetworkLeases(context.Context, string, string) ([]api.NetworkLease, error)
+	NetworkState(context.Context, string, string) (*api.NetworkState, error)
+	Networks(context.Context, string) ([]api.Network, error)
+	Profile(context.Context, string, string) (*api.Profile, error)
+	Profiles(context.Context, string) ([]api.Profile, error)
 	Projects(context.Context) ([]api.Project, error)
 	Remove(context.Context, string, string) error
 	RemoveImage(context.Context, string, string) error
@@ -184,6 +194,58 @@ func (c *LocalClient) Instances(ctx context.Context, project string) ([]api.Inst
 		return nil, err
 	}
 	return server.GetInstancesFull(api.InstanceTypeAny)
+}
+
+func (c *LocalClient) Networks(ctx context.Context, project string) ([]api.Network, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetNetworks()
+}
+
+func (c *LocalClient) Network(ctx context.Context, project, name string) (*api.Network, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	network, _, err := server.GetNetwork(name)
+	return network, err
+}
+
+func (c *LocalClient) NetworkState(ctx context.Context, project, name string) (*api.NetworkState, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetNetworkState(name)
+}
+
+// NetworkLeases is only meaningful for a network Incus manages; the caller
+// checks Managed before asking, and treats a failure as "unavailable".
+func (c *LocalClient) NetworkLeases(ctx context.Context, project, name string) ([]api.NetworkLease, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetNetworkLeases(name)
+}
+
+func (c *LocalClient) Profiles(ctx context.Context, project string) ([]api.Profile, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return server.GetProfiles()
+}
+
+func (c *LocalClient) Profile(ctx context.Context, project, name string) (*api.Profile, error) {
+	server, err := c.connect(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	profile, _, err := server.GetProfile(name)
+	return profile, err
 }
 
 func (c *LocalClient) Projects(ctx context.Context) ([]api.Project, error) {
@@ -370,13 +432,31 @@ func (m *SystemManager) State(ctx context.Context, requestedProject string) (Sta
 	if err != nil {
 		return State{}, err
 	}
+	// Networks and profiles are one call each and degrade the same way
+	// storage does: an unreadable one costs its own section plus a
+	// warning, never the whole page. A failed call contributes no rows —
+	// a partial result from a failed read must not be presented as the
+	// inventory.
+	var networkRows []Network
+	if rawNetworks, err := m.client.Networks(ctx, project); err != nil {
+		warnings = append(warnings, "Networks are unavailable.")
+	} else {
+		networkRows = networks(rawNetworks)
+	}
+	var profileRows []Profile
+	if rawProfiles, err := m.client.Profiles(ctx, project); err != nil {
+		warnings = append(warnings, "Profiles are unavailable.")
+	} else {
+		profileRows = profiles(rawProfiles)
+	}
 	version := server.Environment.ServerVersion
 	if version == "" {
 		version = "installed"
 	}
 	return State{
-		Buckets: buckets, Images: images, Instances: instances, Pools: pools, Project: project,
-		Projects: projects, Version: version, Volumes: volumes, Warnings: warnings,
+		Buckets: buckets, Images: images, Instances: instances, Networks: networkRows,
+		Pools: pools, Profiles: profileRows, Project: project, Projects: projects,
+		Version: version, Volumes: volumes, Warnings: warnings,
 	}, nil
 }
 

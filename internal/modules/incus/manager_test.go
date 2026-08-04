@@ -27,7 +27,14 @@ type fakeClient struct {
 	instances     []api.InstanceFull
 	logfile       string
 	logfileError  error
+	leases        []api.NetworkLease
+	leasesError   error
+	networkState  *api.NetworkState
+	networks      []api.Network
+	networksError error
 	pools         []api.StoragePool
+	profiles      []api.Profile
+	profilesError error
 	projects      []api.Project
 	snapshotError error
 	version       string
@@ -87,6 +94,52 @@ func (client *fakeClient) Images(_ context.Context, project string) ([]api.Image
 func (client *fakeClient) Instances(_ context.Context, project string) ([]api.InstanceFull, error) {
 	client.actions = append(client.actions, "instances "+project)
 	return client.instances, nil
+}
+
+func (client *fakeClient) Networks(_ context.Context, project string) ([]api.Network, error) {
+	client.actions = append(client.actions, "networks "+project)
+	return client.networks, client.networksError
+}
+
+func (client *fakeClient) Network(_ context.Context, project, name string) (*api.Network, error) {
+	client.actions = append(client.actions, "network "+project+" "+name)
+	for _, item := range client.networks {
+		if item.Name == name {
+			return &item, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
+func (client *fakeClient) NetworkState(_ context.Context, project, name string) (*api.NetworkState, error) {
+	client.actions = append(client.actions, "network state "+project+" "+name)
+	if client.networkState == nil {
+		return nil, errors.New("no state")
+	}
+	return client.networkState, nil
+}
+
+func (client *fakeClient) NetworkLeases(_ context.Context, project, name string) ([]api.NetworkLease, error) {
+	client.actions = append(client.actions, "network leases "+project+" "+name)
+	if client.leasesError != nil {
+		return nil, client.leasesError
+	}
+	return client.leases, nil
+}
+
+func (client *fakeClient) Profiles(_ context.Context, project string) ([]api.Profile, error) {
+	client.actions = append(client.actions, "profiles "+project)
+	return client.profiles, client.profilesError
+}
+
+func (client *fakeClient) Profile(_ context.Context, project, name string) (*api.Profile, error) {
+	client.actions = append(client.actions, "profile "+project+" "+name)
+	for _, item := range client.profiles {
+		if item.Name == name {
+			return &item, nil
+		}
+	}
+	return nil, errors.New("not found")
 }
 
 func (client *fakeClient) Projects(context.Context) ([]api.Project, error) {
@@ -287,6 +340,20 @@ var secretConfig = api.ConfigMap{
 	"volatile.last_state.p": "RUNNING",
 }
 
+// managedNetworkConfig mixes the addressing keys a network page should
+// report with a BGP peer password, which is a real Incus network config key
+// and must never cross the broker boundary.
+var managedNetworkConfig = api.ConfigMap{
+	"ipv4.address":                "10.209.192.1/24",
+	"ipv4.nat":                    "true",
+	"ipv6.address":                "none",
+	"dns.domain":                  "incus",
+	"bgp.peers.upstream.password": "s3cr3t-bgp-password",
+	"bgp.peers.upstream.address":  "192.0.2.1",
+	"user.note":                   "operator scratch space",
+	"raw.dnsmasq":                 "auth-zone=example.test",
+}
+
 // runningState is the live state of the running fixture instance. Its
 // address list deliberately mixes one global address per family with a
 // loopback and a link-local address, so a test can prove only globals are
@@ -361,6 +428,37 @@ func stateClient() *fakeClient {
 		buckets: map[string][]api.StorageBucket{
 			"fast": {{Name: "assets", S3URL: "https://s3.example/assets"}},
 		},
+		networks: []api.Network{
+			{
+				Name: "incusbr0", Type: "bridge", Managed: true, Status: "Created",
+				UsedBy:     []string{"/1.0/instances/api", "/1.0/profiles/default"},
+				NetworkPut: api.NetworkPut{Config: managedNetworkConfig},
+			},
+			{Name: "docker0", Type: "bridge", Managed: false},
+		},
+		networkState: &api.NetworkState{
+			Hwaddr: "00:16:3e:11:22:33", Mtu: 1500, State: "up",
+			Addresses: []api.NetworkStateAddress{
+				{Family: "inet", Address: "10.209.192.1", Netmask: "24", Scope: "global"},
+			},
+			Counters: &api.NetworkStateCounters{
+				BytesReceived: 1048576, BytesSent: 2097152, PacketsReceived: 700, PacketsSent: 1,
+			},
+		},
+		leases: []api.NetworkLease{
+			{Address: "10.209.192.235", Hostname: "web-test", Hwaddr: "00:16:3e:17:6f:6c", Type: "dynamic"},
+		},
+		profiles: []api.Profile{{
+			Name: "default", UsedBy: []string{"/1.0/instances/api"},
+			ProfilePut: api.ProfilePut{
+				Description: "Default Incus profile",
+				Config:      secretConfig,
+				Devices: api.DevicesMap{
+					"eth0": {"type": "nic", "network": "incusbr0", "name": "eth0"},
+					"root": {"type": "disk", "path": "/", "pool": "default"},
+				},
+			},
+		}},
 		bucketErrors: map[string]error{},
 		volumeErrors: map[string]error{},
 	}

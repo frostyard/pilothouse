@@ -15,11 +15,11 @@ landed behavior, not a future guarantee, and
 a fixture matrix of capability sets.
 
 **Running total:** `internal/broker/api.go` declares exactly 39 `Action*`
-constants and 21 `Query*` constants today — 60 IDs total, reproducible with:
+constants and 23 `Query*` constants today — 62 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 39
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 21
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 23
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -27,11 +27,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 60 IDs is registered exactly once across the four
+Every one of the 62 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 39/21 above, not IDs
-added on top. This table therefore has exactly 60 rows.
+via `StreamQueryRegistry`) — both are members of the 39/23 above, not IDs
+added on top. This table therefore has exactly 62 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +40,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-39/21/60 all fail the build. It additionally checks that an `Action*`
+39/23/62 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -103,8 +103,7 @@ to. Both are bounded to a 200-line, 256 KiB tail.
 
 `ActionIncusSnapshotCreate`, `ActionIncusSnapshotDelete`,
 `ActionIncusSnapshotRestore` and `ActionIncusStopForce` are the newest IDs,
-added by the Incus snapshot phase, and are why the totals above now read
-39/21/60. All four belong to the `incus` module, are administrator-only, and
+added by the Incus snapshot phase, raising the totals to 39/21/60. All four belong to the `incus` module, are administrator-only, and
 are ordinary all-of rows guarded by `caps.Has(capability.Incus)`.
 
 The three snapshot actions are the first in the daemon to carry **three**
@@ -125,6 +124,40 @@ outright is a materially more dangerous act than asking it to shut down, and a
 distinct ID makes it read distinctly in the audit trail. It exists because the
 graceful path gives an instance 30 seconds and then fails, which left a wedged
 instance with no way to stop it from the console at all.
+
+`QueryIncusNetwork` (`org.frostyard.pilothouse.incus.network`) and
+`QueryIncusProfile` (`org.frostyard.pilothouse.incus.profile`) are the newest
+IDs, added by the Incus networks-and-profiles phase, and are why the totals
+above now read 39/23/62. Both belong to the `incus` module, both are ordinary
+all-of rows guarded by `caps.Has(capability.Incus)`, and both are read-only:
+this phase declares no `Action*` constant, so the action total stays at 39.
+Neither rendered page contains a form, a button, or any other control.
+
+`QueryIncusNetwork` is the third surface built on an **allowlist**, and it
+needs one for the same concrete reason the others do rather than by analogy:
+Incus network configuration carries `bgp.peers.<name>.password`, a BGP
+session password, and the `ovn.*` and `tunnel.*` families carry credentials
+and keys. `networkConfigKeys` in `internal/modules/incus/network.go` admits
+only addressing, NAT, DHCP and DNS shape; every secret-bearing namespace is
+excluded by omission. The list model's IPv4/IPv6 columns read through the
+same predicate, so the cheaper summary cannot become a bypass around the
+detail model's filter.
+
+`QueryIncusProfile` deliberately **reuses the instance allowlists**
+(`configKeys`, `configPrefixes`, `deviceProperties`) rather than defining its
+own: a profile carries exactly the same configuration and device shape as an
+instance, including the same `user.*`, `environment.*` and `raw.*`
+namespaces. A profile is arguably the more sensitive of the two, since its
+cloud-init payload applies to every instance that inherits it.
+
+Both list sections report what the host actually has rather than only what
+Incus manages: an Incus host's network list is mostly interfaces it merely
+observes (physical NICs, loopback, a foreign bridge such as `docker0`), and
+those are shown with an "Observed" badge. Leases are the one thing that
+genuinely depends on management — Incus tracks them only for its own
+networks — so `NetworkDetail` carries a separate `LeasesAvailable` flag that
+distinguishes "no leases" from "leases cannot be read", and the unmanaged
+case is never asked for leases at all.
 
 **#64 added no broker ID.** Both commands above were re-run against this
 tree at the close of #64 (optional engines and `updex` become explicitly
@@ -200,6 +233,8 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `QueryHostImageStatus` | maintenance (host image) | bootc OR rpm-ostree *(exception — see below)* |
 | `QueryIncusInstance` | incus | incus |
 | `QueryIncusLogs` | incus | incus |
+| `QueryIncusNetwork` | incus | incus |
+| `QueryIncusProfile` | incus | incus |
 | `QueryIncusState` | incus | incus |
 | `QueryJobs` | jobs | none |
 | `QueryLogs` | logs | systemd AND journald *(exception — see below)* |
@@ -923,7 +958,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 60 IDs, and asserts the two helpers do not
+are disjoint and together cover all 62 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as

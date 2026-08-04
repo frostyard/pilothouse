@@ -23,6 +23,14 @@ const snapshotNameLimit = 63
 // instance's live snapshot list instead, so a snapshot created outside
 // Pilothouse under a laxer name stays manageable.
 func validSnapshotName(name string) bool {
+	return validResourceName(name)
+}
+
+// validResourceName is the shared name gate for identifiers that reach the
+// Incus API in a URL path segment — snapshots, networks, profiles. It
+// admits the characters real Incus names use and nothing that could change
+// the shape of a path: no "/", no spaces, no leading or trailing "-"/".".
+func validResourceName(name string) bool {
 	if len(name) == 0 || len(name) > snapshotNameLimit {
 		return false
 	}

@@ -229,7 +229,7 @@ by accident. Current modules:
 | `sysext` | `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
-| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; lifecycle actions including a distinct force stop. Storage reads degrade per pool rather than failing the page. |
+| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; read-only network and profile inventory with per-network DHCP leases and allowlisted configuration; lifecycle actions including a distinct force stop. Storage, network and profile reads each degrade independently rather than failing the page. |
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
@@ -412,9 +412,10 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (60 IDs,
-  21 queries; the newest IDs are the Incus phases' `QueryIncusInstance`,
-  `QueryIncusLogs`, and the four snapshot/force-stop actions) and
+  withheld. `docs/capabilities.md`'s binding table carries the row (62 IDs,
+  23 queries; the newest IDs are the Incus phases' `QueryIncusInstance`,
+  `QueryIncusLogs`, `QueryIncusNetwork`, `QueryIncusProfile`, and the four
+  snapshot/force-stop actions) and
   `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
 - `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
@@ -1112,8 +1113,8 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   in the module's own `Mount`: `GET /incus`,
   `POST /incus/instances/{name}/{action}`, and
   `POST /incus/images/{fingerprint}/{action}`. (The instance-depth phase has
-  since added two read-only routes and two snapshot routes behind the same
-  gate — see the Incus sections below — so the module now has seven.) With incus
+  since added four read-only routes and two snapshot routes behind the same
+  gate — see the Incus sections below — so the module now has nine.) With incus
   absent, the whole module disappears — nav entry, dashboard card, and every
   one of those routes 404s at request time — while podman, docker, and the
   rest of the app are
@@ -1332,8 +1333,8 @@ place, so a reader who lands here first does not have to reassemble it.
   `internal/broker/api.go` declared 35 `Action*` and 19 `Query*` constants
   (54 total) both before and after it, and `docs/capabilities.md`'s binding
   table and both capability contract tests were unchanged in shape and count.
-  (The two Incus phases have since taken the query total to 21, the action
-  total to 39, and the overall total to 60.) Both contract harnesses build fixtures
+  (The three Incus phases have since taken the query total to 23, the action
+  total to 39, and the overall total to 62.) Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
 - **Systemd units.** Both packaged broker units
@@ -1492,6 +1493,53 @@ docker modules too. All three now use explicit `confirmTitles` and
 `TestInstanceActionMessagesReadAsEnglish` test asserting the rendered notice
 text, so the derived form cannot come back. Derive an action's *ID* from its
 URL segment if you like; never derive its English.
+
+### Incus networks and profiles (read-only)
+
+The third Incus phase adds two read-only surfaces and, more usefully, tests
+whether the instance allowlist generalises. It does — but only one of the two
+could reuse it.
+
+- **Profiles reuse the instance allowlist verbatim.** A profile carries
+  exactly the same configuration and device shape as an instance, including
+  the same `user.*`, `environment.*` and `raw.*` namespaces, so
+  `ProfileDetail` calls the same `allowedConfig`/`allowedDevices` helpers with
+  the profile's single config map passed as both halves of the
+  expanded/local merge. This is the stronger case for the allowlist rather
+  than a convenience: a profile's cloud-init payload applies to *every*
+  instance that inherits it, so a leak there is broader than a leak from one
+  instance.
+
+- **Networks needed their own allowlist, for a concrete reason.** Incus
+  network configuration has a different secret surface:
+  `bgp.peers.<name>.password` is a real BGP session password (see
+  `internal/server/network/driver_bridge.go` in the Incus source), and the
+  `ovn.*` and `tunnel.*` families carry credentials and keys.
+  `networkConfigKeys` admits only addressing, NAT, DHCP and DNS shape.
+  Crucially the *list* model reads its IPv4/IPv6 columns through
+  `allowedNetworkValue`, which consults the same predicate — a summary that
+  read the raw config directly would have been a bypass around the detail
+  model's filter, and a test asserts the serialized list carries no secret.
+
+- **Observed networks are reported, not hidden.** An Incus host's network
+  list is mostly interfaces it does not manage — physical NICs, loopback, a
+  foreign bridge such as `docker0` — and omitting them would misrepresent the
+  host. They render with an "Observed" badge rather than "Managed". Leases
+  are the one thing that genuinely depends on management, since Incus tracks
+  them only for its own networks, so `NetworkDetail` carries a separate
+  `LeasesAvailable` flag: an unmanaged network is never asked for leases at
+  all, and the page says Incus tracks none for it rather than showing the
+  same "no leases" text a managed network with none would show. A managed
+  network whose lease read *fails* degrades to the same unavailable state
+  while the rest of the detail survives.
+
+Both new sections join `QueryIncusState` (one call each) and degrade the same
+way storage does — an unreadable list costs its own section plus a warning,
+never the page. `GET /incus/networks/{name}` and `GET /incus/profiles/{name}`
+render the detail, both behind the module's existing whole-module gate.
+Neither page contains a form or a button, and `views_test.go` asserts that
+directly: there is no mutating counterpart in the broker's ID vocabulary for
+either surface.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 
