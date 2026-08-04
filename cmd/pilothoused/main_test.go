@@ -1409,6 +1409,18 @@ func TestRegisterDockerRegistersEverythingWithDockerCapability(t *testing.T) {
 
 type fakeIncusManager struct{}
 
+func (fakeIncusManager) CreateSnapshot(context.Context, string, string, string) error  { return nil }
+func (fakeIncusManager) DeleteSnapshot(context.Context, string, string, string) error  { return nil }
+func (fakeIncusManager) RestoreSnapshot(context.Context, string, string, string) error { return nil }
+func (fakeIncusManager) StopForce(context.Context, string, string) error               { return nil }
+
+func (fakeIncusManager) Detail(context.Context, string, string) (incus.Detail, error) {
+	return incus.Detail{}, nil
+}
+
+func (fakeIncusManager) Logs(context.Context, string, string, string) (incus.Logs, error) {
+	return incus.Logs{}, nil
+}
 func (fakeIncusManager) Remove(context.Context, string, string) error      { return nil }
 func (fakeIncusManager) RemoveImage(context.Context, string, string) error { return nil }
 func (fakeIncusManager) Restart(context.Context, string, string) error     { return nil }
@@ -1422,8 +1434,14 @@ func TestRegisterIncusNoOpsWithoutIncusCapability(t *testing.T) {
 	actions, queries := broker.NewActionRegistry(), broker.NewQueryRegistry()
 	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, capability.New(capability.Systemd)))
 
-	assert.False(t, queries.Registered(broker.QueryIncusState))
-	for _, id := range []string{broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart, broker.ActionIncusStart, broker.ActionIncusStop} {
+	for _, id := range []string{broker.QueryIncusState, broker.QueryIncusInstance, broker.QueryIncusLogs} {
+		assert.False(t, queries.Registered(id))
+	}
+	for _, id := range []string{
+		broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart,
+		broker.ActionIncusSnapshotCreate, broker.ActionIncusSnapshotDelete, broker.ActionIncusSnapshotRestore,
+		broker.ActionIncusStart, broker.ActionIncusStop, broker.ActionIncusStopForce,
+	} {
 		assert.False(t, actions.Registered(id))
 	}
 }

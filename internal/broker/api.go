@@ -9,17 +9,26 @@ import (
 )
 
 const (
-	ActionFilesUpload                      = "org.frostyard.pilothouse.files.upload"
-	ActionDockerRemove                     = "org.frostyard.pilothouse.docker.remove"
-	ActionDockerRemoveImage                = "org.frostyard.pilothouse.docker.remove_image"
-	ActionDockerRestart                    = "org.frostyard.pilothouse.docker.restart"
-	ActionDockerStart                      = "org.frostyard.pilothouse.docker.start"
-	ActionDockerStop                       = "org.frostyard.pilothouse.docker.stop"
-	ActionIncusRemove                      = "org.frostyard.pilothouse.incus.remove"
-	ActionIncusRemoveImage                 = "org.frostyard.pilothouse.incus.remove_image"
-	ActionIncusRestart                     = "org.frostyard.pilothouse.incus.restart"
-	ActionIncusStart                       = "org.frostyard.pilothouse.incus.start"
-	ActionIncusStop                        = "org.frostyard.pilothouse.incus.stop"
+	ActionFilesUpload          = "org.frostyard.pilothouse.files.upload"
+	ActionDockerRemove         = "org.frostyard.pilothouse.docker.remove"
+	ActionDockerRemoveImage    = "org.frostyard.pilothouse.docker.remove_image"
+	ActionDockerRestart        = "org.frostyard.pilothouse.docker.restart"
+	ActionDockerStart          = "org.frostyard.pilothouse.docker.start"
+	ActionDockerStop           = "org.frostyard.pilothouse.docker.stop"
+	ActionIncusRemove          = "org.frostyard.pilothouse.incus.remove"
+	ActionIncusRemoveImage     = "org.frostyard.pilothouse.incus.remove_image"
+	ActionIncusRestart         = "org.frostyard.pilothouse.incus.restart"
+	ActionIncusSnapshotCreate  = "org.frostyard.pilothouse.incus.snapshot_create"
+	ActionIncusSnapshotDelete  = "org.frostyard.pilothouse.incus.snapshot_delete"
+	ActionIncusSnapshotRestore = "org.frostyard.pilothouse.incus.snapshot_restore"
+	ActionIncusStart           = "org.frostyard.pilothouse.incus.start"
+	ActionIncusStop            = "org.frostyard.pilothouse.incus.stop"
+	// ActionIncusStopForce is deliberately a separate ID from
+	// ActionIncusStop rather than a force parameter on it: killing an
+	// instance outright is a materially more dangerous act than asking it
+	// to shut down, and a distinct ID makes it read distinctly in the
+	// audit trail.
+	ActionIncusStopForce                   = "org.frostyard.pilothouse.incus.stop_force"
 	ActionMaintenanceReboot                = "org.frostyard.pilothouse.maintenance.reboot"
 	ActionPodmanRemove                     = "org.frostyard.pilothouse.podman.remove"
 	ActionPodmanRemoveImage                = "org.frostyard.pilothouse.podman.remove_image"
@@ -55,6 +64,8 @@ const (
 	QueryDockerState      = "org.frostyard.pilothouse.docker.state"
 	QueryExtensionsState  = "org.frostyard.pilothouse.sysext.state"
 	QueryHostImageStatus  = "org.frostyard.pilothouse.maintenance.host_image_status"
+	QueryIncusInstance    = "org.frostyard.pilothouse.incus.instance"
+	QueryIncusLogs        = "org.frostyard.pilothouse.incus.logs"
 	QueryIncusState       = "org.frostyard.pilothouse.incus.state"
 	QueryJobs             = "org.frostyard.pilothouse.jobs.list"
 	QueryLogs             = "org.frostyard.pilothouse.logs.list"

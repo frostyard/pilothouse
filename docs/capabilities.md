@@ -14,12 +14,12 @@ landed behavior, not a future guarantee, and
 `cmd/pilothoused/capability_contract_test.go` enforces the full table across
 a fixture matrix of capability sets.
 
-**Running total:** `internal/broker/api.go` declares exactly 35 `Action*`
-constants and 19 `Query*` constants today — 54 IDs total, reproducible with:
+**Running total:** `internal/broker/api.go` declares exactly 39 `Action*`
+constants and 21 `Query*` constants today — 60 IDs total, reproducible with:
 
 ```sh
-grep -c '^[[:space:]]*Action' internal/broker/api.go   # 35
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 19
+grep -c '^[[:space:]]*Action' internal/broker/api.go   # 39
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 21
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -27,11 +27,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 54 IDs is registered exactly once across the four
+Every one of the 60 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 35/19 above, not IDs
-added on top. This table therefore has exactly 54 rows.
+via `StreamQueryRegistry`) — both are members of the 39/21 above, not IDs
+added on top. This table therefore has exactly 60 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +40,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-35/19/54 all fail the build. It additionally checks that an `Action*`
+39/21/60 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -61,24 +61,75 @@ totals from the 16/51 phase 1a ended with to 17/52. It is the table's first
 source alone is enough (see exception #4 below).
 
 `QueryAutoUpdateStatus` (`org.frostyard.pilothouse.maintenance.autoupdate_status`)
-was added by #58 for read-only automatic-update reporting, the increment before
-the current 19/54 total. Like `QueryHostImageStatus` it is an
+was added by #58 for read-only automatic-update reporting, raising the totals to
+18/53. Like `QueryHostImageStatus` it is an
 **any-of** row: `registerAutoUpdate` guards it with the same
 `caps.HasAny(capability.Bootc, capability.RPMOStree)` gate, and for the same
 reason — a no-updater image host must still be able to report the "not
 configured" empty state (see exception #5 below).
 
-`QueryExtensionsState` (`org.frostyard.pilothouse.sysext.state`) is the newest
-ID, added by #52 for the read-only extension inventory, and is why the totals
-above now read 19/54. It belongs to the `sysext` (Extensions) module, not
+`QueryExtensionsState` (`org.frostyard.pilothouse.sysext.state`) was added by
+#52 for the read-only extension inventory, raising the totals to 19/54. It
+belongs to the `sysext` (Extensions) module, not
 maintenance, and is the table's third **any-of** row: `registerExtensions`
 guards it with `caps.HasAny(capability.Updex, capability.Sysext)` — either tool
 alone yields a usable inventory (see exception #6 below).
 
+`QueryIncusInstance` (`org.frostyard.pilothouse.incus.instance`) and
+`QueryIncusLogs` (`org.frostyard.pilothouse.incus.logs`) are the newest IDs,
+added by the Incus instance-depth phase, raising the totals to 35/21/56. Both belong to the `incus` module and both are ordinary **all-of** rows
+guarded by `caps.Has(capability.Incus)` in `registerIncus`, alongside the
+already-present `QueryIncusState`. Neither has a mutating counterpart: that
+phase added no `Action*` constant.
+
+`QueryIncusInstance` returns one instance's configuration, devices,
+interfaces and snapshots. Its configuration and device properties are built
+by **allowlist** in `internal/modules/incus/detail.go` — `configKeys`,
+`configPrefixes`, and the per-device-type `deviceProperties` map — never by
+copying the instance's expanded configuration. An Incus instance's
+configuration routinely carries secrets (`user.user-data` holds cloud-init
+payloads with SSH keys and passwords, `environment.*` holds process
+environment, `raw.*` holds passthrough runtime configuration), and none of
+those namespaces is allowlisted, so none of them crosses the broker boundary.
+A key or device type added by a future Incus release is excluded until it is
+reviewed and added to the allowlist.
+
+`QueryIncusLogs` takes a fixed `source` selector accepting exactly `console`
+or `log` and **never a filename**. The daemon rejects any other value before
+reading anything, and for `log` it derives the supervisor logfile from the
+resolved instance's own type (`lxc.log` for a container, `qemu.log` for a
+virtual machine), matching what `incus info --show-log` resolves `default`
+to. Both are bounded to a 200-line, 256 KiB tail.
+
+`ActionIncusSnapshotCreate`, `ActionIncusSnapshotDelete`,
+`ActionIncusSnapshotRestore` and `ActionIncusStopForce` are the newest IDs,
+added by the Incus snapshot phase, and are why the totals above now read
+39/21/60. All four belong to the `incus` module, are administrator-only, and
+are ordinary all-of rows guarded by `caps.Has(capability.Incus)`.
+
+The three snapshot actions are the first in the daemon to carry **three**
+identifiers (`project`, `instance`, `snapshot`) rather than two, so they are
+registered through `registerSnapshotActions` rather than
+`registerProjectActions`. Their audit resource is the fully qualified
+`incus/snapshot/<project>/<instance>/<snapshot>`, so two snapshots sharing a
+name on different instances are distinct resources for confirmation and audit.
+Delete and restore require confirmation; create only adds and does not.
+Snapshots Pilothouse creates are always non-stateful — a stateful snapshot
+needs CRIU on the host and there is no way to ask for one — and the daemon
+refuses to restore a running instance, matching what Incus itself enforces for
+a non-stateful snapshot.
+
+`ActionIncusStopForce` is deliberately a **separate ID** from
+`ActionIncusStop` rather than a `force` parameter on it. Killing an instance
+outright is a materially more dangerous act than asking it to shut down, and a
+distinct ID makes it read distinctly in the audit trail. It exists because the
+graceful path gives an instance 30 seconds and then fails, which left a wedged
+instance with no way to stop it from the console at all.
+
 **#64 added no broker ID.** Both commands above were re-run against this
 tree at the close of #64 (optional engines and `updex` become explicitly
-opt-in, mock Fleet moves behind `--dev`) and still print 35 and 19 — 54 IDs
-total, unchanged. That phase declares no new `Action*`/`Query*` constant and
+opt-in, mock Fleet moves behind `--dev`) and still printed 35 and 19 — 54 IDs
+total, unchanged at that point. That phase declares no new `Action*`/`Query*` constant and
 removes none: it changes only *what causes* four already-declared
 capabilities (`updex`, `podman`, `docker`, `incus`) to be advertised, which
 is upstream of every row below. No row in this table, no row in
@@ -104,8 +155,12 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionIncusRemove` | incus | incus |
 | `ActionIncusRemoveImage` | incus | incus |
 | `ActionIncusRestart` | incus | incus |
+| `ActionIncusSnapshotCreate` | incus | incus |
+| `ActionIncusSnapshotDelete` | incus | incus |
+| `ActionIncusSnapshotRestore` | incus | incus |
 | `ActionIncusStart` | incus | incus |
 | `ActionIncusStop` | incus | incus |
+| `ActionIncusStopForce` | incus | incus |
 | `ActionMaintenanceReboot` | maintenance | systemd |
 | `ActionPodmanRemove` | podman | podman |
 | `ActionPodmanRemoveImage` | podman | podman |
@@ -143,6 +198,8 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `QueryDockerState` | docker | docker |
 | `QueryExtensionsState` | sysext (extensions) | updex OR sysext *(exception — see below)* |
 | `QueryHostImageStatus` | maintenance (host image) | bootc OR rpm-ostree *(exception — see below)* |
+| `QueryIncusInstance` | incus | incus |
+| `QueryIncusLogs` | incus | incus |
 | `QueryIncusState` | incus | incus |
 | `QueryJobs` | jobs | none |
 | `QueryLogs` | logs | systemd AND journald *(exception — see below)* |
@@ -866,7 +923,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 54 IDs, and asserts the two helpers do not
+are disjoint and together cover all 60 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as

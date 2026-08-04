@@ -282,8 +282,12 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.ActionIncusRemove:                      {capability.Incus},
 	broker.ActionIncusRemoveImage:                 {capability.Incus},
 	broker.ActionIncusRestart:                     {capability.Incus},
+	broker.ActionIncusSnapshotCreate:              {capability.Incus},
+	broker.ActionIncusSnapshotDelete:              {capability.Incus},
+	broker.ActionIncusSnapshotRestore:             {capability.Incus},
 	broker.ActionIncusStart:                       {capability.Incus},
 	broker.ActionIncusStop:                        {capability.Incus},
+	broker.ActionIncusStopForce:                   {capability.Incus},
 	broker.ActionMaintenanceReboot:                {capability.Systemd},
 	broker.ActionPodmanRemove:                     {capability.Podman},
 	broker.ActionPodmanRemoveImage:                {capability.Podman},
@@ -316,6 +320,8 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.QueryCapabilities:     nil,
 	broker.QueryDockerLogs:       {capability.Docker},
 	broker.QueryDockerState:      {capability.Docker},
+	broker.QueryIncusInstance:    {capability.Incus},
+	broker.QueryIncusLogs:        {capability.Incus},
 	broker.QueryIncusState:       {capability.Incus},
 	broker.QueryJobs:             nil,
 	broker.QueryLogs:             {capability.Systemd, capability.Journald},
@@ -2409,7 +2415,13 @@ var contractSubRoutes = []struct {
 	{http.MethodGet, "/docker/containers/" + sampleContainerID + "/logs", []capability.ID{capability.Docker}},
 	{http.MethodPost, "/docker/containers/" + sampleContainerID + "/start", []capability.ID{capability.Docker}},
 	{http.MethodPost, "/docker/images/" + sampleContainerID + "/remove", []capability.ID{capability.Docker}},
+	{http.MethodGet, "/incus/instances/sample", []capability.ID{capability.Incus}},
+	{http.MethodGet, "/incus/instances/sample/logs", []capability.ID{capability.Incus}},
 	{http.MethodPost, "/incus/instances/sample/start", []capability.ID{capability.Incus}},
+	{http.MethodPost, "/incus/instances/sample/stop-force", []capability.ID{capability.Incus}},
+	{http.MethodPost, "/incus/instances/sample/snapshots", []capability.ID{capability.Incus}},
+	{http.MethodPost, "/incus/instances/sample/snapshots/sample-snapshot/restore", []capability.ID{capability.Incus}},
+	{http.MethodPost, "/incus/instances/sample/snapshots/sample-snapshot/delete", []capability.ID{capability.Incus}},
 	{http.MethodPost, "/incus/images/sample-fingerprint/remove", []capability.ID{capability.Incus}},
 }
 
@@ -2681,12 +2693,12 @@ func TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck(t *testing.T) {
 // implied by the fixture runs above, which only exercise the broker IDs the
 // web side happens to call:
 //
-//   - Completeness. Together the tables must carry all 54 declared broker IDs
-//     (35 Action* + 19 Query*), the same totals cmd/pilothoused's
+//   - Completeness. Together the tables must carry all 60 declared broker IDs
+//     (39 Action* + 21 Query*), the same totals cmd/pilothoused's
 //     TestCapabilityTableMirrorsBrokerAPIConstants pins against
 //     internal/broker/api.go's live go/ast-parsed declarations. Every key here
 //     is a broker.Action*/Query* constant reference, so a renamed constant is
-//     a compile error and 54 distinct keys can only mean full coverage — which
+//     a compile error and 60 distinct keys can only mean full coverage — which
 //     is what makes requireAvailable's "not in either table" branch a genuine
 //     tripwire for a newly added ID rather than a formality.
 //   - Disjointness. An ID carries at most one registration guard, so appearing
@@ -2700,8 +2712,8 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 		assert.NotContainsf(t, capabilityRequirements, id,
 			"broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
 	}
-	assert.Equal(t, 54, len(capabilityRequirements)+len(capabilityAnyRequirements),
-		"the two web-side broker-ID tables must together cover all 54 declared broker IDs (35 Action* + 19 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
+	assert.Equal(t, 60, len(capabilityRequirements)+len(capabilityAnyRequirements),
+		"the two web-side broker-ID tables must together cover all 60 declared broker IDs (39 Action* + 21 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
 
 	// Hand-written from docs/capabilities.md, not read back from the
 	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are two

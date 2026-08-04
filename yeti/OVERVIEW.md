@@ -229,7 +229,7 @@ by accident. Current modules:
 | `sysext` | `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
-| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`; lifecycle actions. |
+| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; lifecycle actions including a distinct force stop. Storage reads degrade per pool rather than failing the page. |
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
@@ -412,8 +412,9 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (54 IDs,
-  19 queries, the 19th being #52's `QueryExtensionsState`) and
+  withheld. `docs/capabilities.md`'s binding table carries the row (60 IDs,
+  21 queries; the newest IDs are the Incus phases' `QueryIncusInstance`,
+  `QueryIncusLogs`, and the four snapshot/force-stop actions) and
   `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
 - `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
@@ -1106,18 +1107,19 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `RequiredCapabilities() []capability.ID`, returning
   `[]capability.ID{capability.Incus}` — the same one-capability-per-engine
   mapping podman and docker use, matching `docs/capabilities.md` and #50's
-  daemon-side `registerIncus` gating. Unlike podman/docker, incus has no
-  separate logs route (its state page nests project/instance detail inline),
-  so it has exactly three routes, all wrapped in
-  `platform.Gate(host, []capability.ID{capability.Incus}, ...)` in the
-  module's own `Mount`: `GET /incus`,
+  daemon-side `registerIncus` gating. At #54 incus had exactly three routes,
+  all wrapped in `platform.Gate(host, []capability.ID{capability.Incus}, ...)`
+  in the module's own `Mount`: `GET /incus`,
   `POST /incus/instances/{name}/{action}`, and
-  `POST /incus/images/{fingerprint}/{action}`. With incus absent, the whole
-  module disappears — nav entry, dashboard card, and all three routes 404 at
-  request time — while podman, docker, and the rest of the app are
+  `POST /incus/images/{fingerprint}/{action}`. (The instance-depth phase has
+  since added two read-only routes and two snapshot routes behind the same
+  gate — see the Incus sections below — so the module now has seven.) With incus
+  absent, the whole module disappears — nav entry, dashboard card, and every
+  one of those routes 404s at request time — while podman, docker, and the
+  rest of the app are
   unaffected; with incus present, the module behaves exactly as before this
-  chunk. `views.templ` is unchanged: an absent module 404s before any page
-  renders, so there is no conditional view content to add, the same as
+  chunk. `views.templ` needed no capability-conditional content: an absent
+  module 404s before any page renders, so there is nothing to add, the same as
   podman/docker/backups/logs (maintenance's `views.templ` gained conditional
   host-image content in #51; see the Maintenance bullet above for its
   now-different behavior). Incus is not a
@@ -1326,10 +1328,12 @@ place, so a reader who lands here first does not have to reassemble it.
   `rpm-ostree`, and the two `autoupdate-*` capabilities stay presence-probed
   and carry no flag. Every `registerX` guard in `cmd/pilothoused` is
   untouched — the guards were already correct, and the defect was entirely
-  in what fed them. No broker ID was added or removed: `internal/broker/api.go`
-  still declares 35 `Action*` and 19 `Query*` constants (54 total), and
-  `docs/capabilities.md`'s binding table and both capability contract tests
-  are unchanged in shape and count. Both contract harnesses build fixtures
+  in what fed them. No broker ID was added or removed by #64:
+  `internal/broker/api.go` declared 35 `Action*` and 19 `Query*` constants
+  (54 total) both before and after it, and `docs/capabilities.md`'s binding
+  table and both capability contract tests were unchanged in shape and count.
+  (The two Incus phases have since taken the query total to 21, the action
+  total to 39, and the overall total to 60.) Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
 - **Systemd units.** Both packaged broker units
@@ -1351,6 +1355,135 @@ place, so a reader who lands here first does not have to reassemble it.
   it found, registers no engine or `updex` query/action, and starts
   successfully; the console renders the surfaces that remain and omits the
   rest entirely rather than showing them broken.
+
+### Incus instance depth (allowlisted detail + bounded logs)
+
+The Incus module reports what an instance is actually doing, not just that it
+exists. Three things carry it:
+
+- **One read, more of it.** `LocalClient.Instances` calls
+  `GetInstancesFull(api.InstanceTypeAny)` rather than `GetInstances`, so a
+  single round trip returns each instance's configuration, runtime state and
+  snapshot list together. `listInstance` projects that onto `incus.Instance`,
+  which gained `Addresses`, `CPUTime`, `Memory`, `Processes`, `Snapshots` and
+  `StartedAt`. `State` is nil for a stopped instance, so every live field
+  stays at its Go zero value — the page renders those as a dash rather than
+  as a measured zero. Addresses are filtered to Incus's `global` scope, which
+  drops loopback (`local`) and link-local (`link`) without matching on
+  interface names, then sorted so map iteration order cannot reorder them.
+  This makes the dashboard card's `QueryIncusState` call heavier than it was;
+  that cost is accepted rather than split, since it is still one call.
+
+- **`QueryIncusInstance` returns an allowlisted model.** `detail()` in
+  `internal/modules/incus/detail.go` builds `Detail` by copying only keys on
+  a fixed list — `configKeys`, the `image.` prefix in `configPrefixes`, and
+  the per-device-type `deviceProperties` map — never the instance's expanded
+  configuration wholesale. This is a security boundary, not tidiness: an
+  Incus instance's configuration routinely carries `user.user-data`
+  (cloud-init payloads with SSH keys and passwords), `environment.*` and
+  `raw.*`, and `docs/modules.md` forbids exposing instance environment
+  variables or secrets to the web process. Allowlisting rather than
+  denylisting means a key or device type added by a future Incus release is
+  excluded until it is reviewed. `detail_test.go` proves this behaviorally:
+  it drives the real manager over a fixture whose configuration carries each
+  of those namespaces and asserts none of it appears anywhere in the
+  serialized model, alongside a positive assertion that the allowlisted keys
+  *are* present, so the exclusion assertions cannot pass vacuously.
+
+- **`QueryIncusLogs` takes a source, never a filename.** The query's `source`
+  parameter accepts exactly `console` (the instance's console ring buffer)
+  or `log` (the supervisor logfile); `SystemManager.Logs` rejects anything
+  else before reading. For `log` the filename is derived from the resolved
+  instance's own type — `lxc.log` for a container, `qemu.log` for a virtual
+  machine — matching what `incus info --show-log` resolves `default` to
+  (`cmd/incus/info.go`). No caller-supplied string ever reaches
+  `GetInstanceLogfile`, so there is no path-traversal surface to reason
+  about. `readLines` keeps a 200-line, 256 KiB tail, dropping an over-cap
+  single line whole rather than truncating it. This is a local
+  implementation rather than a reuse of podman's `boundedLogLines`: Incus
+  logfiles are plain text with neither Docker's 8-byte stream framing nor an
+  RFC3339 timestamp prefix, so the shared parts would have been the trivial
+  half.
+
+Two routes render it, both behind the module's existing whole-module gate:
+`GET /incus/instances/{name}` (detail) and `GET /incus/instances/{name}/logs`
+(logs, defaulting to the console source and polling every 5s via HTMX, the
+same shape as podman's and docker's logs pages). The web handler rejects an
+unsupported `source` itself with a 404, before issuing any broker query.
+Neither route is a mutation and this phase declares no new `Action*`
+constant: the action total stays at 35 while the query total moves to 21.
+
+Separately, `SystemManager.storage` no longer fails the whole query when one
+pool cannot be read. Each pool's volume and bucket reads are independent: a
+failure contributes a message to `State.Warnings` and no rows for that pool,
+leaving every other pool's inventory intact, and the page renders the
+warnings in a "Partial inventory" card. A driver that simply has no bucket
+support stays silent, since that is a capability gap rather than a degraded
+read. Only the pool list itself is still fatal, because without it there is
+nothing to enumerate.
+
+### Incus snapshots and force stop
+
+Snapshots are the first Incus surface that mutates something other than an
+instance's run state, and they are the daemon's first **three-identifier**
+actions.
+
+- **A new registration shape.** `registerProjectActions` in
+  `cmd/pilothoused/main.go` binds exactly two parameters (`project` plus one
+  more), which cannot express a snapshot's `project`/`instance`/`snapshot`
+  triple. `registerSnapshotActions` is its three-identifier sibling: same
+  admin-only, fixed-ID, confirmation-carrying shape, but its `Resource`
+  builds `incus/snapshot/<project>/<instance>/<snapshot>`, so two snapshots
+  sharing a name on different instances are distinct resources for
+  confirmation and audit. Reach for it — not a wider `registerProjectActions`
+  — when a future action needs a third identifier.
+
+- **Rediscover before mutating.** `CreateSnapshot` validates the *new* name
+  against `validSnapshotName` (stricter than Incus itself: no `/`, no
+  spaces, no leading or trailing `-`/`.`, 63 characters) and refuses a name
+  the instance already carries, so a create can never silently overwrite.
+  `DeleteSnapshot` and `RestoreSnapshot` do **not** use that validator —
+  they resolve the name against the instance's live snapshot list instead,
+  the same way `RemoveImage` resolves a fingerprint against the live image
+  list. That is both stricter (a name that does not exist is rejected before
+  any API call) and more permissive in the right direction: a snapshot
+  created outside Pilothouse under a laxer name stays manageable.
+
+- **Restore has a precondition, checked here.** Incus refuses to restore a
+  running instance from a non-stateful snapshot, and Pilothouse only ever
+  creates non-stateful ones (a stateful snapshot needs CRIU, and there is no
+  way to ask for one). `RestoreSnapshot` rejects a running instance itself
+  with "stop the instance before restoring a snapshot" rather than letting
+  that surface as an opaque API error, and the detail page replaces the
+  Restore control with an explanation while the instance runs. Delete stays
+  available either way.
+
+- **Force stop is its own broker ID.** `ActionIncusStopForce` is deliberately
+  not a `force` parameter on `ActionIncusStop`: killing an instance outright
+  is materially more dangerous than asking it to shut down, and a distinct ID
+  makes it read distinctly in the audit trail. It exists because the graceful
+  path gives an instance 30 seconds and then fails, which previously left a
+  wedged instance with no way to stop it from the console at all. Both stops
+  require confirmation.
+
+Two routes carry the UI, both behind the module's existing whole-module gate:
+`POST /incus/instances/{name}/snapshots` (create, whose name arrives in the
+form because it names something that does not exist yet) and
+`POST /incus/instances/{name}/snapshots/{snapshot}/{action}` for restore and
+delete. Both redirect back to the instance's own detail page rather than the
+list, so the result is visible where the action was taken.
+
+One incidental fix rode along, and then spread. The instance-action success
+message was built as `fmt.Sprintf("Instance %sd", action)`, which is correct
+only for "remove" — it produced "Instance startd" and "Instance stopd", and
+"stop-force" has no correct derived form at all. The identical
+`fmt.Sprintf("Container %sd", ...)` construction was live in the podman and
+docker modules too. All three now use explicit `confirmTitles` and
+`successMessages` maps keyed by action, and each module carries a
+`TestContainerActionMessagesReadAsEnglish` /
+`TestInstanceActionMessagesReadAsEnglish` test asserting the rendered notice
+text, so the derived form cannot come back. Derive an action's *ID* from its
+URL segment if you like; never derive its English.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 
