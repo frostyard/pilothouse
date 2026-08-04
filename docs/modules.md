@@ -620,6 +620,22 @@ resource's list transfers — and when a cheap list model exposes a field the
 detail model filters, route the list through the same predicate so the
 summary cannot become a bypass.
 
+`org.frostyard.pilothouse.incus.create` is the repo's worked example of a
+**fixed action that reaches the network**. The image server is a
+compile-time constant (`imageRemote`), not a parameter, so the action cannot
+be pointed at an arbitrary host; the parameter set carries no remote, server
+or URL field at all. When an action must contact something outside the host,
+pin the destination in code and validate every caller-supplied component
+against it — never accept an endpoint through the broker protocol.
+
+It is also the one Incus action registered with `Background: true`, because
+downloading an image takes minutes. Long privileged mutations belong in the
+broker's durable background-action definition (which enqueues a job, holds
+the resource lock, and returns immediately) rather than blocking a request
+or launching a goroutine from a web module. When the SDK's waiter takes no
+`context.Context` — as `RemoteOperation.Wait()` does — race it against
+`ctx.Done()` and cancel the target, or the action's timeout is decorative.
+
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The
 `/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the

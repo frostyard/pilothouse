@@ -1252,6 +1252,25 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 	}); err != nil {
 		return err
 	}
+	// Instance creation downloads an image from a fixed remote, which
+	// routinely takes minutes, so it is the module's one background
+	// action: the broker enqueues a durable job, holds the instance's own
+	// lock for the duration, and returns immediately. The remote is a
+	// constant in the manager, never a parameter.
+	if err := actions.RegisterDefinition(broker.ActionDefinition{
+		ID: broker.ActionIncusCreate, Admin: true, Background: true,
+		Parameters: []string{"project", "name", "image", "type", "profile"},
+		Timeout:    30 * time.Minute,
+		Resource: func(parameters map[string]string) (string, error) {
+			return "incus/instance/" + parameters["project"] + "/" + parameters["name"], nil
+		},
+		Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+			return manager.CreateInstance(ctx, parameters["project"], parameters["name"],
+				parameters["image"], parameters["type"], parameters["profile"])
+		},
+	}); err != nil {
+		return err
+	}
 	// Snapshot actions carry a third identifier, so they cannot use
 	// registerProjectActions' two-parameter shape. Restore and delete are
 	// destructive and require confirmation; create only adds.

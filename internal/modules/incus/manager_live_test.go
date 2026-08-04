@@ -2,10 +2,12 @@ package incus
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
+	incusclient "github.com/lxc/incus/v7/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,4 +58,70 @@ func TestLiveSystemManagerState(t *testing.T) {
 		}
 		t.Logf("profile %s: devices=%d config=%d usedBy=%d", detail.Name, len(detail.Devices), len(detail.Config), len(detail.UsedBy))
 	}
+}
+
+// TestLiveImageRemoteResolvesAlias exercises the one outbound network path
+// creation depends on, without creating anything: connect to the fixed
+// image remote, resolve a well-known alias for both instance types, and
+// confirm a nonexistent alias fails rather than silently succeeding.
+func TestLiveImageRemoteResolvesAlias(t *testing.T) {
+	if os.Getenv("PILOTHOUSE_LIVE_INCUS") != "1" {
+		t.Skip("set PILOTHOUSE_LIVE_INCUS=1 to contact the public image server")
+	}
+	images, err := incusclient.ConnectSimpleStreams(imageRemote, &incusclient.ConnectionArgs{
+		HTTPClient: &http.Client{Timeout: imageRemoteTimeout},
+	})
+	require.NoError(t, err)
+
+	for _, instanceType := range []string{TypeContainer, TypeVirtualMachine} {
+		entry, _, err := images.GetImageAliasType(instanceType, "debian/13")
+		require.NoError(t, err, "resolving debian/13 for %s", instanceType)
+		require.NotEmpty(t, entry.Target)
+
+		image, _, err := images.GetImage(entry.Target)
+		require.NoError(t, err)
+		require.Equal(t, instanceType, image.Type, "the resolved image must match the requested type")
+		t.Logf("%s debian/13 -> %s (%s, %d bytes)", instanceType, entry.Target[:12], image.Properties["description"], image.Size)
+	}
+
+	_, _, err = images.GetImageAliasType(TypeContainer, "debian/does-not-exist")
+	require.Error(t, err, "a nonexistent alias must fail rather than resolve")
+}
+
+// TestLiveCreateInstance is the only live test that mutates the host, so it
+// is gated behind its own variable rather than PILOTHOUSE_LIVE_INCUS: it
+// downloads an image and creates a real instance. It cleans up after
+// itself, and refuses to run if its fixed name is already taken so it can
+// never delete an instance it did not create.
+func TestLiveCreateInstance(t *testing.T) {
+	if os.Getenv("PILOTHOUSE_LIVE_INCUS_CREATE") != "1" {
+		t.Skip("set PILOTHOUSE_LIVE_INCUS_CREATE=1 to create and delete a real instance")
+	}
+	const name = "pilothouse-live-check"
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	manager := NewSystemManager(NewLocalClient())
+	state, err := manager.State(ctx, "default")
+	require.NoError(t, err)
+	for _, instance := range state.Instances {
+		require.NotEqual(t, name, instance.Name, "refusing to run: %s already exists", name)
+	}
+
+	require.NoError(t, manager.CreateInstance(ctx, "default", name, "debian/13", TypeContainer, ""))
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cleanupCancel()
+		if err := manager.Remove(cleanupCtx, "default", name); err != nil {
+			t.Logf("cleanup failed, remove %s by hand: %v", name, err)
+		}
+	})
+
+	detail, err := manager.Detail(ctx, "default", name)
+	require.NoError(t, err)
+	require.Equal(t, name, detail.Instance.Name)
+	require.Equal(t, "Container", detail.Instance.Type)
+	require.False(t, detail.Instance.Running, "a created instance is not started")
+	t.Logf("created %s: architecture=%s profiles=%v config=%d devices=%d",
+		detail.Instance.Name, detail.Architecture, detail.Profiles, len(detail.Config), len(detail.Devices))
 }

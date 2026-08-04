@@ -85,6 +85,7 @@ type State struct {
 }
 
 type Manager interface {
+	CreateInstance(context.Context, string, string, string, string, string) error
 	CreateSnapshot(context.Context, string, string, string) error
 	DeleteSnapshot(context.Context, string, string, string) error
 	Detail(context.Context, string, string) (Detail, error)
@@ -103,6 +104,7 @@ type Manager interface {
 
 type Client interface {
 	ConsoleLog(context.Context, string, string) (io.ReadCloser, error)
+	CreateFromImage(context.Context, string, string, string, string, string) error
 	CreateSnapshot(context.Context, string, string, string) error
 	DeleteSnapshot(context.Context, string, string, string) error
 	Images(context.Context, string) ([]api.Image, error)

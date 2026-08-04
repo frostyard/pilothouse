@@ -15,6 +15,7 @@ const (
 	ActionDockerRestart        = "org.frostyard.pilothouse.docker.restart"
 	ActionDockerStart          = "org.frostyard.pilothouse.docker.start"
 	ActionDockerStop           = "org.frostyard.pilothouse.docker.stop"
+	ActionIncusCreate          = "org.frostyard.pilothouse.incus.create"
 	ActionIncusRemove          = "org.frostyard.pilothouse.incus.remove"
 	ActionIncusRemoveImage     = "org.frostyard.pilothouse.incus.remove_image"
 	ActionIncusRestart         = "org.frostyard.pilothouse.incus.restart"

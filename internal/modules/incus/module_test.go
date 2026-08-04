@@ -454,3 +454,58 @@ func TestNetworkAndProfileRoutesReportBrokerFailure(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, response.Code, path)
 	}
 }
+
+// TestCreateRouteSubmitsTrimmedForm proves the create route passes the
+// form through as the fixed background action's parameters, trimming
+// surrounding whitespace, and reports that the work started rather than
+// that it finished.
+func TestCreateRouteSubmitsTrimmedForm(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{
+		"image":   {"  debian/13  "},
+		"name":    {"  web-01  "},
+		"profile": {"  default  "},
+		"project": {"production"},
+		"type":    {"container"},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, broker.ActionIncusCreate, host.actionID)
+	assert.Equal(t, map[string]string{
+		"image": "debian/13", "name": "web-01", "profile": "default",
+		"project": "production", "type": "container",
+	}, host.actionParameters)
+	assert.Contains(t, response.Header().Get("Location"), "Instance+creation+started")
+}
+
+// TestCreateRouteSubmitsNoRemote is the web-side half of the guarantee that
+// the image server is not caller-controlled: whatever the form carries, the
+// action's parameter set never includes a remote or URL.
+func TestCreateRouteSubmitsNoRemote(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{
+		"image": {"debian/13"}, "name": {"web-01"}, "project": {"production"}, "type": {"container"},
+		"remote": {"https://evil.example"}, "server": {"https://evil.example"}, "url": {"https://evil.example"},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(httptest.NewRecorder(), request)
+
+	assert.Equal(t, broker.ActionIncusCreate, host.actionID)
+	for key, value := range host.actionParameters {
+		assert.NotContains(t, value, "evil.example", "parameter %q carried a caller-supplied host", key)
+	}
+	for _, key := range []string{"remote", "server", "url"} {
+		assert.NotContains(t, host.actionParameters, key)
+	}
+}

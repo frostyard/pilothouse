@@ -22,6 +22,7 @@ type fakeClient struct {
 	buckets       map[string][]api.StorageBucket
 	consoleError  error
 	consoleLog    string
+	createError   error
 	images        []api.Image
 	instanceErr   error
 	instances     []api.InstanceFull
@@ -48,6 +49,12 @@ func (client *fakeClient) ConsoleLog(_ context.Context, project, name string) (i
 		return nil, client.consoleError
 	}
 	return io.NopCloser(strings.NewReader(client.consoleLog)), nil
+}
+
+func (client *fakeClient) CreateFromImage(_ context.Context, project, name, alias, instanceType, profile string) error {
+	client.actions = append(client.actions,
+		"create "+project+" "+name+" "+alias+" "+instanceType+" profile="+profile)
+	return client.createError
 }
 
 func (client *fakeClient) CreateSnapshot(_ context.Context, project, instance, name string) error {

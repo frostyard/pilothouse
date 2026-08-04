@@ -14,11 +14,11 @@ landed behavior, not a future guarantee, and
 `cmd/pilothoused/capability_contract_test.go` enforces the full table across
 a fixture matrix of capability sets.
 
-**Running total:** `internal/broker/api.go` declares exactly 39 `Action*`
-constants and 23 `Query*` constants today — 62 IDs total, reproducible with:
+**Running total:** `internal/broker/api.go` declares exactly 40 `Action*`
+constants and 23 `Query*` constants today — 63 IDs total, reproducible with:
 
 ```sh
-grep -c '^[[:space:]]*Action' internal/broker/api.go   # 39
+grep -c '^[[:space:]]*Action' internal/broker/api.go   # 40
 grep -c '^[[:space:]]*Query' internal/broker/api.go    # 23
 ```
 
@@ -27,11 +27,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 62 IDs is registered exactly once across the four
+Every one of the 63 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 39/23 above, not IDs
-added on top. This table therefore has exactly 62 rows.
+via `StreamQueryRegistry`) — both are members of the 40/23 above, not IDs
+added on top. This table therefore has exactly 63 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +40,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-39/23/62 all fail the build. It additionally checks that an `Action*`
+40/23/63 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -127,10 +127,9 @@ instance with no way to stop it from the console at all.
 
 `QueryIncusNetwork` (`org.frostyard.pilothouse.incus.network`) and
 `QueryIncusProfile` (`org.frostyard.pilothouse.incus.profile`) are the newest
-IDs, added by the Incus networks-and-profiles phase, and are why the totals
-above now read 39/23/62. Both belong to the `incus` module, both are ordinary
+IDs, added by the Incus networks-and-profiles phase, raising the totals to 39/23/62. Both belong to the `incus` module, both are ordinary
 all-of rows guarded by `caps.Has(capability.Incus)`, and both are read-only:
-this phase declares no `Action*` constant, so the action total stays at 39.
+that phase declared no `Action*` constant.
 Neither rendered page contains a form, a button, or any other control.
 
 `QueryIncusNetwork` is the third surface built on an **allowlist**, and it
@@ -159,6 +158,41 @@ networks — so `NetworkDetail` carries a separate `LeasesAvailable` flag that
 distinguishes "no leases" from "leases cannot be read", and the unmanaged
 case is never asked for leases at all.
 
+`ActionIncusCreate` (`org.frostyard.pilothouse.incus.create`) is the newest
+ID, added by the Incus instance-creation phase, and is why the totals above
+now read 40/23/63. It belongs to the `incus` module, is administrator-only,
+and is an ordinary all-of row guarded by `caps.Has(capability.Incus)`.
+
+It is the module's **only background action** and the daemon's first
+outbound network operation. Creating an instance downloads an image, which
+routinely takes minutes, so it is registered with `Background: true` and a
+30-minute timeout: the broker enqueues a durable job, holds the new
+instance's own `incus/instance/<project>/<name>` lock for the duration, and
+returns immediately. The web notice therefore says creation *started*, not
+that it finished; the outcome lands in Activity.
+
+**The image server is a compile-time constant, never a parameter.**
+`imageRemote` in `internal/modules/incus/create.go` is
+`https://images.linuxcontainers.org` — the server the `images:` remote
+points at — and the action's parameter set (`project`, `name`, `image`,
+`type`, `profile`) contains no remote, server or URL field at all. This is
+the property that keeps the action a fixed operation rather than a generic
+fetcher, and it is asserted from both sides: a manager-side test pins the
+constant, and a web-side test submits `remote`/`server`/`url` form fields
+and asserts none of them reaches the action's parameters.
+
+Everything the operator does supply is validated broker-side before
+anything reaches the network: the instance name against the same rule every
+other instance action uses, the type against the closed pair
+`container`/`virtual-machine`, the profile against the project's live
+profile list, and the image alias against a shape check that rejects empty,
+`.` and `..` path segments. The alias is then resolved explicitly on the
+fixed remote — rather than handed to the daemon unresolved, which is what
+the Incus CLI does for a simplestreams remote — so an alias that does not
+exist fails immediately with a clear message instead of surfacing later as a
+failed background job. Instances Pilothouse creates are never stateful and
+carry no caller-supplied device or configuration overrides.
+
 **#64 added no broker ID.** Both commands above were re-run against this
 tree at the close of #64 (optional engines and `updex` become explicitly
 opt-in, mock Fleet moves behind `--dev`) and still printed 35 and 19 — 54 IDs
@@ -185,6 +219,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionDockerRestart` | docker | docker |
 | `ActionDockerStart` | docker | docker |
 | `ActionDockerStop` | docker | docker |
+| `ActionIncusCreate` | incus | incus |
 | `ActionIncusRemove` | incus | incus |
 | `ActionIncusRemoveImage` | incus | incus |
 | `ActionIncusRestart` | incus | incus |
@@ -958,7 +993,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 62 IDs, and asserts the two helpers do not
+are disjoint and together cover all 63 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as

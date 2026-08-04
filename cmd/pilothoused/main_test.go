@@ -1409,6 +1409,9 @@ func TestRegisterDockerRegistersEverythingWithDockerCapability(t *testing.T) {
 
 type fakeIncusManager struct{}
 
+func (fakeIncusManager) CreateInstance(context.Context, string, string, string, string, string) error {
+	return nil
+}
 func (fakeIncusManager) CreateSnapshot(context.Context, string, string, string) error  { return nil }
 func (fakeIncusManager) DeleteSnapshot(context.Context, string, string, string) error  { return nil }
 func (fakeIncusManager) RestoreSnapshot(context.Context, string, string, string) error { return nil }
@@ -1449,7 +1452,7 @@ func TestRegisterIncusNoOpsWithoutIncusCapability(t *testing.T) {
 		assert.False(t, queries.Registered(id))
 	}
 	for _, id := range []string{
-		broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart,
+		broker.ActionIncusCreate, broker.ActionIncusRemove, broker.ActionIncusRemoveImage, broker.ActionIncusRestart,
 		broker.ActionIncusSnapshotCreate, broker.ActionIncusSnapshotDelete, broker.ActionIncusSnapshotRestore,
 		broker.ActionIncusStart, broker.ActionIncusStop, broker.ActionIncusStopForce,
 	} {

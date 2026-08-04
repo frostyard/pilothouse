@@ -387,3 +387,35 @@ func TestDetailPagesExposeNoMutationControl(t *testing.T) {
 	assert.NotContains(t, profile.String(), "<form")
 	assert.NotContains(t, profile.String(), "<button")
 }
+
+// TestPageRendersCreateFormForAdmin proves the creation form renders for an
+// admin, offers exactly the two supported types, and lists the project's
+// profiles alongside a default option.
+func TestPageRendersCreateFormForAdmin(t *testing.T) {
+	state := State{
+		Project:  "production",
+		Profiles: []Profile{{Name: "default"}, {Name: "web"}},
+	}
+	var output strings.Builder
+	require.NoError(t, Page(state, "token", true).Render(context.Background(), &output))
+	html := output.String()
+
+	assert.Contains(t, html, `action="/incus/instances"`)
+	assert.Contains(t, html, "Create instance")
+	assert.Contains(t, html, `value="container"`)
+	assert.Contains(t, html, `value="virtual-machine"`)
+	assert.Contains(t, html, "Default for the project")
+	assert.Contains(t, html, `value="web"`)
+	// The form offers no way to name an image server.
+	assert.NotContains(t, html, "linuxcontainers.org")
+	assert.NotContains(t, html, `name="remote"`)
+	assert.NotContains(t, html, `name="server"`)
+}
+
+func TestPageHidesCreateFormForNonAdmin(t *testing.T) {
+	state := State{Project: "production", Profiles: []Profile{{Name: "default"}}}
+	var output strings.Builder
+	require.NoError(t, Page(state, "token", false).Render(context.Background(), &output))
+	assert.NotContains(t, output.String(), `action="/incus/instances"`)
+	assert.NotContains(t, output.String(), "Create instance")
+}

@@ -190,6 +190,25 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 		err := host.Execute(ctx, r, actionID, map[string]string{"name": name, "project": project})
 		m.redirect(w, r, project, successMessages[action], err)
 	}))
+	// Instance creation is a background broker action: the daemon queues a
+	// durable job and returns immediately, so the notice says the work
+	// started rather than that it finished.
+	mux.HandleFunc("POST /incus/instances", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {
+		if !host.ValidateAction(w, r) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		project := r.FormValue("project")
+		err := host.Execute(ctx, r, broker.ActionIncusCreate, map[string]string{
+			"image":   strings.TrimSpace(r.FormValue("image")),
+			"name":    strings.TrimSpace(r.FormValue("name")),
+			"profile": strings.TrimSpace(r.FormValue("profile")),
+			"project": project,
+			"type":    r.FormValue("type"),
+		})
+		m.redirect(w, r, project, "Instance creation started. Progress appears in Activity.", err)
+	}))
 	// Snapshot creation names a new snapshot, so the name arrives in the
 	// form rather than the path; the broker validates it again before use.
 	mux.HandleFunc("POST /incus/instances/{name}/snapshots", platform.Gate(host, []capability.ID{capability.Incus}, func(w http.ResponseWriter, r *http.Request) {

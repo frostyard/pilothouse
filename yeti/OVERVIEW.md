@@ -229,7 +229,7 @@ by accident. Current modules:
 | `sysext` | `updex` definition/install state and `systemd-sysext` merge state, read entirely through the broker's `QueryExtensionsState` aggregate (no local `updex`/`systemd-sysext` invocation in the web process — the exec-backed implementation lives in the `sysext/extctl` subpackage that only `cmd/pilothoused` links); surfaces per-extension and aggregate component update availability (the responsibility that moved off Maintenance in #52); install/remove/update/refresh actions. Whole-module `CapabilityGateAny` on `updex OR sysext`, with narrower per-route/per-action guards. |
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
-| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; read-only network and profile inventory with per-network DHCP leases and allowlisted configuration; lifecycle actions including a distinct force stop. Storage, network and profile reads each degrade independently rather than failing the page. |
+| `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; read-only network and profile inventory with per-network DHCP leases and allowlisted configuration; instance creation from a fixed public image server as a background job; lifecycle actions including a distinct force stop. Storage, network and profile reads each degrade independently rather than failing the page. |
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
@@ -412,10 +412,10 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (62 IDs,
+  withheld. `docs/capabilities.md`'s binding table carries the row (63 IDs,
   23 queries; the newest IDs are the Incus phases' `QueryIncusInstance`,
-  `QueryIncusLogs`, `QueryIncusNetwork`, `QueryIncusProfile`, and the four
-  snapshot/force-stop actions) and
+  `QueryIncusLogs`, `QueryIncusNetwork`, `QueryIncusProfile`, the four
+  snapshot/force-stop actions, and `ActionIncusCreate`) and
   `cmd/pilothoused/capability_contract_test.go` exercises it
   across bootc-only, rpm-ostree-only, both, and neither fixtures.
 - `maintenance.SystemManager` consumes the staged-deployment fact. `State` is
@@ -1113,8 +1113,9 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   in the module's own `Mount`: `GET /incus`,
   `POST /incus/instances/{name}/{action}`, and
   `POST /incus/images/{fingerprint}/{action}`. (The instance-depth phase has
-  since added four read-only routes and two snapshot routes behind the same
-  gate — see the Incus sections below — so the module now has nine.) With incus
+  since added four read-only routes, two snapshot routes and a creation
+  route behind the same gate — see the Incus sections below — so the module
+  now has ten.) With incus
   absent, the whole module disappears — nav entry, dashboard card, and every
   one of those routes 404s at request time — while podman, docker, and the
   rest of the app are
@@ -1333,8 +1334,8 @@ place, so a reader who lands here first does not have to reassemble it.
   `internal/broker/api.go` declared 35 `Action*` and 19 `Query*` constants
   (54 total) both before and after it, and `docs/capabilities.md`'s binding
   table and both capability contract tests were unchanged in shape and count.
-  (The three Incus phases have since taken the query total to 23, the action
-  total to 39, and the overall total to 62.) Both contract harnesses build fixtures
+  (The four Incus phases have since taken the query total to 23, the action
+  total to 40, and the overall total to 63.) Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
 - **Systemd units.** Both packaged broker units
@@ -1540,6 +1541,58 @@ render the detail, both behind the module's existing whole-module gate.
 Neither page contains a form or a button, and `views_test.go` asserts that
 directly: there is no mutating counterpart in the broker's ID vocabulary for
 either surface.
+
+### Incus instance creation (the one background action)
+
+`ActionIncusCreate` is the Incus module's only background action and the
+daemon's first outbound network operation. Both facts drive its shape.
+
+- **Background, because an image download takes minutes.** It registers with
+  `Background: true` and a 30-minute timeout, so the broker enqueues a
+  durable job (`jobs.db`), holds the new instance's own
+  `incus/instance/<project>/<name>` lock for the duration, and returns
+  immediately — the same mechanism `ActionSysextUpdate` uses. Two creates of
+  the same name in the same project cannot race: the second fails with
+  "resource already has a maintenance job" rather than queueing behind the
+  first. The web notice says creation *started*; the outcome lands in
+  Activity. Locking per instance rather than globally is deliberate —
+  creating two different instances at once is ordinary.
+
+- **The remote is a constant, never a parameter.** `imageRemote` is
+  `https://images.linuxcontainers.org`, the server the `images:` remote
+  points at, and the action's parameter set (`project`, `name`, `image`,
+  `type`, `profile`) has no remote, server or URL field. That is what keeps
+  this a fixed operation rather than a generic fetcher the broker could be
+  pointed anywhere, and it is asserted from both ends: a manager-side test
+  pins the constant, and a web-side test posts `remote`/`server`/`url` form
+  fields and proves none of them reaches the action's parameters.
+
+- **Resolve the alias explicitly.** The Incus CLI's `getImgInfo` takes a
+  shortcut for a simplestreams remote: it builds a synthetic
+  `api.Image{Fingerprint: alias, Public: true}` and lets the server resolve
+  the alias during the copy. `CreateFromImage` instead calls
+  `GetImageAliasType(instanceType, alias)` and `GetImage` against the fixed
+  remote first, so a nonexistent alias fails immediately with a readable
+  message rather than several minutes later as a failed background job. The
+  remote conversation is bounded by its own 60-second HTTP client; the
+  transfer itself is the daemon's work and is bounded by the action timeout.
+
+- **`RemoteOperation.Wait()` takes no context.** Unlike `Operation`, the
+  remote-copy operation's `Wait` cannot be cancelled, so calling it directly
+  would make the background action's timeout meaningless — the call would
+  block until Incus gave up on its own. `waitRemote` races `Wait()` against
+  `ctx.Done()` and calls `CancelTarget()` on expiry, so the timeout actually
+  bounds the work and a cancelled transfer is abandoned rather than left
+  running unattended. Check for this whenever an SDK hands back a waiter
+  with no context parameter.
+
+Validation is broker-side and happens before anything reaches the network:
+the instance name against the same rule every other instance action uses, the
+type against the closed `container`/`virtual-machine` pair, the profile
+against the project's live profile list (rediscovered, not trusted), and the
+alias against a shape check that rejects empty, `.` and `..` path segments.
+A name that already exists is refused. Instances Pilothouse creates carry no
+caller-supplied device or configuration overrides.
 
 ### templ + HTMX, server-rendered, progressive enhancement
 

@@ -108,8 +108,8 @@ func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 	return allOfPresent(caps, row.required)
 }
 
-// capabilityTable is the complete 62-row mirror of docs/capabilities.md.
-// Every Action*/Query* constant declared in internal/broker/api.go (39
+// capabilityTable is the complete 63-row mirror of docs/capabilities.md.
+// Every Action*/Query* constant declared in internal/broker/api.go (40
 // Action* + 23 Query*, the 23 including QueryCapabilities,
 // QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, and
 // the two Incus instance-depth queries QueryIncusInstance and
@@ -123,13 +123,14 @@ func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 // and whether the requirement is satisfied by any one of them (true) rather
 // than all of them (false).
 var capabilityTable = []capabilityRequirement{
-	// Actions (39).
+	// Actions (40).
 	{broker.ActionFilesUpload, inStreamActions, nil, false},
 	{broker.ActionDockerRemove, inActions, []capability.ID{capability.Docker}, false},
 	{broker.ActionDockerRemoveImage, inActions, []capability.ID{capability.Docker}, false},
 	{broker.ActionDockerRestart, inActions, []capability.ID{capability.Docker}, false},
 	{broker.ActionDockerStart, inActions, []capability.ID{capability.Docker}, false},
 	{broker.ActionDockerStop, inActions, []capability.ID{capability.Docker}, false},
+	{broker.ActionIncusCreate, inActions, []capability.ID{capability.Incus}, false},
 	{broker.ActionIncusRemove, inActions, []capability.ID{capability.Incus}, false},
 	{broker.ActionIncusRemoveImage, inActions, []capability.ID{capability.Incus}, false},
 	{broker.ActionIncusRestart, inActions, []capability.ID{capability.Incus}, false},
@@ -191,7 +192,7 @@ var capabilityTable = []capabilityRequirement{
 
 // moduleLevelNoneIDs is the exact 7 broker IDs whose documented requirement
 // is "none" -- the only IDs a minimal (empty capability.Set) fixture should
-// register. Verified against capabilityTable at TestCapabilityTableHasExactlySixtyTwoRows.
+// register. Verified against capabilityTable at TestCapabilityTableHasExactlySixtyThreeRows.
 var moduleLevelNoneIDs = []string{
 	broker.QueryFilesList,
 	broker.QueryFilesDownload,
@@ -276,7 +277,7 @@ func declaredBrokerIDs(t *testing.T) []declaredBrokerID {
 // against internal/broker/api.go's live Action*/Query* declarations in both
 // directions, so neither a new constant missing from the table nor a table
 // row naming an ID that no longer exists can survive. It also pins the
-// documented 39/23/62 totals to the parsed source rather than to the table,
+// documented 40/23/63 totals to the parsed source rather than to the table,
 // and cross-checks that an Action* constant is filed in an action registry
 // and a Query* constant in a query registry.
 func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
@@ -293,9 +294,9 @@ func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
 			declaredQueries++
 		}
 	}
-	assert.Equal(t, 39, declaredActions, "%s must declare 39 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Equal(t, 40, declaredActions, "%s must declare 40 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
 	assert.Equal(t, 23, declaredQueries, "%s must declare 23 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Len(t, declared, 62, "%s must declare 62 broker IDs in total", brokerAPIPath)
+	assert.Len(t, declared, 63, "%s must declare 63 broker IDs in total", brokerAPIPath)
 
 	tableIDs := make(map[string]capabilityRequirement, len(capabilityTable))
 	for _, row := range capabilityTable {
@@ -342,7 +343,7 @@ func TestNoHostImageMutationActionExists(t *testing.T) {
 			assert.NotContainsf(t, lowerValue, needle, "%s declares mutation action %s with wire ID %q, which names %q; #51 exposes no host-image mutation action", brokerAPIPath, entry.name, entry.value, needle)
 		}
 	}
-	require.Equal(t, 39, actionCount, "expected to have scanned all 39 Action* constants; a zero/short scan would make the assertions above vacuous")
+	require.Equal(t, 40, actionCount, "expected to have scanned all 40 Action* constants; a zero/short scan would make the assertions above vacuous")
 }
 
 // TestMaintenanceNeverReferencesZincati enforces the spec's "Maintenance does
@@ -425,8 +426,8 @@ func nonCommentMentions(t *testing.T, path string, source []byte, isGo bool, nee
 	return mentions
 }
 
-func TestCapabilityTableHasExactlySixtyTwoRows(t *testing.T) {
-	require.Len(t, capabilityTable, 62, "docs/capabilities.md documents 62 broker IDs (39 Action* + 23 Query*, including QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, QueryIncusInstance, QueryIncusLogs, and the four Incus snapshot/force-stop actions)")
+func TestCapabilityTableHasExactlySixtyThreeRows(t *testing.T) {
+	require.Len(t, capabilityTable, 63, "docs/capabilities.md documents 63 broker IDs (40 Action* + 23 Query*, including QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, QueryIncusInstance, QueryIncusLogs, and the four Incus snapshot/force-stop actions)")
 	seen := make(map[string]bool, len(capabilityTable))
 	actionCount, queryCount := 0, 0
 	for _, row := range capabilityTable {
@@ -445,7 +446,7 @@ func TestCapabilityTableHasExactlySixtyTwoRows(t *testing.T) {
 			assert.NotEmpty(t, row.required, "any-of row %s must list at least one capability", row.id)
 		}
 	}
-	assert.Equal(t, 39, actionCount, "expected 39 Action* IDs")
+	assert.Equal(t, 40, actionCount, "expected 40 Action* IDs")
 	assert.Equal(t, 23, queryCount, "expected 23 Query* IDs")
 	none := 0
 	for _, row := range capabilityTable {
@@ -769,12 +770,13 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 }
 
 // TestCapabilityContractAllOnReproducesPrePhaseBehavior asserts the all-on
-// fixture registers every one of the 62 IDs -- reproducing pre-phase
+// fixture registers every one of the 63 IDs -- reproducing pre-phase
 // behavior exactly for the 50 pre-existing Action*/Query* constants, plus
 // QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus,
 // QueryExtensionsState, and the six IDs the two Incus phases added
 // (QueryIncusInstance, QueryIncusLogs, the three snapshot actions, and
-// ActionIncusStopForce, QueryIncusNetwork and QueryIncusProfile) -- 62 total,
+// ActionIncusStopForce, QueryIncusNetwork, QueryIncusProfile and
+// ActionIncusCreate) -- 63 total,
 // since every documented requirement is a
 // subset of the full capability vocabulary.
 func TestCapabilityContractAllOnReproducesPrePhaseBehavior(t *testing.T) {
