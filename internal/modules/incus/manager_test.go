@@ -365,3 +365,48 @@ func stateClient() *fakeClient {
 		volumeErrors: map[string]error{},
 	}
 }
+
+// TestUnknownCountersAreNotReportedAsMeasurements covers what a real
+// virtual machine without the guest agent returns: Incus uses -1 as its
+// "cannot determine" sentinel for the process count, and reports a zero CPU
+// usage. Neither is a measurement, so neither may reach the page as one.
+func TestUnknownCountersAreNotReportedAsMeasurements(t *testing.T) {
+	client := stateClient()
+	state := runningState()
+	state.Processes = -1
+	state.CPU.Usage = 0
+	client.instances[1].State = state
+
+	result, err := NewSystemManager(client).State(context.Background(), "production")
+	require.NoError(t, err)
+
+	instance := result.Instances[0]
+	require.Equal(t, "api", instance.Name)
+	assert.Zero(t, instance.Processes, "an unknown process count must not surface as -1")
+	assert.Zero(t, instance.CPUTime)
+	assert.Equal(t, "—", processLabel(instance))
+	assert.Equal(t, "no CPU time reported", cpuLabel(instance))
+
+	// Memory is still a real reading and must survive.
+	assert.Equal(t, uint64(268435456), instance.Memory)
+}
+
+// TestInterfaceWithNoAddressesIsStillReported covers the same host: a VM
+// whose interface exists but reports no addresses yet must still appear in
+// the detail page's interface table rather than vanishing.
+func TestInterfaceWithNoAddressesIsStillReported(t *testing.T) {
+	client := stateClient()
+	state := runningState()
+	state.Network = map[string]api.InstanceStateNetwork{
+		"eth0": {Hwaddr: "00:16:3e:aa:bb:cc", Mtu: 1500, State: "up"},
+	}
+	client.instances[1].State = state
+
+	value, err := NewSystemManager(client).Detail(context.Background(), "production", "api")
+	require.NoError(t, err)
+	require.Len(t, value.Networks, 1)
+	assert.Equal(t, "eth0", value.Networks[0].Name)
+	assert.Empty(t, value.Networks[0].Addresses)
+	assert.Equal(t, "—", joinValues(value.Networks[0].Addresses))
+	assert.Empty(t, value.Instance.Addresses)
+}

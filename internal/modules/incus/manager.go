@@ -637,8 +637,16 @@ func listInstance(item api.InstanceFull) Instance {
 		return instance
 	}
 	instance.Addresses = globalAddresses(item.State)
-	instance.CPUTime = item.State.CPU.Usage
-	instance.Processes = item.State.Processes
+	if item.State.CPU.Usage > 0 {
+		instance.CPUTime = item.State.CPU.Usage
+	}
+	// Incus reports -1 for a process count it cannot determine — a virtual
+	// machine without the guest agent running is the common case. Only a
+	// positive count is a measurement, so anything else stays at the zero
+	// value the struct documents as "not reported".
+	if item.State.Processes > 0 {
+		instance.Processes = item.State.Processes
+	}
 	if item.State.Memory.Usage > 0 {
 		instance.Memory = uint64(item.State.Memory.Usage)
 	}

@@ -1368,7 +1368,15 @@ exists. Three things carry it:
   which gained `Addresses`, `CPUTime`, `Memory`, `Processes`, `Snapshots` and
   `StartedAt`. `State` is nil for a stopped instance, so every live field
   stays at its Go zero value — the page renders those as a dash rather than
-  as a measured zero. Addresses are filtered to Incus's `global` scope, which
+  as a measured zero. A *running* instance can also fail to report a given
+  counter, and Incus does not always spell that as zero: it returns
+  **`processes: -1`** when it cannot determine a process count, which is the
+  normal case for a virtual machine whose guest agent is not running. Only a
+  positive process count and a positive CPU usage are treated as
+  measurements; anything else falls back to the same "not reported" zero, so
+  no page ever renders `-1`. Check each counter's own unknown spelling before
+  trusting it — this one was found by running the module against a real VM,
+  not by any fixture. Addresses are filtered to Incus's `global` scope, which
   drops loopback (`local`) and link-local (`link`) without matching on
   interface names, then sorted so map iteration order cannot reorder them.
   This makes the dashboard card's `QueryIncusState` call heavier than it was;
