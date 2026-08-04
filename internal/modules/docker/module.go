@@ -2,10 +2,8 @@ package docker
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/frostyard/pilothouse/internal/broker"
@@ -20,6 +18,22 @@ var actionIDs = map[string]string{
 	"restart": broker.ActionDockerRestart,
 	"start":   broker.ActionDockerStart,
 	"stop":    broker.ActionDockerStop,
+}
+
+// confirmTitles and successMessages are written out per action rather than
+// derived from the action word. Deriving the success message as
+// "Container %sd" is correct only for "remove"; it produced "Container
+// startd", "Container stopd", and "Container restartd".
+var confirmTitles = map[string]string{
+	"remove": "Remove container",
+	"stop":   "Stop container",
+}
+
+var successMessages = map[string]string{
+	"remove":  "Container removed",
+	"restart": "Container restarted",
+	"start":   "Container started",
+	"stop":    "Container stopped",
 }
 
 func New() *Module {
@@ -92,13 +106,13 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 			http.NotFound(w, r)
 			return
 		}
-		if (action == "stop" || action == "remove") && !host.ConfirmAction(w, r, strings.ToUpper(action[:1])+action[1:]+" container", "docker/container/"+id) {
+		if (action == "stop" || action == "remove") && !host.ConfirmAction(w, r, confirmTitles[action], "docker/container/"+id) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
 		err := host.Execute(ctx, r, actionID, map[string]string{"id": id})
-		m.redirect(w, r, fmt.Sprintf("Container %sd", r.PathValue("action")), err)
+		m.redirect(w, r, successMessages[action], err)
 	}))
 	mux.HandleFunc("POST /docker/images/{id}/{action}", platform.Gate(host, []capability.ID{capability.Docker}, func(w http.ResponseWriter, r *http.Request) {
 		if !host.ValidateAction(w, r) {
