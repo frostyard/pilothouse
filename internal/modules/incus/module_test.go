@@ -27,6 +27,7 @@ type fakeHost struct {
 	actionID         string
 	actionParameters map[string]string
 	queryError       error
+	queryID          string
 	queryParameters  map[string]string
 	// caps overrides Capabilities' return value when capsSet is true.
 	// Leaving both zero (the default for a bare &fakeHost{}) falls back to
@@ -74,12 +75,32 @@ func TestImageActionDispatchAndUnknown(t *testing.T) {
 func (host *fakeHost) Identity(*http.Request) auth.Identity { return auth.Identity{Admin: true} }
 
 func (host *fakeHost) Query(_ context.Context, id string, parameters map[string]string, target any) error {
+	host.queryID = id
 	host.queryParameters = parameters
 	if host.queryError != nil {
 		return host.queryError
 	}
-	if id == broker.QueryIncusState {
+	switch id {
+	case broker.QueryIncusState:
 		*target.(*State) = State{Project: parameters["project"], Projects: []Project{{Name: parameters["project"]}}}
+	case broker.QueryIncusInstance:
+		*target.(*Detail) = Detail{
+			Instance: Instance{Name: parameters["name"], Running: true, Type: "Container"},
+			Project:  parameters["project"],
+		}
+	case broker.QueryIncusNetwork:
+		*target.(*NetworkDetail) = NetworkDetail{
+			Managed: true, Name: parameters["name"], Project: parameters["project"], Type: "bridge",
+		}
+	case broker.QueryIncusProfile:
+		*target.(*ProfileDetail) = ProfileDetail{
+			Name: parameters["name"], Project: parameters["project"],
+		}
+	case broker.QueryIncusLogs:
+		*target.(*Logs) = Logs{
+			Lines: []LogLine{{Message: "canned log line"}}, Name: parameters["name"],
+			Project: parameters["project"], Source: parameters["source"],
+		}
 	}
 	return nil
 }
@@ -160,6 +181,10 @@ func TestRoutesGateOnIncusAbsent(t *testing.T) {
 
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodGet, "/incus", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/instances/api", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/networks/incusbr0", nil),
+		httptest.NewRequest(http.MethodGet, "/incus/profiles/default", nil),
 		httptest.NewRequest(http.MethodPost, "/incus/instances/api/start", nil),
 		httptest.NewRequest(http.MethodPost, "/incus/images/fingerprint/remove", nil),
 	} {
@@ -204,4 +229,283 @@ func TestRoutesWorkWhenIncusPresent(t *testing.T) {
 	mux.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusSeeOther, response.Code)
 	assert.Equal(t, map[string]string{"name": "api", "project": "production"}, host.actionParameters)
+}
+
+// TestDetailRouteQueriesInstance proves the detail route reaches the broker
+// through the fixed QueryIncusInstance ID carrying both the path's instance
+// name and the request's selected project, and renders the returned model.
+func TestDetailRouteQueriesInstance(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusInstance, host.queryID)
+	assert.Equal(t, map[string]string{"name": "api", "project": "production"}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "api")
+}
+
+func TestDetailRouteReportsBrokerFailure(t *testing.T) {
+	host := &fakeHost{queryError: errors.New("broker: unavailable")}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api?project=production", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+}
+
+// TestLogsRouteDefaultsToConsole pins the default source: arriving with no
+// source parameter reads the console log, which is what an operator wants
+// to see first.
+func TestLogsRouteDefaultsToConsole(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusLogs, host.queryID)
+	assert.Equal(t, map[string]string{"name": "api", "project": "production", "source": SourceConsole}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "canned log line")
+}
+
+func TestLogsRoutePassesSupervisorSource(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs?project=production&source=log", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, SourceLog, host.queryParameters["source"])
+}
+
+// TestLogsRouteRejectsUnknownSource proves the web side refuses an
+// unsupported source itself, without issuing a broker query at all, so a
+// crafted source never reaches the daemon.
+func TestLogsRouteRejectsUnknownSource(t *testing.T) {
+	for _, source := range []string{"lxc.log", "../../etc/passwd", "default", "LOG"} {
+		host := &fakeHost{}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs?source="+url.QueryEscape(source), nil))
+
+		assert.Equal(t, http.StatusNotFound, response.Code, "source %q", source)
+		assert.Empty(t, host.queryID, "source %q must be rejected before any broker query", source)
+	}
+}
+
+// TestLogsRouteDegradesOnBrokerFailure proves an unreadable log renders the
+// page in its unavailable state rather than failing the request, matching
+// how the other engine modules treat container diagnostics.
+func TestLogsRouteDegradesOnBrokerFailure(t *testing.T) {
+	host := &fakeHost{queryError: errors.New("broker: unavailable")}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/instances/api/logs?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "could not be read")
+}
+
+// TestSnapshotCreateRouteSubmitsFormName proves the create route passes the
+// form's snapshot name through as the fixed action's parameter and lands
+// back on the instance's own page.
+func TestSnapshotCreateRouteSubmitsFormName(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{"project": {"production"}, "snapshot": {"  before-patch  "}}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances/api/snapshots", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, broker.ActionIncusSnapshotCreate, host.actionID)
+	assert.Equal(t, map[string]string{"instance": "api", "project": "production", "snapshot": "before-patch"},
+		host.actionParameters, "surrounding whitespace is trimmed before submission")
+	assert.Contains(t, response.Header().Get("Location"), "/incus/instances/api?")
+	assert.Contains(t, response.Header().Get("Location"), "project=production")
+}
+
+func TestSnapshotActionRouteDispatchAndUnknown(t *testing.T) {
+	for action, id := range map[string]string{
+		"restore": broker.ActionIncusSnapshotRestore,
+		"delete":  broker.ActionIncusSnapshotDelete,
+	} {
+		host := &fakeHost{}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		form := url.Values{"project": {"production"}}
+		request := httptest.NewRequest(http.MethodPost, "/incus/instances/api/snapshots/nightly/"+action, strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+
+		require.Equal(t, http.StatusSeeOther, response.Code, action)
+		assert.Equal(t, id, host.actionID, action)
+		assert.Equal(t, map[string]string{"instance": "api", "project": "production", "snapshot": "nightly"}, host.actionParameters, action)
+		assert.Contains(t, response.Header().Get("Location"), "/incus/instances/api?", action)
+	}
+
+	// An unknown snapshot action is a 404 that dispatches nothing.
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/incus/instances/api/snapshots/nightly/purge", nil))
+	assert.Equal(t, http.StatusNotFound, response.Code)
+	assert.Empty(t, host.actionID)
+}
+
+// TestStopForceRouteDispatchesItsOwnAction proves force stop is a distinct
+// broker ID rather than a parameter on the graceful stop.
+func TestStopForceRouteDispatchesItsOwnAction(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{"project": {"production"}}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances/api/stop-force", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, broker.ActionIncusStopForce, host.actionID)
+	assert.NotEqual(t, broker.ActionIncusStop, host.actionID)
+}
+
+// TestInstanceActionMessagesReadAsEnglish pins the per-action wording,
+// which used to be derived from the action word and produced "Instance
+// startd" / "Instance stopd".
+func TestInstanceActionMessagesReadAsEnglish(t *testing.T) {
+	for action, want := range map[string]string{
+		"start":      "Instance+started",
+		"stop":       "Instance+stopped",
+		"restart":    "Instance+restarted",
+		"remove":     "Instance+removed",
+		"stop-force": "Instance+force+stopped",
+	} {
+		host := &fakeHost{}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		form := url.Values{"project": {"production"}}
+		request := httptest.NewRequest(http.MethodPost, "/incus/instances/api/"+action, strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+
+		assert.Contains(t, response.Header().Get("Location"), want, action)
+	}
+}
+
+func TestNetworkRouteQueriesNetwork(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/networks/incusbr0?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusNetwork, host.queryID)
+	assert.Equal(t, map[string]string{"name": "incusbr0", "project": "production"}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "incusbr0")
+}
+
+func TestProfileRouteQueriesProfile(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/incus/profiles/default?project=production", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, broker.QueryIncusProfile, host.queryID)
+	assert.Equal(t, map[string]string{"name": "default", "project": "production"}, host.queryParameters)
+	assert.Contains(t, response.Body.String(), "default")
+}
+
+func TestNetworkAndProfileRoutesReportBrokerFailure(t *testing.T) {
+	for _, path := range []string{"/incus/networks/incusbr0", "/incus/profiles/default"} {
+		host := &fakeHost{queryError: errors.New("broker: unavailable")}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equal(t, http.StatusServiceUnavailable, response.Code, path)
+	}
+}
+
+// TestCreateRouteSubmitsTrimmedForm proves the create route passes the
+// form through as the fixed background action's parameters, trimming
+// surrounding whitespace, and reports that the work started rather than
+// that it finished.
+func TestCreateRouteSubmitsTrimmedForm(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{
+		"image":   {"  debian/13  "},
+		"name":    {"  web-01  "},
+		"profile": {"  default  "},
+		"project": {"production"},
+		"type":    {"container"},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusSeeOther, response.Code)
+	assert.Equal(t, broker.ActionIncusCreate, host.actionID)
+	assert.Equal(t, map[string]string{
+		"image": "debian/13", "name": "web-01", "profile": "default",
+		"project": "production", "type": "container",
+	}, host.actionParameters)
+	assert.Contains(t, response.Header().Get("Location"), "Instance+creation+started")
+}
+
+// TestCreateRouteSubmitsNoRemote is the web-side half of the guarantee that
+// the image server is not caller-controlled: whatever the form carries, the
+// action's parameter set never includes a remote or URL.
+func TestCreateRouteSubmitsNoRemote(t *testing.T) {
+	host := &fakeHost{}
+	mux := http.NewServeMux()
+	New().Mount(mux, host)
+
+	form := url.Values{
+		"image": {"debian/13"}, "name": {"web-01"}, "project": {"production"}, "type": {"container"},
+		"remote": {"https://evil.example"}, "server": {"https://evil.example"}, "url": {"https://evil.example"},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/incus/instances", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(httptest.NewRecorder(), request)
+
+	assert.Equal(t, broker.ActionIncusCreate, host.actionID)
+	for key, value := range host.actionParameters {
+		assert.NotContains(t, value, "evil.example", "parameter %q carried a caller-supplied host", key)
+	}
+	for _, key := range []string{"remote", "server", "url"} {
+		assert.NotContains(t, host.actionParameters, key)
+	}
 }

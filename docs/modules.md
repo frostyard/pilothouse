@@ -560,6 +560,82 @@ reported as a warning finding in the storage snapshot without hiding the rest
 of the inventory, while create and delete refuse to proceed until it is
 resolved.
 
+Incus instance depth uses two fixed read-only queries.
+`org.frostyard.pilothouse.incus.instance` returns one instance's
+configuration, devices, interfaces and snapshots, and is the module's worked
+example of the "narrow presentation model" rule above: its configuration and
+device properties are built by **allowlist**
+(`internal/modules/incus/detail.go`'s `configKeys`, `configPrefixes`, and the
+per-device-type `deviceProperties` map), never by copying the instance's
+expanded configuration. An Incus instance's configuration routinely carries
+secrets — `user.user-data` holds cloud-init payloads with SSH keys and
+passwords, `environment.*` holds process environment, `raw.*` holds
+passthrough runtime configuration — and none of those namespaces is
+allowlisted. Allowlist rather than denylist whenever a model is derived from
+an external system's free-form key/value configuration: a key added by a
+later release of that system is then excluded until it is reviewed, rather
+than exposed by default.
+
+`org.frostyard.pilothouse.incus.logs` takes a fixed `source` selector
+accepting exactly `console` or `log` and **never a filename**. The daemon
+rejects any other value before reading, and for `log` derives the supervisor
+logfile from the resolved instance's own type (`lxc.log` for a container,
+`qemu.log` for a virtual machine). Prefer a closed enumeration the daemon
+resolves to a path over accepting a path from the caller, even a validated
+one — an enumeration has no traversal surface to get wrong. The
+`/incus/instances/{name}/logs` page polls for a bounded 200-line tail; only
+the broker daemon accesses the root-equivalent Incus socket.
+
+Incus snapshots are the daemon's first **three-identifier** actions
+(`org.frostyard.pilothouse.incus.snapshot_create`, `.snapshot_delete`, and
+`.snapshot_restore`). `registerProjectActions` in `cmd/pilothoused/main.go`
+binds exactly two parameters, so they register through its sibling
+`registerSnapshotActions`, whose `Resource` builds the fully qualified
+`incus/snapshot/<project>/<instance>/<snapshot>`. Use that sibling — rather
+than widening `registerProjectActions` — when a new action needs a third
+identifier, so each helper keeps one fixed parameter shape.
+
+Both destructive snapshot actions resolve the snapshot name against the
+instance's *live* snapshot list before mutating, exactly as `RemoveImage`
+resolves a fingerprint against the live image list; only creation, which
+names something that does not exist yet, uses a character-level validator.
+Prefer live rediscovery to charset validation wherever the identifier names
+an existing resource: it rejects more, and it does not reject resources
+created outside Pilothouse under laxer names.
+
+`org.frostyard.pilothouse.incus.stop_force` is a separate ID from
+`org.frostyard.pilothouse.incus.stop` rather than a `force` parameter on it.
+When one variant of an action is materially more dangerous than another,
+give it its own fixed ID so the audit trail distinguishes them.
+
+`org.frostyard.pilothouse.incus.network` and
+`org.frostyard.pilothouse.incus.profile` are the read-only network and
+profile surfaces. The profile query **reuses the instance allowlists**
+because a profile carries the same configuration and device shape; the
+network query needs its **own** allowlist because an Incus network's secret
+surface is different (`bgp.peers.<name>.password` is a BGP session password,
+and the `ovn.*`/`tunnel.*` families carry credentials). Derive an allowlist
+from the resource's actual key space rather than assuming a sibling
+resource's list transfers — and when a cheap list model exposes a field the
+detail model filters, route the list through the same predicate so the
+summary cannot become a bypass.
+
+`org.frostyard.pilothouse.incus.create` is the repo's worked example of a
+**fixed action that reaches the network**. The image server is a
+compile-time constant (`imageRemote`), not a parameter, so the action cannot
+be pointed at an arbitrary host; the parameter set carries no remote, server
+or URL field at all. When an action must contact something outside the host,
+pin the destination in code and validate every caller-supplied component
+against it — never accept an endpoint through the broker protocol.
+
+It is also the one Incus action registered with `Background: true`, because
+downloading an image takes minutes. Long privileged mutations belong in the
+broker's durable background-action definition (which enqueues a job, holds
+the resource lock, and returns immediately) rather than blocking a request
+or launching a goroutine from a web module. When the SDK's waiter takes no
+`context.Context` — as `RemoteOperation.Wait()` does — race it against
+`ctx.Done()` and cancel the target, or the action's timeout is decorative.
+
 Podman container diagnostics likewise use the fixed read-only
 `org.frostyard.pilothouse.podman.logs` query. The
 `/podman/containers/{id}/logs` page polls for a bounded 200-line tail; only the

@@ -61,9 +61,46 @@ templ Page(state State, csrf string, admin bool) {
 		<section class="engine-stats" aria-label="Incus summary">
 			<div class="engine-stat"><span>Running</span><strong>{ fmt.Sprint(runningCount(state)) }</strong><small>of { fmt.Sprint(len(state.Instances)) } instances</small></div>
 			<div class="engine-stat"><span>Stopped</span><strong>{ fmt.Sprint(len(state.Instances) - runningCount(state)) }</strong><small>instances</small></div>
+			<div class="engine-stat"><span>Memory</span><strong>{ formatBytes(memoryBytes(state)) }</strong><small>in use</small></div>
 			<div class="engine-stat"><span>Images</span><strong>{ fmt.Sprint(len(state.Images)) }</strong><small>{ formatBytes(imageBytes(state)) } local</small></div>
 			<div class="engine-stat"><span>Engine</span><strong class="version">{ state.Version }</strong><small>Incus</small></div>
 		</section>
+		if len(state.Warnings) > 0 {
+			<article class="card">
+				<div class="card-heading"><h2>Partial inventory</h2></div>
+				<ul class="notice-list">
+					for _, warning := range state.Warnings {
+						<li>{ warning }</li>
+					}
+				</ul>
+			</article>
+		}
+		if admin {
+			<article class="card">
+				<div class="card-heading"><h2>Create instance</h2><p>Launches from the public image server. The image is downloaded in the background; progress appears in Activity.</p></div>
+				<form class="page-intro" method="post" action="/incus/instances" hx-boost="false">
+					<input type="hidden" name="csrf" value={ csrf }/>
+					<input type="hidden" name="project" value={ state.Project }/>
+					<label for="incus-new-name">Name</label>
+					<input id="incus-new-name" name="name" type="text" required maxlength="63" placeholder="web-01"/>
+					<label for="incus-new-image">Image</label>
+					<input id="incus-new-image" name="image" type="text" required maxlength="128" placeholder="debian/13"/>
+					<label for="incus-new-type">Type</label>
+					<select id="incus-new-type" name="type">
+						<option value="container">Container</option>
+						<option value="virtual-machine">Virtual machine</option>
+					</select>
+					<label for="incus-new-profile">Profile</label>
+					<select id="incus-new-profile" name="profile">
+						<option value="">Default for the project</option>
+						for _, profile := range state.Profiles {
+							<option value={ profile.Name }>{ profile.Name }</option>
+						}
+					</select>
+					<button class="button" type="submit">Create</button>
+				</form>
+			</article>
+		}
 		<article class="card table-card">
 			<div class="table-toolbar"><h2>Instances</h2><span>{ fmt.Sprintf("%d total", len(state.Instances)) }</span></div>
 			if len(state.Instances) == 0 {
@@ -73,12 +110,22 @@ templ Page(state State, csrf string, admin bool) {
 				</div>
 			} else {
 				<table class="data-table">
-					<thead><tr><th>Instance</th><th>Type</th><th>Status</th><th></th></tr></thead>
+					<thead><tr><th>Instance</th><th>Type</th><th>Address</th><th>Memory</th><th>Status</th><th></th></tr></thead>
 					<tbody>
 						for _, instance := range state.Instances {
 							<tr>
-								<td><div class="extension-name"><span class="card-icon orange">@web.Icon("incus")</span><div><strong>{ instance.Name }</strong><small>{ instance.Image }</small></div></div></td>
+								<td>
+									<div class="extension-name">
+										<span class="card-icon orange">@web.Icon("incus")</span>
+										<div>
+											<a href={ instanceLink(state.Project, instance.Name) }><strong>{ instance.Name }</strong></a>
+											<small>{ instance.Image }</small>
+										</div>
+									</div>
+								</td>
 								<td>{ instance.Type }</td>
+								<td>{ addressLabel(instance) }</td>
+								<td>{ memoryLabel(instance) }</td>
 								<td>
 									if instance.Running {
 										<span class="badge active">Running</span>
@@ -121,6 +168,53 @@ templ Page(state State, csrf string, admin bool) {
 								@imageAction(state.Project, image.Fingerprint, "remove", csrf, true, fmt.Sprintf("In use by %d instance(s)", image.Instances))
 							}
 						</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Networks</h2><span>{ countLabel(len(state.Networks), "network") }</span></div>
+			if len(state.Networks) == 0 {
+				<div class="empty-state">No networks were found.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Network</th><th>Type</th><th>Managed</th><th>IPv4</th><th>Used by</th></tr></thead><tbody>
+					for _, item := range state.Networks {
+						<tr>
+							<td>
+								if item.Managed {
+									<a href={ networkLink(state.Project, item.Name) }><strong>{ item.Name }</strong></a>
+								} else {
+									<a href={ networkLink(state.Project, item.Name) }>{ item.Name }</a>
+								}
+							</td>
+							<td>{ item.Type }</td>
+							<td>
+								if item.Managed {
+									<span class="badge active">Managed</span>
+								} else {
+									<span class="badge">Observed</span>
+								}
+							</td>
+							<td>{ firstValue(item.IPv4, "—") }</td>
+							<td>{ fmt.Sprint(item.UsedBy) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Profiles</h2><span>{ countLabel(len(state.Profiles), "profile") }</span></div>
+			if len(state.Profiles) == 0 {
+				<div class="empty-state">No profiles were found in the { state.Project } project.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Profile</th><th>Description</th><th>Devices</th><th>Used by</th></tr></thead><tbody>
+					for _, item := range state.Profiles {
+						<tr>
+							<td><a href={ profileLink(state.Project, item.Name) }><strong>{ item.Name }</strong></a></td>
+							<td>{ firstValue(item.Description, "—") }</td>
+							<td>{ fmt.Sprint(item.Devices) }</td>
+							<td>{ fmt.Sprint(item.UsedBy) }</td>
+						</tr>
 					}
 				</tbody></table>
 			}
@@ -178,4 +272,325 @@ templ instanceAction(project, name, action, label, csrf, class string) {
 		<input type="hidden" name="project" value={ project }/>
 		<button class={ "button", class } type="submit">{ label }</button>
 	</form>
+}
+
+templ DetailPage(detail Detail, csrf string, admin bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ detail.Instance.Name }</h2>
+				<p>{ detail.Instance.Type } in the { detail.Project } project.</p>
+			</div>
+			<div class="actions">
+				<a class="button secondary" href={ logsLink(detail.Project, detail.Instance.Name, SourceConsole) }>View logs</a>
+				<a class="button secondary" href={ projectLink(detail.Project) }>Back to Incus</a>
+			</div>
+		</div>
+		<section class="engine-stats" aria-label="Instance summary">
+			<div class="engine-stat">
+				<span>Status</span>
+				if detail.Instance.Running {
+					<strong>Running</strong>
+				} else {
+					<strong>{ stateLabel(detail.Instance) }</strong>
+				}
+				<small>{ uptimeLabel(detail.Instance) }</small>
+			</div>
+			<div class="engine-stat"><span>Memory</span><strong>{ memoryLabel(detail.Instance) }</strong><small>{ memoryTotalLabel(detail) }</small></div>
+			<div class="engine-stat"><span>Processes</span><strong>{ processLabel(detail.Instance) }</strong><small>{ cpuLabel(detail.Instance) }</small></div>
+			<div class="engine-stat"><span>Architecture</span><strong>{ firstValue(detail.Architecture) }</strong><small>{ countLabel(len(detail.Snapshots), "snapshot") }</small></div>
+		</section>
+		if admin {
+			<article class="card">
+				<div class="card-heading split">
+					<div><h2>Lifecycle</h2><p>Actions are recorded in Activity.</p></div>
+					<div class="actions">
+						if detail.Instance.Running {
+							@instanceAction(detail.Project, detail.Instance.Name, "restart", "Restart", csrf, "secondary")
+							@instanceAction(detail.Project, detail.Instance.Name, "stop", "Stop", csrf, "danger")
+							@instanceAction(detail.Project, detail.Instance.Name, "stop-force", "Force stop", csrf, "danger")
+						} else {
+							@instanceAction(detail.Project, detail.Instance.Name, "start", "Start", csrf, "")
+							@instanceAction(detail.Project, detail.Instance.Name, "remove", "Remove", csrf, "danger")
+						}
+					</div>
+				</div>
+			</article>
+		}
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Network</h2><span>{ countLabel(len(detail.Networks), "interface") }</span></div>
+			if len(detail.Networks) == 0 {
+				<div class="empty-state">No interface state is reported. A stopped instance has none.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Interface</th><th>Addresses</th><th>Hardware address</th><th>MTU</th><th>State</th></tr></thead><tbody>
+					for _, item := range detail.Networks {
+						<tr>
+							<td><strong>{ item.Name }</strong></td>
+							<td>{ joinValues(item.Addresses) }</td>
+							<td><span class="version">{ firstValue(item.HWAddr) }</span></td>
+							<td>{ fmt.Sprint(item.MTU) }</td>
+							<td><span class="badge">{ firstValue(item.State) }</span></td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Snapshots</h2><span>{ fmt.Sprintf("%d total", len(detail.Snapshots)) }</span></div>
+			if admin {
+				<form class="page-intro" method="post" action={ snapshotCreateLink(detail.Instance.Name) } hx-boost="false">
+					<input type="hidden" name="csrf" value={ csrf }/>
+					<input type="hidden" name="project" value={ detail.Project }/>
+					<label for="incus-snapshot-name">New snapshot</label>
+					<input id="incus-snapshot-name" name="snapshot" type="text" required maxlength="63" placeholder="nightly"/>
+					<button class="button" type="submit">Create snapshot</button>
+				</form>
+				<p class="card-subtle">Snapshots are never stateful: a running instance's memory is not captured, and an instance must be stopped before a snapshot can be restored.</p>
+			}
+			if len(detail.Snapshots) == 0 {
+				<div class="empty-state">
+					<span class="card-icon orange">@web.Icon("incus")</span>
+					No snapshots exist for this instance.
+				</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Snapshot</th><th>Created</th><th>Expires</th><th>Stateful</th><th>Actions</th></tr></thead><tbody>
+					for _, item := range detail.Snapshots {
+						<tr>
+							<td><strong>{ item.Name }</strong></td>
+							<td>{ firstValue(item.CreatedAt) }</td>
+							<td>{ firstValue(item.ExpiresAt, "Never") }</td>
+							<td>
+								if item.Stateful {
+									<span class="badge active">Stateful</span>
+								} else {
+									<span class="badge">No</span>
+								}
+							</td>
+							<td>
+								<div class="actions">
+									if !admin {
+										<span class="card-subtle">No permission</span>
+									} else {
+										if detail.Instance.Running {
+											<span class="card-subtle" title="Stop the instance before restoring a snapshot">Stop to restore</span>
+										} else {
+											@snapshotAction(detail.Project, detail.Instance.Name, item.Name, "restore", "Restore", csrf, "secondary")
+										}
+										@snapshotAction(detail.Project, detail.Instance.Name, item.Name, "delete", "Delete", csrf, "danger")
+									}
+								</div>
+							</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Devices</h2><span>{ countLabel(len(detail.Devices), "device") } attached</span></div>
+			if len(detail.Devices) == 0 {
+				<div class="empty-state">No devices are attached beyond the profile defaults.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Device</th><th>Type</th><th>Properties</th></tr></thead><tbody>
+					for _, item := range detail.Devices {
+						<tr>
+							<td><strong>{ item.Name }</strong></td>
+							<td>{ firstValue(item.Type) }</td>
+							<td>{ entryLabel(item.Properties) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar">
+				<h2>Configuration</h2>
+				<span>Reviewed keys only</span>
+			</div>
+			<div class="page-intro">
+				<p>Pilothouse reports a fixed set of shape and posture keys. Cloud-init payloads, environment variables, and raw passthrough configuration are never read from the instance.</p>
+			</div>
+			if len(detail.Config) == 0 {
+				<div class="empty-state">This instance sets none of the reported configuration keys.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+					for _, item := range detail.Config {
+						<tr><td><span class="version">{ item.Key }</span></td><td>{ item.Value }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Profiles</h2><span>{ countLabel(len(detail.Profiles), "profile") } applied</span></div>
+			if len(detail.Profiles) == 0 {
+				<div class="empty-state">No profiles are applied to this instance.</div>
+			} else {
+				<div class="mini-list">
+					for _, profile := range detail.Profiles {
+						<div class="mini-row"><div><strong>{ profile }</strong></div></div>
+					}
+				</div>
+			}
+		</article>
+	</div>
+}
+
+templ LogsView(logs Logs, unavailable bool) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div><h2>{ logs.Name }</h2><p>{ sourceDescription(logs.Source) }</p></div>
+			<div class="actions">
+				<a class="button secondary" href={ logsLink(logs.Project, logs.Name, sourceAlternate(logs.Source)) }>{ sourceLabel(sourceAlternate(logs.Source)) }</a>
+				<a class="button secondary" href={ instanceLink(logs.Project, logs.Name) }>Back to instance</a>
+			</div>
+		</div>
+		<article id="instance-logs" class="card table-card" hx-get={ logsLink(logs.Project, logs.Name, logs.Source) } hx-trigger="every 5s" hx-select="#instance-logs" hx-target="#instance-logs" hx-swap="outerHTML">
+			<div class="table-toolbar"><h2>{ sourceLabel(logs.Source) }</h2><span>Last 200 lines</span></div>
+			if unavailable {
+				<div class="empty-state">{ unavailableLabel(logs.Source) }</div>
+			} else if len(logs.Lines) == 0 {
+				<div class="empty-state">No log output.</div>
+			} else {
+				<pre class="log-output">
+					for _, line := range logs.Lines {
+						{ line.Message }{ "\n" }
+					}
+				</pre>
+			}
+		</article>
+	</div>
+}
+
+templ snapshotAction(project, instance, snapshot, action, label, csrf, class string) {
+	<form method="post" action={ snapshotActionLink(instance, snapshot, action) } hx-boost="false">
+		<input type="hidden" name="csrf" value={ csrf }/>
+		<input type="hidden" name="project" value={ project }/>
+		<button class={ "button", class } type="submit">{ label }</button>
+	</form>
+}
+
+templ NetworkPage(detail NetworkDetail) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ detail.Name }</h2>
+				<p>{ networkSummary(detail) }</p>
+			</div>
+			<a class="button secondary" href={ projectLink(detail.Project) }>Back to Incus</a>
+		</div>
+		<section class="engine-stats" aria-label="Network summary">
+			<div class="engine-stat"><span>Type</span><strong>{ detail.Type }</strong><small>{ managedLabel(detail.Managed) }</small></div>
+			<div class="engine-stat"><span>State</span><strong>{ firstValue(detail.State) }</strong><small>MTU { fmt.Sprint(detail.MTU) }</small></div>
+			<div class="engine-stat"><span>Received</span><strong>{ receivedLabel(detail) }</strong><small>{ receivedPacketsLabel(detail) }</small></div>
+			<div class="engine-stat"><span>Sent</span><strong>{ sentLabel(detail) }</strong><small>{ sentPacketsLabel(detail) }</small></div>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Addresses</h2><span>{ firstValue(detail.HWAddr, "no hardware address") }</span></div>
+			if len(detail.Addresses) == 0 {
+				<div class="empty-state">No addresses are configured on this interface.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Address</th></tr></thead><tbody>
+					for _, address := range detail.Addresses {
+						<tr><td><span class="version">{ address }</span></td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>DHCP leases</h2><span>{ countLabel(len(detail.Leases), "lease") }</span></div>
+			if !detail.LeasesAvailable {
+				<div class="empty-state">
+					<span class="card-icon orange">@web.Icon("incus")</span>
+					Incus does not manage this network, so it tracks no leases for it.
+				</div>
+			} else if len(detail.Leases) == 0 {
+				<div class="empty-state">This network has issued no leases.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Address</th><th>Hostname</th><th>Hardware address</th><th>Type</th></tr></thead><tbody>
+					for _, lease := range detail.Leases {
+						<tr>
+							<td><span class="version">{ lease.Address }</span></td>
+							<td>{ firstValue(lease.Hostname, "—") }</td>
+							<td><span class="version">{ firstValue(lease.HWAddr, "—") }</span></td>
+							<td>{ firstValue(lease.Type, "—") }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Configuration</h2><span>Reviewed keys only</span></div>
+			<div class="page-intro">
+				<p>Pilothouse reports a fixed set of addressing, NAT, DHCP and DNS keys. BGP peer passwords, OVN and tunnel credentials are never read from the network.</p>
+			</div>
+			if len(detail.Config) == 0 {
+				<div class="empty-state">This network sets none of the reported configuration keys.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+					for _, item := range detail.Config {
+						<tr><td><span class="version">{ item.Key }</span></td><td>{ item.Value }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		@usedByCard(detail.UsedBy)
+	</div>
+}
+
+templ ProfilePage(detail ProfileDetail) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<div>
+				<h2>{ detail.Name }</h2>
+				<p>{ firstValue(detail.Description, "No description.") }</p>
+			</div>
+			<a class="button secondary" href={ projectLink(detail.Project) }>Back to Incus</a>
+		</div>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Devices</h2><span>{ countLabel(len(detail.Devices), "device") }</span></div>
+			if len(detail.Devices) == 0 {
+				<div class="empty-state">This profile attaches no devices.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Device</th><th>Type</th><th>Properties</th></tr></thead><tbody>
+					for _, item := range detail.Devices {
+						<tr>
+							<td><strong>{ item.Name }</strong></td>
+							<td>{ firstValue(item.Type) }</td>
+							<td>{ entryLabel(item.Properties) }</td>
+						</tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Configuration</h2><span>Reviewed keys only</span></div>
+			<div class="page-intro">
+				<p>A profile applies to every instance that inherits it, so the same fixed key set applies here. Cloud-init payloads, environment variables, and raw passthrough configuration are never read from the profile.</p>
+			</div>
+			if len(detail.Config) == 0 {
+				<div class="empty-state">This profile sets none of the reported configuration keys.</div>
+			} else {
+				<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+					for _, item := range detail.Config {
+						<tr><td><span class="version">{ item.Key }</span></td><td>{ item.Value }</td></tr>
+					}
+				</tbody></table>
+			}
+		</article>
+		@usedByCard(detail.UsedBy)
+	</div>
+}
+
+templ usedByCard(usedBy []string) {
+	<article class="card table-card">
+		<div class="table-toolbar"><h2>Used by</h2><span>{ countLabel(len(usedBy), "reference") }</span></div>
+		if len(usedBy) == 0 {
+			<div class="empty-state">Nothing references this.</div>
+		} else {
+			<div class="mini-list">
+				for _, reference := range usedBy {
+					<div class="mini-row"><div><strong>{ usedByLabel(reference) }</strong><small>{ reference }</small></div></div>
+				}
+			</div>
+		}
+	</article>
 }

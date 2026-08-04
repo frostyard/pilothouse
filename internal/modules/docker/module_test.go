@@ -173,3 +173,24 @@ func TestRoutesWorkWhenDockerPresent(t *testing.T) {
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/docker/containers/"+runningID+"/restart", nil))
 	assert.Equal(t, broker.ActionDockerRestart, host.action)
 }
+
+// TestContainerActionMessagesReadAsEnglish pins the per-action wording. It
+// used to be derived as "Container %sd", which is correct only for
+// "remove" and produced "Container startd" and "Container stopd".
+func TestContainerActionMessagesReadAsEnglish(t *testing.T) {
+	for action, want := range map[string]string{
+		"start":   "Container+started",
+		"stop":    "Container+stopped",
+		"restart": "Container+restarted",
+		"remove":  "Container+removed",
+	} {
+		host := &moduleHost{}
+		mux := http.NewServeMux()
+		New().Mount(mux, host)
+
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/docker/containers/abc123/"+action, nil))
+
+		assert.Contains(t, response.Header().Get("Location"), want, action)
+	}
+}

@@ -1219,13 +1219,96 @@ func registerIncus(actions *broker.ActionRegistry, queries *broker.QueryRegistry
 	}); err != nil {
 		return err
 	}
-	return registerProjectActions(actions, []projectActionRegistration{
+	if err := queries.Register(broker.QueryIncusInstance, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.Detail(ctx, parameters["project"], parameters["name"])
+	}); err != nil {
+		return err
+	}
+	// The logs query takes a fixed source selector, never a filename: the
+	// manager rejects any source outside its two constants and derives the
+	// supervisor logfile from the resolved instance's own type.
+	if err := queries.Register(broker.QueryIncusLogs, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.Logs(ctx, parameters["project"], parameters["name"], parameters["source"])
+	}); err != nil {
+		return err
+	}
+	if err := queries.Register(broker.QueryIncusNetwork, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.NetworkDetail(ctx, parameters["project"], parameters["name"])
+	}); err != nil {
+		return err
+	}
+	if err := queries.Register(broker.QueryIncusProfile, false, func(ctx context.Context, _ auth.Identity, parameters map[string]string) (any, error) {
+		return manager.ProfileDetail(ctx, parameters["project"], parameters["name"])
+	}); err != nil {
+		return err
+	}
+	if err := registerProjectActions(actions, []projectActionRegistration{
 		{id: broker.ActionIncusRemove, resource: "incus/instance", confirmation: true, handler: manager.Remove, parameter: "name"},
 		{id: broker.ActionIncusRemoveImage, resource: "incus/image", confirmation: true, handler: manager.RemoveImage, parameter: "fingerprint"},
 		{id: broker.ActionIncusRestart, resource: "incus/instance", handler: manager.Restart, parameter: "name"},
 		{id: broker.ActionIncusStart, resource: "incus/instance", handler: manager.Start, parameter: "name"},
 		{id: broker.ActionIncusStop, resource: "incus/instance", confirmation: true, handler: manager.Stop, parameter: "name"},
+		{id: broker.ActionIncusStopForce, resource: "incus/instance", confirmation: true, handler: manager.StopForce, parameter: "name"},
+	}); err != nil {
+		return err
+	}
+	// Instance creation downloads an image from a fixed remote, which
+	// routinely takes minutes, so it is the module's one background
+	// action: the broker enqueues a durable job, holds the instance's own
+	// lock for the duration, and returns immediately. The remote is a
+	// constant in the manager, never a parameter.
+	if err := actions.RegisterDefinition(broker.ActionDefinition{
+		ID: broker.ActionIncusCreate, Admin: true, Background: true,
+		Parameters: []string{"project", "name", "image", "type", "profile"},
+		Timeout:    30 * time.Minute,
+		Resource: func(parameters map[string]string) (string, error) {
+			return "incus/instance/" + parameters["project"] + "/" + parameters["name"], nil
+		},
+		Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+			return manager.CreateInstance(ctx, parameters["project"], parameters["name"],
+				parameters["image"], parameters["type"], parameters["profile"])
+		},
+	}); err != nil {
+		return err
+	}
+	// Snapshot actions carry a third identifier, so they cannot use
+	// registerProjectActions' two-parameter shape. Restore and delete are
+	// destructive and require confirmation; create only adds.
+	return registerSnapshotActions(actions, []snapshotActionRegistration{
+		{id: broker.ActionIncusSnapshotCreate, handler: manager.CreateSnapshot},
+		{id: broker.ActionIncusSnapshotDelete, confirmation: true, handler: manager.DeleteSnapshot},
+		{id: broker.ActionIncusSnapshotRestore, confirmation: true, handler: manager.RestoreSnapshot},
 	})
+}
+
+type snapshotActionRegistration struct {
+	confirmation bool
+	handler      func(context.Context, string, string, string) error
+	id           string
+}
+
+// registerSnapshotActions registers the three-identifier snapshot actions.
+// Their audit resource is the fully qualified
+// "incus/snapshot/<project>/<instance>/<snapshot>", so two snapshots of the
+// same name on different instances are distinct resources for confirmation
+// and audit purposes.
+func registerSnapshotActions(registry *broker.ActionRegistry, registrations []snapshotActionRegistration) error {
+	for _, registration := range registrations {
+		handler := registration.handler
+		if err := registry.RegisterDefinition(broker.ActionDefinition{
+			ID: registration.id, Admin: true, Parameters: []string{"project", "instance", "snapshot"},
+			ConfirmationRequired: registration.confirmation,
+			Resource: func(parameters map[string]string) (string, error) {
+				return "incus/snapshot/" + parameters["project"] + "/" + parameters["instance"] + "/" + parameters["snapshot"], nil
+			},
+			Handler: func(ctx context.Context, _ auth.Identity, parameters map[string]string) error {
+				return handler(ctx, parameters["project"], parameters["instance"], parameters["snapshot"])
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type projectActionRegistration struct {
