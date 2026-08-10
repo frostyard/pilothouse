@@ -30,6 +30,18 @@ file, run `make generate` and update its rendering tests. Do not edit generated
 Update relevant documentation when behavior, configuration, or architecture
 changes.
 
+## Classify the change
+
+Before requesting review, select the highest applicable tier from
+[`docs/risk-tiers.md`](docs/risk-tiers.md) and record the tier and rationale in
+the pull request template. Classification follows potential impact rather than
+diff size. Tier 3 and Tier 4 changes require additional failure-path and
+rollback evidence; Tier 4 also requires explicit maintainer security review and
+trust-boundary analysis.
+
+Update the classification if the pull request's scope changes. The tier adds
+review requirements and never replaces repository checks or invariants.
+
 ## Validate and submit
 
 Run the credential-free CI checks before opening a pull request:
