@@ -155,6 +155,13 @@ target inside an ad hoc container or pass Git credentials into the image.
 Preflight treats `origin` as authoritative for moved and remote-only tags, but
 preserves and rejects local-only tags.
 
+Classify every pull request using `docs/risk-tiers.md` before review and update
+the classification when scope changes. Choose the highest tier represented in
+the final diff, classify safeguards with the behavior they protect, and never
+use a lower tier to bypass required evidence or maintainer review. Tier 4
+changes require explicit maintainer security review and may not be treated as
+safe merely because the diff is small or agent-authored.
+
 ## Documentation
 
 **update documentation** After any change to source code, update

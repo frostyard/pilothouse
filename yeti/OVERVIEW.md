@@ -4790,6 +4790,17 @@ rationale.
   assuming either that it must be edited or that it can be skipped
   unexamined. (#51's host-image series was reviewed against it on exactly
   these grounds and required no edit to either file.)
+- `docs/risk-tiers.md` is the pull-request change-classification authority.
+  Every pull request selects the highest tier present in its final diff:
+  documentation-only changes are Tier 1, routine unprivileged implementation
+  is Tier 2, operational/capability/dependency/concurrency changes are Tier 3,
+  and authentication, broker/root/package/release/secret or untrusted-input
+  boundaries are Tier 4. Safeguards inherit the protected behavior's tier.
+  Tier 3 adds targeted failure-path and rollback evidence; Tier 4 adds explicit
+  maintainer security review, trust-boundary/abuse analysis, and least-privilege
+  confirmation. The pull request template records the decision, while
+  `CONTRIBUTING.md` explains when it must be updated; classification never
+  substitutes for an existing gate.
 - `docs/agents/skills/` holds durable lessons harvested from previous mill
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,
