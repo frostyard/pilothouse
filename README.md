@@ -43,11 +43,6 @@ accepted.
 
 ## Develop
 
-Every external action used by `.github/workflows/` is pinned to a full commit
-SHA (or a digest for a container action). The unit suite recursively inventories
-all workflow YAML and rejects floating tags, branches, short SHAs, expressions,
-and container tags.
-
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in

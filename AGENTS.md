@@ -155,13 +155,6 @@ target inside an ad hoc container or pass Git credentials into the image.
 Preflight treats `origin` as authoritative for moved and remote-only tags, but
 preserves and rejects local-only tags.
 
-Every external `uses:` reference under `.github/workflows/` must be immutable:
-GitHub actions and reusable workflows use a full 40-character commit SHA, and
-container actions use a `sha256` digest. Keep the human-readable version or
-source ref in a trailing comment and update both intentionally. Repository-local
-`./` actions are exempt. `internal/workflowcheck` parses every workflow and
-enforces this invariant; do not narrow its recursive inventory.
-
 ## Documentation
 
 **update documentation** After any change to source code, update
