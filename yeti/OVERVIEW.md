@@ -4837,6 +4837,15 @@ rationale.
   Automatic fork events skip before the secret-bearing step; manual dispatch
   re-fetches and rejects a fork target without checking out or executing its
   contents.
+- `.github/workflows/claude-code-review.yml` provides advisory AI review for
+  non-draft, same-repository pull requests. It uses the commit-pinned official
+  Anthropic action, receives `ANTHROPIC_API_KEY`, and has only `contents: read`
+  plus `pull-requests: write`; checkout credentials are not persisted and its
+  tools can only inspect PR data and create comments. The ordinary
+  `pull_request` trigger and explicit head-repository check skip forks rather
+  than exposing the secret through `pull_request_target`. Model output remains
+  untrusted and cannot replace deterministic gates or human review. See
+  `docs/claude-code-review.md`.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
   multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`
