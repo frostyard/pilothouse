@@ -12,6 +12,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  automation-secret-drift:
+    name: Automation secret drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require Copilot assignment token
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.COPILOT_ASSIGNMENT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "::error::COPILOT_ASSIGNMENT_TOKEN is not configured; see docs/ai-fix-workflow.md"
+            exit 1
+          fi
+
   compliance:
     name: Credential-free compliance gates
     runs-on: ubuntu-latest
