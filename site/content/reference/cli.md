@@ -44,19 +44,20 @@ actually invokes the tools.
 | `--definitions-root` | — | Custom root containing sysupdate definition directories; by default updex uses its standard layered search paths |
 | `--docker` | — | Docker endpoint such as `unix:///var/run/docker.sock`; Docker requires explicit configuration to enable |
 | `--incus` | `false` | Enable Incus inventory against the local socket `/var/lib/incus/unix.socket`; Incus requires this explicit opt-in to enable, and the socket path is fixed rather than configurable |
+| `--k3s` | — | Path to the k3s executable; enables read-only node and namespace health through the fixed `/etc/rancher/k3s/k3s.yaml` kubeconfig |
 | `--podman-socket` | — | Podman API Unix socket path; Podman requires explicit configuration to enable |
 | `--updex` | — | Path to the updex executable; updex requires explicit configuration to enable |
 
-The last four flags are the broker's only optional dependencies, and all
-four are off by default. Leaving one unset does not merely hide a surface:
+The last five tooling flags are the broker's only optional dependencies, and all
+five are off by default. Leaving one unset does not merely hide a surface:
 the corresponding probe reports the capability absent without any I/O — no
 command is run and no socket is dialled — so `updex` on `PATH`,
-a live `/run/podman/podman.sock`, an exported `DOCKER_HOST`, or a
-responding `/var/lib/incus/unix.socket` never enables anything on its own.
+a live `/run/podman/podman.sock`, an exported `DOCKER_HOST`, a responding
+`/var/lib/incus/unix.socket`, or `k3s` on `PATH` never enables anything on its own.
 The broker then registers no query or action for that tool, and the console
 shows no navigation entry, no dashboard card, and 404s its routes.
 
-The packaged `pilothoused.service` passes none of the four, and it declares
+The packaged `pilothoused.service` passes none of the five, and it declares
 no `Wants=` on `podman.socket` or `incus.socket` — only `After=`, which
 orders the broker behind those units if something else starts them. Add the
 flags you want to `ExecStart`. Every other capability (systemd, journald,

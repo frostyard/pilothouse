@@ -71,6 +71,7 @@ const (
 	QueryIncusProfile     = "org.frostyard.pilothouse.incus.profile"
 	QueryIncusState       = "org.frostyard.pilothouse.incus.state"
 	QueryJobs             = "org.frostyard.pilothouse.jobs.list"
+	QueryK3sState         = "org.frostyard.pilothouse.k3s.state"
 	QueryLogs             = "org.frostyard.pilothouse.logs.list"
 	QueryMaintenanceState = "org.frostyard.pilothouse.maintenance.state"
 	QueryPodmanLogs       = "org.frostyard.pilothouse.podman.logs"

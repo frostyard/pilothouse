@@ -18,18 +18,19 @@ The application is built from Go and templ on the server, HTMX for focused page 
 - Install, remove, update-all, and merge-refresh actions through `updex` and `systemd-sysext`
 - Extension update availability on the Extensions page, per extension and in aggregate
 - System Podman, Docker Engine, and local Incus inventories with lifecycle controls and bounded log viewing
+- Read-only k3s node readiness and aggregate pod health totals per namespace
 - Reboot-required posture and confirmed host reboot
 - Exact systemd backup timer monitoring with freshness and last-result health
 
 ## What is optional
 
-`updex` and the three container engines are off unless you configure them.
-The broker probes `updex`, Podman, Docker, and Incus only when `--updex`,
-`--podman-socket`, `--docker`, or `--incus` is passed to `pilothoused`; an
+`updex`, the three container engines, and k3s are off unless you configure them.
+The broker probes `updex`, Podman, Docker, Incus, and k3s only when `--updex`,
+`--podman-socket`, `--docker`, `--incus`, or `--k3s` is passed to `pilothoused`; an
 unconfigured one is reported absent without running a command or contacting
 a socket, so an engine socket that merely happens to be running on the host
-never enables anything. The packaged unit passes none of the four, which
-means a stock install shows no Podman, Docker, or Incus surface and no
+never enables anything. The packaged unit passes none of the five, which
+means a stock install shows no Podman, Docker, Incus, or k3s surface and no
 `updex`-backed extension operations until an operator adds the flags. See
 the [CLI reference](/reference/cli/) for the exact flags and defaults.
 

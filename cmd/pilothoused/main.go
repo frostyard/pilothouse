@@ -31,6 +31,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/files"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/k3s"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
 	logjournal "github.com/frostyard/pilothouse/internal/modules/logs/journal"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
@@ -63,6 +64,7 @@ func run() error {
 	flag.Var(filesRoots.Flag(false), "files-root", "read-only files root as id=absolute-path; repeatable")
 	flag.Var(filesRoots.Flag(true), "files-write-root", "writable files root as id=absolute-path; repeatable")
 	incusEnabled := flag.Bool("incus", false, "enable Incus inventory against the local socket /var/lib/incus/unix.socket; Incus stays disabled unless this is set")
+	k3sExecutable := flag.String("k3s", "", "path to the k3s executable; k3s visibility stays disabled unless this is set")
 	loginGroup := flag.String("login-group", "", "optional system group allowed to log in")
 	pamService := flag.String("pam-service", "pilothouse", "PAM service name")
 	podmanSocket := flag.String("podman-socket", "", "Podman API Unix socket path; Podman stays disabled unless this is set")
@@ -97,7 +99,7 @@ func run() error {
 	actions.UseJobs(jobStore)
 	queries := broker.NewQueryRegistry()
 	streamQueries := broker.NewStreamQueryRegistry()
-	caps := capability.Probe(context.Background(), capability.Config{DockerEndpoint: *dockerEndpoint, IncusEnabled: *incusEnabled, PodmanSocket: *podmanSocket, Updex: *updex})
+	caps := capability.Probe(context.Background(), capability.Config{DockerEndpoint: *dockerEndpoint, IncusEnabled: *incusEnabled, K3s: *k3sExecutable, PodmanSocket: *podmanSocket, Updex: *updex})
 	if err := registerCapabilities(queries, caps); err != nil {
 		return err
 	}
@@ -230,6 +232,9 @@ func run() error {
 	// default, so this client is never used to reach the socket.
 	incusClient := incus.NewLocalClient()
 	if err := registerIncus(actions, queries, incus.NewSystemManager(incusClient), caps); err != nil {
+		return err
+	}
+	if err := registerK3s(queries, k3s.NewSystemManager(k3s.ExecRunner{}, *k3sExecutable), caps); err != nil {
 		return err
 	}
 	sessions := broker.NewSessionStore(15*time.Minute, 8*time.Hour)
@@ -1204,6 +1209,18 @@ func registerDocker(actions *broker.ActionRegistry, queries *broker.QueryRegistr
 		{id: broker.ActionDockerRestart, resource: "docker/container", handler: manager.Restart},
 		{id: broker.ActionDockerStart, resource: "docker/container", handler: manager.Start},
 		{id: broker.ActionDockerStop, resource: "docker/container", confirmation: true, handler: manager.Stop},
+	})
+}
+
+// registerK3s exposes the aggregate cluster-health query only when the
+// explicitly configured k3s executable answered the fixed capability probe.
+// The module is read-only and therefore registers no action.
+func registerK3s(queries *broker.QueryRegistry, manager k3s.Manager, caps capability.Set) error {
+	if !caps.Has(capability.K3s) {
+		return nil
+	}
+	return queries.Register(broker.QueryK3sState, false, func(ctx context.Context, _ auth.Identity, _ map[string]string) (any, error) {
+		return manager.State(ctx)
 	})
 }
 

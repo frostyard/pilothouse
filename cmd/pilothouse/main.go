@@ -21,6 +21,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/files"
 	"github.com/frostyard/pilothouse/internal/modules/fleet"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/k3s"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
@@ -130,6 +131,7 @@ func newRegistry(dev bool) (*platform.Registry, error) {
 		podman.New(),
 		docker.New(),
 		incus.New(),
+		k3s.New(),
 		logs.New(),
 		files.New(),
 		serviceModule,

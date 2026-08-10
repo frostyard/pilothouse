@@ -5,14 +5,15 @@
 Pilothouse (`github.com/frostyard/pilothouse`) is a local web administration
 console for image-based Linux systems. It presents
 a live dashboard and management UI (system telemetry, sysext/`updex`
-lifecycle, systemd services, Podman/Docker/Incus workloads, journal search,
+lifecycle, systemd services, Podman/Docker/Incus workloads, read-only k3s
+health, journal search,
 backups, storage/disk health and managed NFS/SMB mounts, file browsing,
 maintenance/reboot) over HTMX-enhanced server-rendered HTML, while keeping
 all privileged system access behind a single, fixed, root-only broker.
 
 The defining architectural rule: an unprivileged web process (`pilothouse`)
 never talks to root-equivalent APIs (systemd D-Bus, journald, Podman/Docker/
-Incus sockets, filesystem roots) directly. It only calls a small, fixed set
+Incus sockets, the Kubernetes API, filesystem roots) directly. It only calls a small, fixed set
 of broker queries/actions implemented by a root-only daemon
 (`pilothoused`), connected over a protected Unix socket.
 
@@ -190,7 +191,7 @@ test/image/ucore-image-test.sh
   front, then opens root-owned bbolt databases for audit and jobs, builds
   `broker.QueryRegistry` / `broker.ActionRegistry` / stream registries, and
   registers every privileged implementation (services, Podman, Docker, Incus,
-  sysext, files, logs, backups, storage/remote-mounts, maintenance) — each
+  k3s, sysext, files, logs, backups, storage/remote-mounts, maintenance) — each
   registration guarded by the probed capability set so an absent optional
   dependency degrades only that registration instead of aborting startup.
   Serves HTTP only over a Unix socket with `0660 root:<socket-group>`
@@ -230,6 +231,7 @@ by accident. Current modules:
 | `podman` | System (rootful) Podman inventory (containers/pods/images) via Libpod API; bounded logs; lifecycle actions. |
 | `docker` | System Docker daemon inventory, bounded logs, lifecycle/image removal. |
 | `incus` | Local-only Incus inventory (projects/instances/images/pools/volumes/buckets) via `/var/lib/incus/unix.socket`, with per-instance live state (globally-scoped addresses, memory, CPU time, processes, start time, snapshot count); a per-instance detail page carrying allowlisted configuration, devices, interfaces and snapshots; bounded console and supervisor logs; non-stateful snapshot create/restore/delete; read-only network and profile inventory with per-network DHCP leases and allowlisted configuration; instance creation from a fixed public image server as a background job; lifecycle actions including a distinct force stop. Storage, network and profile reads each degrade independently rather than failing the page. |
+| `k3s` | Opt-in, read-only cluster visibility through fixed `k3s kubectl` reads against `/etc/rancher/k3s/k3s.yaml`: node readiness/version/runtime and aggregate pod-health totals per namespace. Unknown future pod phases count as not ready rather than failing the complete view. No individual pod identity, logs, configuration, secret, Kubernetes API proxy, or mutation crosses the broker boundary. |
 | `logs` | Admin-only bounded system-journal search (message/priority/unit/time-window filters, ≤200 entries). |
 | `files` | Admin-only browsing/download/atomic upload within explicitly configured filesystem roots (256 MiB bound). |
 | `backups` | Monitors explicitly configured systemd backup timers: enabled/active state, last result, freshness, next run. |
@@ -412,8 +414,8 @@ narrative below. What the daemon side now does:
   guard in the daemon's registration code — and is deliberately independent of
   `registerMaintenance`'s `Systemd` guard, so a bootc host without systemd gets
   host-image reporting while the reboot posture query and reboot action stay
-  withheld. `docs/capabilities.md`'s binding table carries the row (63 IDs,
-  23 queries; the newest IDs are the Incus phases' `QueryIncusInstance`,
+  withheld. `docs/capabilities.md`'s binding table carries the row (64 IDs,
+  24 queries; the newest ID is k3s's `QueryK3sState`, after the Incus phases' `QueryIncusInstance`,
   `QueryIncusLogs`, `QueryIncusNetwork`, `QueryIncusProfile`, the four
   snapshot/force-stop actions, and `ActionIncusCreate`) and
   `cmd/pilothoused/capability_contract_test.go` exercises it
@@ -572,16 +574,16 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   module manager is constructed (`internal/capability.Probe`): systemd,
   journald, `updex`, `systemd-sysext`, bootc, rpm-ostree, the
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
-  unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
+  unit-file pairs, the Podman/Docker/Incus engine sockets, and k3s. Every
   individual probe narrows to "absent" on any error rather than failing —
   probing itself is never fatal. Exec-backed probes keep stdout and stderr
   separate: JSON validation consumes stdout only, successful stderr warnings
   are ignored, and a failed command retains trimmed stderr in its returned
-  diagnostic. `updex`, Podman, Docker, and Incus are
+  diagnostic. `updex`, Podman, Docker, Incus, and k3s are
   additionally gated on explicit configuration: `--updex`,
-  `--podman-socket`, and `--docker` all default to empty and `--incus`
+  `--podman-socket`, `--docker`, and `--k3s` all default to empty and `--incus`
   defaults to `false`, and an unset value makes
-  `ProbeUpdex`/`ProbePodman`/`ProbeDocker`/`ProbeIncus` report the
+  `ProbeUpdex`/`ProbePodman`/`ProbeDocker`/`ProbeIncus`/`ProbeK3s` report the
   capability absent without running any command, performing any I/O, or
   dialling anything. The "no client is built" half of that holds literally
   for Docker — `probeDocker`'s empty-endpoint guard sits ahead of its
@@ -590,7 +592,7 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   guard, so a disabled probe does allocate that struct. It is a pure
   allocation with no dial and no I/O, and `probeIncus` returns early
   without ever calling its `Server` method. So a host that merely happens
-  to have `updex` on
+  to have `updex` or `k3s` on
   `PATH`, a socket at the conventional path, `DOCKER_HOST` exported, or a
   live `/var/lib/incus/unix.socket` never enables the tool/engine. Docker's
   non-empty endpoint is also the *only* input its client is built from —
@@ -612,7 +614,7 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   table mapping every broker ID to its required capability, and
   `docs/modules.md`'s "Capability-guarded registration" section for the
   convention new modules follow. `registerPodman`/`registerDocker`/
-  `registerIncus` are the first full conversions — each takes `caps
+  `registerIncus`/`registerK3s` are full conversions — each takes `caps
   capability.Set` and registers nothing for its engine when the
   corresponding capability is absent. No engine state is ever a fatal
   `run()` error, but only one of them is warned about. A *configured but
@@ -1337,15 +1339,16 @@ place, so a reader who lands here first does not have to reassemble it.
   `internal/broker/api.go` declared 35 `Action*` and 19 `Query*` constants
   (54 total) both before and after it, and `docs/capabilities.md`'s binding
   table and both capability contract tests were unchanged in shape and count.
-  (The four Incus phases have since taken the query total to 23, the action
-  total to 40, and the overall total to 63.) Both contract harnesses build fixtures
+  (The four Incus phases later took the query total to 23 and the action
+  total to 40; k3s visibility then took the query total to 24 and the
+  overall total to 64.) Both contract harnesses build fixtures
   from explicit `capability.Set` values rather than from a live `Probe`, so a
   fixture naming `podman` still means "podman was configured and reachable."
 - **Systemd units.** Both packaged broker units
   (`packaging/deb/pilothoused.service` and `packaging/rpm/pilothoused.service`)
   declare no `Wants=` on
   any engine socket (only `After=`, ordering without pull-in), and their
-  `ExecStart` passes none of the four flags — so a stock install runs with
+  `ExecStart` passes none of the five flags — so a stock install runs with
   every optional dependency off, and starting the broker never activates
   `podman.socket` or `incus.socket`.
 - **Mock Fleet.** `fleet` is a static preview with no real transport, so it
@@ -1862,6 +1865,9 @@ environment variables, typically supplied via systemd `EnvironmentFile`.
   the flag gates only whether that path is probed. `incus.NewLocalClient()`
   in `run()` is still constructed unconditionally — it performs no I/O —
   since the capability guard is what withholds registration
+- `--k3s` executable path (default empty — k3s visibility requires explicit
+  configuration; unset means no command runs). The probe and manager both
+  use `/etc/rancher/k3s/k3s.yaml` directly and accept no kubeconfig path
 - repeatable `--files-root id=/absolute/path` (read-only) and
   `--files-write-root id=/absolute/path` (writable) — validated: absolute,
   non-root, unique IDs, no symlink roots (`internal/modules/files/config.go`)

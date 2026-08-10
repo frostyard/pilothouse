@@ -11,7 +11,7 @@ import (
 	"slices"
 )
 
-// ID is a canonical capability identifier. The eleven values below are the
+// ID is a canonical capability identifier. The twelve values below are the
 // complete, fixed vocabulary from the spec; there is no mechanism to
 // register additional IDs at runtime.
 type ID string
@@ -28,6 +28,7 @@ const (
 	Podman              ID = "podman"
 	Docker              ID = "docker"
 	Incus               ID = "incus"
+	K3s                 ID = "k3s"
 )
 
 // Set holds the capabilities present on a host. The zero value is a valid,

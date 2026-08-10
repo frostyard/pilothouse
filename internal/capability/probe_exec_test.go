@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -211,6 +212,71 @@ func TestProbeRPMOStreeAppliesBoundedTimeout(t *testing.T) {
 
 	require.Len(t, runner.calls, 1)
 	assertBoundedTimeout(t, runner.calls[0].ctx, start)
+}
+
+func TestProbeK3sPresentOnVersionJSON(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1","minor":"34"}`)}
+	s := ProbeK3s(context.Background(), runner, "/usr/local/bin/k3s")
+
+	assert.True(t, s.Has(K3s))
+	require.Len(t, runner.calls, 1)
+	assert.Equal(t, "/usr/local/bin/k3s", runner.calls[0].name)
+	assert.Equal(t, []string{"kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml", "get", "--raw=/version"}, runner.calls[0].args)
+}
+
+func TestProbeK3sAbsentAndNeverRunsWhenUnconfigured(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1"}`)}
+	s := ProbeK3s(context.Background(), runner, "")
+
+	assert.Empty(t, runner.calls)
+	assert.False(t, s.Has(K3s))
+}
+
+func TestProbeK3sRejectsInvalidVersionResponses(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		output string
+		err    error
+	}{
+		{name: "invalid JSON", output: "version"},
+		{name: "empty object", output: `{}`},
+		{name: "missing minor", output: `{"major":"1"}`},
+		{name: "missing major", output: `{"minor":"34"}`},
+		{name: "wrong field type", output: `{"major":1,"minor":"34"}`},
+		{name: "command failure", err: errors.New("exit status 1")},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runner := &fakeCommandRunner{output: []byte(testCase.output), err: testCase.err}
+			assert.False(t, ProbeK3s(context.Background(), runner, "/opt/k3s").Has(K3s))
+		})
+	}
+}
+
+func TestProbeK3sPresentDespiteStderrWarnings(t *testing.T) {
+	// Regression for the combined-output probe runner: a k3s invocation that
+	// prints valid version JSON on stdout while warning on stderr must still
+	// yield the capability, so run the real ExecRunner against a stand-in
+	// executable that does exactly that.
+	k3s := filepath.Join(t.TempDir(), "k3s")
+	require.NoError(t, os.WriteFile(k3s, []byte("#!/bin/sh\n"+
+		"echo 'WARN[0000] unable to read optional k3s config' >&2\n"+
+		`echo '{"major":"1","minor":"34"}'`+"\n"), 0o755))
+
+	assert.True(t, ProbeK3s(context.Background(), ExecRunner{}, k3s).Has(K3s))
+}
+
+func TestProbeK3sAppliesBoundedTimeout(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1","minor":"34"}`)}
+	start := time.Now()
+	ProbeK3s(context.Background(), runner, "/opt/k3s")
+
+	require.Len(t, runner.calls, 1)
+	assertBoundedTimeout(t, runner.calls[0].ctx, start)
+}
+
+func TestProbeK3sUnconfiguredKeepsK3sOutOfComposedProbe(t *testing.T) {
+	s := Probe(context.Background(), Config{})
+	assert.False(t, s.Has(K3s))
 }
 
 func TestExecRunnerSeparatesStderrFromStdout(t *testing.T) {

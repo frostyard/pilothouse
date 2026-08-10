@@ -1,0 +1,97 @@
+package k3s
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/frostyard/pilothouse/internal/web"
+)
+
+templ Summary(state State) {
+	<article class="card">
+		<div class="card-heading split">
+			<div><h2>k3s</h2><p>{ fmt.Sprintf("%d of %d nodes ready", readyNodes(state), len(state.Nodes)) }</p></div>
+			<a class="card-link" href="/k3s">
+				Inspect
+				@web.Icon("chevron")
+			</a>
+		</div>
+		<div class="mini-list">
+			<div class="mini-row"><div><strong>Pods</strong><small>{ fmt.Sprintf("%d ready of %d total", readyPods(state), totalPods(state)) }</small></div></div>
+			<div class="mini-row"><div><strong>Namespaces</strong><small>{ fmt.Sprintf("%d reported", len(state.Namespaces)) }</small></div></div>
+			<div class="mini-row">
+				<div><strong>Workload issues</strong><small>Not ready, pending, or failed</small></div>
+				if issuePods(state) == 0 {
+					<span class="badge active">None</span>
+				} else {
+					<span class="badge warning">{ fmt.Sprint(issuePods(state)) }</span>
+				}
+			</div>
+		</div>
+	</article>
+}
+
+templ Page(state State) {
+	<div class="page-stack">
+		<div class="page-intro">
+			<p>Read-only health summary from the local k3s API. Pilothouse exposes node readiness and namespace totals, not individual pod details or cluster mutations.</p>
+			<span class="badge">Read only</span>
+		</div>
+		<section class="engine-stats" aria-label="k3s summary">
+			<div class="engine-stat"><span>Nodes ready</span><strong>{ fmt.Sprint(readyNodes(state)) }</strong><small>of { fmt.Sprint(len(state.Nodes)) } nodes</small></div>
+			<div class="engine-stat"><span>Pods ready</span><strong>{ fmt.Sprint(readyPods(state)) }</strong><small>of { fmt.Sprint(totalPods(state)) } pods</small></div>
+			<div class="engine-stat"><span>Namespaces</span><strong>{ fmt.Sprint(len(state.Namespaces)) }</strong><small>with pods</small></div>
+			<div class="engine-stat"><span>Workload issues</span><strong>{ fmt.Sprint(issuePods(state)) }</strong><small>not ready, pending, or failed</small></div>
+		</section>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Nodes</h2><span>{ fmt.Sprintf("%d total", len(state.Nodes)) }</span></div>
+			if len(state.Nodes) == 0 {
+				<div class="empty-state">No nodes were reported by k3s.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Node</th><th>Status</th><th>Roles</th><th>Kubernetes</th><th>Runtime</th></tr></thead>
+					<tbody>
+						for _, node := range state.Nodes {
+							<tr>
+								<td><strong>{ node.Name }</strong></td>
+								<td>
+									if node.Ready {
+										<span class="badge active">Ready</span>
+									} else {
+										<span class="badge warning">Not ready</span>
+									}
+								</td>
+								<td>{ strings.Join(node.Roles, ", ") }</td>
+								<td><span class="version">{ node.Version }</span></td>
+								<td><span class="version">{ node.Runtime }</span></td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+		<article class="card table-card">
+			<div class="table-toolbar"><h2>Namespaces</h2><span>Aggregate pod health</span></div>
+			if len(state.Namespaces) == 0 {
+				<div class="empty-state">No pods were reported by k3s.</div>
+			} else {
+				<table class="data-table">
+					<thead><tr><th>Namespace</th><th>Ready</th><th>Not ready</th><th>Pending</th><th>Failed</th><th>Succeeded</th><th>Total</th></tr></thead>
+					<tbody>
+						for _, namespace := range state.Namespaces {
+							<tr>
+								<td><strong>{ namespace.Name }</strong></td>
+								<td>{ fmt.Sprint(namespace.Ready) }</td>
+								<td>{ fmt.Sprint(namespace.NotReady) }</td>
+								<td>{ fmt.Sprint(namespace.Pending) }</td>
+								<td>{ fmt.Sprint(namespace.Failed) }</td>
+								<td>{ fmt.Sprint(namespace.Succeeded) }</td>
+								<td>{ fmt.Sprint(namespace.Total) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</article>
+	</div>
+}

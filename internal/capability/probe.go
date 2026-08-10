@@ -19,6 +19,10 @@ type Config struct {
 	// fixed at /var/lib/incus/unix.socket, so this flag gates only
 	// whether that fixed path is probed.
 	IncusEnabled bool
+	// K3s is the configured --k3s executable path. That flag defaults to
+	// empty; empty means k3s is not configured, so ProbeK3s reports it
+	// absent without running any command. There is no PATH fallback.
+	K3s string
 	// PodmanSocket is the already-configured --podman-socket path. That
 	// flag defaults to empty; empty means podman is not configured, so
 	// ProbePodman reports it absent without constructing a client or
@@ -56,12 +60,13 @@ var probes = []probeFn{
 	func(ctx context.Context, config Config) Set { return ProbePodman(ctx, config.PodmanSocket) },
 	func(ctx context.Context, config Config) Set { return ProbeDocker(ctx, config.DockerEndpoint) },
 	func(ctx context.Context, config Config) Set { return ProbeIncus(ctx, config.IncusEnabled) },
+	func(ctx context.Context, config Config) Set { return ProbeK3s(ctx, ExecRunner{}, config.K3s) },
 }
 
 // Probe runs every probe in this package -- systemd (plus, sharing its
 // connection, the automatic-update pairs), journald, updex, systemd-sysext,
-// bootc, rpm-ostree, and the three container engines -- and returns their
-// union. It has no error return: every probe it composes is itself
+// bootc, rpm-ostree, the three container engines, and k3s -- and returns
+// their union. It has no error return: every probe it composes is itself
 // designed to never fail fatally (see probe_systemd.go, probe_journald.go,
 // probe_exec.go, probe_engines.go), narrowing the result on any failure
 // instead of erroring, so Probe never fails either -- a host with every

@@ -108,9 +108,9 @@ func (row capabilityRequirement) satisfiedBy(caps capability.Set) bool {
 	return allOfPresent(caps, row.required)
 }
 
-// capabilityTable is the complete 63-row mirror of docs/capabilities.md.
+// capabilityTable is the complete 64-row mirror of docs/capabilities.md.
 // Every Action*/Query* constant declared in internal/broker/api.go (40
-// Action* + 23 Query*, the 23 including QueryCapabilities,
+// Action* + 24 Query*, the 24 including QueryCapabilities,
 // QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, and
 // the two Incus instance-depth queries QueryIncusInstance and
 // QueryIncusLogs) appears exactly once. QueryServicesJournal and
@@ -164,7 +164,7 @@ var capabilityTable = []capabilityRequirement{
 	{broker.ActionStorageMount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageUnmount, inActions, []capability.ID{capability.Systemd}, false},
 	{broker.ActionStorageDelete, inActions, []capability.ID{capability.Systemd}, false},
-	// Queries (23).
+	// Queries (24).
 	{broker.QueryActivity, inQueries, nil, false},
 	{broker.QueryAutoUpdateStatus, inQueries, []capability.ID{capability.Bootc, capability.RPMOStree}, true},
 	{broker.QueryBackupsState, inQueries, []capability.ID{capability.Systemd}, false},
@@ -179,6 +179,7 @@ var capabilityTable = []capabilityRequirement{
 	{broker.QueryIncusProfile, inQueries, []capability.ID{capability.Incus}, false},
 	{broker.QueryIncusState, inQueries, []capability.ID{capability.Incus}, false},
 	{broker.QueryJobs, inQueries, nil, false},
+	{broker.QueryK3sState, inQueries, []capability.ID{capability.K3s}, false},
 	{broker.QueryLogs, inQueries, []capability.ID{capability.Systemd, capability.Journald}, false},
 	{broker.QueryMaintenanceState, inQueries, []capability.ID{capability.Systemd}, false},
 	{broker.QueryPodmanLogs, inQueries, []capability.ID{capability.Podman}, false},
@@ -277,7 +278,7 @@ func declaredBrokerIDs(t *testing.T) []declaredBrokerID {
 // against internal/broker/api.go's live Action*/Query* declarations in both
 // directions, so neither a new constant missing from the table nor a table
 // row naming an ID that no longer exists can survive. It also pins the
-// documented 40/23/63 totals to the parsed source rather than to the table,
+// documented 40/24/64 totals to the parsed source rather than to the table,
 // and cross-checks that an Action* constant is filed in an action registry
 // and a Query* constant in a query registry.
 func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
@@ -295,8 +296,8 @@ func TestCapabilityTableMirrorsBrokerAPIConstants(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 40, declaredActions, "%s must declare 40 Action* constants (docs/capabilities.md: grep -c '^[[:space:]]*Action' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Equal(t, 23, declaredQueries, "%s must declare 23 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
-	assert.Len(t, declared, 63, "%s must declare 63 broker IDs in total", brokerAPIPath)
+	assert.Equal(t, 24, declaredQueries, "%s must declare 24 Query* constants (docs/capabilities.md: grep -c '^[[:space:]]*Query' %s)", brokerAPIPath, brokerAPIPath)
+	assert.Len(t, declared, 64, "%s must declare 64 broker IDs in total", brokerAPIPath)
 
 	tableIDs := make(map[string]capabilityRequirement, len(capabilityTable))
 	for _, row := range capabilityTable {
@@ -426,8 +427,8 @@ func nonCommentMentions(t *testing.T, path string, source []byte, isGo bool, nee
 	return mentions
 }
 
-func TestCapabilityTableHasExactlySixtyThreeRows(t *testing.T) {
-	require.Len(t, capabilityTable, 63, "docs/capabilities.md documents 63 broker IDs (40 Action* + 23 Query*, including QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus, QueryExtensionsState, QueryIncusInstance, QueryIncusLogs, and the four Incus snapshot/force-stop actions)")
+func TestCapabilityTableHasExactlySixtyFourRows(t *testing.T) {
+	require.Len(t, capabilityTable, 64, "docs/capabilities.md documents 64 broker IDs (40 Action* + 24 Query*, including the read-only QueryK3sState)")
 	seen := make(map[string]bool, len(capabilityTable))
 	actionCount, queryCount := 0, 0
 	for _, row := range capabilityTable {
@@ -447,7 +448,7 @@ func TestCapabilityTableHasExactlySixtyThreeRows(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 40, actionCount, "expected 40 Action* IDs")
-	assert.Equal(t, 23, queryCount, "expected 23 Query* IDs")
+	assert.Equal(t, 24, queryCount, "expected 24 Query* IDs")
 	none := 0
 	for _, row := range capabilityTable {
 		if len(row.required) == 0 {
@@ -502,7 +503,7 @@ func (fakeSysextManager) State(context.Context, bool, bool) (sysext.ExtensionsSt
 // phase's conversion chunks (registerServices, registerLogs, registerBackups,
 // registerStorageActions, registerMaintenance, registerHostImage,
 // registerSysextActions, registerExtensions, registerPodman, registerDocker,
-// registerIncus, plus the always-on
+// registerIncus, registerK3s, plus the always-on
 // registerStorage/registerFiles/registerActivity/registerJobs/
 // registerCapabilities) against fresh registries and fake managers for the
 // given capability.Set, following c7's nil-manager convention: for the four
@@ -512,7 +513,7 @@ func (fakeSysextManager) State(context.Context, bool, bool) (sysext.ExtensionsSt
 // buildSystemdManagers would produce, so this test doubles as regression
 // coverage that the two mechanisms (construction-time nil-out from c7,
 // registration-time capability guard from c8/c9) never disagree. Every
-// other manager (maintenance, sysext, podman, docker, incus) has no
+// other manager (maintenance, sysext, podman, docker, incus, k3s) has no
 // systemd-dependent construction, so it is always a live fake; withholding
 // registration for those is registerX's own capability-guard job alone.
 func registerEverythingForFixture(t *testing.T, caps capability.Set) contractRegistries {
@@ -605,6 +606,7 @@ func registerEverythingForFixture(t *testing.T, caps capability.Set) contractReg
 	require.NoError(t, registerPodman(actions, queries, fakePodmanManager{}, caps))
 	require.NoError(t, registerDocker(actions, queries, fakeDockerManager{}, caps))
 	require.NoError(t, registerIncus(actions, queries, fakeIncusManager{}, caps))
+	require.NoError(t, registerK3s(queries, fakeK3sManager{}, caps))
 
 	return contractRegistries{queries: queries, actions: actions, streamQueries: streamQueries, streamActions: streamActions}
 }
@@ -623,6 +625,7 @@ var allCapabilityIDs = []capability.ID{
 	capability.Podman,
 	capability.Docker,
 	capability.Incus,
+	capability.K3s,
 }
 
 // ucoreCapabilitySet is the spec's "uCore fixture": an image-based host that
@@ -746,6 +749,7 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 		{"journald-only", capability.New(capability.Journald)},
 		{"systemd-plus-journald-no-engines", capability.New(capability.Systemd, capability.Journald)},
 		{"engines-only", capability.New(capability.Podman, capability.Docker, capability.Incus)},
+		{"k3s-only", capability.New(capability.K3s)},
 		{"updex-without-sysext", capability.New(capability.Updex)},
 		{"sysext-without-updex", capability.New(capability.Sysext)},
 		{"systemd-plus-one-engine", capability.New(capability.Systemd, capability.Podman)},
@@ -770,13 +774,13 @@ func TestCapabilityContractAcrossFixtureMatrix(t *testing.T) {
 }
 
 // TestCapabilityContractAllOnReproducesPrePhaseBehavior asserts the all-on
-// fixture registers every one of the 63 IDs -- reproducing pre-phase
+// fixture registers every one of the 64 IDs -- reproducing pre-phase
 // behavior exactly for the 50 pre-existing Action*/Query* constants, plus
 // QueryCapabilities, QueryHostImageStatus, QueryAutoUpdateStatus,
 // QueryExtensionsState, and the six IDs the two Incus phases added
 // (QueryIncusInstance, QueryIncusLogs, the three snapshot actions, and
 // ActionIncusStopForce, QueryIncusNetwork, QueryIncusProfile and
-// ActionIncusCreate) -- 63 total,
+// ActionIncusCreate, plus QueryK3sState) -- 64 total,
 // since every documented requirement is a
 // subset of the full capability vocabulary.
 func TestCapabilityContractAllOnReproducesPrePhaseBehavior(t *testing.T) {
