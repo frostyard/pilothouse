@@ -8,6 +8,8 @@ Thank you for helping improve Pilothouse.
 - Open an issue before making a substantial change so its scope and design can
   be discussed.
 - Keep each pull request focused and avoid unrelated changes.
+- For AI-assisted work, follow the
+  [AI Security Policy](docs/security/SECURITY-AI.md).
 
 ## Development
 

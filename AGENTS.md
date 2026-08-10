@@ -1,5 +1,7 @@
 # AGENTS
 
+All AI-assisted work must follow `docs/security/SECURITY-AI.md`.
+
 This project is derived from `housecat-inc/scratch` and follows its core stack:
 
 - Idiomatic Go
