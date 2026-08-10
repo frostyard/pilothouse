@@ -21,7 +21,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - System Docker Engine inventory with container lifecycle controls, bounded log viewing, and socket isolation
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls, live per-instance addresses and memory, a per-instance detail page (allowlisted configuration, devices, interfaces, snapshots), bounded console and supervisor logs, non-stateful snapshot create/restore/delete, read-only network and profile inventory with DHCP leases, and instance creation from the public image server as a background job
 - Administrator-only browsing, download, and atomic upload within configured host file roots
-- PAM authentication using Snow's users and account policy
+- PAM authentication using host users and account policy
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts
@@ -230,7 +230,7 @@ What it deliberately does **not** cover, all of which is
 guest stays enforcing, but the job neither scans the audit log nor classifies
 denials — and bootc update/rollback of an ephemeral uCore-derived image
 containing the last released x86_64 RPM. The issue does not test `.deb`
-layering or Snosi-built sysext delivery.
+layering or system-extension delivery.
 
 The released-RPM fixture producer lives at `test/image/releaserpm`. It is test
 infrastructure, not a shipped binary. Ordinary repository test, vet and lint
