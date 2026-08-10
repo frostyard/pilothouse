@@ -3474,8 +3474,9 @@ Layer A in CI, and it is a *consumer* of the `packages` job, not a second build:
   mask the other's result. The same digest pins the Makefile's unset-variable
   message names, for the same reason: a floating tag makes the gate's result
   depend on when it ran.
-- Its steps are `actions/checkout@v7` (the script and the Makefile come from the
-  tree, never from the artifact), `actions/download-artifact@v5` fetching the
+- Its steps use commit-pinned `actions/checkout` v7.0.1 (the script and the
+  Makefile come from the tree, never from the artifact) and commit-pinned
+  `actions/download-artifact` v5.0.0 fetching the
   matrix row's artifact into `dist/`, then
   `make verify-package-install INSTALL_IMAGE=${{ matrix.image }}
   ARTIFACT_DIR=dist` — the *same* target a developer runs, so CI and a
@@ -4056,10 +4057,11 @@ second build.
   tag-triggered; adding one so `needs: packages` could be satisfied on tags
   would create a third GoReleaser build alongside `release.yml` for no gain,
   since every tag points at a commit the `main` push trigger already covered.
-- Its steps are `actions/checkout@v7` (the harness comes from the tree), the
-  KVM rule, an `apt-get install` of `qemu-system-x86`, `qemu-utils` and
-  `xorriso` (boot, overlay creation and the NoCloud seed ISO respectively),
-  `actions/download-artifact@v5` for the matrix row's artifact **only**, and a
+- Its steps use commit-pinned `actions/checkout` v7.0.1 (the harness comes
+  from the tree), the KVM rule, an `apt-get install` of `qemu-system-x86`,
+  `qemu-utils` and `xorriso` (boot, overlay creation and the NoCloud seed ISO
+  respectively), commit-pinned `actions/download-artifact` v5.0.0 for the
+  matrix row's artifact **only**, and a
   single run step: `bash test/vm/vm-boot-test.sh --family ${{ matrix.family }}
   --artifact-dir dist`. The **explicit interpreter** is not decoration —
   `test/vm/vm-boot-test.sh` is also committed `100755`, so neither the file
@@ -4645,7 +4647,7 @@ explicitly, since no ambient runner tool may be relied on, plus the
 toolchain the arm64 cgo `pilothoused` build needs — `cpio` is **not** among
 them: nothing in the workflow uses it, and `packaging/extract`'s rpm backend
 runs `rpm2archive` piped into `tar`), runs
-`goreleaser/goreleaser-action@v7` with the Pro distribution and the existing
+commit-pinned `goreleaser/goreleaser-action` v7.2.3 with the Pro distribution and the existing
 `~> v2` constraint on `release --snapshot --clean`, then asserts and verifies
 what came out and uploads the two artifacts. The second, `install`, downloads
 those artifacts and installs them on the two digest-pinned distro containers;
@@ -4790,6 +4792,14 @@ rationale.
   assuming either that it must be edited or that it can be skipped
   unexamined. (#51's host-image series was reviewed against it on exactly
   these grounds and required no edit to either file.)
+- `internal/workflowcheck/actions_test.go` parses every `.yml` and `.yaml` file
+  recursively under `.github/workflows/` and inspects real YAML `uses` keys,
+  not shell text or comments. External actions and reusable workflows must use
+  full 40-character commit SHAs; container actions must use `sha256` digests;
+  repository-local `./` actions remain valid. Its direct classification table
+  covers tags, branches, short SHAs, expressions, Docker tags, commit pins,
+  digest pins, nested actions, and local actions, while the live-tree test
+  prevents future workflows from escaping the policy.
 - `docs/agents/skills/` holds durable lessons harvested from previous mill
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,

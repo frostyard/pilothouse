@@ -134,9 +134,9 @@ func TestPackagingWorkflowInstallJob(t *testing.T) {
 			}
 		}
 
-		require.Contains(t, uses, "actions/checkout@v7",
+		require.Contains(t, uses, "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 			"the install job checks the tree out: verify-install.sh and the Makefile come from the repository, not the artifact")
-		require.Contains(t, uses, "actions/download-artifact@v5",
+		require.Contains(t, uses, "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
 			"the install job downloads the already-uploaded artifact instead of building a second time")
 
 		for _, ref := range uses {

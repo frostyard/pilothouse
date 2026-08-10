@@ -113,16 +113,16 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 	require.Equal(t, []imageTierStep{
 		{
 			Name: "Checkout code",
-			Uses: "actions/checkout@v7",
+			Uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 		},
 		{
 			Name: "Set up Go",
-			Uses: "actions/setup-go@v6",
+			Uses: "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
 			With: map[string]string{"go-version": "stable"},
 		},
 		{
 			Name: "Install cosign",
-			Uses: "sigstore/cosign-installer@v4.1.2",
+			Uses: "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
 		},
 		{
 			Name: "Enable KVM acceleration",
