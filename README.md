@@ -57,6 +57,8 @@ native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
 CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
 contract daily at 04:23 UTC and on manual dispatch, using no repository secrets.
+The pull-request workflow disables token permissions by default, grants each
+job read-only contents access, and grants OIDC only to the Codecov job.
 Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
