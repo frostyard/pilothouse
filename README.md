@@ -35,6 +35,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Responsive desktop and mobile layouts
 - Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when systemd, journald, updex, `systemd-sysext`, or a container engine is absent or unreachable. Four of those capabilities — updex, Podman, Docker, Incus — are additionally opt-in, so "present" means "explicitly configured *and* reachable" rather than "detected on the host" (next bullet)
 - Explicit opt-in for every optional dependency: `updex`, Podman, Docker, and Incus are probed only when `--updex`, `--podman-socket`, `--docker`, or `--incus` is configured on `pilothoused`, and an unconfigured one is reported absent without any I/O — no command is run and no socket is dialled — so a binary on `PATH`, a socket at a conventional path, or an exported `DOCKER_HOST` never enables anything by itself, and the packaged unit passes none of the four. Every feature bullet above that names updex, Podman, Docker, or Incus therefore describes a surface that appears only once its flag is set. The remaining capabilities (systemd, journald, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs) stay presence-probed, and the broker also no longer declares `Wants=` on any engine socket
+- Machine-readable command probes parse stdout only. A successful command's stderr diagnostics do not corrupt its JSON contract; when a command fails, stderr is retained in the returned diagnostic while stdout remains separately available.
 
 Pilothouse-managed SMB mounts can optionally map file ownership to a local
 numeric UID/GID. Both IDs are required together; leaving both fields blank
@@ -56,9 +57,9 @@ Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
 CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
-contract daily at 04:23 UTC and on manual dispatch, using no repository secrets.
-The pull-request workflow disables token permissions by default, grants each
-job read-only contents access, and grants OIDC only to the Codecov job.
+contract daily at 04:23 UTC and on manual dispatch. Its compliance job remains
+credential-free; a separate job reports drift when the Copilot assignment
+secret is absent.
 Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
@@ -80,6 +81,12 @@ branch is in this repository is handed to Copilot by
 `.github/workflows/copilot-review-apply.yml`. Empty and approval-only reviews
 are ignored, reruns are deduplicated by review ID, and every resulting change
 must still pass the normal pull-request gates and human review.
+
+With the `ANTHROPIC_API_KEY` repository secret configured, non-draft pull
+requests whose branch is in this repository also receive an advisory,
+least-privilege [Claude code review](docs/claude-code-review.md). Fork pull
+requests are deliberately skipped, comments remain untrusted until a human
+verifies them, and the workflow cannot approve, merge, deploy, or publish.
 
 Go 1.26 or newer is required.
 

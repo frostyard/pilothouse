@@ -574,7 +574,10 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. `updex`, Podman, Docker, and Incus are
+  probing itself is never fatal. Exec-backed probes keep stdout and stderr
+  separate: JSON validation consumes stdout only, successful stderr warnings
+  are ignored, and a failed command retains trimmed stderr in its returned
+  diagnostic. `updex`, Podman, Docker, and Incus are
   additionally gated on explicit configuration: `--updex`,
   `--podman-socket`, and `--docker` all default to empty and `--incus`
   defaults to `false`, and an unset value makes
@@ -4591,9 +4594,11 @@ reviewed `govulncheck` v1.6.0 release rather than resolving a floating version;
 same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
 current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
-It has read-only contents permission, no secrets or publication step,
-commit-pinned checkout/setup actions, a 45-minute timeout, and
-`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
+That compliance job has read-only contents permission, consumes no secrets,
+uses commit-pinned checkout/setup actions, and has a 45-minute timeout. A
+separate five-minute drift job fails when `COPILOT_ASSIGNMENT_TOKEN` is absent;
+neither job publishes anything, and `cancel-in-progress: false` ensures a
+delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
@@ -4842,6 +4847,20 @@ rationale.
   Automatic fork events skip before the secret-bearing step; manual dispatch
   re-fetches and rejects a fork target without checking out or executing its
   contents.
+- `.github/workflows/ai-fix-requested.yml` assigns an open, labelled issue to
+  Copilot only after a gate confirms `COPILOT_ASSIGNMENT_TOKEN` is configured.
+  An absent token produces a notice and a skipped assignment job rather than an
+  event-driven failure; the nightly compliance workflow separately fails its
+  drift job while the secret remains absent.
+- `.github/workflows/claude-code-review.yml` provides advisory AI review for
+  non-draft, same-repository pull requests. It uses the commit-pinned official
+  Anthropic action, receives `ANTHROPIC_API_KEY`, and has only `contents: read`
+  plus `pull-requests: write`; checkout credentials are not persisted and its
+  tools can only inspect PR data and create comments. The ordinary
+  `pull_request` trigger and explicit head-repository check skip forks rather
+  than exposing the secret through `pull_request_target`. Model output remains
+  untrusted and cannot replace deterministic gates or human review. See
+  `docs/claude-code-review.md`.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
   multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`
