@@ -574,7 +574,10 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, and the Podman/Docker/Incus engine sockets. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. `updex`, Podman, Docker, and Incus are
+  probing itself is never fatal. Exec-backed probes keep stdout and stderr
+  separate: JSON validation consumes stdout only, successful stderr warnings
+  are ignored, and a failed command retains trimmed stderr in its returned
+  diagnostic. `updex`, Podman, Docker, and Incus are
   additionally gated on explicit configuration: `--updex`,
   `--podman-socket`, and `--docker` all default to empty and `--incus`
   defaults to `false`, and an unset value makes

@@ -831,6 +831,15 @@ list, but it is generic job-store infrastructure tied to no probed
 capability, exactly like `QueryActivity` — treated the same way:
 unconditional/`none`.
 
+## Exec-backed probe output contract
+
+Startup probes that execute a command keep stdout and stderr separate. JSON
+capability checks validate stdout only, so a successful tool may emit a warning
+on stderr without hiding its capability for the daemon's lifetime. On command
+failure, the runner preserves stdout separately and includes trimmed stderr in
+the returned diagnostic. Commands are still invoked directly with bounded
+contexts and never through a shell.
+
 ## `QueryCapabilities` query
 
 `QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`), added in
