@@ -66,6 +66,13 @@ access, Podman 5, cosign and the GitHub-hosted `ubuntu-26.04` environment to
 exercise released packaging plus checked-out executables on ephemeral uCore
 derivatives, so it has no local make target either.
 
+With the user-scoped token from the [Copilot workflow setup](docs/ai-fix-workflow.md#repository-setup)
+configured, submitted review feedback on an open, non-draft pull request whose
+branch is in this repository is handed to Copilot by
+`.github/workflows/copilot-review-apply.yml`. Empty and approval-only reviews
+are ignored, reruns are deduplicated by review ID, and every resulting change
+must still pass the normal pull-request gates and human review.
+
 Go 1.26 or newer is required.
 
 ```bash

@@ -157,6 +157,16 @@ target inside an ad hoc container or pass Git credentials into the image.
 Preflight treats `origin` as authoritative for moved and remote-only tags, but
 preserves and rejects local-only tags.
 
+`.github/workflows/copilot-review-apply.yml` hands actionable submitted reviews
+on non-draft, same-repository pull requests to the Copilot coding agent and
+supports manual replay by pull request and review ID. It re-fetches both
+objects, ignores approvals and empty reviews, and uses a review-ID marker to
+prevent duplicate handoffs. The workflow requires the user-scoped
+`COPILOT_ASSIGNMENT_TOKEN` secret because an installation `GITHUB_TOKEN`
+comment cannot invoke the agent. Keep default permissions empty, never expose
+the token to fork pull requests, and never execute or copy review text into the
+handoff command.
+
 ## Documentation
 
 **update documentation** After any change to source code, update
