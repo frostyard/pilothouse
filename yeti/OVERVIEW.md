@@ -4581,7 +4581,14 @@ development image. Wiring it
 into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
-gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
+gates will be green" promise that `AGENTS.md` and `README.md` both make.
+`.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
+same contract, not another exception: at 04:23 UTC daily (and on manual
+dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
+current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
+It has read-only contents permission, no secrets or publication step,
+commit-pinned checkout/setup actions, a 45-minute timeout, and
+`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
@@ -4790,6 +4797,17 @@ rationale.
   assuming either that it must be edited or that it can be skipped
   unexamined. (#51's host-image series was reviewed against it on exactly
   these grounds and required no edit to either file.)
+- `docs/risk-tiers.md` is the pull-request change-classification authority.
+  Every pull request selects the highest tier present in its final diff:
+  documentation-only changes are Tier 1, routine unprivileged implementation
+  is Tier 2, operational/capability/dependency/concurrency changes are Tier 3,
+  and authentication, broker/root/package/release/secret or untrusted-input
+  boundaries are Tier 4. Safeguards inherit the protected behavior's tier.
+  Tier 3 adds targeted failure-path and rollback evidence; Tier 4 adds explicit
+  maintainer security review, trust-boundary/abuse analysis, and least-privilege
+  confirmation. The pull request template records the decision, while
+  `CONTRIBUTING.md` explains when it must be updated; classification never
+  substitutes for an existing gate.
 - `.knowledge/README.md` is the cross-session knowledge index. It points agents
   to the live owners of durable facts — `AGENTS.md`, the append-only
   `corrections.jsonl`, every file under `docs/agents/skills/`, this overview,

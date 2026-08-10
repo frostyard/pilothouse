@@ -4,6 +4,14 @@
 
 Closes #
 
+## Change classification
+
+<!-- Select the highest applicable tier from docs/risk-tiers.md and explain why. -->
+
+- Risk tier:
+- Rationale:
+- Required Tier 3/4 evidence, if applicable:
+
 ## Validation
 
 <!-- List the commands run and any checks that were not run. -->

@@ -199,7 +199,11 @@ credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
 Automated harnesses (the mill's deep gate) use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
-gates.
+gates. `.github/workflows/nightly-compliance.yml` reruns that same `make ci`
+contract every day at 04:23 UTC and on manual dispatch with read-only contents
+access, no secrets, commit-pinned actions, and non-cancelling concurrency. It
+installs the native headers and pinned linter required to prevent a gate from
+silently degrading on a fresh runner.
 
 Two workflow gates sit outside that one-command mirror. First,
 `.github/workflows/packaging.yml` carries three tiers: it builds the `.deb`
