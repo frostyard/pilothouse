@@ -7,6 +7,7 @@ repository's **Actions** tab.
 | Signal | Source | What it reports |
 | --- | --- | --- |
 | Pull request quality | [`test.yml`](../.github/workflows/test.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, and builds |
+| Repository policy | [`repository.yaml`](../policies/repository.yaml) | Versioned structural requirements for governance, review, workflow, and policy-enforcement assets |
 | Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract plus an automation-secret drift check |
 | Package quality | [`packaging.yml`](../.github/workflows/packaging.yml) | Package contract checks, installation checks, and opt-in booted-VM validation |
 | Image quality | [`image-tier.yml`](../.github/workflows/image-tier.yml) | Opt-in uCore update and rollback validation under QEMU/KVM |
@@ -24,9 +25,10 @@ wrapped CPU counters, and rendering of the composed dashboard resource summary.
 ## Local verification
 
 Run `make ci` before pushing. It checks module tidiness, vetting, formatting,
-lint, known Go vulnerabilities, tests, race detection, and both binaries in the
-same order as the credential-free CI contract. Use `make docker-ci` when the
-host lacks the required native dependencies.
+lint, known Go vulnerabilities, tests (including the repository policy), race
+detection, and both binaries in the same order as the credential-free CI
+contract. Use `make docker-ci` when the host lacks the required native
+dependencies.
 
 Packaging and image validation require credentials, artifacts, containers, or
 KVM and therefore remain separate from the local CI mirror. See the workflow
