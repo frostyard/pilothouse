@@ -109,7 +109,7 @@ make docker-race
 make docker-lint
 ```
 
-Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
+Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. The editor devcontainer installs `golangci-lint` and `govulncheck` from pinned Go module releases, verified by the Go checksum database. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
 
 If local sign-in is unavailable, verify the privileged broker before debugging
 the browser: `systemctl status pilothoused` and `journalctl -u pilothoused`.

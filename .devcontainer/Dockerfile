@@ -8,6 +8,9 @@
 # The Go version tracks go.mod / CI (`setup-go` uses 1.26.5).
 FROM golang:1.26.5-bookworm
 
+ARG GOLANGCI_LINT_VERSION=v2.11.4
+ARG GOVULNCHECK_VERSION=v1.6.0
+
 # System build dependencies:
 #   build-essential  - C toolchain for cgo
 #   libpam0g-dev     - PAM headers/lib (pilothoused, always)
@@ -21,13 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# CI-parity tooling. golangci-lint is installed from the official prebuilt
-# binary (matches the golangci-lint-action, and avoids source-build flakiness);
-# govulncheck matches the Security Scan job. templ is provided by the module's
-# `go tool` directive (`go tool templ generate`), so it needs no install here.
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-      | sh -s -- -b "$(go env GOPATH)/bin" \
- && go install golang.org/x/vuln/cmd/govulncheck@latest
+# CI-parity tooling. Go's module checksum database verifies both pinned tools.
+# templ is provided by the module's `go tool` directive
+# (`go tool templ generate`), so it needs no install here.
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} \
+ && go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
 
 # Keep the Go toolchain and go-installed tools (golangci-lint, govulncheck) on
 # PATH for login shells too. `bash -lc` re-sources /etc/profile, which resets

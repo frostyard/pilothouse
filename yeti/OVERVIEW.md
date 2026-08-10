@@ -151,6 +151,9 @@ test/image/ucore-image-test.sh
                       reaps signals, resets the exact private Podman store, then
                       removes its private workspace. image-tier.yml invokes it
                       on main and on vm-boot-labelled pull requests
+.devcontainer/        editor devcontainer image. Its golangci-lint and govulncheck
+                      installs use explicit Go module release versions, so Go's
+                      checksum database verifies them and no remote install script runs
 .docker/              development container image (Go + PAM + systemd headers, plus the systemd
                       package so `systemd-analyze` exists and `shellcheck` for the
                       packaging scriptlet) for docker-* make targets. It includes
