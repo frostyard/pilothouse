@@ -25,6 +25,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/docker"
 	"github.com/frostyard/pilothouse/internal/modules/files"
 	"github.com/frostyard/pilothouse/internal/modules/incus"
+	"github.com/frostyard/pilothouse/internal/modules/k3s"
 	"github.com/frostyard/pilothouse/internal/modules/logs"
 	"github.com/frostyard/pilothouse/internal/modules/maintenance"
 	"github.com/frostyard/pilothouse/internal/modules/podman"
@@ -1371,6 +1372,25 @@ func TestRegisterPodmanRegistersEverythingWithPodmanCapability(t *testing.T) {
 	for _, id := range []string{broker.ActionPodmanRemove, broker.ActionPodmanRemoveImage, broker.ActionPodmanRestart, broker.ActionPodmanStart, broker.ActionPodmanStop} {
 		assert.True(t, actions.Registered(id))
 	}
+}
+
+type fakeK3sManager struct{}
+
+func (fakeK3sManager) State(context.Context) (k3s.State, error) {
+	return k3s.State{Nodes: []k3s.Node{{Name: "server", Ready: true}}}, nil
+}
+
+func TestRegisterK3sIsCapabilityGatedAndReadOnly(t *testing.T) {
+	without := broker.NewQueryRegistry()
+	require.NoError(t, registerK3s(without, fakeK3sManager{}, capability.New(capability.Systemd)))
+	assert.False(t, without.Registered(broker.QueryK3sState))
+
+	with := broker.NewQueryRegistry()
+	require.NoError(t, registerK3s(with, fakeK3sManager{}, capability.New(capability.K3s)))
+	assert.True(t, with.Registered(broker.QueryK3sState))
+	result, err := with.Execute(context.Background(), auth.Identity{}, broker.QueryK3sState, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "server", result.(k3s.State).Nodes[0].Name)
 }
 
 type fakeDockerManager struct{}

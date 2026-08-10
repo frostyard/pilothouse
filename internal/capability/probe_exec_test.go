@@ -211,6 +211,43 @@ func TestProbeRPMOStreeAppliesBoundedTimeout(t *testing.T) {
 	assertBoundedTimeout(t, runner.calls[0].ctx, start)
 }
 
+func TestProbeK3sPresentOnVersionJSON(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1","minor":"34"}`)}
+	s := ProbeK3s(context.Background(), runner, "/usr/local/bin/k3s")
+
+	assert.True(t, s.Has(K3s))
+	require.Len(t, runner.calls, 1)
+	assert.Equal(t, "/usr/local/bin/k3s", runner.calls[0].name)
+	assert.Equal(t, []string{"kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml", "get", "--raw=/version"}, runner.calls[0].args)
+}
+
+func TestProbeK3sAbsentAndNeverRunsWhenUnconfigured(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1"}`)}
+	s := ProbeK3s(context.Background(), runner, "")
+
+	assert.Empty(t, runner.calls)
+	assert.False(t, s.Has(K3s))
+}
+
+func TestProbeK3sAbsentOnInvalidJSONOrCommandFailure(t *testing.T) {
+	assert.False(t, ProbeK3s(context.Background(), &fakeCommandRunner{output: []byte("version")}, "/opt/k3s").Has(K3s))
+	assert.False(t, ProbeK3s(context.Background(), &fakeCommandRunner{err: errors.New("exit status 1")}, "/opt/k3s").Has(K3s))
+}
+
+func TestProbeK3sAppliesBoundedTimeout(t *testing.T) {
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1"}`)}
+	start := time.Now()
+	ProbeK3s(context.Background(), runner, "/opt/k3s")
+
+	require.Len(t, runner.calls, 1)
+	assertBoundedTimeout(t, runner.calls[0].ctx, start)
+}
+
+func TestProbeK3sUnconfiguredKeepsK3sOutOfComposedProbe(t *testing.T) {
+	s := Probe(context.Background(), Config{})
+	assert.False(t, s.Has(K3s))
+}
+
 func TestExecRunnerDoesNotUseAShell(t *testing.T) {
 	// A regression guard: ExecRunner must run the named binary directly via
 	// exec.CommandContext, never through /bin/sh -c or similar, so shell

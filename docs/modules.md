@@ -109,18 +109,18 @@ must be guarded by the probed `capability.Set` per `docs/capabilities.md`'s
 binding table: a `registerX` function checks `caps.Has(...)`/`caps.HasAll(...)`
 and registers nothing for that module when its capability is absent, rather
 than letting a missing or unreachable dependency fail daemon startup. See
-`registerPodman`/`registerDocker`/`registerIncus` in
+`registerPodman`/`registerDocker`/`registerIncus`/`registerK3s` in
 `cmd/pilothoused/main.go` for the pattern: each takes the probed
 `capability.Set` as its last parameter and no-ops immediately when its
 engine capability isn't present. New modules that depend on optional host
 tooling should follow the same shape from the start.
 
-The guard is only half the contract. For the four *optional* dependencies —
-`updex`, Podman, Docker, and Incus — the capability itself is gated on
+The guard is only half the contract. For the five *optional* dependencies —
+`updex`, Podman, Docker, Incus, and k3s — the capability itself is gated on
 explicit operator configuration, not on the tooling merely being present:
 `capability.Config` carries `Updex`, `PodmanSocket`, `DockerEndpoint`, and
-`IncusEnabled` straight from `cmd/pilothoused`'s `--updex`,
-`--podman-socket`, `--docker`, and `--incus` flags, all of which default to
+`IncusEnabled`, plus `K3s`, straight from `cmd/pilothoused`'s `--updex`,
+`--podman-socket`, `--docker`, `--incus`, and `--k3s` flags, all of which default to
 the zero value, and each probe returns an empty `Set` on the zero value
 without performing any I/O — no command is run and no socket is dialled.
 (`ProbePodman`/`ProbeDocker` do not even construct a client; `ProbeIncus`
@@ -131,8 +131,8 @@ binary on `PATH`, a live socket at a conventional path, or an exported
 guard above withholds registration and the web-side gate omits the module's
 nav entry, dashboard card, and routes. Both packaged broker units
 (`packaging/deb/pilothoused.service` and `packaging/rpm/pilothoused.service`,
-which differ only in their `--admin-group` argument) pass none of the four in
-their `ExecStart`, so a stock install runs with all four off until an operator
+which differ only in their `--admin-group` argument) pass none of the five in
+their `ExecStart`, so a stock install runs with all five off until an operator
 adds them. Follow the same
 shape for new optional tooling: add a `capability.Config` field fed by an
 explicitly-set flag rather than probing whatever the host happens to have.

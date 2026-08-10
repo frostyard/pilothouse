@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os/exec"
 	"time"
+
+	"github.com/frostyard/pilothouse/internal/k3sconfig"
 )
 
 // execProbeTimeout bounds every exec-based probe in this file, matching the
@@ -62,6 +64,18 @@ func ProbeBootc(ctx context.Context, runner CommandRunner) Set {
 // status --json` exits 0 and the output parses as JSON.
 func ProbeRPMOStree(ctx context.Context, runner CommandRunner) Set {
 	return probeExecJSON(ctx, runner, RPMOStree, "rpm-ostree", "status", "--json")
+}
+
+// ProbeK3s probes the k3s capability: present iff the explicitly configured
+// executable can read the local server's version through the fixed k3s
+// kubeconfig. An empty executable means k3s is not configured, so no command
+// is run and there is no PATH fallback.
+func ProbeK3s(ctx context.Context, runner CommandRunner, k3s string) Set {
+	if k3s == "" {
+		return New()
+	}
+	return probeExecJSON(ctx, runner, K3s, k3s,
+		"kubectl", "--kubeconfig="+k3sconfig.KubeconfigPath, "get", "--raw=/version")
 }
 
 // probeExecSuccess reports id present iff running name with args, bounded

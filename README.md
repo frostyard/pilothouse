@@ -20,6 +20,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Administrator-only container start, stop, restart, and safe removal actions
 - System Docker Engine inventory with container lifecycle controls, bounded log viewing, and socket isolation
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls, live per-instance addresses and memory, a per-instance detail page (allowlisted configuration, devices, interfaces, snapshots), bounded console and supervisor logs, non-stateful snapshot create/restore/delete, read-only network and profile inventory with DHCP leases, and instance creation from the public image server as a background job
+- Read-only k3s visibility with node readiness and aggregate pod health totals per namespace; individual pod details and cluster mutations are intentionally excluded
 - Administrator-only browsing, download, and atomic upload within configured host file roots
 - PAM authentication using host users and account policy
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
@@ -33,8 +34,8 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Liveness and broker-aware readiness endpoints at `/healthz` and `/readyz`
 - Optional numeric local UID/GID ownership mapping for Pilothouse-managed SMB mounts
 - Responsive desktop and mobile layouts
-- Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when systemd, journald, updex, `systemd-sysext`, or a container engine is absent or unreachable. Four of those capabilities — updex, Podman, Docker, Incus — are additionally opt-in, so "present" means "explicitly configured *and* reachable" rather than "detected on the host" (next bullet)
-- Explicit opt-in for every optional dependency: `updex`, Podman, Docker, and Incus are probed only when `--updex`, `--podman-socket`, `--docker`, or `--incus` is configured on `pilothoused`, and an unconfigured one is reported absent without any I/O — no command is run and no socket is dialled — so a binary on `PATH`, a socket at a conventional path, or an exported `DOCKER_HOST` never enables anything by itself, and the packaged unit passes none of the four. Every feature bullet above that names updex, Podman, Docker, or Incus therefore describes a surface that appears only once its flag is set. The remaining capabilities (systemd, journald, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs) stay presence-probed, and the broker also no longer declares `Wants=` on any engine socket
+- Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus, k3s), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when a dependency is absent or unreachable. Five of those capabilities — updex, Podman, Docker, Incus, and k3s — are additionally opt-in, so "present" means "explicitly configured *and* reachable" rather than "detected on the host" (next bullet)
+- Explicit opt-in for every optional dependency: `updex`, Podman, Docker, Incus, and k3s are probed only when `--updex`, `--podman-socket`, `--docker`, `--incus`, or `--k3s` is configured on `pilothoused`, and an unconfigured one is reported absent without any I/O — no command is run and no socket is dialled — so a binary on `PATH`, a socket at a conventional path, or an exported `DOCKER_HOST` never enables anything by itself, and the packaged unit passes none of the five. Every feature bullet above that names one of these dependencies therefore describes a surface that appears only once its flag is set. The remaining capabilities (systemd, journald, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs) stay presence-probed, and the broker also no longer declares `Wants=` on any engine socket
 
 Pilothouse-managed SMB mounts can optionally map file ownership to a local
 numeric UID/GID. Both IDs are required together; leaving both fields blank
@@ -80,8 +81,8 @@ sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id
 and start the real `pilothouse` binary on a loopback port and need no broker.
 
 That broker runs with no optional tooling configured, so Podman, Docker,
-Incus, and every `updex`-backed extension operation are absent from the
-console; add `--podman-socket`, `--docker`, `--incus`, or `--updex` to the
+Incus, k3s, and every `updex`-backed extension operation are absent from the
+console; add `--podman-socket`, `--docker`, `--incus`, `--k3s`, or `--updex` to the
 `pilothoused` line to work on those surfaces, and `--dev` to the
 `pilothouse` line to see the static Fleet preview.
 
@@ -463,7 +464,7 @@ The central contract is deliberately small. Every management module provides:
 
 The shell knows only about `platform.Module`; it does not import concrete modules. The web composition root registers presentation modules. The broker composition root separately registers privileged queries and action implementations. Modules submit fixed query and action identifiers through `platform.Host`; they never execute privileged commands or connect to root-equivalent service sockets in the web process.
 
-The Podman module intentionally manages the root/system store used for host services through the Podman 5.0 or newer Libpod API. Enable the rootful API socket with `sudo systemctl enable --now podman.socket`, then point `pilothoused` at it with `--podman-socket` (for example `--podman-socket /run/podman/podman.sock`); the flag defaults to empty and Podman stays disabled until it is set, so a host that merely has a socket present never enables the engine on its own. The Docker module targets the system Docker daemon; point `pilothoused` at it with `--docker` (for example `--docker unix:///var/run/docker.sock`). That flag defaults to empty and Docker stays disabled until it is set — an exported `DOCKER_HOST` or a socket at the SDK's default path never enables the engine on its own, because the endpoint you configure is the only input the Docker client is built from. The Incus module uses the official SDK against `/var/lib/incus/unix.socket` and allows selection from projects reported by that local daemon; it never reads configured Incus remotes. Opt in with `pilothoused --incus`; that flag defaults to `false` and Incus stays disabled until it is set, so a host that merely answers on that socket never enables the engine on its own. The socket path is fixed rather than configurable — the flag decides only whether it is probed. Rootless and remote workloads remain isolated from this system administration surface.
+The Podman module intentionally manages the root/system store used for host services through the Podman 5.0 or newer Libpod API. Enable the rootful API socket with `sudo systemctl enable --now podman.socket`, then point `pilothoused` at it with `--podman-socket` (for example `--podman-socket /run/podman/podman.sock`); the flag defaults to empty and Podman stays disabled until it is set, so a host that merely has a socket present never enables the engine on its own. The Docker module targets the system Docker daemon; point `pilothoused` at it with `--docker` (for example `--docker unix:///var/run/docker.sock`). That flag defaults to empty and Docker stays disabled until it is set — an exported `DOCKER_HOST` or a socket at the SDK's default path never enables the engine on its own, because the endpoint you configure is the only input the Docker client is built from. The Incus module uses the official SDK against `/var/lib/incus/unix.socket` and allows selection from projects reported by that local daemon; it never reads configured Incus remotes. Opt in with `pilothoused --incus`; that flag defaults to `false` and Incus stays disabled until it is set, so a host that merely answers on that socket never enables the engine on its own. The socket path is fixed rather than configurable — the flag decides only whether it is probed. The k3s module is read-only and opt-in through `--k3s /usr/local/bin/k3s`; the broker runs only fixed `kubectl get` commands against `/etc/rancher/k3s/k3s.yaml`, returning node readiness and namespace-level pod totals without exposing the kubeconfig, Kubernetes API, individual pod details, or any mutation. Rootless and remote workloads remain isolated from this system administration surface.
 
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 
@@ -530,7 +531,8 @@ enables no container engine and no `updex`-backed extension operation. Add
 the flags for the surfaces you want to that `ExecStart`:
 `--updex /usr/bin/updex` (adjust to your host's path),
 `--podman-socket /run/podman/podman.sock`,
-`--docker unix:///var/run/docker.sock`, and `--incus`.
+`--docker unix:///var/run/docker.sock`, `--incus`, and
+`--k3s /usr/local/bin/k3s`.
 `systemd-sysext`, systemd, journald, bootc, and rpm-ostree need no flag;
 they are still detected by presence. `pilothouse.service` likewise omits
 `--dev`, so the static Fleet preview is not registered in a normal

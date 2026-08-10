@@ -114,6 +114,7 @@ func fullCapabilitySet() capability.Set {
 		capability.Podman,
 		capability.Docker,
 		capability.Incus,
+		capability.K3s,
 	)
 }
 
@@ -327,6 +328,7 @@ var capabilityRequirements = map[string][]capability.ID{
 	broker.QueryIncusProfile:     {capability.Incus},
 	broker.QueryIncusState:       {capability.Incus},
 	broker.QueryJobs:             nil,
+	broker.QueryK3sState:         {capability.K3s},
 	broker.QueryLogs:             {capability.Systemd, capability.Journald},
 	broker.QueryMaintenanceState: {capability.Systemd},
 	broker.QueryPodmanLogs:       {capability.Podman},
@@ -407,6 +409,7 @@ var moduleRequiredCapabilities = map[string][]capability.ID{
 	"podman":    {capability.Podman},
 	"docker":    {capability.Docker},
 	"incus":     {capability.Incus},
+	"k3s":       {capability.K3s},
 }
 
 // moduleRequiredAnyCapabilities is the any-of counterpart of
@@ -2699,8 +2702,8 @@ func TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck(t *testing.T) {
 // implied by the fixture runs above, which only exercise the broker IDs the
 // web side happens to call:
 //
-//   - Completeness. Together the tables must carry all 63 declared broker IDs
-//     (40 Action* + 23 Query*), the same totals cmd/pilothoused's
+//   - Completeness. Together the tables must carry all 64 declared broker IDs
+//     (40 Action* + 24 Query*), the same totals cmd/pilothoused's
 //     TestCapabilityTableMirrorsBrokerAPIConstants pins against
 //     internal/broker/api.go's live go/ast-parsed declarations. Every key here
 //     is a broker.Action*/Query* constant reference, so a renamed constant is
@@ -2718,8 +2721,8 @@ func TestWebSideOracleTablesAreCompleteAndDisjoint(t *testing.T) {
 		assert.NotContainsf(t, capabilityRequirements, id,
 			"broker ID %q appears in both capabilityRequirements and capabilityAnyRequirements; an ID carries at most one registration guard", id)
 	}
-	assert.Equal(t, 63, len(capabilityRequirements)+len(capabilityAnyRequirements),
-		"the two web-side broker-ID tables must together cover all 63 declared broker IDs (40 Action* + 23 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
+	assert.Equal(t, 64, len(capabilityRequirements)+len(capabilityAnyRequirements),
+		"the two web-side broker-ID tables must together cover all 64 declared broker IDs (40 Action* + 24 Query*), matching docs/capabilities.md and cmd/pilothoused's capabilityTable")
 
 	// Hand-written from docs/capabilities.md, not read back from the
 	// production gates: QueryHostImageStatus and QueryAutoUpdateStatus are two

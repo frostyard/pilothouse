@@ -5,7 +5,8 @@ issue #35, `.mill/spec.md`). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
-capability-guarded. `registerPodman`/`registerDocker`/`registerIncus` (and
+capability-guarded. `registerPodman`/`registerDocker`/`registerIncus`/
+`registerK3s` (and
 the new `QueryCapabilities` itself), plus `registerServices`,
 `registerLogs`, `registerBackups`, `registerStorageActions`,
 `registerMaintenance`, `registerHostImage`, and `registerSysextActions`, are
@@ -15,11 +16,11 @@ landed behavior, not a future guarantee, and
 a fixture matrix of capability sets.
 
 **Running total:** `internal/broker/api.go` declares exactly 40 `Action*`
-constants and 23 `Query*` constants today — 63 IDs total, reproducible with:
+constants and 24 `Query*` constants today — 64 IDs total, reproducible with:
 
 ```sh
 grep -c '^[[:space:]]*Action' internal/broker/api.go   # 40
-grep -c '^[[:space:]]*Query' internal/broker/api.go    # 23
+grep -c '^[[:space:]]*Query' internal/broker/api.go    # 24
 ```
 
 (The POSIX `[[:space:]]` character class is used rather than a literal `\t`
@@ -27,11 +28,11 @@ escape, since a bare backslash-`t` is interpreted inconsistently across grep
 implementations — GNU grep treats it as a tab as an extension even in BRE,
 most other greps do not and silently match nothing.)
 
-Every one of the 63 IDs is registered exactly once across the four
+Every one of the 64 IDs is registered exactly once across the four
 registries in `cmd/pilothoused/main.go`, including `ActionFilesUpload`
 (registered via `StreamActionRegistry`) and `QueryFilesDownload` (registered
-via `StreamQueryRegistry`) — both are members of the 40/23 above, not IDs
-added on top. This table therefore has exactly 63 rows.
+via `StreamQueryRegistry`) — both are members of the 40/24 above, not IDs
+added on top. This table therefore has exactly 64 rows.
 
 Both grep commands above were re-run against this tree when the totals were
 last changed, and they are no longer only documentation:
@@ -40,7 +41,7 @@ last changed, and they are no longer only documentation:
 with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 `capabilityTable` **in both directions**, so a constant added without a table
 row, a table row naming an ID that no longer exists, or a drift away from
-40/23/63 all fail the build. It additionally checks that an `Action*`
+40/24/64 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
 registry.
 
@@ -158,9 +159,9 @@ networks — so `NetworkDetail` carries a separate `LeasesAvailable` flag that
 distinguishes "no leases" from "leases cannot be read", and the unmanaged
 case is never asked for leases at all.
 
-`ActionIncusCreate` (`org.frostyard.pilothouse.incus.create`) is the newest
-ID, added by the Incus instance-creation phase, and is why the totals above
-now read 40/23/63. It belongs to the `incus` module, is administrator-only,
+`ActionIncusCreate` (`org.frostyard.pilothouse.incus.create`) was added by
+the Incus instance-creation phase and brought the totals to 40/23/63. It
+belongs to the `incus` module, is administrator-only,
 and is an ordinary all-of row guarded by `caps.Has(capability.Incus)`.
 
 It is the module's **only background action** and the daemon's first
@@ -170,6 +171,16 @@ routinely takes minutes, so it is registered with `Background: true` and a
 instance's own `incus/instance/<project>/<name>` lock for the duration, and
 returns immediately. The web notice therefore says creation *started*, not
 that it finished; the outcome lands in Activity.
+
+`QueryK3sState` (`org.frostyard.pilothouse.k3s.state`) is the newest ID,
+raising the current totals to 40/24/64. It is a non-admin, read-only query
+guarded by `caps.Has(capability.K3s)`. The capability is advertised only when
+`--k3s <path>` is explicitly configured and that executable can read
+`/version` through the fixed `/etc/rancher/k3s/k3s.yaml` kubeconfig. The
+query runs only two fixed inventory commands: node JSON and all-namespace pod
+JSON. Its response contains node readiness/version/runtime plus pod-health
+totals grouped by namespace; it carries no individual pod identity, logs,
+configuration, secret, or mutation.
 
 **The image server is a compile-time constant, never a parameter.**
 `imageRemote` in `internal/modules/incus/create.go` is
@@ -205,11 +216,11 @@ count in either contract test moved. This is recorded rather than left
 implicit precisely because "nothing changed" and "nobody checked" produce
 identical diffs.
 
-Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
+Canonical capability IDs: `systemd`, `journald`,
 `updex`, `sysext`, `bootc`, `rpm-ostree`, `autoupdate-rpm-ostree`,
-`autoupdate-bootc`, `podman`, `docker`, `incus`.
+`autoupdate-bootc`, `podman`, `docker`, `incus`, `k3s`.
 
-## Actions (35)
+## Actions (40)
 
 | Broker ID | Module | Capability |
 |---|---|---|
@@ -254,7 +265,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `ActionStorageUnmount` | storage (remote-mount) | systemd |
 | `ActionStorageDelete` | storage (remote-mount) | systemd |
 
-## Queries (19)
+## Queries (24)
 
 | Broker ID | Module | Capability |
 |---|---|---|
@@ -272,6 +283,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 | `QueryIncusProfile` | incus | incus |
 | `QueryIncusState` | incus | incus |
 | `QueryJobs` | jobs | none |
+| `QueryK3sState` | k3s | k3s |
 | `QueryLogs` | logs | systemd AND journald *(exception — see below)* |
 | `QueryMaintenanceState` | maintenance | systemd |
 | `QueryPodmanLogs` | podman | podman |
@@ -287,7 +299,7 @@ Canonical capability IDs (from `.mill/spec.md`): `systemd`, `journald`,
 Per `.mill/spec.md`: services state/actions → systemd; services journal →
 journald; logs → journald; storage remote-mount actions → systemd; backups
 → systemd; maintenance → systemd; podman/docker/incus → their engine
-capability; system, files, activity, jobs → none. sysext is per-action, not
+capability; k3s → k3s; system, files, activity, jobs → none. sysext is per-action, not
 module-level.
 
 Maintenance's "→ systemd" default is now a **per-surface** requirement rather
@@ -993,7 +1005,7 @@ With the split in place, that mutation fails the `bootc-only` and
 `snosi-without-bootc` web fixtures and the `bootc-only` / `rpm-ostree-only`
 daemon fixtures. `TestWebSideOracleTablesAreCompleteAndDisjoint` additionally
 pins the two any-of tables literally, checks the two web-side broker-ID tables
-are disjoint and together cover all 63 IDs, and asserts the two helpers do not
+are disjoint and together cover all 64 IDs, and asserts the two helpers do not
 collapse into each other.
 
 **Static guarantees.** Two of the spec's constraints are enforced as
@@ -1014,7 +1026,7 @@ as prose only:
 
 This phase changed no broker ID, no registry, and no row of this table (see
 the "#64 added no broker ID" note near the top for the re-run counts). It
-changed what makes four of the eleven canonical capability IDs present in
+changed what makes four of the then-eleven canonical capability IDs present in
 the probed `capability.Set` in the first place, which is the input every row
 here is read against:
 
@@ -1030,6 +1042,12 @@ unconfigured probe returns an empty `Set` before performing any I/O.
 `systemd`, `journald`, `sysext`, `bootc`, `rpm-ostree`, and the two
 `autoupdate-*` pairs are unchanged — they remain presence-probed and carry
 no flag.
+
+Issue #88 later added `k3s` as a twelfth capability and a fifth optional
+dependency. `--k3s <path>` defaults to empty, and `ProbeK3s` returns before
+running anything in that state. When configured, the probe executes the
+selected binary directly (never through a shell) with the fixed arguments
+`kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get --raw=/version`.
 
 The consequence for this table is that on a default-flagged daemon every
 `podman`, `docker`, and `incus` row is unregistered, as is every row whose

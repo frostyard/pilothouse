@@ -9,7 +9,7 @@ import (
 )
 
 func TestIDConstantsMatchCanonicalStrings(t *testing.T) {
-	// The eleven canonical string values from .mill/spec.md, verbatim.
+	// The canonical string values, verbatim.
 	assert.Equal(t, ID("systemd"), Systemd)
 	assert.Equal(t, ID("journald"), Journald)
 	assert.Equal(t, ID("updex"), Updex)
@@ -21,6 +21,7 @@ func TestIDConstantsMatchCanonicalStrings(t *testing.T) {
 	assert.Equal(t, ID("podman"), Podman)
 	assert.Equal(t, ID("docker"), Docker)
 	assert.Equal(t, ID("incus"), Incus)
+	assert.Equal(t, ID("k3s"), K3s)
 }
 
 func TestZeroValueSetIsNilSafe(t *testing.T) {
