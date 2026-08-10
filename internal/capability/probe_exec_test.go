@@ -229,13 +229,28 @@ func TestProbeK3sAbsentAndNeverRunsWhenUnconfigured(t *testing.T) {
 	assert.False(t, s.Has(K3s))
 }
 
-func TestProbeK3sAbsentOnInvalidJSONOrCommandFailure(t *testing.T) {
-	assert.False(t, ProbeK3s(context.Background(), &fakeCommandRunner{output: []byte("version")}, "/opt/k3s").Has(K3s))
-	assert.False(t, ProbeK3s(context.Background(), &fakeCommandRunner{err: errors.New("exit status 1")}, "/opt/k3s").Has(K3s))
+func TestProbeK3sRejectsInvalidVersionResponses(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		output string
+		err    error
+	}{
+		{name: "invalid JSON", output: "version"},
+		{name: "empty object", output: `{}`},
+		{name: "missing minor", output: `{"major":"1"}`},
+		{name: "missing major", output: `{"minor":"34"}`},
+		{name: "wrong field type", output: `{"major":1,"minor":"34"}`},
+		{name: "command failure", err: errors.New("exit status 1")},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runner := &fakeCommandRunner{output: []byte(testCase.output), err: testCase.err}
+			assert.False(t, ProbeK3s(context.Background(), runner, "/opt/k3s").Has(K3s))
+		})
+	}
 }
 
 func TestProbeK3sAppliesBoundedTimeout(t *testing.T) {
-	runner := &fakeCommandRunner{output: []byte(`{"major":"1"}`)}
+	runner := &fakeCommandRunner{output: []byte(`{"major":"1","minor":"34"}`)}
 	start := time.Now()
 	ProbeK3s(context.Background(), runner, "/opt/k3s")
 

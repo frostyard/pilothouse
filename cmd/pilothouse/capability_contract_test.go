@@ -2707,7 +2707,7 @@ func TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck(t *testing.T) {
 //     TestCapabilityTableMirrorsBrokerAPIConstants pins against
 //     internal/broker/api.go's live go/ast-parsed declarations. Every key here
 //     is a broker.Action*/Query* constant reference, so a renamed constant is
-//     a compile error and 63 distinct keys can only mean full coverage — which
+//     a compile error and 64 distinct keys can only mean full coverage — which
 //     is what makes requireAvailable's "not in either table" branch a genuine
 //     tripwire for a newly added ID rather than a formality.
 //   - Disjointness. An ID carries at most one registration guard, so appearing

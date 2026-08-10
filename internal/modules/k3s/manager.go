@@ -181,6 +181,9 @@ func canonicalNodes(raw nodeList) ([]Node, error) {
 		if item.Metadata.Name == "" {
 			return nil, errors.New("k3s node response contains an unnamed node")
 		}
+		if item.Status.NodeInfo.KubeletVersion == "" || item.Status.NodeInfo.ContainerRuntimeVersion == "" {
+			return nil, fmt.Errorf("k3s node %q response omits version or runtime", item.Metadata.Name)
+		}
 		nodes = append(nodes, Node{
 			Name: item.Metadata.Name, Ready: conditionTrue(item.Status.Conditions, "Ready"),
 			Roles: nodeRoles(item.Metadata.Labels), Runtime: item.Status.NodeInfo.ContainerRuntimeVersion,

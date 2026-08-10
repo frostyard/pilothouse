@@ -148,9 +148,13 @@ func TestSystemManagerRejectsMalformedClusterDocuments(t *testing.T) {
 		pods      string
 		wantError string
 	}{
+		{name: "wrong node api", nodes: `{"apiVersion":"v2","kind":"NodeList","items":[]}`, wantError: "unexpected k3s node response"},
 		{name: "wrong node kind", nodes: `{"apiVersion":"v1","kind":"PodList","items":[]}`, wantError: "unexpected k3s node response"},
 		{name: "unnamed node", nodes: `{"apiVersion":"v1","kind":"NodeList","items":[{"metadata":{}}]}`, wantError: "k3s node response contains an unnamed node"},
+		{name: "node missing version", nodes: `{"apiVersion":"v1","kind":"NodeList","items":[{"metadata":{"name":"server"},"status":{"nodeInfo":{"containerRuntimeVersion":"containerd://2.1.4-k3s1"}}}]}`, wantError: `k3s node "server" response omits version or runtime`},
+		{name: "node missing runtime", nodes: `{"apiVersion":"v1","kind":"NodeList","items":[{"metadata":{"name":"server"},"status":{"nodeInfo":{"kubeletVersion":"v1.34.1+k3s1"}}}]}`, wantError: `k3s node "server" response omits version or runtime`},
 		{name: "wrong pod api", nodes: nodesFixture, pods: `{"apiVersion":"v2","kind":"PodList","items":[]}`, wantError: "unexpected k3s pod response"},
+		{name: "wrong pod kind", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"NodeList","items":[]}`, wantError: "unexpected k3s pod response"},
 		{name: "unnamed pod", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"namespace":"default"},"status":{"phase":"Running"}}]}`, wantError: "k3s pod response contains an unnamed pod or namespace"},
 		{name: "invalid pod phase", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"api","namespace":"default"},"status":{"phase":"Evicted"}}]}`, wantError: `k3s pod default/api has invalid phase "Evicted"`},
 	} {

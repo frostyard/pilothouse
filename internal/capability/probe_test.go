@@ -14,7 +14,7 @@ func TestUnionSetsEmptyWhenEveryProbeFails(t *testing.T) {
 	// probe came back absent (i.e. every probe failed or was
 	// unreachable) -- proving the aggregator never turns "every probe
 	// absent" into an error, only ever into an empty Set.
-	s := unionSets(New(), New(), New(), New(), New(), New(), New(), New(), New())
+	s := unionSets(New(), New(), New(), New(), New(), New(), New(), New(), New(), New())
 
 	assert.Empty(t, s.List())
 }
@@ -23,8 +23,8 @@ func TestUnionSetsPartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 	// A representative partial fixture, in the same shape (and order) as
 	// Probe's own composition: systemd succeeds together with one
 	// automatic-update pair sharing its connection, journald succeeds, one
-	// engine succeeds; updex/sysext/bootc/rpm-ostree and the other two
-	// engines fail/are absent.
+	// engine succeeds; updex/sysext/bootc/rpm-ostree, the other two
+	// engines, and k3s fail/are absent.
 	s := unionSets(
 		New(Systemd, AutoupdateRPMOStree),
 		New(Journald),
@@ -35,6 +35,7 @@ func TestUnionSetsPartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 		New(Podman),
 		New(), // docker absent
 		New(), // incus absent
+		New(), // k3s absent
 	)
 
 	assert.ElementsMatch(t, []ID{Systemd, AutoupdateRPMOStree, Journald, Podman}, s.List())
@@ -43,7 +44,7 @@ func TestUnionSetsPartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 func TestUnionSetsAllPresent(t *testing.T) {
 	all := []ID{
 		Systemd, Journald, Updex, Sysext, Bootc, RPMOStree,
-		AutoupdateRPMOStree, AutoupdateBootc, Podman, Docker, Incus,
+		AutoupdateRPMOStree, AutoupdateBootc, Podman, Docker, Incus, K3s,
 	}
 	s := unionSets(New(all...))
 
@@ -75,11 +76,12 @@ func withFakeProbes(t *testing.T, fakes []probeFn) {
 func TestProbeAllFailingYieldsEmptySet(t *testing.T) {
 	// Every entry in the fake table reports absent, mirroring a host where
 	// every real probe (systemd, journald, updex, sysext, bootc,
-	// rpm-ostree, podman, docker, incus) is unreachable or absent. Unlike
+	// rpm-ostree, podman, docker, incus, k3s) is unreachable or absent. Unlike
 	// relying on this test host's real state, swapping the table makes the
 	// all-absent outcome deterministic regardless of what systemd/docker/
 	// incus/etc. this host actually has.
 	withFakeProbes(t, []probeFn{
+		func(context.Context, Config) Set { return New() },
 		func(context.Context, Config) Set { return New() },
 		func(context.Context, Config) Set { return New() },
 		func(context.Context, Config) Set { return New() },
@@ -100,8 +102,8 @@ func TestProbePartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 	// A representative partial fixture, in the same shape (and order) as
 	// the real probes table: systemd succeeds together with one
 	// automatic-update pair sharing its connection, journald succeeds, one
-	// engine succeeds; updex/sysext/bootc/rpm-ostree and the other two
-	// engines fail/are absent. Calling the real Probe (with the table
+	// engine succeeds; updex/sysext/bootc/rpm-ostree, the other two
+	// engines, and k3s fail/are absent. Calling the real Probe (with the table
 	// swapped) proves Probe itself wires up and unions every probe's
 	// result, not just that a merge helper can combine Sets handed to it
 	// directly.
@@ -115,6 +117,7 @@ func TestProbePartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 		func(context.Context, Config) Set { return New(Podman) },
 		func(context.Context, Config) Set { return New() }, // docker absent
 		func(context.Context, Config) Set { return New() }, // incus absent
+		func(context.Context, Config) Set { return New() }, // k3s absent
 	})
 
 	s := Probe(context.Background(), Config{})
@@ -125,9 +128,15 @@ func TestProbePartialSuccessContainsExactlySucceedingIDs(t *testing.T) {
 func TestProbePassesConfigThroughToEachProbe(t *testing.T) {
 	// Proves Probe hands its config argument through to every probe in the
 	// table (not a zero-value Config), by asserting each fake observes the
-	// exact DockerEndpoint/IncusEnabled/PodmanSocket/Updex values passed to
+	// exact DockerEndpoint/IncusEnabled/K3s/PodmanSocket/Updex values passed to
 	// Probe.
-	want := Config{DockerEndpoint: "unix:///custom/docker.sock", IncusEnabled: true, PodmanSocket: "/custom/podman.sock", Updex: "/custom/updex"}
+	want := Config{
+		DockerEndpoint: "unix:///custom/docker.sock",
+		IncusEnabled:   true,
+		K3s:            "/custom/k3s",
+		PodmanSocket:   "/custom/podman.sock",
+		Updex:          "/custom/updex",
+	}
 	var got []Config
 	withFakeProbes(t, []probeFn{
 		func(_ context.Context, config Config) Set { got = append(got, config); return New() },
@@ -160,6 +169,7 @@ func TestProbeHasNoErrorReturnAndCompletesWithoutPanic(t *testing.T) {
 
 	config := Config{
 		DockerEndpoint: "unix://" + filepath.Join(t.TempDir(), "missing-docker.sock"),
+		K3s:            filepath.Join(t.TempDir(), "missing-k3s"),
 		PodmanSocket:   filepath.Join(t.TempDir(), "missing-podman.sock"),
 		Updex:          filepath.Join(t.TempDir(), "missing-updex"),
 	}
@@ -170,6 +180,7 @@ func TestProbeHasNoErrorReturnAndCompletesWithoutPanic(t *testing.T) {
 	})
 	assert.False(t, s.Has(Docker), "the configured docker endpoint is guaranteed unreachable")
 	assert.False(t, s.Has(Incus), "incus is not opted in via IncusEnabled")
+	assert.False(t, s.Has(K3s), "the configured k3s path is guaranteed nonexistent")
 	assert.False(t, s.Has(Podman), "the configured podman socket is guaranteed unreachable")
 	assert.False(t, s.Has(Updex), "the configured updex path is guaranteed nonexistent")
 }

@@ -74,8 +74,22 @@ func ProbeK3s(ctx context.Context, runner CommandRunner, k3s string) Set {
 	if k3s == "" {
 		return New()
 	}
-	return probeExecJSON(ctx, runner, K3s, k3s,
+	probeCtx, cancel := context.WithTimeout(ctx, execProbeTimeout)
+	defer cancel()
+
+	output, err := runner.Run(probeCtx, k3s,
 		"kubectl", "--kubeconfig="+k3sconfig.KubeconfigPath, "get", "--raw=/version")
+	if err != nil {
+		return New()
+	}
+	var version struct {
+		Major string `json:"major"`
+		Minor string `json:"minor"`
+	}
+	if err := json.Unmarshal(output, &version); err != nil || version.Major == "" || version.Minor == "" {
+		return New()
+	}
+	return New(K3s)
 }
 
 // probeExecSuccess reports id present iff running name with args, bounded
