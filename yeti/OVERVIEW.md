@@ -4801,6 +4801,14 @@ rationale.
   confirmation. The pull request template records the decision, while
   `CONTRIBUTING.md` explains when it must be updated; classification never
   substitutes for an existing gate.
+- `.knowledge/README.md` is the cross-session knowledge index. It points agents
+  to the live owners of durable facts — `AGENTS.md`, the append-only
+  `corrections.jsonl`, every file under `docs/agents/skills/`, this overview,
+  and authoritative subsystem docs — rather than copying those facts into a
+  second store that can drift. Its correction schema requires a date, scope,
+  the prior belief plus verified reality, evidence, and an optional promotion
+  target. Committed knowledge must contain no credentials, personal data,
+  speculation, or transient worktree state.
 - `docs/agents/skills/` holds durable lessons harvested from previous mill
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,

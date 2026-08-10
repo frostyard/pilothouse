@@ -1,5 +1,7 @@
 # AGENTS
 
+All AI-assisted work must follow `docs/security/SECURITY-AI.md`.
+
 This project is derived from `housecat-inc/scratch` and follows its core stack:
 
 - Idiomatic Go
@@ -177,6 +179,13 @@ before performing tasks. Write content in this directory to be
 maximally useful to an AI agent understanding the codebase — detailed
 architecture, patterns, and decision rationale rather than user-facing
 guides.
+
+**.knowledge/ directory** is the cross-session entry point for committed agent
+knowledge. Read `.knowledge/README.md` before planning changes, then follow its
+links to this file, `corrections.jsonl`, every learned skill, the yeti overview,
+and authoritative subsystem docs. Append only verified corrections, promote
+stable rules to their durable owner, and never commit credentials, personal
+data, speculation, or transient worktree state.
 
 ## One command mirrors CI
 

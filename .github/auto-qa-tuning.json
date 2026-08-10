@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "rolling_window_days": 30,
+  "minimum_sample_size": 10,
+  "signals": {
+    "repository_ci": ".github/workflows/test.yml",
+    "coverage": ".github/workflows/test.yml#unit-test",
+    "correction_frequency": "corrections.jsonl",
+    "recurring_review_findings": "docs/agents/skills/"
+  },
+  "thresholds": {
+    "relative_regression": 0.1,
+    "consecutive_improved_windows_to_relax": 2
+  },
+  "actions": {
+    "repository_ci": [
+      "add or document the missing targeted local check"
+    ],
+    "coverage": [
+      "add focused tests for repeatedly missed paths"
+    ],
+    "correction_frequency": [
+      "promote recurring corrections into a learned skill and tighten affected guidance"
+    ],
+    "recurring_review_findings": [
+      "add a regression check or clarify the applicable repository convention"
+    ]
+  },
+  "guardrails": {
+    "insufficient_data": "hold",
+    "required_checks": "never_relax",
+    "coverage_checks": "never_relax",
+    "security_checks": "never_relax",
+    "changes_via_pull_request": true
+  }
+}
