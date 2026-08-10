@@ -17,7 +17,9 @@ published from the unit-test job to Codecov, but upload failures are
 non-blocking; the unit tests themselves remain blocking. The workflow disables
 token permissions by default, grants every job read-only contents access, and
 adds OIDC only to the unit-test job for the Codecov upload. Its vulnerability
-scanner is pinned to a reviewed version.
+scanner is pinned to a reviewed version. System telemetry has direct regression
+coverage for zero-capacity percentage calculations, lower and upper saturation,
+wrapped CPU counters, and rendering of the composed dashboard resource summary.
 
 ## Local verification
 
