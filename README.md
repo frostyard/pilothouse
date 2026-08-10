@@ -79,6 +79,12 @@ branch is in this repository is handed to Copilot by
 are ignored, reruns are deduplicated by review ID, and every resulting change
 must still pass the normal pull-request gates and human review.
 
+With the `ANTHROPIC_API_KEY` repository secret configured, non-draft pull
+requests whose branch is in this repository also receive an advisory,
+least-privilege [Claude code review](docs/claude-code-review.md). Fork pull
+requests are deliberately skipped, comments remain untrusted until a human
+verifies them, and the workflow cannot approve, merge, deploy, or publish.
+
 Go 1.26 or newer is required.
 
 ```bash
