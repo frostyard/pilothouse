@@ -156,7 +156,6 @@ func TestSystemManagerRejectsMalformedClusterDocuments(t *testing.T) {
 		{name: "wrong pod api", nodes: nodesFixture, pods: `{"apiVersion":"v2","kind":"PodList","items":[]}`, wantError: "unexpected k3s pod response"},
 		{name: "wrong pod kind", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"NodeList","items":[]}`, wantError: "unexpected k3s pod response"},
 		{name: "unnamed pod", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"namespace":"default"},"status":{"phase":"Running"}}]}`, wantError: "k3s pod response contains an unnamed pod or namespace"},
-		{name: "invalid pod phase", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"api","namespace":"default"},"status":{"phase":"Evicted"}}]}`, wantError: `k3s pod in namespace "default" has invalid phase "Evicted"`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			responses := [][]byte{[]byte(testCase.nodes)}
@@ -167,6 +166,16 @@ func TestSystemManagerRejectsMalformedClusterDocuments(t *testing.T) {
 			assert.EqualError(t, err, testCase.wantError)
 		})
 	}
+}
+
+func TestSystemManagerCountsUnrecognizedPodPhaseAsNotReady(t *testing.T) {
+	pods := `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"api","namespace":"default"},"status":{"phase":"FuturePhase"}}]}`
+	runner := &fakeRunner{responses: [][]byte{[]byte(nodesFixture), []byte(pods)}}
+
+	state, err := NewSystemManager(runner, "/usr/local/bin/k3s").State(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []Namespace{{Name: "default", NotReady: 1, Total: 1}}, state.Namespaces)
+	require.Len(t, state.Nodes, 2, "an unknown pod phase must not erase unrelated node inventory")
 }
 
 func TestSystemManagerRejectsInvalidJSON(t *testing.T) {

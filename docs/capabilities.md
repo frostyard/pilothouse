@@ -180,7 +180,10 @@ guarded by `caps.Has(capability.K3s)`. The capability is advertised only when
 query runs only two fixed inventory commands: node JSON and all-namespace pod
 JSON. Its response contains node readiness/version/runtime plus pod-health
 totals grouped by namespace; it carries no individual pod identity, logs,
-configuration, secret, or mutation.
+configuration, secret, or mutation. Response shape remains strict, but a pod
+phase unknown to this client is forward-compatible data rather than a malformed
+response: it increments that namespace's not-ready count so unrelated node and
+namespace visibility remains available.
 
 **The image server is a compile-time constant, never a parameter.**
 `imageRemote` in `internal/modules/incus/create.go` is

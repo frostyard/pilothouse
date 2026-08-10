@@ -244,7 +244,10 @@ func aggregateNamespaces(raw podList) ([]Namespace, error) {
 		case "Unknown":
 			namespace.NotReady++
 		default:
-			return nil, fmt.Errorf("k3s pod in namespace %q has invalid phase %q", item.Metadata.Namespace, item.Status.Phase)
+			// Kubernetes API clients must tolerate enum values introduced by a
+			// newer server. Preserve visibility and conservatively count an
+			// unrecognized phase as not ready instead of failing all inventory.
+			namespace.NotReady++
 		}
 	}
 	namespaces := make([]Namespace, 0, len(byName))
