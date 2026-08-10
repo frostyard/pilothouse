@@ -197,6 +197,9 @@ credentials — tidy check, vet, format check, lint, govulncheck, tests, race,
 build — in CI's order. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
+`.github/workflows/test.yml` disables token permissions by default, grants
+each job read-only contents access, and grants OIDC only to the unit-test job
+that invokes Codecov.
 Automated harnesses (the mill's deep gate) use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
 gates. `.github/workflows/nightly-compliance.yml` reruns that same `make ci`

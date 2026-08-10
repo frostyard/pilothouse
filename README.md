@@ -56,8 +56,11 @@ them.
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
-CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
-contract daily at 04:23 UTC and on manual dispatch. Its compliance job remains
+CI. The pull-request test workflow starts from no token permissions, grants
+only read-only contents access per job, and adds OIDC only to the unit-test job
+for Codecov; its `govulncheck` installation is version-pinned. The read-only
+`nightly-compliance.yml` workflow reruns the same `make ci` contract daily at
+04:23 UTC and on manual dispatch. Its compliance job remains
 credential-free; a separate job reports drift when the Copilot assignment
 secret is absent.
 Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
