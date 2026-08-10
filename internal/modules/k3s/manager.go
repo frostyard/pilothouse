@@ -225,7 +225,7 @@ func aggregateNamespaces(raw podList) ([]Namespace, error) {
 		case "Unknown":
 			namespace.NotReady++
 		default:
-			return nil, fmt.Errorf("k3s pod %s/%s has invalid phase %q", item.Metadata.Namespace, item.Metadata.Name, item.Status.Phase)
+			return nil, fmt.Errorf("k3s pod in namespace %q has invalid phase %q", item.Metadata.Namespace, item.Status.Phase)
 		}
 	}
 	namespaces := make([]Namespace, 0, len(byName))
