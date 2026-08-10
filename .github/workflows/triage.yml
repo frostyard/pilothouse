@@ -1,0 +1,52 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    name: Apply issue labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Classify issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          title="$(jq -r '.issue.title' "$GITHUB_EVENT_PATH")"
+          body="$(jq -r '(.issue.body // "") | gsub("<!--[\\s\\S]*?-->"; "")' "$GITHUB_EVENT_PATH")"
+          content="${title,,}"$'\n'"${body,,}"
+          labels=()
+
+          if [[ "$content" =~ (^|[^[:alnum:]])(bug|broken|crash|panic|regression|error|failure|fails|failing)([^[:alnum:]]|$) ]]; then
+            labels+=(bug)
+          fi
+          if [[ "$content" =~ (^|[^[:alnum:]])(documentation|docs?|readme|guide|typo)([^[:alnum:]]|$) ]]; then
+            labels+=(documentation)
+          fi
+          if [[ "$content" =~ (^|[^[:alnum:]])(enhancement|feature|improvement|proposal|request)([^[:alnum:]]|$) ]]; then
+            labels+=(enhancement)
+          fi
+          if [[ "$content" =~ (^|[^[:alnum:]])(question|how[[:space:]]+(can|do|should))([^[:alnum:]]|$) || "$content" == *"?"* ]]; then
+            labels+=(question)
+          fi
+
+          if ((${#labels[@]} == 0)); then
+            exit 0
+          fi
+
+          issue_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+          printf '%s\n' "${labels[@]}" |
+            jq -R . |
+            jq -s '{labels: .}' |
+            gh api \
+              --method POST \
+              --header "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/issues/${issue_number}/labels" \
+              --input -
