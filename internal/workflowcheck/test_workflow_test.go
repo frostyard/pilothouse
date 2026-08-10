@@ -10,7 +10,9 @@ import (
 )
 
 type testWorkflowStep struct {
-	Run string `yaml:"run"`
+	Uses string            `yaml:"uses"`
+	Run  string            `yaml:"run"`
+	With map[string]string `yaml:"with"`
 }
 
 type testWorkflowJob struct {
@@ -68,5 +70,18 @@ func TestTestWorkflowUsesLeastPrivilegeAndPinnedScanner(t *testing.T) {
 	wantInstall := []string{"go install golang.org/x/vuln/cmd/govulncheck@v1.6.0"}
 	if !reflect.DeepEqual(scannerInstalls, wantInstall) {
 		t.Errorf("govulncheck installs = %#v, want %#v", scannerInstalls, wantInstall)
+	}
+
+	var codecovSteps []testWorkflowStep
+	for _, step := range workflow.Jobs["unit-test"].Steps {
+		if strings.HasPrefix(step.Uses, "codecov/codecov-action@") {
+			codecovSteps = append(codecovSteps, step)
+		}
+	}
+	if len(codecovSteps) != 1 {
+		t.Fatalf("Codecov steps = %d, want exactly 1", len(codecovSteps))
+	}
+	if codecovSteps[0].With["use_oidc"] != "true" {
+		t.Errorf("Codecov use_oidc = %q, want true", codecovSteps[0].With["use_oidc"])
 	}
 }

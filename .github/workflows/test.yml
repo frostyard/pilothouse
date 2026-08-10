@@ -85,6 +85,7 @@ jobs:
         with:
           files: ./coverage.out
           fail_ci_if_error: false
+          use_oidc: true
           verbose: true
         continue-on-error: true
 
