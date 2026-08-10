@@ -156,7 +156,7 @@ func TestSystemManagerRejectsMalformedClusterDocuments(t *testing.T) {
 		{name: "wrong pod api", nodes: nodesFixture, pods: `{"apiVersion":"v2","kind":"PodList","items":[]}`, wantError: "unexpected k3s pod response"},
 		{name: "wrong pod kind", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"NodeList","items":[]}`, wantError: "unexpected k3s pod response"},
 		{name: "unnamed pod", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"namespace":"default"},"status":{"phase":"Running"}}]}`, wantError: "k3s pod response contains an unnamed pod or namespace"},
-		{name: "invalid pod phase", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"api","namespace":"default"},"status":{"phase":"Evicted"}}]}`, wantError: `k3s pod default/api has invalid phase "Evicted"`},
+		{name: "invalid pod phase", nodes: nodesFixture, pods: `{"apiVersion":"v1","kind":"PodList","items":[{"metadata":{"name":"api","namespace":"default"},"status":{"phase":"Evicted"}}]}`, wantError: `k3s pod in namespace "default" has invalid phase "Evicted"`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			responses := [][]byte{[]byte(testCase.nodes)}
@@ -186,6 +186,18 @@ func TestBoundedOutputCapsStoredBytes(t *testing.T) {
 func TestExecRunnerDoesNotUseShell(t *testing.T) {
 	_, err := (ExecRunner{}).Run(context.Background(), "echo hi; echo bye")
 	assert.Error(t, err)
+}
+
+func TestExecRunnerReturnsOnlyStdoutOnSuccess(t *testing.T) {
+	output, err := (ExecRunner{}).Run(context.Background(), "sh", "-c", `printf '{"kind":"NodeList"}'; printf 'warning' >&2`)
+	require.NoError(t, err)
+	assert.Equal(t, `{"kind":"NodeList"}`, string(output))
+}
+
+func TestExecRunnerReturnsBothStreamsOnFailure(t *testing.T) {
+	output, err := (ExecRunner{}).Run(context.Background(), "sh", "-c", `printf 'partial response'; printf 'request failed' >&2; exit 1`)
+	require.Error(t, err)
+	assert.Equal(t, "partial response\nrequest failed", string(output))
 }
 
 func TestNodeRolesIgnoreUnrelatedLabels(t *testing.T) {

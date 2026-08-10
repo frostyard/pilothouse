@@ -53,15 +53,34 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	output := &boundedOutput{limit: commandOutputLimit}
+	stdout := &boundedOutput{limit: commandOutputLimit}
+	stderr := &boundedOutput{limit: commandOutputLimit}
 	command := exec.CommandContext(ctx, name, args...)
-	command.Stdout = output
-	command.Stderr = output
+	command.Stdout = stdout
+	command.Stderr = stderr
 	err := command.Run()
-	if output.truncated {
-		return output.Bytes(), fmt.Errorf("command output exceeds %d bytes", commandOutputLimit)
+	if stdout.truncated || stderr.truncated {
+		return joinCommandOutput(stdout.Bytes(), stderr.Bytes()), fmt.Errorf("command output stream exceeds %d bytes", commandOutputLimit)
 	}
-	return output.Bytes(), err
+	if err != nil {
+		return joinCommandOutput(stdout.Bytes(), stderr.Bytes()), err
+	}
+	return stdout.Bytes(), nil
+}
+
+func joinCommandOutput(stdout, stderr []byte) []byte {
+	if len(stdout) == 0 {
+		return stderr
+	}
+	if len(stderr) == 0 {
+		return stdout
+	}
+	output := make([]byte, 0, len(stdout)+len(stderr)+1)
+	output = append(output, stdout...)
+	if stdout[len(stdout)-1] != '\n' {
+		output = append(output, '\n')
+	}
+	return append(output, stderr...)
 }
 
 type boundedOutput struct {
