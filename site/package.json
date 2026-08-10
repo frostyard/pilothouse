@@ -9,11 +9,19 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/mdx": "^4.3.0",
-    "astro": "^5.12.0"
+    "@astrojs/mdx": "^7.0.5",
+    "astro": "^7.2.0"
   },
   "devDependencies": {
     "pagefind": "^1.3.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.120.0"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.1",
+    "nanoid": "^3.3.18",
+    "postcss": "^8.5.26"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

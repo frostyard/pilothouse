@@ -44,6 +44,10 @@ accepted.
 
 ## Develop
 
+Classify each pull request using [`docs/risk-tiers.md`](docs/risk-tiers.md),
+selecting the highest tier represented anywhere in the final diff. Higher tiers
+add targeted validation and review requirements; they do not replace CI.
+
 For work that spans sessions, start with [`.knowledge/README.md`](.knowledge/README.md).
 It indexes the repository's binding instructions, verified corrections, learned
 skills, architecture context, and subsystem documentation without duplicating
@@ -52,7 +56,9 @@ them.
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
-CI. Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
+CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
+contract daily at 04:23 UTC and on manual dispatch, using no repository secrets.
+Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
 artifacts: it installs them on pinned Debian and Fedora containers, so it
@@ -66,6 +72,19 @@ the booted-VM tier has no local `make` target.
 access, Podman 5, cosign and the GitHub-hosted `ubuntu-26.04` environment to
 exercise released packaging plus checked-out executables on ephemeral uCore
 derivatives, so it has no local make target either.
+
+With the user-scoped token from the [Copilot workflow setup](docs/ai-fix-workflow.md#repository-setup)
+configured, submitted review feedback on an open, non-draft pull request whose
+branch is in this repository is handed to Copilot by
+`.github/workflows/copilot-review-apply.yml`. Empty and approval-only reviews
+are ignored, reruns are deduplicated by review ID, and every resulting change
+must still pass the normal pull-request gates and human review.
+
+With the `ANTHROPIC_API_KEY` repository secret configured, non-draft pull
+requests whose branch is in this repository also receive an advisory,
+least-privilege [Claude code review](docs/claude-code-review.md). Fork pull
+requests are deliberately skipped, comments remain untrusted until a human
+verifies them, and the workflow cannot approve, merge, deploy, or publish.
 
 Go 1.26 or newer is required.
 

@@ -4587,7 +4587,14 @@ development image. Wiring it
 into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
-gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
+gates will be green" promise that `AGENTS.md` and `README.md` both make.
+`.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
+same contract, not another exception: at 04:23 UTC daily (and on manual
+dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
+current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
+It has read-only contents permission, no secrets or publication step,
+commit-pinned checkout/setup actions, a 45-minute timeout, and
+`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
@@ -4796,6 +4803,17 @@ rationale.
   assuming either that it must be edited or that it can be skipped
   unexamined. (#51's host-image series was reviewed against it on exactly
   these grounds and required no edit to either file.)
+- `docs/risk-tiers.md` is the pull-request change-classification authority.
+  Every pull request selects the highest tier present in its final diff:
+  documentation-only changes are Tier 1, routine unprivileged implementation
+  is Tier 2, operational/capability/dependency/concurrency changes are Tier 3,
+  and authentication, broker/root/package/release/secret or untrusted-input
+  boundaries are Tier 4. Safeguards inherit the protected behavior's tier.
+  Tier 3 adds targeted failure-path and rollback evidence; Tier 4 adds explicit
+  maintainer security review, trust-boundary/abuse analysis, and least-privilege
+  confirmation. The pull request template records the decision, while
+  `CONTRIBUTING.md` explains when it must be updated; classification never
+  substitutes for an existing gate.
 - `.knowledge/README.md` is the cross-session knowledge index. It points agents
   to the live owners of durable facts — `AGENTS.md`, the append-only
   `corrections.jsonl`, every file under `docs/agents/skills/`, this overview,
@@ -4808,6 +4826,32 @@ rationale.
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,
   implementing, or reviewing changes — treat them as binding guidance.
+- `.github/workflows/copilot-review-apply.yml` closes the submitted-review
+  feedback loop for same-repository pull requests. Automatic runs admit only
+  open, non-draft pull requests with a branch in this repository; manual
+  dispatch takes numeric pull-request and review IDs. The script re-fetches
+  and revalidates both resources, treats only `COMMENTED` and
+  `CHANGES_REQUESTED` as actionable, ignores empty reviews (including
+  `COMMENTED` reviews without inline findings), and posts one fixed `@copilot`
+  request containing the reviewer and review URL rather than untrusted review
+  text. A hidden review-ID marker makes retries idempotent. Default workflow
+  permissions are empty and no checkout occurs. Posting uses the user-scoped
+  `COPILOT_ASSIGNMENT_TOKEN` secret because a comment authored by the
+  workflow's installation `GITHUB_TOKEN` cannot invoke the coding agent; its
+  owner needs repository write and Copilot coding-agent access, and the token
+  must be configured with Actions, Contents, Issues, and Pull requests access.
+  Automatic fork events skip before the secret-bearing step; manual dispatch
+  re-fetches and rejects a fork target without checking out or executing its
+  contents.
+- `.github/workflows/claude-code-review.yml` provides advisory AI review for
+  non-draft, same-repository pull requests. It uses the commit-pinned official
+  Anthropic action, receives `ANTHROPIC_API_KEY`, and has only `contents: read`
+  plus `pull-requests: write`; checkout credentials are not persisted and its
+  tools can only inspect PR data and create comments. The ordinary
+  `pull_request` trigger and explicit head-repository check skip forks rather
+  than exposing the secret through `pull_request_target`. Model output remains
+  untrusted and cannot replace deterministic gates or human review. See
+  `docs/claude-code-review.md`.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
   multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`

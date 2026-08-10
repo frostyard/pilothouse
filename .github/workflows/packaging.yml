@@ -54,12 +54,12 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
 
@@ -89,7 +89,7 @@ jobs:
           sudo apt-get install -y rpm gcc-aarch64-linux-gnu libpam0g-dev libsystemd-dev libpam0g-dev:arm64 libsystemd-dev:arm64
 
       - name: Build packages with GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser-pro
           version: "~> v2"
@@ -109,14 +109,14 @@ jobs:
         run: make verify-packages
 
       - name: Upload deb packages
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: packages-deb
           path: dist/*.deb
           if-no-files-found: error
 
       - name: Upload rpm packages
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: packages-rpm
           path: dist/*.rpm
@@ -157,10 +157,10 @@ jobs:
       # verify-install.sh and the make target that runs it both come from the
       # tree, not from the artifact.
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download the built packages
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: ${{ matrix.artifact }}
           path: dist
@@ -206,7 +206,7 @@ jobs:
     steps:
       # The harness comes from the tree, never from the artifact.
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Standard GitHub-hosted runners expose /dev/kvm but not to the job's
       # user. This udev rule is what makes hardware acceleration usable; the
@@ -229,7 +229,7 @@ jobs:
           sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
 
       - name: Download the built packages
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: ${{ matrix.artifact }}
           path: dist
