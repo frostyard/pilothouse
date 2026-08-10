@@ -71,6 +71,9 @@ sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id
 ./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
 ```
 
+`make test` includes the process-level web checks in `test/e2e/`; they build
+and start the real `pilothouse` binary on a loopback port and need no broker.
+
 That broker runs with no optional tooling configured, so Podman, Docker,
 Incus, and every `updex`-backed extension operation are absent from the
 console; add `--podman-socket`, `--docker`, `--incus`, or `--updex` to the

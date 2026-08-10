@@ -1661,6 +1661,9 @@ list in `cmd/pilothouse/main.go`, not just registered in
 - templ rendering tests render a component directly into a
   `strings.Builder` and assert on the output HTML (see
   `internal/modules/services/views_test.go`, `internal/web/shell_test.go`).
+- Process-level web E2E tests live in `test/e2e/`. They build and start the
+  real `pilothouse` binary on a loopback port, then exercise its public and
+  authentication-gated HTTP surfaces without requiring a broker.
 - Optional live integration tests are gated behind env vars:
   `PILOTHOUSE_LIVE_PODMAN`, `PILOTHOUSE_LIVE_DOCKER`, `PILOTHOUSE_LIVE_INCUS`,
   `JOURNAL_SMOKE`.
