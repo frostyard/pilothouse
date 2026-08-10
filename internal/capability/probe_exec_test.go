@@ -3,6 +3,9 @@ package capability
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -249,6 +252,19 @@ func TestProbeK3sRejectsInvalidVersionResponses(t *testing.T) {
 	}
 }
 
+func TestProbeK3sPresentDespiteStderrWarnings(t *testing.T) {
+	// Regression for the combined-output probe runner: a k3s invocation that
+	// prints valid version JSON on stdout while warning on stderr must still
+	// yield the capability, so run the real ExecRunner against a stand-in
+	// executable that does exactly that.
+	k3s := filepath.Join(t.TempDir(), "k3s")
+	require.NoError(t, os.WriteFile(k3s, []byte("#!/bin/sh\n"+
+		"echo 'WARN[0000] unable to read optional k3s config' >&2\n"+
+		`echo '{"major":"1","minor":"34"}'`+"\n"), 0o755))
+
+	assert.True(t, ProbeK3s(context.Background(), ExecRunner{}, k3s).Has(K3s))
+}
+
 func TestProbeK3sAppliesBoundedTimeout(t *testing.T) {
 	runner := &fakeCommandRunner{output: []byte(`{"major":"1","minor":"34"}`)}
 	start := time.Now()
@@ -261,6 +277,44 @@ func TestProbeK3sAppliesBoundedTimeout(t *testing.T) {
 func TestProbeK3sUnconfiguredKeepsK3sOutOfComposedProbe(t *testing.T) {
 	s := Probe(context.Background(), Config{})
 	assert.False(t, s.Has(K3s))
+}
+
+func TestExecRunnerSeparatesStderrFromStdout(t *testing.T) {
+	runner := ExecRunner{}
+	output, err := runner.Run(context.Background(), os.Args[0],
+		"-test.run=^TestExecRunnerHelperProcess$", "--", "exec-runner-helper", "success")
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":{}}`, string(output),
+		"successful stderr diagnostics must not corrupt machine-readable stdout")
+}
+
+func TestExecRunnerIncludesStderrOnFailure(t *testing.T) {
+	runner := ExecRunner{}
+	output, err := runner.Run(context.Background(), os.Args[0],
+		"-test.run=^TestExecRunnerHelperProcess$", "--", "exec-runner-helper", "failure")
+
+	assert.Equal(t, "partial stdout\n", string(output))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "WARN helper diagnostic")
+}
+
+func TestExecRunnerHelperProcess(t *testing.T) {
+	for index, arg := range os.Args {
+		if arg != "exec-runner-helper" {
+			continue
+		}
+		if index+1 >= len(os.Args) {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "WARN helper diagnostic")
+		if os.Args[index+1] == "success" {
+			_, _ = fmt.Fprintln(os.Stdout, `{"status":{}}`)
+			os.Exit(0)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "partial stdout")
+		os.Exit(7)
+	}
 }
 
 func TestExecRunnerDoesNotUseAShell(t *testing.T) {

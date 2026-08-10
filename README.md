@@ -6,7 +6,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 
 ## What works
 
-- Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics
+- Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics, with utilization gauges safely bounded from 0–100% even for zero-capacity or wrapped-counter inputs
 - Automatic dashboard refresh every 15 seconds
 - Live attention view for disk, memory, load, failed systemd units, and unavailable status sources
 - Storage health that distinguishes expected immutable EROFS mounts from unexpected read-only or capacity-exhausted writable filesystems
@@ -36,6 +36,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 - Responsive desktop and mobile layouts
 - Startup-time host capability probing (systemd, journald, updex, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs, Podman, Docker, Incus, k3s), advertised over an authenticated broker query; the daemon starts and registers only the privileged operations whose required capability is actually present, degrading gracefully instead of failing to start when a dependency is absent or unreachable. Five of those capabilities — updex, Podman, Docker, Incus, and k3s — are additionally opt-in, so "present" means "explicitly configured *and* reachable" rather than "detected on the host" (next bullet)
 - Explicit opt-in for every optional dependency: `updex`, Podman, Docker, Incus, and k3s are probed only when `--updex`, `--podman-socket`, `--docker`, `--incus`, or `--k3s` is configured on `pilothoused`, and an unconfigured one is reported absent without any I/O — no command is run and no socket is dialled — so a binary on `PATH`, a socket at a conventional path, or an exported `DOCKER_HOST` never enables anything by itself, and the packaged unit passes none of the five. Every feature bullet above that names one of these dependencies therefore describes a surface that appears only once its flag is set. The remaining capabilities (systemd, journald, `systemd-sysext`, bootc, rpm-ostree, automatic-update pairs) stay presence-probed, and the broker also no longer declares `Wants=` on any engine socket
+- Machine-readable command probes parse stdout only. A successful command's stderr diagnostics do not corrupt its JSON contract; when a command fails, stderr is retained in the returned diagnostic while stdout remains separately available.
 
 Pilothouse-managed SMB mounts can optionally map file ownership to a local
 numeric UID/GID. Both IDs are required together; leaving both fields blank
@@ -46,7 +47,9 @@ accepted.
 
 Classify each pull request using [`docs/risk-tiers.md`](docs/risk-tiers.md),
 selecting the highest tier represented anywhere in the final diff. Higher tiers
-add targeted validation and review requirements; they do not replace CI.
+add targeted validation and review requirements; they do not replace CI. The
+[public metrics index](docs/metrics/) links the auditable repository signals
+and defines the rolling pull-request acceptance metric.
 
 For work that spans sessions, start with [`.knowledge/README.md`](.knowledge/README.md).
 It indexes the repository's binding instructions, verified corrections, learned
@@ -56,8 +59,13 @@ them.
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
-CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
-contract daily at 04:23 UTC and on manual dispatch, using no repository secrets.
+CI. The pull-request test workflow starts from no token permissions, grants
+only read-only contents access per job, and adds OIDC only to the unit-test job
+for Codecov; its `govulncheck` installation is version-pinned. The read-only
+`nightly-compliance.yml` workflow reruns the same `make ci` contract daily at
+04:23 UTC and on manual dispatch. Its compliance job remains
+credential-free; a separate job reports drift when the Copilot assignment
+secret is absent.
 Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the

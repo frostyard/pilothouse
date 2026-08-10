@@ -223,7 +223,7 @@ by accident. Current modules:
 
 | Module | Purpose |
 |---|---|
-| `system` | Unprivileged host telemetry (CPU/mem/disk/load/net/os) from `/proc`, `/sys`, `/etc/os-release`; emits health findings. |
+| `system` | Unprivileged host telemetry (CPU/mem/disk/load/net/os) from `/proc`, `/sys`, `/etc/os-release`; utilization helpers return zero for a zero total and saturate at 0–100% across wrapped or oversized counters, and the composed resource-summary rendering is regression-tested; emits health findings. |
 | `storage` | Block/mount inventory (`lsblk`/`findmnt`) enriched with optional SMART/NVMe, MD RAID, LVM, device-mapper/LUKS, multipath, ZFS, and Btrfs backends; emits health findings; admins can create/mount/unmount/delete Pilothouse-managed NFS and SMB (guest or credentialed) automounts. SMB creation optionally supports paired numeric local UID/GID mapping. Expected immutable EROFS mounts retain their inventory usage and read-only state but are excluded from capacity and read-only health findings; other filesystems retain those checks. |
 | `attention` | Aggregates `platform.HealthProvider` findings from other modules (bounded 2s/provider) into one "needs attention" view. |
 | `services` | Systemd service/socket/timer inventory and lifecycle/enablement control via system D-Bus; bounded journal diagnostics. |
@@ -576,7 +576,10 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   `rpm-ostreed-automatic`/`bootc-fetch-apply-updates` automatic-update
   unit-file pairs, the Podman/Docker/Incus engine sockets, and k3s. Every
   individual probe narrows to "absent" on any error rather than failing —
-  probing itself is never fatal. `updex`, Podman, Docker, Incus, and k3s are
+  probing itself is never fatal. Exec-backed probes keep stdout and stderr
+  separate: JSON validation consumes stdout only, successful stderr warnings
+  are ignored, and a failed command retains trimmed stderr in its returned
+  diagnostic. `updex`, Podman, Docker, Incus, and k3s are
   additionally gated on explicit configuration: `--updex`,
   `--podman-socket`, `--docker`, and `--k3s` all default to empty and `--incus`
   defaults to `false`, and an unset value makes
@@ -4588,13 +4591,24 @@ into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
 gates will be green" promise that `AGENTS.md` and `README.md` both make.
+The pull-request workflow enforces its credential-free boundary with an empty
+top-level permission map, exact read-only contents access on every job, and
+OIDC only on the unit-test job for Codecov. Its security job installs the
+reviewed `govulncheck` v1.6.0 release rather than resolving a floating version;
+`internal/workflowcheck/test_workflow_test.go` guards both contracts. The
+public observability entry point is `docs/metrics/README.md`: it links live
+GitHub Actions, Codecov, issue, and pull-request evidence, defines the rolling
+90-day acceptance-rate calculation, and explicitly excludes secrets, private
+agent inputs, security-sensitive findings, and managed-host telemetry.
 `.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
 same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
 current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
-It has read-only contents permission, no secrets or publication step,
-commit-pinned checkout/setup actions, a 45-minute timeout, and
-`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
+That compliance job has read-only contents permission, consumes no secrets,
+uses commit-pinned checkout/setup actions, and has a 45-minute timeout. A
+separate five-minute drift job fails when `COPILOT_ASSIGNMENT_TOKEN` is absent;
+neither job publishes anything, and `cancel-in-progress: false` ensures a
+delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
@@ -4843,6 +4857,11 @@ rationale.
   Automatic fork events skip before the secret-bearing step; manual dispatch
   re-fetches and rejects a fork target without checking out or executing its
   contents.
+- `.github/workflows/ai-fix-requested.yml` assigns an open, labelled issue to
+  Copilot only after a gate confirms `COPILOT_ASSIGNMENT_TOKEN` is configured.
+  An absent token produces a notice and a skipped assignment job rather than an
+  event-driven failure; the nightly compliance workflow separately fails its
+  drift job while the secret remains absent.
 - `.github/workflows/claude-code-review.yml` provides advisory AI review for
   non-draft, same-repository pull requests. It uses the commit-pinned official
   Anthropic action, receives `ANTHROPIC_API_KEY`, and has only `contents: read`

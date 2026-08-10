@@ -46,6 +46,22 @@ func TestSystemPageRendersDetailedResourceCards(t *testing.T) {
 	assert.NotContains(t, html, "@web.")
 }
 
+func TestResourcesRendersSummaryRowsAndIcons(t *testing.T) {
+	snapshot := Snapshot{
+		CPUPercent: 42.5, MemoryUsed: 4 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024,
+		MemoryPercent: 50, DiskUsed: 75 * 1024 * 1024 * 1024, DiskTotal: 100 * 1024 * 1024 * 1024, DiskPercent: 75,
+	}
+	var output strings.Builder
+	require.NoError(t, Resources(snapshot).Render(context.Background(), &output))
+
+	html := output.String()
+	for _, value := range []string{"Resource summary", "CPU", "42.5%", "Memory", "4.0 GiB / 8.0 GiB", "Persistent storage", "75.0 GiB / 100.0 GiB", `href="/system"`} {
+		assert.Contains(t, html, value)
+	}
+	assert.Equal(t, 4, strings.Count(html, `<svg`), "the summary must render its link and three row icons")
+	assert.NotContains(t, html, "@web.")
+}
+
 func TestSystemPageRendersNetworkEmptyState(t *testing.T) {
 	var output strings.Builder
 	require.NoError(t, SystemPage(Snapshot{}).Render(context.Background(), &output))

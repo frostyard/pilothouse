@@ -1,0 +1,24 @@
+version: 1
+
+required_files:
+  - AGENTS.md
+  - CONTRIBUTING.md
+  - README.md
+  - docs/quality.md
+  - docs/review-rubric.md
+  - docs/risk-tiers.md
+  - docs/security/SECURITY-AI.md
+  - .github/pull_request_template.md
+  - .github/workflows/nightly-compliance.yml
+  - .github/workflows/test.yml
+  - internal/workflowcheck/actions_test.go
+  - internal/workflowcheck/repository_policy_test.go
+  - policies/README.md
+  - policies/repository.yaml
+  - workflows/code-review.yaml
+
+required_globs:
+  - pattern: .github/workflows/*.yml
+    minimum: 1
+  - pattern: internal/workflowcheck/*_test.go
+    minimum: 1

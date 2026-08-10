@@ -6,7 +6,10 @@ the `ai-fix-requested` label. It revalidates the issue's open state and label,
 rejects pull requests, and does nothing when Copilot is already assigned.
 
 The workflow checks out no code, grants the default `GITHUB_TOKEN` no
-permissions, and never interpolates issue text into a command or prompt.
+permissions, and never interpolates issue text into a command or prompt. A
+gate checks whether `COPILOT_ASSIGNMENT_TOKEN` is configured before starting
+the assignment job. When it is absent, the gate emits a notice and the
+assignment job is reported as skipped rather than failed.
 
 ## Repository setup
 
@@ -26,6 +29,11 @@ Give the token access only to this repository, set an expiration, and rotate it
 before it expires. See GitHub's
 [Copilot cloud agent API documentation](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api)
 for the current authentication and permission requirements.
+
+The scheduled [nightly compliance workflow](../.github/workflows/nightly-compliance.yml)
+fails its separate automation-secret drift job when this token is absent. This
+keeps label-triggered runs neutral while making configuration drift visible
+once per day.
 
 ## Manual replay
 
