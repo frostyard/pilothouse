@@ -4586,9 +4586,11 @@ gates will be green" promise that `AGENTS.md` and `README.md` both make.
 same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
 current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
-It has read-only contents permission, no secrets or publication step,
-commit-pinned checkout/setup actions, a 45-minute timeout, and
-`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
+That compliance job has read-only contents permission, consumes no secrets,
+uses commit-pinned checkout/setup actions, and has a 45-minute timeout. A
+separate five-minute drift job fails when `COPILOT_ASSIGNMENT_TOKEN` is absent;
+neither job publishes anything, and `cancel-in-progress: false` ensures a
+delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then
@@ -4837,6 +4839,11 @@ rationale.
   Automatic fork events skip before the secret-bearing step; manual dispatch
   re-fetches and rejects a fork target without checking out or executing its
   contents.
+- `.github/workflows/ai-fix-requested.yml` assigns an open, labelled issue to
+  Copilot only after a gate confirms `COPILOT_ASSIGNMENT_TOKEN` is configured.
+  An absent token produces a notice and a skipped assignment job rather than an
+  event-driven failure; the nightly compliance workflow separately fails its
+  drift job while the secret remains absent.
 - `.github/workflows/claude-code-review.yml` provides advisory AI review for
   non-draft, same-repository pull requests. It uses the commit-pinned official
   Anthropic action, receives `ANTHROPIC_API_KEY`, and has only `contents: read`
