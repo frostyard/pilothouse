@@ -4585,6 +4585,11 @@ into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
 gates will be green" promise that `AGENTS.md` and `README.md` both make.
+The pull-request workflow enforces its credential-free boundary with an empty
+top-level permission map, exact read-only contents access on every job, and
+OIDC only on the unit-test job for Codecov. Its security job installs the
+reviewed `govulncheck` v1.6.0 release rather than resolving a floating version;
+`internal/workflowcheck/test_workflow_test.go` guards both contracts.
 `.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
 same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and

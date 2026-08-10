@@ -14,7 +14,10 @@ repository's **Actions** tab.
 
 The pull request checks are the primary merge signal. Code coverage is
 published from the unit-test job to Codecov, but upload failures are
-non-blocking; the unit tests themselves remain blocking.
+non-blocking; the unit tests themselves remain blocking. The workflow disables
+token permissions by default, grants every job read-only contents access, and
+adds OIDC only to the unit-test job for the Codecov upload. Its vulnerability
+scanner is pinned to a reviewed version.
 
 ## Local verification
 
