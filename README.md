@@ -6,7 +6,7 @@ The application is bootstrapped from [housecat-inc/scratch](https://github.com/h
 
 ## What works
 
-- Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics
+- Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics, with utilization gauges safely bounded from 0–100% even for zero-capacity or wrapped-counter inputs
 - Automatic dashboard refresh every 15 seconds
 - Live attention view for disk, memory, load, failed systemd units, and unavailable status sources
 - Storage health that distinguishes expected immutable EROFS mounts from unexpected read-only or capacity-exhausted writable filesystems

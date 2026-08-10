@@ -1,6 +1,7 @@
 package system
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ func TestCPUPercent(t *testing.T) {
 	a.InDelta(50, cpuPercent(cpuTimes{idle: 100, total: 200}, cpuTimes{idle: 150, total: 300}), 0.001)
 	a.Equal(float64(0), cpuPercent(cpuTimes{idle: 100, total: 200}, cpuTimes{idle: 100, total: 200}))
 	a.Equal(float64(0), cpuPercent(cpuTimes{idle: 100, total: 200}, cpuTimes{idle: 50, total: 100}))
+	a.Equal(float64(100), cpuPercent(cpuTimes{idle: 100, total: 200}, cpuTimes{idle: 50, total: 300}), "a wrapped idle counter must remain bounded")
 }
 
 func TestCPUBreakdown(t *testing.T) {
@@ -23,6 +25,52 @@ func TestCPUBreakdown(t *testing.T) {
 	assert.InDelta(t, 40, user, 0.001)
 	assert.InDelta(t, 20, system, 0.001)
 	assert.InDelta(t, 10, wait, 0.001)
+}
+
+func TestCPUBreakdownClampsWrappedAndOversizedDeltas(t *testing.T) {
+	user, system, wait := cpuBreakdown(
+		cpuTimes{user: 100, system: 80, iowait: 60, total: 200},
+		cpuTimes{user: 50, system: 200, iowait: 10, total: 300},
+	)
+	assert.Equal(t, float64(0), user, "a wrapped user counter must not produce a negative share")
+	assert.Equal(t, float64(100), system, "a component delta larger than the total must saturate")
+	assert.Equal(t, float64(0), wait, "a wrapped iowait counter must not produce a negative share")
+}
+
+func TestPercent(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		used, total uint64
+		want        float64
+	}{
+		{name: "zero total", used: 1, total: 0, want: 0},
+		{name: "zero used", used: 0, total: 10, want: 0},
+		{name: "partial", used: 1, total: 4, want: 25},
+		{name: "full", used: 10, total: 10, want: 100},
+		{name: "overfull saturates", used: 20, total: 10, want: 100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, percent(test.used, test.total))
+		})
+	}
+}
+
+func TestClamp(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value float64
+		want  float64
+	}{
+		{name: "negative", value: -1, want: 0},
+		{name: "negative infinity", value: math.Inf(-1), want: 0},
+		{name: "midrange", value: 50, want: 50},
+		{name: "over maximum", value: 101, want: 100},
+		{name: "positive infinity", value: math.Inf(1), want: 100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, clamp(test.value))
+		})
+	}
 }
 
 func TestReadMemoryDetails(t *testing.T) {
