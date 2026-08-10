@@ -4589,7 +4589,11 @@ The pull-request workflow enforces its credential-free boundary with an empty
 top-level permission map, exact read-only contents access on every job, and
 OIDC only on the unit-test job for Codecov. Its security job installs the
 reviewed `govulncheck` v1.6.0 release rather than resolving a floating version;
-`internal/workflowcheck/test_workflow_test.go` guards both contracts.
+`internal/workflowcheck/test_workflow_test.go` guards both contracts. The
+public observability entry point is `docs/metrics/README.md`: it links live
+GitHub Actions, Codecov, issue, and pull-request evidence, defines the rolling
+90-day acceptance-rate calculation, and explicitly excludes secrets, private
+agent inputs, security-sensitive findings, and managed-host telemetry.
 `.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
 same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and

@@ -46,7 +46,9 @@ accepted.
 
 Classify each pull request using [`docs/risk-tiers.md`](docs/risk-tiers.md),
 selecting the highest tier represented anywhere in the final diff. Higher tiers
-add targeted validation and review requirements; they do not replace CI.
+add targeted validation and review requirements; they do not replace CI. The
+[public metrics index](docs/metrics/) links the auditable repository signals
+and defines the rolling pull-request acceptance metric.
 
 For work that spans sessions, start with [`.knowledge/README.md`](.knowledge/README.md).
 It indexes the repository's binding instructions, verified corrections, learned

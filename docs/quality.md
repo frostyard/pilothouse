@@ -2,7 +2,9 @@
 
 This page is the repository's index of auditable quality signals. The current
 status and run history for each automated signal are available in the
-repository's **Actions** tab.
+repository's **Actions** tab. The [public metrics index](metrics/) links those
+live sources, Codecov, issue and pull-request outcomes, and the reproducible
+rolling acceptance-rate definition without copying values that can go stale.
 
 | Signal | Source | What it reports |
 | --- | --- | --- |
