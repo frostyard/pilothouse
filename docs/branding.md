@@ -60,6 +60,16 @@ The same applies to capability IDs themselves (`updex`, `sysext`, `bootc`,
 `rpm-ostree` in `docs/capabilities.md`'s binding table): they are contract
 identifiers shared with the broker, not prose.
 
+## Generic host prose stays product-neutral
+
+Describe host accounts, validation scope, and extension delivery without
+attributing them to an operating-system product:
+
+| Before | After |
+| --- | --- |
+| "PAM authentication using Snow's users and account policy" | "PAM authentication using host users and account policy" |
+| "Snosi-built sysext delivery" | "system-extension delivery" |
+
 ## The allowlist — do not sweep these
 
 Every site below intentionally retains a `cayo`/`snosi` occurrence. A
@@ -125,11 +135,12 @@ added later.
 ## Checking a sweep
 
 Every remaining `cayo`/`snosi` occurrence in the tree should be an
-allowlisted site (or this file's own description of the allowlist). That is
-what the complement grep asserts — it should print nothing:
+allowlisted site (or this file's own description of the allowlist), and the
+product possessive `Snow's` should not appear outside this rule's example.
+That is what the complement grep asserts — it should print nothing:
 
 ```sh
-git grep -i 'snosi\|cayo' \
+git grep -i -E "snosi|cayo|snow's" \
   | grep -v '_test.go' \
   | grep -v 'docs/capabilities.md' \
   | grep -v '.github/workflows/release.yml' \
