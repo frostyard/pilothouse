@@ -1,0 +1,46 @@
+name: Nightly compliance
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nightly-compliance
+  cancel-in-progress: false
+
+jobs:
+  compliance:
+    name: Credential-free compliance gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libpam0g-dev libsystemd-dev
+
+      - name: Install compliance tools
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          golangci-lint version
+          govulncheck -version
+
+      - name: Run credential-free CI mirror
+        run: make ci

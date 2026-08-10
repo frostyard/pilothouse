@@ -4581,7 +4581,14 @@ development image. Wiring it
 into `ci` would make every local and containerized run of the full gate fail on
 a clean checkout and would break the "`make ci` / `make docker-ci` runs every
 CI gate that runs without credentials, and local green means the credential-free
-gates will be green" promise that `AGENTS.md` and `README.md` both make. CI
+gates will be green" promise that `AGENTS.md` and `README.md` both make.
+`.github/workflows/nightly-compliance.yml` is a scheduled consumer of that
+same contract, not another exception: at 04:23 UTC daily (and on manual
+dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
+current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
+It has read-only contents permission, no secrets or publication step,
+commit-pinned checkout/setup actions, a 45-minute timeout, and
+`cancel-in-progress: false` so a delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
 builds the artifacts, runs `make verify-packages` against them, then

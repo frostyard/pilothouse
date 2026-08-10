@@ -55,7 +55,9 @@ them.
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
 the same order. Local green means the credential-free gates will be green in
-CI. Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
+CI. The read-only `nightly-compliance.yml` workflow reruns the same `make ci`
+contract daily at 04:23 UTC and on manual dispatch, using no repository secrets.
+Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
 artifacts: it installs them on pinned Debian and Fedora containers, so it
