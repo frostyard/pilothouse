@@ -1,9 +1,12 @@
 package capability
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -12,7 +15,7 @@ import (
 // dbusProbeTimeout for the equivalent on the D-Bus-backed probe).
 const execProbeTimeout = 5 * time.Second
 
-// CommandRunner runs an external command and returns its combined output.
+// CommandRunner runs an external command and returns its stdout.
 // It mirrors internal/modules/sysext/extctl.CommandRunner's shape but is kept
 // local to this package: internal/capability is foundational and must not
 // depend on a feature module.
@@ -27,7 +30,19 @@ type ExecRunner struct{}
 
 // Run implements CommandRunner.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return stdout.Bytes(), fmt.Errorf("run %s: %w: %s", name, err, detail)
+		}
+		return stdout.Bytes(), fmt.Errorf("run %s: %w", name, err)
+	}
+	return stdout.Bytes(), nil
 }
 
 // ProbeUpdex probes the updex capability: present iff the configured
@@ -79,7 +94,7 @@ func probeExecSuccess(ctx context.Context, runner CommandRunner, id ID, name str
 }
 
 // probeExecJSON reports id present iff running name with args, bounded by
-// execProbeTimeout, exits 0 AND the combined output parses as JSON. A
+// execProbeTimeout, exits 0 AND stdout parses as JSON. A
 // json.Valid check is sufficient; this deliberately does not depend on any
 // specific field of the output.
 func probeExecJSON(ctx context.Context, runner CommandRunner, id ID, name string, args ...string) Set {

@@ -3,6 +3,8 @@ package capability
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -209,6 +211,44 @@ func TestProbeRPMOStreeAppliesBoundedTimeout(t *testing.T) {
 
 	require.Len(t, runner.calls, 1)
 	assertBoundedTimeout(t, runner.calls[0].ctx, start)
+}
+
+func TestExecRunnerSeparatesStderrFromStdout(t *testing.T) {
+	runner := ExecRunner{}
+	output, err := runner.Run(context.Background(), os.Args[0],
+		"-test.run=^TestExecRunnerHelperProcess$", "--", "exec-runner-helper", "success")
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":{}}`, string(output),
+		"successful stderr diagnostics must not corrupt machine-readable stdout")
+}
+
+func TestExecRunnerIncludesStderrOnFailure(t *testing.T) {
+	runner := ExecRunner{}
+	output, err := runner.Run(context.Background(), os.Args[0],
+		"-test.run=^TestExecRunnerHelperProcess$", "--", "exec-runner-helper", "failure")
+
+	assert.Equal(t, "partial stdout\n", string(output))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "WARN helper diagnostic")
+}
+
+func TestExecRunnerHelperProcess(t *testing.T) {
+	for index, arg := range os.Args {
+		if arg != "exec-runner-helper" {
+			continue
+		}
+		if index+1 >= len(os.Args) {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "WARN helper diagnostic")
+		if os.Args[index+1] == "success" {
+			_, _ = fmt.Fprintln(os.Stdout, `{"status":{}}`)
+			os.Exit(0)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "partial stdout")
+		os.Exit(7)
+	}
 }
 
 func TestExecRunnerDoesNotUseAShell(t *testing.T) {
