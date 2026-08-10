@@ -7,7 +7,7 @@ repository's **Actions** tab.
 | Signal | Source | What it reports |
 | --- | --- | --- |
 | Pull request quality | [`test.yml`](../.github/workflows/test.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, and builds |
-| Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract |
+| Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract plus an automation-secret drift check |
 | Package quality | [`packaging.yml`](../.github/workflows/packaging.yml) | Package contract checks, installation checks, and opt-in booted-VM validation |
 | Image quality | [`image-tier.yml`](../.github/workflows/image-tier.yml) | Opt-in uCore update and rollback validation under QEMU/KVM |
 
