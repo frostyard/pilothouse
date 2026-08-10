@@ -39,7 +39,11 @@ func TestPublicWebFlowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close()
+	t.Cleanup(func() {
+		if err := logFile.Close(); err != nil {
+			t.Errorf("close pilothouse log: %v", err)
+		}
+	})
 
 	command := exec.CommandContext(
 		t.Context(),
@@ -105,11 +109,7 @@ func TestPublicWebFlowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := readResponseBody(t, response)
 	if response.StatusCode != http.StatusOK || string(body) != "ok\n" {
 		t.Fatalf("GET /healthz = %d %q, want 200 %q", response.StatusCode, body, "ok\n")
 	}
@@ -130,15 +130,24 @@ func TestPublicWebFlowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err = io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	body = readResponseBody(t, response)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("GET /login = %d, want 200", response.StatusCode)
 	}
 	if !strings.Contains(string(body), "<title>Sign in · Pilothouse</title>") {
 		t.Fatalf("GET /login did not render the Pilothouse sign-in page")
 	}
+}
+
+func readResponseBody(t *testing.T, response *http.Response) []byte {
+	t.Helper()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		_ = response.Body.Close()
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
