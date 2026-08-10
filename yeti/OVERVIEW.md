@@ -4820,6 +4820,23 @@ rationale.
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,
   implementing, or reviewing changes — treat them as binding guidance.
+- `.github/workflows/copilot-review-apply.yml` closes the submitted-review
+  feedback loop for same-repository pull requests. Automatic runs admit only
+  open, non-draft pull requests with a branch in this repository; manual
+  dispatch takes numeric pull-request and review IDs. The script re-fetches
+  and revalidates both resources, treats only `COMMENTED` and
+  `CHANGES_REQUESTED` as actionable, ignores empty reviews (including
+  `COMMENTED` reviews without inline findings), and posts one fixed `@copilot`
+  request containing the reviewer and review URL rather than untrusted review
+  text. A hidden review-ID marker makes retries idempotent. Default workflow
+  permissions are empty and no checkout occurs. Posting uses the user-scoped
+  `COPILOT_ASSIGNMENT_TOKEN` secret because a comment authored by the
+  workflow's installation `GITHUB_TOKEN` cannot invoke the coding agent; its
+  owner needs repository write and Copilot coding-agent access, and the token
+  must be configured with Actions, Contents, Issues, and Pull requests access.
+  Automatic fork events skip before the secret-bearing step; manual dispatch
+  re-fetches and rejects a fork target without checking out or executing its
+  contents.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
   multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`
