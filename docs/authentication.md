@@ -31,6 +31,14 @@ Only the opaque token is placed in the browser cookie. The cookie is HTTP-only, 
 
 Authentication errors are deliberately generic. Empty passwords are rejected before PAM. Failed attempts receive a fixed delay and exponential per-user/per-address backoff.
 
+NSS identity resolution requires a non-negative numeric UID that fits the
+platform's integer range and rejects UID 0 before resolving supplementary
+groups. Group names are sorted before they are returned. An individual group
+ID that disappears during resolution is omitted, while failure to enumerate
+the account's group IDs rejects the identity. The optional login group is
+enforced after resolution, and administrator status is granted only when a
+non-empty administrator group is configured and present.
+
 If local sign-in fails while `pilothoused` is restarting, diagnose the broker
 startup failure first with `systemctl status pilothoused` and
 `journalctl -u pilothoused`. The web process cannot authenticate without the
