@@ -12,8 +12,9 @@ untrusted diff.
 
 A maintainer must configure `ANTHROPIC_API_KEY` as a GitHub Actions repository
 secret. The workflow passes it only to the commit-pinned official
-`anthropics/claude-code-action`. If the secret is absent or invalid, the review
-job fails without changing repository or host state.
+`anthropics/claude-code-action`. If the secret is absent, the job emits a
+warning and skips checkout and review. An invalid configured key still makes the
+review fail without changing repository or host state.
 
 The workflow has only `contents: read` and `pull-requests: write`. Checkout does
 not persist credentials. Claude's tools are limited to reading pull-request

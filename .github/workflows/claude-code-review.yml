@@ -21,13 +21,28 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - name: Check Anthropic configuration
+        id: configuration
+        shell: bash
+        env:
+          CONFIGURED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [[ "$CONFIGURED" != "true" ]]; then
+            echo "::warning::ANTHROPIC_API_KEY is not configured; skipping Claude code review"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Checkout pull request
+        if: steps.configuration.outputs.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
 
       - name: Review pull request with Claude
+        if: steps.configuration.outputs.enabled == 'true'
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
