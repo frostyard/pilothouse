@@ -32,7 +32,10 @@ type Server struct {
 type attempt struct {
 	failures int
 	next     time.Time
+	updated  time.Time
 }
+
+const maxTrackedAttempts = 4096
 
 type attemptLimiter struct {
 	attempts map[string]attempt
@@ -328,21 +331,31 @@ func (l *attemptLimiter) delay(key string) time.Duration {
 func (l *attemptLimiter) failure(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.attempts) >= 4096 {
-		cutoff := l.now().Add(-10 * time.Minute)
+
+	now := l.now()
+	entry, exists := l.attempts[key]
+	if !exists && len(l.attempts) >= maxTrackedAttempts {
+		cutoff := now.Add(-10 * time.Minute)
+		oldestKey := ""
+		var oldest time.Time
 		for existingKey, existing := range l.attempts {
-			if existing.next.Before(cutoff) {
+			if existing.updated.Before(cutoff) {
 				delete(l.attempts, existingKey)
+				continue
+			}
+			if oldestKey == "" || existing.updated.Before(oldest) {
+				oldestKey = existingKey
+				oldest = existing.updated
 			}
 		}
-	}
-	entry, exists := l.attempts[key]
-	if !exists && len(l.attempts) >= 4096 {
-		return
+		if len(l.attempts) >= maxTrackedAttempts {
+			delete(l.attempts, oldestKey)
+		}
 	}
 	entry.failures++
 	delay := time.Second * time.Duration(1<<min(entry.failures-1, 5))
-	entry.next = l.now().Add(delay)
+	entry.next = now.Add(delay)
+	entry.updated = now
 	l.attempts[key] = entry
 }
 

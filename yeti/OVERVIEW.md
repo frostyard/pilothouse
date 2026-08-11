@@ -544,6 +544,13 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   group membership on every request (not just at login), so removing a user
   from the admin group takes effect immediately, without waiting for
   session expiry.
+- **Bounded login backoff remains effective at capacity.** Failed authentication
+  keys receive exponential per-user/per-address backoff in
+  `internal/broker/server.go`. The tracker holds at most 4,096 keys, reclaims
+  entries idle for ten minutes, and then evicts the least recently failed key
+  when necessary. The failure that triggered saturation is always inserted;
+  unseen successful logins are never globally locked out merely because the
+  tracker is full.
 - **Durable audit before mutation.** Action intent is recorded in a
   root-owned bbolt database *before* the action runs; if the audit store is
   unavailable, the action does not run. Long-running mutations (extension
