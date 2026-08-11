@@ -29,7 +29,11 @@ The frontend forwards a bounded username/password request to the broker over the
 
 Only the opaque token is placed in the browser cookie. The cookie is HTTP-only, same-site strict, and becomes secure when TLS is used or `--secure-cookie` is configured. Sessions expire after 15 minutes without activity and always expire after eight hours. Broker restarts invalidate every session.
 
-Authentication errors are deliberately generic. Empty passwords are rejected before PAM. Failed attempts receive a fixed delay and exponential per-user/per-address backoff.
+Authentication errors are deliberately generic. Empty passwords are rejected
+before PAM. Failed attempts receive a fixed delay and exponential
+per-user/per-address backoff. The backoff map is bounded; when it remains full
+after expired entries are removed, the oldest penalty is evicted so the new
+failure is still tracked rather than silently bypassing backoff.
 
 NSS identity resolution requires a non-negative numeric UID that fits the
 platform's integer range and rejects UID 0 before resolving supplementary

@@ -16,6 +16,8 @@ import (
 	"github.com/frostyard/pilothouse/internal/auth"
 )
 
+const maxTrackedLoginAttempts = 4096
+
 type Server struct {
 	actions       *ActionRegistry
 	attempts      *attemptLimiter
@@ -328,8 +330,9 @@ func (l *attemptLimiter) delay(key string) time.Duration {
 func (l *attemptLimiter) failure(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.attempts) >= 4096 {
-		cutoff := l.now().Add(-10 * time.Minute)
+	now := l.now()
+	if len(l.attempts) >= maxTrackedLoginAttempts {
+		cutoff := now.Add(-10 * time.Minute)
 		for existingKey, existing := range l.attempts {
 			if existing.next.Before(cutoff) {
 				delete(l.attempts, existingKey)
@@ -337,12 +340,20 @@ func (l *attemptLimiter) failure(key string) {
 		}
 	}
 	entry, exists := l.attempts[key]
-	if !exists && len(l.attempts) >= 4096 {
-		return
+	if !exists && len(l.attempts) >= maxTrackedLoginAttempts {
+		var oldestKey string
+		var oldestNext time.Time
+		for existingKey, existing := range l.attempts {
+			if oldestKey == "" || existing.next.Before(oldestNext) {
+				oldestKey = existingKey
+				oldestNext = existing.next
+			}
+		}
+		delete(l.attempts, oldestKey)
 	}
 	entry.failures++
 	delay := time.Second * time.Duration(1<<min(entry.failures-1, 5))
-	entry.next = l.now().Add(delay)
+	entry.next = now.Add(delay)
 	l.attempts[key] = entry
 }
 

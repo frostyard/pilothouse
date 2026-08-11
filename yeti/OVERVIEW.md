@@ -544,6 +544,12 @@ Contracts of the parsers themselves, worth knowing before consuming them:
   group membership on every request (not just at login), so removing a user
   from the admin group takes effect immediately, without waiting for
   session expiry.
+- **Bounded login backoff remains active at capacity.** Failed logins receive a
+  fixed delay plus exponential backoff keyed by normalized username and remote
+  address. The broker retains at most 4,096 attempt entries, first removes
+  expired penalties, and then evicts the entry with the oldest next-attempt
+  time when necessary so a new failure is always recorded rather than silently
+  bypassing backoff.
 - **Durable audit before mutation.** Action intent is recorded in a
   root-owned bbolt database *before* the action runs; if the audit store is
   unavailable, the action does not run. Long-running mutations (extension

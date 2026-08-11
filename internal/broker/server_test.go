@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -89,6 +90,25 @@ func TestBrokerClientLoginSessionAndAuthorizedAction(t *testing.T) {
 	require.NoError(t, client.Logout(context.Background(), login.Token))
 	_, err = client.Session(context.Background(), login.Token)
 	assert.ErrorIs(t, err, ErrUnauthorized)
+}
+
+func TestAttemptLimiterRecordsNewFailuresAtCapacity(t *testing.T) {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	limiter := &attemptLimiter{attempts: make(map[string]attempt, maxTrackedLoginAttempts), now: func() time.Time { return now }}
+	for i := range maxTrackedLoginAttempts {
+		limiter.attempts[fmt.Sprintf("key-%04d", i)] = attempt{failures: 1, next: now.Add(time.Duration(i) * time.Second)}
+	}
+
+	limiter.failure("new-key")
+
+	assert.Len(t, limiter.attempts, maxTrackedLoginAttempts)
+	assert.NotContains(t, limiter.attempts, "key-0000")
+	require.Contains(t, limiter.attempts, "new-key")
+	assert.Equal(t, attempt{failures: 1, next: now.Add(time.Second)}, limiter.attempts["new-key"])
+
+	limiter.failure("new-key")
+
+	assert.Equal(t, attempt{failures: 2, next: now.Add(2 * time.Second)}, limiter.attempts["new-key"])
 }
 
 func TestBrokerClientPreservesJSONQueryPublicErrorStatus(t *testing.T) {
