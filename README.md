@@ -26,7 +26,7 @@ and runtime guidance below rather than their unresolved site routes.
 - Local Incus project inventory for containers, virtual machines, and images with lifecycle controls, live per-instance addresses and memory, a per-instance detail page (allowlisted configuration, devices, interfaces, snapshots), bounded console and supervisor logs, non-stateful snapshot create/restore/delete, read-only network and profile inventory with DHCP leases, and instance creation from the public image server as a background job
 - Read-only k3s visibility with node readiness and aggregate pod health totals per namespace; unrecognized future pod phases conservatively count as not ready instead of hiding the whole view, while individual pod details and cluster mutations are intentionally excluded
 - Administrator-only browsing, download, and atomic upload within configured host file roots
-- PAM authentication using host users and account policy
+- PAM authentication using host users and account policy, with bounded per-user/per-address exponential login backoff
 - Opaque, idle-expiring broker sessions with per-session CSRF tokens
 - An unprivileged web process and a root-only action broker connected through a protected Unix socket
 - Group-based administration, POST-only mutations, origin checks, strict command arguments, and bounded command timeouts

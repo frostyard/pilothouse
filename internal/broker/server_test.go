@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -133,6 +134,53 @@ func TestBrokerClientSanitizesGenericQueryErrors(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, StatusCode(err))
 	assert.NotContains(t, err.Error(), "private query detail")
+}
+
+func TestAttemptLimiterBacksOffNewKeyAtCapacity(t *testing.T) {
+	now := time.Date(2026, 8, 11, 3, 0, 0, 0, time.UTC)
+	limiter := &attemptLimiter{attempts: map[string]attempt{}, now: func() time.Time { return now }}
+
+	limiter.failure("oldest")
+	now = now.Add(time.Nanosecond)
+	for i := 1; i < 4096; i++ {
+		limiter.failure(fmt.Sprintf("existing-%d", i))
+	}
+
+	limiter.failure("target")
+	assert.Len(t, limiter.attempts, 4096)
+	assert.NotContains(t, limiter.attempts, "oldest")
+	assert.Equal(t, time.Second, limiter.delay("target"))
+
+	now = now.Add(time.Second)
+	limiter.failure("target")
+	assert.Equal(t, 2*time.Second, limiter.delay("target"))
+
+	now = now.Add(2 * time.Second)
+	limiter.failure("target")
+	assert.Equal(t, 4*time.Second, limiter.delay("target"))
+}
+
+func TestAttemptLimiterCapacityDoesNotBlockUnseenSuccessfulLogin(t *testing.T) {
+	server := NewServer(
+		fakeAuthenticator{},
+		fakeResolver{identity: auth.Identity{UID: 1000, Username: "snow"}},
+		NewSessionStore(time.Minute, time.Hour),
+		NewActionRegistry(),
+		NewQueryRegistry(),
+		NewStreamActionRegistry(),
+		NewStreamQueryRegistry(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	for i := 0; i < 4096; i++ {
+		server.attempts.failure(fmt.Sprintf("existing-%d", i))
+	}
+	client := &Client{baseURL: "http://broker", http: &http.Client{Transport: handlerTransport{handler: server.Handler()}}, socket: "test"}
+
+	login, err := client.Login(context.Background(), "snow", "secret", "local")
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, login.Token)
+	assert.Len(t, server.attempts.attempts, 4096)
 }
 
 func TestBrokerClientStreamsQueryAndChunkedAction(t *testing.T) {
