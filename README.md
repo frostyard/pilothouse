@@ -4,6 +4,10 @@ Pilothouse is a local web administration console for image-based Linux systems. 
 
 The application is bootstrapped from [housecat-inc/scratch](https://github.com/housecat-inc/scratch): Go and templ on the server, HTMX for focused page updates, an embedded design system, and no Node runtime or external frontend assets.
 
+Operator documentation currently lives in this README. The documentation
+sources under [`site/`](site/) are not yet published, so use the installation
+and runtime guidance below rather than their unresolved site routes.
+
 ## What works
 
 - Live CPU, memory, persistent storage, load, uptime, network totals, host, OS, and kernel metrics, with utilization gauges safely bounded from 0–100% even for zero-capacity or wrapped-counter inputs
@@ -100,18 +104,10 @@ Go 1.26 or newer is required.
 make test
 make race
 make build
-sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id -gn)"
-./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
 ```
 
 `make test` includes the process-level web checks in `test/e2e/`; they build
 and start the real `pilothouse` binary on a loopback port and need no broker.
-
-That broker runs with no optional tooling configured, so Podman, Docker,
-Incus, k3s, and every `updex`-backed extension operation are absent from the
-console; add `--podman-socket`, `--docker`, `--incus`, `--k3s`, or `--updex` to the
-`pilothoused` line to work on those surfaces, and `--dev` to the
-`pilothouse` line to see the static Fleet preview.
 
 Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
 
@@ -125,6 +121,69 @@ make docker-lint
 ```
 
 Each target checks the reusable development image through Docker's build cache and uses persistent Docker volumes for Go and linter caches. Container commands run as the host user, so generated files and build output remain writable. `make docker-run` uses host networking and starts the web process, but broker-backed operations require separately mounting a broker socket into the container.
+
+## Run locally
+
+Start the privileged broker, then the web process:
+
+```bash
+sudo ./bin/pilothoused --socket /tmp/pilothouse-broker.sock --socket-group "$(id -gn)"
+./bin/pilothouse --broker-socket /tmp/pilothouse-broker.sock
+```
+
+That broker runs with no optional tooling configured, so Podman, Docker,
+Incus, k3s, and every `updex`-backed extension operation are absent from the
+console; add `--podman-socket`, `--docker`, `--incus`, `--k3s`, or `--updex` to the
+`pilothoused` line to work on those surfaces, and `--dev` to the
+`pilothouse` line to see the static Fleet preview.
+
+Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any
+authenticated account can view the dashboard. Members of the configured
+broker admin group can perform sysext mutations, and Podman, Docker, and Incus
+mutations for whichever engines were configured above. The packaged broker
+unit uses `sudo` on Debian-family hosts and `wheel` on Fedora-family hosts.
+
+The default is intentionally loopback-only. Terminate TLS at a reverse proxy
+and add `--secure-cookie` to the web service before exposing it to another
+machine.
+
+When a reverse proxy changes the upstream `Host`, configure the browser-visible
+origin explicitly. The option is repeatable; an HTTPS origin automatically
+enables secure cookies.
+
+```bash
+./bin/pilothouse --allowed-origin https://admin.example.test
+```
+
+The packaged service also reads comma-separated origins from
+`/etc/pilothouse/pilothouse.env`:
+
+```ini
+PILOTHOUSE_ALLOWED_ORIGINS=https://admin.example.test
+```
+
+Configure exact backup timers for the privileged broker in
+`/etc/pilothouse/pilothoused.env`. Pilothouse deliberately does not infer
+backups from unit names.
+
+```ini
+PILOTHOUSE_BACKUP_TIMERS=restic.timer,borg.timer
+```
+
+Configure Files only on the privileged broker. `--files-root` adds a read-only
+root and `--files-write-root` adds a writable root; each flag is repeatable and
+uses `id=absolute-path`. The unprivileged web process never receives root paths.
+
+```bash
+sudo ./bin/pilothoused \
+  --files-root logs=/var/log \
+  --files-write-root imports=/var/lib/pilothouse/imports
+```
+
+The filesystem root (`/`) is rejected. Symlinks are displayed but never
+followed. Downloads and uploads are limited to 256 MiB each. Uploads are
+available only in writable roots, are atomically published as `root:root` mode
+`0640`, and reject existing destination names rather than overwriting them.
 
 If local sign-in is unavailable, verify the privileged broker before debugging
 the browser: `systemctl status pilothoused` and `journalctl -u pilothoused`.
@@ -444,43 +503,6 @@ Local-only tags are preserved and rejected rather than silently deleted.
 make bump
 ```
 
-Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any authenticated account can view the dashboard. Members of the configured broker admin group can perform sysext, Podman, and Docker mutations. The packaged broker unit configures that group per distro family — `sudo` on Debian-family hosts, `wheel` on Fedora-family hosts.
-
-The default is intentionally loopback-only. Terminate TLS at a reverse proxy and add `--secure-cookie` to the web service before exposing it to another machine.
-
-When a reverse proxy changes the upstream `Host`, configure the browser-visible origin explicitly. The option is repeatable; an HTTPS origin automatically enables secure cookies.
-
-```bash
-./bin/pilothouse --allowed-origin https://admin.example.test
-```
-
-The packaged service also reads comma-separated origins from `/etc/pilothouse/pilothouse.env`:
-
-```ini
-PILOTHOUSE_ALLOWED_ORIGINS=https://admin.example.test
-```
-
-Configure exact backup timers for the privileged broker in `/etc/pilothouse/pilothoused.env`. Pilothouse deliberately does not infer backups from unit names.
-
-```ini
-PILOTHOUSE_BACKUP_TIMERS=restic.timer,borg.timer
-```
-
-Configure Files only on the privileged broker. `--files-root` adds a read-only
-root and `--files-write-root` adds a writable root; each flag is repeatable and
-uses `id=absolute-path`. The unprivileged web process never receives root paths.
-
-```bash
-sudo ./bin/pilothoused \
-  --files-root logs=/var/log \
-  --files-write-root imports=/var/lib/pilothouse/imports
-```
-
-The filesystem root (`/`) is rejected. Symlinks are displayed but never
-followed. Downloads and uploads are limited to 256 MiB each. Uploads are
-available only in writable roots, are atomically published as `root:root` mode
-`0640`, and reject existing destination names rather than overwriting them.
-
 ## Module architecture
 
 The central contract is deliberately small. Every management module provides:
@@ -496,6 +518,57 @@ The Podman module intentionally manages the root/system store used for host serv
 See [docs/modules.md](docs/modules.md) for a worked module template and [docs/authentication.md](docs/authentication.md) for the trust model.
 
 ## Install
+
+### Install a release package
+
+Download the package for your architecture and `checksums.txt` from the
+[latest release](https://github.com/frostyard/pilothouse/releases/latest).
+The current release uses `frostyard-pilothouse_<version>_amd64.deb` or
+`_arm64.deb` on Debian-family hosts, and
+`frostyard-pilothouse-<version>-1.x86_64.rpm` or `-1.aarch64.rpm` on
+Fedora-family hosts.
+
+For example, on Debian or Ubuntu:
+
+```bash
+version=0.7.0
+artifact="frostyard-pilothouse_${version}_$(dpkg --print-architecture).deb"
+base="https://github.com/frostyard/pilothouse/releases/download/v${version}"
+curl -fLO "${base}/checksums.txt"
+curl -fLO "${base}/${artifact}"
+grep -F "  ${artifact}" checksums.txt | sha256sum --check -
+sudo apt install "./${artifact}"
+```
+
+On Fedora, RHEL, or uCore:
+
+```bash
+version=0.7.0
+artifact="frostyard-pilothouse-${version}-1.$(uname -m).rpm"
+base="https://github.com/frostyard/pilothouse/releases/download/v${version}"
+curl -fLO "${base}/checksums.txt"
+curl -fLO "${base}/${artifact}"
+grep -F "  ${artifact}" checksums.txt | sha256sum --check -
+sudo dnf install "./${artifact}"
+```
+
+Set `version` to the release you selected. The examples support the published
+`amd64`/`arm64` Debian architectures and `x86_64`/`aarch64` RPM architectures.
+After installation, start the web service; it requires and starts the broker:
+
+```bash
+sudo systemctl enable --now pilothouse.service
+```
+
+Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any
+authenticated account can view the dashboard. Members of the configured
+broker admin group can perform sysext mutations and mutations for configured
+container engines; that group is `sudo` on Debian-family hosts and `wheel` on
+Fedora-family hosts. The service listens only on loopback by default; follow
+[Run locally](#run-locally) for reverse-proxy, TLS, origin, backup, and Files
+configuration.
+
+### Install from source
 
 Start with the steps that are the same everywhere:
 
@@ -536,6 +609,9 @@ sudo install -Dm0640 -o root -g pilothouse packaging/pilothoused.env /etc/piloth
 sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
+
+After starting the source installation, use the same console address, account
+roles, and runtime configuration described for the package installation above.
 
 `/etc/pilothouse` is `root:pilothouse` mode `0750` so the units can read their
 `EnvironmentFile=` as the `pilothouse` group without exposing it to every
