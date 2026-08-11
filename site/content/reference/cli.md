@@ -11,11 +11,29 @@ pilothouse ships two binaries. `pilothouse` is the unprivileged web process; `pi
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--listen` | `127.0.0.1:8888` | HTTP listen address |
+| `--listen` | `127.0.0.1:8888` | HTTP(S) listen address (env `PILOTHOUSE_LISTEN`) |
 | `--broker-socket` | `/run/pilothouse/broker.sock` | Privileged broker Unix socket |
 | `--allowed-origin` | — | Trusted public HTTP(S) origin when behind a reverse proxy; repeatable |
 | `--secure-cookie` | `false` | Require HTTPS when sending the session cookie |
+| `--tls-cert` | — | PEM certificate (chain) enabling HTTPS; requires `--tls-key` (env `PILOTHOUSE_TLS_CERT`) |
+| `--tls-key` | — | PEM private key for `--tls-cert` (env `PILOTHOUSE_TLS_KEY`) |
+| `--allow-insecure-http` | `false` | Serve plaintext HTTP on a non-loopback address (env `PILOTHOUSE_ALLOW_INSECURE_HTTP`) |
 | `--dev` | `false` | Register in-development preview modules that are not backed by real functionality |
+
+For each option with a named environment variable, resolution is: explicit
+flag → environment variable → default. A flag passed on the command line wins
+even when its value equals the default, which is why the packaged unit passes
+no `--listen` flag — that is what lets `PILOTHOUSE_LISTEN` from
+`/etc/pilothouse/pilothouse.env` take effect.
+
+Binding a non-loopback address without `--tls-cert`/`--tls-key` serves HTTPS
+with a persistent auto-generated self-signed certificate (stored in
+`$STATE_DIRECTORY` under systemd — `/var/lib/pilothouse/web` for the packaged
+unit — or `~/.local/state/pilothouse` otherwise), and the process refuses to
+start if that certificate cannot be prepared. Plaintext HTTP beyond loopback
+requires the explicit `--allow-insecure-http` acknowledgment. The unspecified
+addresses (`0.0.0.0`, `::`) and any hostname other than the literal
+`localhost` count as non-loopback; no DNS resolution happens at startup.
 
 `--dev` currently gates exactly one module: the Fleet preview, a static mock
 with no real multi-system transport or enrollment behind it. Without the flag
@@ -71,4 +89,8 @@ The packaged services read environment files under `/etc/pilothouse/`.
 | File | Variable | Purpose |
 | --- | --- | --- |
 | `pilothouse.env` | `PILOTHOUSE_ALLOWED_ORIGINS` | Comma-separated trusted origins for the web process |
+| `pilothouse.env` | `PILOTHOUSE_LISTEN` | Listen address when no `--listen` flag is passed |
+| `pilothouse.env` | `PILOTHOUSE_TLS_CERT` | PEM certificate path when no `--tls-cert` flag is passed |
+| `pilothouse.env` | `PILOTHOUSE_TLS_KEY` | PEM key path when no `--tls-key` flag is passed |
+| `pilothouse.env` | `PILOTHOUSE_ALLOW_INSECURE_HTTP` | Plaintext acknowledgment when no `--allow-insecure-http` flag is passed |
 | `pilothoused.env` | `PILOTHOUSE_BACKUP_TIMERS` | Comma-separated exact backup timers to monitor |

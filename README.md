@@ -107,7 +107,8 @@ make build
 ```
 
 `make test` includes the process-level web checks in `test/e2e/`; they build
-and start the real `pilothouse` binary on a loopback port and need no broker.
+and start the real `pilothouse` binary on an ephemeral local port and need no
+broker.
 
 Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
 
@@ -143,9 +144,57 @@ broker admin group can perform sysext mutations, and Podman, Docker, and Incus
 mutations for whichever engines were configured above. The packaged broker
 unit uses `sudo` on Debian-family hosts and `wheel` on Fedora-family hosts.
 
-The default is intentionally loopback-only. Terminate TLS at a reverse proxy
-and add `--secure-cookie` to the web service before exposing it to another
-machine.
+### Remote access
+
+The default is intentionally loopback-only. To reach the console from another
+machine, pick one of these, in order of preference:
+
+1. **SSH port forwarding** — zero configuration, zero new exposure:
+
+   ```bash
+   ssh -L 8888:127.0.0.1:8888 user@host
+   ```
+
+   Then open `http://127.0.0.1:8888` locally.
+
+2. **An overlay network (Tailscale, WireGuard)** — bind the console to the
+   overlay address, or let `tailscale serve` terminate real HTTPS in front of
+   the loopback listener:
+
+   ```bash
+   ./bin/pilothouse --listen 100.64.0.5:8888    # tailnet address
+   # or, keeping the loopback default:
+   tailscale serve https / http://127.0.0.1:8888
+   ```
+
+3. **Direct LAN bind with TLS** — binding a non-loopback address without TLS
+   material auto-generates a persistent self-signed certificate (under
+   `$STATE_DIRECTORY` for the packaged unit, `~/.local/state/pilothouse`
+   otherwise) and serves HTTPS with it; supply `--tls-cert`/`--tls-key` to
+   use your own certificate instead. The session cookie's `Secure` attribute
+   engages automatically under TLS.
+
+   ```bash
+   ./bin/pilothouse --listen 0.0.0.0:8888                     # self-signed
+   ./bin/pilothouse --listen 0.0.0.0:8888 \
+     --tls-cert /etc/pilothouse/tls/console.crt \
+     --tls-key /etc/pilothouse/tls/console.key                # your cert
+   ```
+
+   On a packaged install, set `PILOTHOUSE_LISTEN` (and optionally
+   `PILOTHOUSE_TLS_CERT`/`PILOTHOUSE_TLS_KEY`) in
+   `/etc/pilothouse/pilothouse.env`; flags passed in `ExecStart` would
+   override the environment, and the packaged unit deliberately passes no
+   `--listen` flag.
+
+4. **A TLS-terminating reverse proxy** — keep the listener on loopback, add
+   `--secure-cookie`, and configure the browser-visible origin as below.
+
+Serving plaintext HTTP on a non-loopback address requires the explicit
+`--allow-insecure-http` flag (or `PILOTHOUSE_ALLOW_INSECURE_HTTP=1`); without
+it the console falls back to the self-signed certificate, and refuses to
+start if none can be prepared. If you previously ran `--listen 0.0.0.0:...`
+over plaintext, add that flag or switch to one of the TLS options.
 
 When a reverse proxy changes the upstream `Host`, configure the browser-visible
 origin explicitly. The option is repeatable; an HTTPS origin automatically
@@ -564,9 +613,10 @@ Open `http://127.0.0.1:8888` and sign in with a non-root system account. Any
 authenticated account can view the dashboard. Members of the configured
 broker admin group can perform sysext mutations and mutations for configured
 container engines; that group is `sudo` on Debian-family hosts and `wheel` on
-Fedora-family hosts. The service listens only on loopback by default; follow
-[Run locally](#run-locally) for reverse-proxy, TLS, origin, backup, and Files
-configuration.
+Fedora-family hosts. The service listens only on loopback by default; to
+reach it from another machine, set `PILOTHOUSE_LISTEN` in
+`/etc/pilothouse/pilothouse.env` and see [Remote access](#remote-access) for
+the SSH, overlay-network, native-TLS, and reverse-proxy options.
 
 ### Install from source
 

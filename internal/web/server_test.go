@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -808,4 +809,57 @@ func withTestSession(r *http.Request, csrf, token string) *http.Request {
 		data:  broker.SessionResponse{CSRF: csrf},
 		token: token,
 	}))
+}
+
+// TestSessionCookieSecureUnderTLS drives real HTTPS requests through the
+// full handler chain and asserts the session cookie's Secure attribute on
+// the responses a browser actually receives: the login set and the logout
+// clear. secureCookie is false here, so Secure derives purely from the TLS
+// connection state — the property that makes native TLS safe without also
+// passing --secure-cookie.
+func TestSessionCookieSecureUnderTLS(t *testing.T) {
+	server := newTestServer(t)
+	ts := httptest.NewTLSServer(server.Handler())
+	defer ts.Close()
+	client := ts.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	login, err := client.PostForm(ts.URL+"/login", url.Values{
+		"csrf":     {server.loginCSRF},
+		"username": {"snow"},
+		"password": {"secret"},
+	})
+	require.NoError(t, err)
+	defer func() { _ = login.Body.Close() }()
+	require.Equal(t, http.StatusSeeOther, login.StatusCode)
+	sessionSet := findSessionCookie(t, login)
+	assert.True(t, sessionSet.Secure, "login Set-Cookie must carry Secure over TLS")
+	assert.True(t, sessionSet.HttpOnly)
+	assert.NotEmpty(t, sessionSet.Value)
+
+	logoutRequest, err := http.NewRequest(http.MethodPost, ts.URL+"/logout", strings.NewReader("csrf=csrf"))
+	require.NoError(t, err)
+	logoutRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	logoutRequest.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessionSet.Value})
+	logout, err := client.Do(logoutRequest)
+	require.NoError(t, err)
+	defer func() { _ = logout.Body.Close() }()
+	require.Equal(t, http.StatusSeeOther, logout.StatusCode)
+	sessionClear := findSessionCookie(t, logout)
+	assert.True(t, sessionClear.Secure, "logout Set-Cookie must carry Secure over TLS")
+	assert.Empty(t, sessionClear.Value)
+	assert.Negative(t, sessionClear.MaxAge)
+}
+
+func findSessionCookie(t *testing.T, response *http.Response) *http.Cookie {
+	t.Helper()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == sessionCookie {
+			return cookie
+		}
+	}
+	t.Fatalf("response carries no %s cookie", sessionCookie)
+	return nil
 }
