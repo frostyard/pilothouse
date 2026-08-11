@@ -180,10 +180,15 @@ test/image/ucore-image-test.sh
 
 ### Two binaries, one protocol
 
-- **`pilothouse`** (`cmd/pilothouse/main.go`): binds a loopback/TCP listener
-  (default `127.0.0.1:8888`), instantiates all modules, and wires them to a
-  `broker.Client` that dials `/run/pilothouse/broker.sock`. Runs as an
-  unprivileged user. Some modules perform genuinely unprivileged local reads
+- **`pilothouse`** (`cmd/pilothouse/main.go`): binds a TCP listener (default
+  `127.0.0.1:8888`, loopback HTTP), instantiates all modules, and wires them
+  to a `broker.Client` that dials `/run/pilothouse/broker.sock`. Runs as an
+  unprivileged user. A non-loopback bind fails closed to HTTPS: operator
+  `--tls-cert`/`--tls-key` material wins, otherwise `internal/tlscert`
+  prepares a persistent self-signed certificate (refusing to start if it
+  cannot), and plaintext beyond loopback requires the explicit
+  `--allow-insecure-http` acknowledgment; `cmd/pilothouse/listen.go` holds
+  the flag→env→default resolution and the serve-mode decision. Some modules perform genuinely unprivileged local reads
   directly (e.g. `system` collects `/proc`, `/sys`, `/etc/os-release`
   telemetry) — this is allowed because it requires no elevated access.
 - **`pilothoused`** (`cmd/pilothoused/main.go`): refuses to start unless
@@ -1668,8 +1673,13 @@ list in `cmd/pilothouse/main.go`, not just registered in
   `strings.Builder` and assert on the output HTML (see
   `internal/modules/services/views_test.go`, `internal/web/shell_test.go`).
 - Process-level web E2E tests live in `test/e2e/`. They build and start the
-  real `pilothouse` binary on a loopback port, then exercise its public and
-  authentication-gated HTTP surfaces without requiring a broker.
+  real `pilothouse` binary on an ephemeral local port, then exercise its
+  public and authentication-gated HTTP surfaces without requiring a broker.
+  `web_test.go` covers the loopback HTTP default; `tls_test.go` covers
+  operator-supplied certificates on loopback, the self-signed HTTPS path on
+  a wildcard bind (with `STATE_DIRECTORY` pointed at a temp dir), and the
+  guardrail's refusal branch (nonzero exit plus the remedy message when no
+  certificate can be prepared).
 - Optional live integration tests are gated behind env vars:
   `PILOTHOUSE_LIVE_PODMAN`, `PILOTHOUSE_LIVE_DOCKER`, `PILOTHOUSE_LIVE_INCUS`,
   `JOURNAL_SMOKE`.
@@ -1830,10 +1840,26 @@ No config-file parser; configuration is command-line flags plus a couple of
 environment variables, typically supplied via systemd `EnvironmentFile`.
 
 **`pilothouse` (web) flags** — `cmd/pilothouse/main.go`:
-- `--listen` (default `127.0.0.1:8888`), `--broker-socket`
-  (default `/run/pilothouse/broker.sock`)
+- `--listen` (default `127.0.0.1:8888`; env fallback `PILOTHOUSE_LISTEN`),
+  `--broker-socket` (default `/run/pilothouse/broker.sock`)
+- `--tls-cert` / `--tls-key` (must be set together; env fallbacks
+  `PILOTHOUSE_TLS_CERT`/`PILOTHOUSE_TLS_KEY`) — enable HTTPS on any address
+- `--allow-insecure-http` (env fallback `PILOTHOUSE_ALLOW_INSECURE_HTTP`) —
+  explicit acknowledgment for plaintext HTTP on a non-loopback address
+- for the four options above, resolution is explicit flag → env → default
+  (`flag.Visit`-based, so a flag passed with its default value still beats
+  the env var); `packaging/pilothouse.service` passes no `--listen` flag so
+  the env file can set it. The self-signed certificate for a non-loopback
+  bind without TLS material persists in `$STATE_DIRECTORY` (the packaged
+  unit declares `StateDirectory=pilothouse/web`, nested under the broker's
+  root-owned `/var/lib/pilothouse` — ordering is guaranteed by
+  `Requires=/After=pilothoused.service`) or `~/.local/state/pilothouse`
+  outside systemd; `internal/tlscert` regenerates it at startup when it is
+  unparseable, expired, within its 30-day renewal window, or missing the
+  listen host from its SANs
 - repeatable `--allowed-origin`; also augmented by `PILOTHOUSE_ALLOWED_ORIGINS`
-- `--secure-cookie` (set behind a TLS-terminating proxy)
+- `--secure-cookie` (set behind a TLS-terminating proxy; when the process
+  itself terminates TLS the secure-cookie behavior engages automatically)
 - `--dev` (default `false`) — registers in-development preview modules not
   backed by real functionality; today that is exactly one module, `fleet`.
   It is a bare bool with no companion environment variable, matching

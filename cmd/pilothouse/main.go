@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,6 +32,7 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	systemmodule "github.com/frostyard/pilothouse/internal/modules/system"
 	"github.com/frostyard/pilothouse/internal/platform"
+	"github.com/frostyard/pilothouse/internal/tlscert"
 	"github.com/frostyard/pilothouse/internal/web"
 )
 
@@ -41,30 +44,73 @@ func main() {
 }
 
 func run() error {
-	listen := flag.String("listen", "127.0.0.1:8888", "HTTP listen address")
+	listen := flag.String("listen", "127.0.0.1:8888", "HTTP listen address (env PILOTHOUSE_LISTEN)")
 	brokerSocket := flag.String("broker-socket", "/run/pilothouse/broker.sock", "privileged broker Unix socket")
 	var allowedOrigins stringListFlag
 	flag.Var(&allowedOrigins, "allowed-origin", "trusted public HTTP(S) origin when behind a reverse proxy; repeatable")
 	secureCookie := flag.Bool("secure-cookie", false, "require HTTPS when sending the session cookie")
+	tlsCert := flag.String("tls-cert", "", "PEM certificate (chain) enabling HTTPS; requires --tls-key (env PILOTHOUSE_TLS_CERT)")
+	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert (env PILOTHOUSE_TLS_KEY)")
+	allowInsecureHTTP := flag.Bool("allow-insecure-http", false, "serve plaintext HTTP on a non-loopback address (env PILOTHOUSE_ALLOW_INSECURE_HTTP)")
 	dev := flag.Bool("dev", false, "register in-development preview modules that are not backed by real functionality")
 	flag.Parse()
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
+	// Flag-beats-environment precedence needs to know which flags were
+	// actually passed: an explicit --listen 127.0.0.1:8888 must beat
+	// PILOTHOUSE_LISTEN even though it equals the default.
+	passed := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	addr := resolveString(passed["listen"], *listen, os.Getenv("PILOTHOUSE_LISTEN"))
+	certPath := resolveString(passed["tls-cert"], *tlsCert, os.Getenv("PILOTHOUSE_TLS_CERT"))
+	keyPath := resolveString(passed["tls-key"], *tlsKey, os.Getenv("PILOTHOUSE_TLS_KEY"))
+	allowInsecure, err := resolveBool(passed["allow-insecure-http"], *allowInsecureHTTP, "PILOTHOUSE_ALLOW_INSECURE_HTTP", os.Getenv("PILOTHOUSE_ALLOW_INSECURE_HTTP"))
+	if err != nil {
+		return err
+	}
+	if (certPath == "") != (keyPath == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be set together (got cert=%q key=%q; env: PILOTHOUSE_TLS_CERT/PILOTHOUSE_TLS_KEY)", certPath, keyPath)
+	}
+	loopback, err := isLoopbackListen(addr)
+	if err != nil {
+		return err
+	}
+	mode := decideServeMode(loopback, certPath != "", allowInsecure)
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if mode == serveTLSSelfSigned {
+		host, _, _ := net.SplitHostPort(addr)
+		dir, dirErr := certStateDir()
+		if dirErr != nil {
+			return selfSignedUnavailable(addr, dirErr)
+		}
+		certPath, keyPath, err = tlscert.LoadOrCreate(dir, host, time.Now, logger)
+		if err != nil {
+			return selfSignedUnavailable(addr, err)
+		}
+	}
+	tlsActive := mode != serveHTTP
+	if !loopback && !tlsActive {
+		logger.Warn("serving plaintext HTTP on a non-loopback address by explicit override; credentials and session cookies are not encrypted in transit", "address", addr)
+	}
+
 	registry, err := newRegistry(*dev)
 	if err != nil {
 		return fmt.Errorf("register modules: %w", err)
 	}
-	handler, err := web.NewServer(registry, broker.NewClient(*brokerSocket), logger, *secureCookie, allowedOrigins...)
+	handler, err := web.NewServer(registry, broker.NewClient(*brokerSocket), logger, *secureCookie || tlsActive, allowedOrigins...)
 	if err != nil {
 		return fmt.Errorf("create web server: %w", err)
 	}
 	server := &http.Server{
-		Addr:              *listen,
+		Addr:              addr,
 		Handler:           handler.Handler(),
 		IdleTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Minute,
+	}
+	if tlsActive {
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -76,8 +122,13 @@ func run() error {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	logger.Info("pilothouse listening", "address", server.Addr, "modules", len(registry.Modules()))
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	logger.Info("pilothouse listening", "address", server.Addr, "modules", len(registry.Modules()), "tls", tlsActive, "cert", certPath)
+	if tlsActive {
+		err = server.ListenAndServeTLS(certPath, keyPath)
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil

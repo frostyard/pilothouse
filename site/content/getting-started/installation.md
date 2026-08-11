@@ -83,7 +83,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pilothouse.service
 ```
 
-`/etc/pilothouse` is `root:pilothouse` mode `0750` so the units can read their `EnvironmentFile=` as the `pilothouse` group without exposing it to every account on the host. `/etc/pilothouse/storage/credentials` is stricter — `root:root` mode `0700` — because it holds remote-mount secrets only the root broker reads. Both env files ship with every setting commented out, so copying them changes no behavior: uncomment `PILOTHOUSE_ALLOWED_ORIGINS` in `/etc/pilothouse/pilothouse.env` for a reverse-proxy deployment (see [Expose beyond loopback](#expose-beyond-loopback)) and `PILOTHOUSE_BACKUP_TIMERS` in `/etc/pilothouse/pilothoused.env` to name the backup timers to monitor (see [Backup monitoring](#backup-monitoring)). The `.deb` and `.rpm` packages create the same two directories and install the same two files as configuration files, and declare their PAM and systemd runtime dependencies per format.
+`/etc/pilothouse` is `root:pilothouse` mode `0750` so the units can read their `EnvironmentFile=` as the `pilothouse` group without exposing it to every account on the host. `/etc/pilothouse/storage/credentials` is stricter — `root:root` mode `0700` — because it holds remote-mount secrets only the root broker reads. Both env files ship with every setting commented out, so copying them changes no behavior: uncomment `PILOTHOUSE_LISTEN` (and optionally `PILOTHOUSE_TLS_CERT`/`PILOTHOUSE_TLS_KEY`) in `/etc/pilothouse/pilothouse.env` to reach the console from another machine, `PILOTHOUSE_ALLOWED_ORIGINS` for a reverse-proxy deployment (see [Expose beyond loopback](#expose-beyond-loopback) for both), and `PILOTHOUSE_BACKUP_TIMERS` in `/etc/pilothouse/pilothoused.env` to name the backup timers to monitor (see [Backup monitoring](#backup-monitoring)). The `.deb` and `.rpm` packages create the same two directories and install the same two files as configuration files, and declare their PAM and systemd runtime dependencies per format.
 
 The packaged units are deliberately minimal: `pilothoused.service` passes none of the five optional-tooling flags and declares no `Wants=` on `podman.socket` or `incus.socket`, and `pilothouse.service` does not pass `--dev`. A stock install therefore enables no container engine, no k3s visibility, no `updex`-backed extension operation, and no Fleet preview until you add the flags to the relevant `ExecStart`.
 
@@ -91,7 +91,14 @@ For an immutable production image, package the binary and unit in a dedicated sy
 
 ## Expose beyond loopback
 
-The default is intentionally loopback-only. Terminate TLS at a reverse proxy and add `--secure-cookie` to the web service before exposing it to another machine.
+The default is intentionally loopback-only. To reach the console from another machine, pick one of these, in order of preference:
+
+1. **SSH port forwarding** — zero configuration, zero new exposure: `ssh -L 8888:127.0.0.1:8888 user@host`, then open `http://127.0.0.1:8888` locally.
+2. **An overlay network (Tailscale, WireGuard)** — set `PILOTHOUSE_LISTEN=<overlay-address>:8888` in `/etc/pilothouse/pilothouse.env`, or keep the loopback default and let `tailscale serve https / http://127.0.0.1:8888` terminate real HTTPS in front of it.
+3. **Direct LAN bind with TLS** — set `PILOTHOUSE_LISTEN=0.0.0.0:8888`. With no TLS material configured the service generates a persistent self-signed certificate under `/var/lib/pilothouse/web` and serves HTTPS with it (accept the one-time browser warning); set `PILOTHOUSE_TLS_CERT`/`PILOTHOUSE_TLS_KEY` to use your own certificate instead. The session cookie's `Secure` attribute engages automatically under TLS. Restart `pilothouse.service` after editing the env file.
+4. **A TLS-terminating reverse proxy** — keep the listener on loopback and add `--secure-cookie` to the web service.
+
+Serving plaintext HTTP on a non-loopback address requires the explicit acknowledgment `PILOTHOUSE_ALLOW_INSECURE_HTTP=1` (or `--allow-insecure-http`); without it the service uses the self-signed certificate, and refuses to start if none can be prepared.
 
 When a reverse proxy changes the upstream `Host`, configure the browser-visible origin explicitly. The option is repeatable; an HTTPS origin automatically enables secure cookies.
 

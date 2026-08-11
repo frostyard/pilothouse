@@ -26,7 +26,9 @@ For any new or changed templ component invocation, add or update a rendering tes
 
 Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
 
-Process-level web E2E tests live in `test/e2e/`. They build and start the real `pilothouse` binary on a loopback port, require no broker, and run as part of `make test`.
+Process-level web E2E tests live in `test/e2e/`. They build and start the real `pilothouse` binary on an ephemeral local port (loopback, plus one wildcard bind exercising the self-signed TLS path), require no broker, and run as part of `make test`.
+
+The web binary's listen address, TLS material, and plaintext acknowledgment resolve as explicit flag → `PILOTHOUSE_*` environment variable → default (`cmd/pilothouse/listen.go`). The loopback HTTP default must not change, and the non-loopback guardrail must stay fail-closed: a non-loopback bind without operator TLS material serves a self-signed certificate from `internal/tlscert` (persisted in `$STATE_DIRECTORY` or the XDG state home), refuses to start when none can be prepared, and serves plaintext only under the explicit `--allow-insecure-http` acknowledgment.
 
 If native Go, PAM, or systemd build dependencies are unavailable, use the matching containerized targets: `make docker-build`, `make docker-test`, `make docker-fmt`, and `make docker-lint`. Use `make docker-generate` after templ changes. These targets build and reuse the repository's development image; do not assemble ad hoc build containers when they are available.
 

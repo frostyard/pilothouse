@@ -73,8 +73,18 @@ The initial HTML conversation supports username and password prompts. Multi-step
 ## Deployment rules
 
 - Keep the broker socket inside `/run/pilothouse` and never proxy it.
-- Keep the web listener on loopback unless a TLS reverse proxy is configured.
-- Set `--secure-cookie` behind an HTTPS proxy.
+- The web listener defaults to loopback HTTP. A non-loopback bind requires
+  transport encryption: operator TLS material (`--tls-cert`/`--tls-key` or
+  `PILOTHOUSE_TLS_CERT`/`PILOTHOUSE_TLS_KEY`), the auto-generated self-signed
+  certificate (the fallback when none is configured; the process refuses to
+  start if it cannot be prepared), or the explicit `--allow-insecure-http`
+  acknowledgment for deployments whose transport is secured elsewhere (a
+  TLS-terminating reverse proxy, an encrypting overlay network).
+- A hostname in the listen address — even one resolving to loopback — is
+  classified non-loopback; no DNS resolution happens at startup.
+- The session cookie's `Secure` attribute engages automatically when the
+  process itself terminates TLS. Set `--secure-cookie` behind an HTTPS proxy,
+  where the process-local connection is plaintext.
 - If the proxy does not preserve the public `Host`, set each browser-visible origin with `--allowed-origin` or `PILOTHOUSE_ALLOWED_ORIGINS`. Pilothouse deliberately does not trust forwarded headers implicitly.
 - Do not add generic command execution actions.
 - Prefer a dedicated admin group if `sudo` is broader than desired.
