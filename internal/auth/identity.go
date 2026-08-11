@@ -23,35 +23,69 @@ type Resolver interface {
 }
 
 type SystemResolver struct {
-	adminGroup string
-	loginGroup string
+	adminGroup    string
+	loginGroup    string
+	lookupAccount func(string) (accountRecord, error)
+	lookupGroup   func(string) (string, error)
+}
+
+type accountRecord struct {
+	uid      string
+	username string
+	groupIDs func() ([]string, error)
 }
 
 func NewSystemResolver(adminGroup, loginGroup string) *SystemResolver {
-	return &SystemResolver{adminGroup: adminGroup, loginGroup: loginGroup}
+	return &SystemResolver{
+		adminGroup:    adminGroup,
+		loginGroup:    loginGroup,
+		lookupAccount: lookupSystemAccount,
+		lookupGroup:   lookupSystemGroup,
+	}
+}
+
+func lookupSystemAccount(username string) (accountRecord, error) {
+	account, err := user.Lookup(username)
+	if err != nil {
+		return accountRecord{}, err
+	}
+	return accountRecord{
+		uid:      account.Uid,
+		username: account.Username,
+		groupIDs: account.GroupIds,
+	}, nil
+}
+
+func lookupSystemGroup(groupID string) (string, error) {
+	group, err := user.LookupGroupId(groupID)
+	if err != nil {
+		return "", err
+	}
+	return group.Name, nil
 }
 
 func (r *SystemResolver) Resolve(username string) (Identity, error) {
-	account, err := user.Lookup(username)
+	account, err := r.lookupAccount(username)
 	if err != nil {
 		return Identity{}, fmt.Errorf("resolve account: %w", err)
 	}
-	uid, err := strconv.Atoi(account.Uid)
+	uidValue, err := strconv.ParseUint(account.uid, 10, strconv.IntSize-1)
 	if err != nil {
 		return Identity{}, fmt.Errorf("parse account uid: %w", err)
 	}
+	uid := int(uidValue)
 	if uid == 0 {
 		return Identity{}, fmt.Errorf("direct root login is disabled")
 	}
-	groupIDs, err := account.GroupIds()
+	groupIDs, err := account.groupIDs()
 	if err != nil {
 		return Identity{}, fmt.Errorf("resolve account groups: %w", err)
 	}
 	groups := make([]string, 0, len(groupIDs))
 	for _, groupID := range groupIDs {
-		group, lookupErr := user.LookupGroupId(groupID)
+		group, lookupErr := r.lookupGroup(groupID)
 		if lookupErr == nil {
-			groups = append(groups, group.Name)
+			groups = append(groups, group)
 		}
 	}
 	slices.Sort(groups)
@@ -62,6 +96,6 @@ func (r *SystemResolver) Resolve(username string) (Identity, error) {
 		Admin:    r.adminGroup != "" && slices.Contains(groups, r.adminGroup),
 		Groups:   groups,
 		UID:      uid,
-		Username: account.Username,
+		Username: account.username,
 	}, nil
 }
