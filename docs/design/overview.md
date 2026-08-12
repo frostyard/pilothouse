@@ -42,7 +42,10 @@ internal/
                        (see "Packaging test fixtures" below). Ships in no binary and imports no
                        other repository package
 
-docs/                 authoritative subsystem docs (kept here, not duplicated into yeti/):
+docs/                 all documentation, in frostyard/core's four-category shape
+                      (adr/, design/, specs/, plans/ + indexed README.md); this file is
+                      docs/design/overview.md (formerly yeti/OVERVIEW.md), the living
+                      architecture entry point. Authoritative subsystem docs:
   authentication.md    login, session, authorization, audit, PAM policy, deployment rules
   modules.md           how to add a new module: contract, file layout, action/query rules
   capabilities.md      binding table mapping every broker ID to its required host capability
@@ -4831,7 +4834,7 @@ rationale.
   spec→PR harness for this repo: `[gates].chunk` (`make generate`, `gofmt`,
   `go vet`, `go test`) runs after every chunk, `[gates].deep` (`make
   docker-ci`) runs before the ship decision, and `[context].docs` lists
-  `AGENTS.md`, `yeti/OVERVIEW.md`, and `docs/modules.md` as required reading
+  `AGENTS.md`, `docs/design/overview.md`, and `docs/modules.md` as required reading
   for every mill agent. The mill engine itself lives in the separate
   `frostyard/mill` repo; this repo carries only config, learned skills, and
   cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
@@ -4843,7 +4846,7 @@ rationale.
   skill-review instructions, with no per-module feature inventory and no
   module-specific claim anywhere in it. A change that adds or reshapes a
   module's surface therefore does not make any sentence in it stale — the
-  per-module feature narrative lives here in `yeti/OVERVIEW.md`, in
+  per-module feature narrative lives here in `docs/design/overview.md`, in
   `docs/modules.md`, and in `README.md`'s "What works" list. Confirm this is
   still true when reviewing AGENTS.md's "update relevant documentation after
   any change to source code" invariant for a feature change, rather than
@@ -4932,4 +4935,5 @@ rationale.
   `sysext`/`systemd-sysext`/`bootc`/`rpm-ostree` are tool and capability
   identifiers rather than branding, and the allowlist of sites (test fixtures,
   `docs/capabilities.md` fixture prose, the `release.yml` dispatch, mock Fleet
-  data, `yeti/` historical narrative) that naming sweeps must leave unchanged.
+  data, the historical narrative in this doc — formerly `yeti/OVERVIEW.md`)
+  that naming sweeps must leave unchanged.

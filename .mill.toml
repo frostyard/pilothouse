@@ -21,7 +21,7 @@ deep = ["make docker-ci"]
 
 [context]
 # Docs every agent must read before planning/implementing/reviewing.
-docs = ["AGENTS.md", "yeti/OVERVIEW.md", "docs/modules.md"]
+docs = ["AGENTS.md", "docs/design/overview.md", "docs/modules.md"]
 # Durable lessons harvested from previous runs; read by all agents.
 skills_dir = "docs/agents/skills"
 

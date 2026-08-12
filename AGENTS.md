@@ -172,25 +172,35 @@ handoff command.
 ## Documentation
 
 **update documentation** After any change to source code, update
-relevant documentation in CLAUDE.md, README.md and the `yeti/` folder.
-A task is not complete without reviewing and updating relevant
-documentation.
+relevant documentation in this file (`AGENTS.md`, which `CLAUDE.md`
+symlinks), README.md, and `docs/`. A task is not complete without
+reviewing and updating relevant documentation.
 
-**yeti/ directory** The `yeti/` directory contains documentation
-written for AI consumption and context enhancement, not primarily for
-humans. Jobs like `doc-maintainer` and `issue-worker` instruct the AI
-to read `yeti/OVERVIEW.md` and related files for codebase context
-before performing tasks. Write content in this directory to be
-maximally useful to an AI agent understanding the codebase — detailed
-architecture, patterns, and decision rationale rather than user-facing
-guides.
+**docs/ directory** All documentation lives in one tree, `docs/`, in
+frostyard/core's four-category shape per
+[core ADR-0025](https://github.com/frostyard/core/blob/main/docs/adr/0025-consolidate-repository-docs-into-docs.md):
+`docs/adr/` (why — decisions), `docs/design/` (how it fits together),
+`docs/specs/` (exact contracts), `docs/plans/` (order of work), indexed in
+[docs/README.md](docs/README.md), whose table and conventions are binding.
+The entry point for codebase context is
+[docs/design/overview.md](docs/design/overview.md) (formerly
+`yeti/OVERVIEW.md`) — read it and the docs it links before performing
+tasks. New docs start from their category's `TEMPLATE.md` and get indexed.
+Repo-local decisions get an ADR in `docs/adr/` (next free number);
+org-wide decisions go to frostyard/core, with a back-link recorded in
+[docs/org-adrs.md](docs/org-adrs.md). Write every doc to be maximally
+useful to an agent's context window — dense, factual, exact paths and
+constants, decision rationale rather than user-facing guides.
+Inbox-style notes (corrections, `.memory/`-style learnings) are seeds,
+not archives: fold them into the right `docs/` page (or this file, for
+rules of engagement) and delete the entry.
 
 **.knowledge/ directory** is the cross-session entry point for committed agent
 knowledge. Read `.knowledge/README.md` before planning changes, then follow its
-links to this file, `corrections.jsonl`, every learned skill, the yeti overview,
-and authoritative subsystem docs. Append only verified corrections, promote
-stable rules to their durable owner, and never commit credentials, personal
-data, speculation, or transient worktree state.
+links to this file, `corrections.jsonl`, every learned skill, the design
+overview, and authoritative subsystem docs. Append only verified corrections,
+promote stable rules to their durable owner, and never commit credentials,
+personal data, speculation, or transient worktree state.
 
 ## One command mirrors CI
 
