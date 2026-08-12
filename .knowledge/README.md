@@ -13,10 +13,13 @@ prior conversation.
   verified differences between an agent's prior belief and repository reality.
 - [`../docs/agents/skills/`](../docs/agents/skills/) — durable implementation
   and review lessons harvested from previous mill runs. Every skill is binding.
-- [`../yeti/OVERVIEW.md`](../yeti/OVERVIEW.md) — current architecture,
-  subsystem contracts, and rationale written for agent context.
-- [`../docs/`](../docs/) — authoritative subsystem documentation and historical
-  design records.
+- [`../docs/design/overview.md`](../docs/design/overview.md) — current
+  architecture, subsystem contracts, and rationale written for agent context
+  (formerly `yeti/OVERVIEW.md`).
+- [`../docs/`](../docs/) — all documentation in frostyard/core's four-category
+  shape (see [`../docs/README.md`](../docs/README.md)): repo-local ADRs,
+  design docs, specs, plans, authoritative subsystem documentation, and
+  historical design records.
 
 ## Recording knowledge
 
@@ -31,7 +34,7 @@ or maintainer response verifies it. Append one JSON object per line to
 Use `promoted_to` to name the durable document that now carries the rule. Put
 stable repository-wide instructions in `AGENTS.md`, reusable implementation
 lessons in `docs/agents/skills/`, architecture and rationale in
-`yeti/OVERVIEW.md`, and subsystem contracts in the relevant `docs/` file.
+`docs/design/overview.md`, and subsystem contracts in the relevant `docs/` file.
 Do not duplicate those facts in this index.
 
 Never record credentials, tokens, personal data, unverified speculation, or

@@ -15,7 +15,8 @@
 // Why this is a subpackage of packaging rather than more files in packaging
 // itself:
 //
-//   - The parent package is documented as inert at run time. yeti/OVERVIEW.md
+//   - The parent package is documented as inert at run time.
+//     docs/design/overview.md (formerly yeti/OVERVIEW.md)
 //     pins the mechanical form of that guarantee as
 //     `grep -lE 'os/exec|exec\.Command' packaging/*.go` listing exactly
 //     units_test.go and postinstall_test.go, and that glob is NOT recursive, so

@@ -22,7 +22,7 @@ does — bootc / rpm-ostree host-image reporting, `systemd-sysext` extension
 lifecycle, immutable EROFS mount handling — and carries no product identity.
 It currently appears in `README.md`, `site/content/getting-started/overview.md`,
 `.goreleaser.yaml` (both the short package `description` and the long one),
-`yeti/OVERVIEW.md`'s Purpose paragraph, and `workflows/code-review.yaml`'s
+`docs/design/overview.md`'s Purpose paragraph, and `workflows/code-review.yaml`'s
 reviewer prompt.
 
 ### When to use it, and when not to
@@ -118,19 +118,18 @@ data, and #64 placed it behind the `--dev` flag — without `--dev`,
 `fleet.New()` is never constructed and never reaches the registry. This is
 developer-only fixture data, not a production surface.
 
-### `yeti/` historical and phase narrative
+### `docs/design/overview.md` historical and phase narrative (formerly `yeti/`)
 
-Where a `yeti/` document records what a past phase actually did, a product
-name in that record is a historical fact.
+Where `docs/design/overview.md` (formerly `yeti/OVERVIEW.md`) records what a
+past phase actually did, a product name in that record is a historical fact.
 
-**Rationale:** `yeti/` is AI-context documentation, and its phase narrative
-is history rather than a live product description; rewriting it would make
-the record inaccurate. This exemption covers narrative only — `yeti/`'s
-*current-state* prose (its Purpose self-description and the module table's
-`sysext` row) is live product description and was neutralized by this sweep
-like any other generic surface. As of this sweep no `cayo`/`snosi`
-occurrence remains anywhere under `yeti/`; the rule stands for any narrative
-added later.
+**Rationale:** the phase narrative is history rather than a live product
+description; rewriting it would make the record inaccurate. This exemption
+covers narrative only — the doc's *current-state* prose (its Purpose
+self-description and the module table's `sysext` row) is live product
+description and was neutralized by this sweep like any other generic
+surface. As of this sweep no `cayo`/`snosi` occurrence remains anywhere in
+it; the rule stands for any narrative added later.
 
 ## Checking a sweep
 
@@ -145,7 +144,7 @@ git grep -i -E "snosi|cayo|snow's" \
   | grep -v 'docs/capabilities.md' \
   | grep -v '.github/workflows/release.yml' \
   | grep -v 'internal/modules/fleet/' \
-  | grep -v 'yeti/OVERVIEW.md' \
+  | grep -v 'docs/design/overview.md' \
   | grep -v 'docs/branding.md'
 ```
 
