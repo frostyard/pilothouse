@@ -886,8 +886,8 @@ unconditionally at startup and every module's `Mount` still runs — routes stay
 mounted on the shared mux, and absence is enforced per request: a request for
 a route whose capability is missing 404s at request time, and the module's
 nav entry and dashboard card are omitted from that render. See `docs/modules.md`'s
-"Whole-module web-side capability gating" and `docs/design/overview.md`'s "Web-side
-capability gating (end state, #54)" for the mechanism and the exact
+"Whole-module web-side capability gating" and `docs/design/capability-gating.md`'s
+"Web-side capability gating (end state, #54)" for the mechanism and the exact
 module→capability mapping the web process applies.
 
 The **sysext web surface, which #54 did not cover, is gated as of #52.**

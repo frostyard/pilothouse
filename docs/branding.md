@@ -118,18 +118,22 @@ data, and #64 placed it behind the `--dev` flag — without `--dev`,
 `fleet.New()` is never constructed and never reaches the registry. This is
 developer-only fixture data, not a production surface.
 
-### `docs/design/overview.md` historical and phase narrative (formerly `yeti/`)
+### `docs/design/` and `docs/specs/` historical and phase narrative (formerly `yeti/`)
 
-Where `docs/design/overview.md` (formerly `yeti/OVERVIEW.md`) records what a
-past phase actually did, a product name in that record is a historical fact.
+Where `docs/design/overview.md` and the subsystem docs split out of it
+(`docs/design/*.md`, `docs/specs/artifact-contract.md` — all formerly
+`yeti/OVERVIEW.md`) record what a past phase actually did, a product name in
+that record is a historical fact.
 
 **Rationale:** the phase narrative is history rather than a live product
 description; rewriting it would make the record inaccurate. This exemption
 covers narrative only — the doc's *current-state* prose (its Purpose
 self-description and the module table's `sysext` row) is live product
 description and was neutralized by this sweep like any other generic
-surface. As of this sweep no `cayo`/`snosi` occurrence remains anywhere in
-it; the rule stands for any narrative added later.
+surface. As of that sweep no `cayo`/`snosi` occurrence remained anywhere in
+the then-single `docs/design/overview.md`; narrative added later (e.g. the
+booted-VM harness scope notes, now in `docs/design/vm-harness.md`) names
+`Snosi` under this same historical-narrative rule.
 
 ## Checking a sweep
 
@@ -144,7 +148,8 @@ git grep -i -E "snosi|cayo|snow's" \
   | grep -v 'docs/capabilities.md' \
   | grep -v '.github/workflows/release.yml' \
   | grep -v 'internal/modules/fleet/' \
-  | grep -v 'docs/design/overview.md' \
+  | grep -v 'docs/design/' \
+  | grep -v 'docs/specs/artifact-contract.md' \
   | grep -v 'docs/branding.md'
 ```
 

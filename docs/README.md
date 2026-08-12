@@ -22,10 +22,34 @@ Docs are split by the question they answer (the shape defined by
 - [design/overview.md](design/overview.md) — architecture, module inventory,
   broker contract, patterns, and configuration; the entry point for agents and
   contributors (formerly `yeti/OVERVIEW.md`)
+- [design/host-image.md](design/host-image.md) — host-image and
+  automatic-update reporting (#51/#58/#60): parsers, manager, queries,
+  degrade rules
+- [design/capability-gating.md](design/capability-gating.md) — capability
+  probing, guarded registration, web-side fetch/cache and gating, per-module
+  adoption, optional-tooling opt-in (#50/#54/#64)
+- [design/incus.md](design/incus.md) — the Incus module's depth phases:
+  allowlisted detail, snapshots/force stop, networks/profiles, creation
+- [design/packaging-test-fixtures.md](design/packaging-test-fixtures.md) —
+  `internal/packagingtest`: the tool gate and `.deb`/`.rpm` fixture builders
+- [design/artifact-extraction.md](design/artifact-extraction.md) —
+  `packaging/extract` backends, `cmd/verify-packages`, and the CI packaging
+  gate
+- [design/install-validation.md](design/install-validation.md) — Layer A:
+  `packaging/verify-install.sh` container install checks and the `install`
+  CI job
+- [design/vm-harness.md](design/vm-harness.md) — Layer B: the `test/vm`
+  booted-VM harness and the `vm-boot` CI job
+- [design/image-tier.md](design/image-tier.md) — the #80 image-tier
+  validation on a uCore/bootc host and `image-tier.yml`
+- [design/agent-workflows.md](design/agent-workflows.md) — mill
+  configuration, risk tiers, knowledge index, automation workflows
 
 ### Specs
 
-- *(none yet — start from [specs/TEMPLATE.md](specs/TEMPLATE.md))*
+- [specs/artifact-contract.md](specs/artifact-contract.md) — the exact
+  packaging artifact contract: model, finding codes, required destinations,
+  dependency lists, `packaging.Verify` semantics, drift guards
 
 ### Plans
 

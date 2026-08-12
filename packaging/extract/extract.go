@@ -16,7 +16,8 @@
 // itself:
 //
 //   - The parent package is documented as inert at run time.
-//     docs/design/overview.md (formerly yeti/OVERVIEW.md)
+//     docs/specs/artifact-contract.md (formerly part of
+//     docs/design/overview.md, before that yeti/OVERVIEW.md)
 //     pins the mechanical form of that guarantee as
 //     `grep -lE 'os/exec|exec\.Command' packaging/*.go` listing exactly
 //     units_test.go and postinstall_test.go, and that glob is NOT recursive, so
