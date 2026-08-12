@@ -159,8 +159,8 @@ The guard above is daemon-side and per-registration. A separate,
 web-side mechanism lets a whole `platform.Module` declare that its entire
 surface — nav entry, dashboard cards, and routes — depends on host
 capabilities the web process itself can check per request, via the
-`capability.Set` cache described in `docs/design/overview.md`'s "Web-side
-capability fetch/cache". The set reaches both halves of the mechanism
+`capability.Set` cache described in `docs/design/capability-gating.md`'s
+"Web-side capability fetch/cache" bullet. The set reaches both halves of the mechanism
 through `Host.Capabilities(context.Context) capability.Set`, a method added
 to the `platform.Host` interface in #54 and satisfied by
 `internal/web.Server` from the cache above; because it takes a
