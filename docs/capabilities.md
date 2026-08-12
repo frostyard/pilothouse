@@ -43,7 +43,11 @@ with `go/ast` and diffs the declared `Action*`/`Query*` constants against
 row, a table row naming an ID that no longer exists, or a drift away from
 40/24/64 all fail the build. It additionally checks that an `Action*`
 constant is filed in an action registry and a `Query*` constant in a query
-registry.
+registry. This mirror-plus-live-diff arrangement — and why this Markdown
+file is deliberately not machine-parsed — is recorded as
+[ADR-0007](adr/0007-capability-table-contract-tests.md); the opt-in,
+zero-I/O capability model behind the table is
+[ADR-0006](adr/0006-opt-in-capabilities-zero-io-omission.md).
 
 `QueryCapabilities` (`org.frostyard.pilothouse.capabilities.list`) landed
 during phase 1a alongside the engine conversions and is included in both the

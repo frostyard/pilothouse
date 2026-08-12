@@ -136,6 +136,10 @@ their `ExecStart`, so a stock install runs with all five off until an operator
 adds them. Follow the same
 shape for new optional tooling: add a `capability.Config` field fed by an
 explicitly-set flag rather than probing whatever the host happens to have.
+Both halves of this contract are recorded as
+[ADR-0006](adr/0006-opt-in-capabilities-zero-io-omission.md); the binding
+table's test enforcement is
+[ADR-0007](adr/0007-capability-table-contract-tests.md).
 By contrast, the non-optional host facts (`systemd`, `journald`,
 `systemd-sysext`, `bootc`, `rpm-ostree`, and the automatic-update unit
 pairs) stay presence-probed and carry no flag.
@@ -483,6 +487,10 @@ module's methods must apply both tests too.
 ## Privileged reads
 
 Some read operations are themselves privileged or must use the same system context as mutations. Container engines are the canonical example: access to the Docker, Podman, or Incus API socket is effectively root access, and rootless, remote, and system inventories are distinct.
+(The fixed-ID wire surface these queries ride on is
+[ADR-0001](adr/0001-versioned-broker-wire-surface.md); detail surfaces that
+expose upstream config must be allowlist-built per
+[ADR-0003](adr/0003-allowlist-built-detail-surfaces.md).)
 
 Register a fixed broker query and call it through `host.Query` from both `Dashboard` and page handlers:
 

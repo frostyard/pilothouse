@@ -15,7 +15,34 @@ Docs are split by the question they answer (the shape defined by
 ### Decisions (ADRs)
 
 - [org-adrs.md](org-adrs.md) — the frostyard/core ADRs that bind this repo
-- *(no repo-local ADRs yet — start from [adr/TEMPLATE.md](adr/TEMPLATE.md))*
+- [adr/0001](adr/0001-versioned-broker-wire-surface.md) — version the broker
+  wire surface as four ID-dispatched registry routes; no proxy/exec escape
+  hatch
+- [adr/0002](adr/0002-audited-resource-key-doubles-as-lock-key.md) — one
+  canonical resource key per action: the audited resource is the default
+  serialization-lock key
+- [adr/0003](adr/0003-allowlist-built-detail-surfaces.md) — privileged detail
+  surfaces are allowlist-built, never passthrough
+- [adr/0004](adr/0004-hand-transcribed-packaging-contract-oracle.md) — the
+  packaging contract stays hand-transcribed as an independent oracle
+- [adr/0005](adr/0005-tiered-package-validation-and-vm-boot-label.md) —
+  tiered package validation (contract → container → booted VM → image host);
+  heavy tiers gated on `vm-boot` label presence
+- [adr/0006](adr/0006-opt-in-capabilities-zero-io-omission.md) — capabilities
+  are a closed vocabulary; unconfigured means zero I/O, unavailable means
+  omitted
+- [adr/0007](adr/0007-capability-table-contract-tests.md) — docs/capabilities.md
+  is a binding table, mirrored in tests and diffed against live code
+- [adr/0008](adr/0008-no-config-file-flags-env-precedence.md) — no config
+  file: flags plus `PILOTHOUSE_*` env, explicit flag wins
+- [adr/0009](adr/0009-fail-closed-non-loopback-bind.md) — fail closed on
+  non-loopback binds: TLS, persisted self-signed, or refuse
+- [adr/0010](adr/0010-forbidden-packaging-roots-two-unharmonized-layers.md) —
+  packages never install under systemd-owned roots; two enforcement layers
+  stay unharmonized
+- [adr/0011](adr/0011-digest-pinned-test-images-no-default-install-image.md) —
+  test images pinned per tier at one site each; `INSTALL_IMAGE` has no
+  default
 
 ### Design
 
