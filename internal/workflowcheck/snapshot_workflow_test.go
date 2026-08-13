@@ -14,19 +14,32 @@ func TestSnapshotWorkflowUsesRollingDevConcurrency(t *testing.T) {
 		t.Fatalf("read snapshot workflow: %v", err)
 	}
 
+	type concurrency struct {
+		Group            string `yaml:"group"`
+		CancelInProgress bool   `yaml:"cancel-in-progress"`
+	}
 	var workflow struct {
-		Concurrency struct {
-			Group            string `yaml:"group"`
-			CancelInProgress bool   `yaml:"cancel-in-progress"`
-		} `yaml:"concurrency"`
+		Concurrency *concurrency `yaml:"concurrency"`
+		Jobs        struct {
+			Snapshot struct {
+				If          string      `yaml:"if"`
+				Concurrency concurrency `yaml:"concurrency"`
+			} `yaml:"snapshot"`
+		} `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse snapshot workflow: %v", err)
 	}
-	if workflow.Concurrency.Group != "goreleaser-nightly" {
-		t.Errorf("concurrency group = %q, want goreleaser-nightly", workflow.Concurrency.Group)
+	if workflow.Concurrency != nil {
+		t.Error("workflow-level concurrency lets unsuccessful upstream runs cancel a release")
 	}
-	if !workflow.Concurrency.CancelInProgress {
+	if workflow.Jobs.Snapshot.If != "${{ github.event.workflow_run.conclusion == 'success' }}" {
+		t.Errorf("snapshot job condition = %q, want successful upstream run guard", workflow.Jobs.Snapshot.If)
+	}
+	if workflow.Jobs.Snapshot.Concurrency.Group != "goreleaser-nightly" {
+		t.Errorf("snapshot concurrency group = %q, want goreleaser-nightly", workflow.Jobs.Snapshot.Concurrency.Group)
+	}
+	if !workflow.Jobs.Snapshot.Concurrency.CancelInProgress {
 		t.Error("cancel-in-progress = false, want true")
 	}
 }
