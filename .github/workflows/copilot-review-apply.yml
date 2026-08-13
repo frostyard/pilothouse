@@ -21,11 +21,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  apply-review:
+  gate:
+    name: Check Copilot review handoff availability
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check assignment token
+        id: check
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.COPILOT_ASSIGNMENT_TOKEN }}
+        run: |
+          if [[ -n "${TOKEN:-}" ]]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::COPILOT_ASSIGNMENT_TOKEN is not configured; skipping Copilot review handoff"
+          fi
+
+  apply-review:
+    needs: gate
+    if: needs.gate.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Validate review and request fixes

@@ -165,9 +165,11 @@ supports manual replay by pull request and review ID. It re-fetches both
 objects, ignores approvals and empty reviews, and uses a review-ID marker to
 prevent duplicate handoffs. The workflow requires the user-scoped
 `COPILOT_ASSIGNMENT_TOKEN` secret because an installation `GITHUB_TOKEN`
-comment cannot invoke the agent. Keep default permissions empty, never expose
-the token to fork pull requests, and never execute or copy review text into the
-handoff command.
+comment cannot invoke the agent. A missing secret must produce a notice and
+skip the handoff job; the nightly compliance workflow reports the persistent
+configuration drift. Keep default permissions empty, never expose the token to
+fork pull requests, and never execute or copy review text into the handoff
+command.
 
 ## Documentation
 
