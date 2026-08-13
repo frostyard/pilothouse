@@ -75,18 +75,17 @@ func runAutomationScript(t *testing.T, script, token, outputPath string) (string
 	return string(output), err
 }
 
-func TestAIFixWorkflowSkipsAssignmentWithoutToken(t *testing.T) {
-	workflow := loadAutomationWorkflow(t, "ai-fix-requested.yml")
-
+func checkAssignmentTokenGate(
+	t *testing.T,
+	workflow automationWorkflow,
+	wantAdmission string,
+	wantNotice string,
+) {
+	t.Helper()
 	gate, ok := workflow.Jobs["gate"]
 	if !ok {
-		t.Fatal("AI fix workflow must declare a gate job")
+		t.Fatal("workflow must declare a gate job")
 	}
-	wantAdmission := strings.Join(strings.Fields(`
-		github.event_name == 'workflow_dispatch' ||
-		(github.event.issue.state == 'open' &&
-		github.event.label.name == 'ai-fix-requested')
-	`), " ")
 	if got := strings.Join(strings.Fields(gate.If), " "); got != wantAdmission {
 		t.Errorf("gate admission condition = %q, want %q", got, wantAdmission)
 	}
@@ -115,7 +114,7 @@ func TestAIFixWorkflowSkipsAssignmentWithoutToken(t *testing.T) {
 		if got := strings.TrimSpace(string(output)); got != "enabled=false" {
 			t.Errorf("gate output = %q, want enabled=false", got)
 		}
-		if !strings.Contains(log, "::notice::COPILOT_ASSIGNMENT_TOKEN is not configured; skipping Copilot assignment") {
+		if !strings.Contains(log, wantNotice) {
 			t.Errorf("gate log does not explain skip: %q", log)
 		}
 	})
@@ -134,6 +133,21 @@ func TestAIFixWorkflowSkipsAssignmentWithoutToken(t *testing.T) {
 			t.Errorf("gate output = %q, want enabled=true", got)
 		}
 	})
+}
+
+func TestAIFixWorkflowSkipsAssignmentWithoutToken(t *testing.T) {
+	workflow := loadAutomationWorkflow(t, "ai-fix-requested.yml")
+	wantAdmission := strings.Join(strings.Fields(`
+		github.event_name == 'workflow_dispatch' ||
+		(github.event.issue.state == 'open' &&
+		github.event.label.name == 'ai-fix-requested')
+	`), " ")
+	checkAssignmentTokenGate(
+		t,
+		workflow,
+		wantAdmission,
+		"::notice::COPILOT_ASSIGNMENT_TOKEN is not configured; skipping Copilot assignment",
+	)
 
 	assign, ok := workflow.Jobs["assign-copilot"]
 	if !ok {
@@ -153,6 +167,42 @@ func TestAIFixWorkflowSkipsAssignmentWithoutToken(t *testing.T) {
 	}
 	if !strings.Contains(assign.Steps[0].Run, `if [[ -z "${GH_TOKEN:-}" ]]`) {
 		t.Error("assignment step must retain its defensive token check")
+	}
+}
+
+func TestCopilotReviewWorkflowSkipsHandoffWithoutToken(t *testing.T) {
+	workflow := loadAutomationWorkflow(t, "copilot-review-apply.yml")
+	wantAdmission := strings.Join(strings.Fields(`
+		github.event_name == 'workflow_dispatch' ||
+		(github.event.pull_request.draft == false &&
+		github.event.pull_request.head.repo.full_name == github.repository)
+	`), " ")
+	checkAssignmentTokenGate(
+		t,
+		workflow,
+		wantAdmission,
+		"::notice::COPILOT_ASSIGNMENT_TOKEN is not configured; skipping Copilot review handoff",
+	)
+
+	apply, ok := workflow.Jobs["apply-review"]
+	if !ok {
+		t.Fatal("Copilot review workflow must declare the apply-review job")
+	}
+	if apply.Needs != "gate" {
+		t.Errorf("review handoff needs = %q, want gate", apply.Needs)
+	}
+	if apply.If != "needs.gate.outputs.enabled == 'true'" {
+		t.Errorf("review handoff condition = %q, want enabled gate output", apply.If)
+	}
+	if len(apply.Steps) != 1 {
+		t.Fatalf("review handoff steps = %d, want 1", len(apply.Steps))
+	}
+	step := apply.Steps[0]
+	if got := step.Env["GH_TOKEN"]; got != "${{ secrets.COPILOT_ASSIGNMENT_TOKEN }}" {
+		t.Errorf("review handoff token source = %q, want COPILOT_ASSIGNMENT_TOKEN secret", got)
+	}
+	if !strings.Contains(step.Run, `if [[ -z "${GH_TOKEN:-}" ]]`) {
+		t.Error("review handoff step must retain its defensive token check")
 	}
 }
 

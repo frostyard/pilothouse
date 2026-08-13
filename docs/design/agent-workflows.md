@@ -68,9 +68,11 @@ workflows.
   workflow's installation `GITHUB_TOKEN` cannot invoke the coding agent; its
   owner needs repository write and Copilot coding-agent access, and the token
   must be configured with Actions, Contents, Issues, and Pull requests access.
-  Automatic fork events skip before the secret-bearing step; manual dispatch
-  re-fetches and rejects a fork target without checking out or executing its
-  contents.
+  An availability gate emits a notice and skips the handoff job when the token
+  is absent; the nightly compliance workflow separately reports that persistent
+  secret drift. Automatic fork events skip before the secret-bearing step;
+  manual dispatch re-fetches and rejects a fork target without checking out or
+  executing its contents.
 - `.github/workflows/ai-fix-requested.yml` assigns an open, labelled issue to
   Copilot only after a gate confirms `COPILOT_ASSIGNMENT_TOKEN` is configured.
   An absent token produces a notice and a skipped assignment job rather than an
@@ -92,4 +94,3 @@ workflows.
   (parallel security/correctness reviewers plus a synthesizer), and
   `module-audit.yaml` (fans out one audit agent per `internal/modules/*`
   directory). See `workflows/README.md` for setup and schema gotchas.
-

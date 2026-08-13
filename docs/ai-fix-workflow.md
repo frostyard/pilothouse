@@ -11,6 +11,10 @@ gate checks whether `COPILOT_ASSIGNMENT_TOKEN` is configured before starting
 the assignment job. When it is absent, the gate emits a notice and the
 assignment job is reported as skipped rather than failed.
 
+The [review feedback workflow](../.github/workflows/copilot-review-apply.yml)
+uses the same token-presence gate before handing actionable reviews to
+Copilot. A missing token likewise produces a notice and a skipped handoff job.
+
 ## Repository setup
 
 GitHub's agent-assignment API requires a user-to-server token. The workflow's
@@ -32,8 +36,8 @@ for the current authentication and permission requirements.
 
 The scheduled [nightly compliance workflow](../.github/workflows/nightly-compliance.yml)
 fails its separate automation-secret drift job when this token is absent. This
-keeps label-triggered runs neutral while making configuration drift visible
-once per day.
+keeps label-triggered and submitted-review runs neutral while making
+configuration drift visible once per day.
 
 ## Manual replay
 
