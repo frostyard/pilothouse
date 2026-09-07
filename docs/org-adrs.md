@@ -18,6 +18,7 @@ The ones that bind pilothouse:
 - [ADR-0021 — SHA-pinned actions and least-privilege CI workflows](https://github.com/frostyard/core/blob/main/docs/adr/0021-sha-pinned-actions-and-least-privilege-ci.md) — docs/workflow-action-pinning.md + workflowcheck tests
 - [ADR-0022 — make ci is the canonical gate; TestI* is reserved](https://github.com/frostyard/core/blob/main/docs/adr/0022-make-ci-gate-and-test-naming-filter.md) — make ci/docker-ci, the Test[^I] filter, PILOTHOUSE_LIVE_* gates
 - [ADR-0025 — One docs/ tree per repository, in core's four-category shape](https://github.com/frostyard/core/blob/main/docs/adr/0025-consolidate-repository-docs-into-docs.md) — docs/{adr,design,specs,plans} + indexed docs/README.md; yeti/OVERVIEW.md folded into docs/design/overview.md
+- [ADR-0043 — Pin repository tools in mise and name the verify gate](https://github.com/frostyard/core/blob/main/docs/adr/0043-pin-repository-tools-in-mise-and-name-the-verify-gate.md) — `mise.toml` + `mise.lock` at the repo root, `go.mod` as the sole Go pin, no optional tools, the `make verify`/`check`/`ci` triad; repo-local adoption recorded in [adr/0012](adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
 
 When changing behavior covered by one of these, update or supersede the ADR
 in frostyard/core first, then change this repo in the same effort.
