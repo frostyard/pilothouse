@@ -43,6 +43,9 @@ Docs are split by the question they answer (the shape defined by
 - [adr/0011](adr/0011-digest-pinned-test-images-no-default-install-image.md) —
   test images pinned per tier at one site each; `INSTALL_IMAGE` has no
   default
+- [adr/0012](adr/0012-canonical-go-toolchain-version.md) — one exact Go
+  toolchain version for development, CI, packaging, and releases, updated
+  through one guarded Make target
 
 ### Design
 

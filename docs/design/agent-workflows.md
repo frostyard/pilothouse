@@ -94,3 +94,8 @@ workflows.
   (parallel security/correctness reviewers plus a synthesizer), and
   `module-audit.yaml` (fans out one audit agent per `internal/modules/*`
   directory). See `workflows/README.md` for setup and schema gotchas.
+- The active Go toolchain version is currently repeated across the Makefile,
+  Dockerfiles, and GitHub Actions, including a mix of exact versions and the
+  moving `stable` alias. [ADR-0012](../adr/0012-canonical-go-toolchain-version.md)
+  establishes `.go-version` and `make update-go` as the replacement contract;
+  until its implementation lands, those existing pins remain independent.
