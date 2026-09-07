@@ -81,7 +81,7 @@ func TestIsLoopbackListen(t *testing.T) {
 		// Hostnames other than the literal "localhost" fail closed as
 		// non-loopback: no DNS resolution happens at startup.
 		{"myhost.lan:8888", false, false},
-		{"cayo:8888", false, false},
+		{"floe:8888", false, false},
 		// A bare address without a port is a startup error.
 		{"127.0.0.1", false, true},
 		{"", false, true},

@@ -25,8 +25,8 @@ type Module struct {
 
 func New() *Module {
 	return &Module{systems: []System{
-		{ID: "local", Image: "cayo 2026.07", Role: "This system", Kernel: "Current host", Uptime: "Connected", State: "healthy", Connected: true},
-		{ID: "cayo-01", Image: "cayo 2026.07", Role: "Server", Kernel: "6.12.30", Uptime: "84 days", Updates: 1, Attention: 1, State: "attention"},
+		{ID: "local", Image: "floe 2026.07", Role: "This system", Kernel: "Current host", Uptime: "Connected", State: "healthy", Connected: true},
+		{ID: "floe-01", Image: "floe 2026.07", Role: "Server", Kernel: "6.12.30", Uptime: "84 days", Updates: 1, Attention: 1, State: "attention"},
 		{ID: "workstation-01", Image: "snow 2026.07", Role: "Desktop", Kernel: "6.15.4-bpo", Uptime: "11 days", Updates: 2, Attention: 3, State: "healthy"},
 		{ID: "surface-go", Image: "snowfield 2026.07", Role: "Surface", Kernel: "6.15.4-surface", Uptime: "3 days", State: "healthy"},
 	}}

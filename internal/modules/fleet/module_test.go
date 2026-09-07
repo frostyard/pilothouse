@@ -56,7 +56,7 @@ func TestFleetRoutesRenderPreviewPages(t *testing.T) {
 	}{
 		{path: "/fleet", title: "Systems", active: "fleet"},
 		{path: "/fleet/enroll", title: "Connect a system", active: "fleet"},
-		{path: "/fleet/systems/cayo-01", title: "cayo-01", active: "fleet"},
+		{path: "/fleet/systems/floe-01", title: "floe-01", active: "fleet"},
 	}
 
 	for _, test := range tests {
