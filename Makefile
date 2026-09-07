@@ -9,7 +9,7 @@ GOFMT ?= gofmt
 # exist. Overriding it on the command line still works, as scripts/bump_test.sh
 # does when it drives format-check with a stub gofmt.
 GOFILES = $$(find . -type f -name '*.go' -not -name '*_templ.go')
-GO_VERSION ?= 1.26.5
+GO_VERSION ?= 1.26.6
 GOLANGCI_LINT_VERSION ?= v2.11.4
 SVU_VERSION ?= v3.4.1
 DOCKER ?= docker
