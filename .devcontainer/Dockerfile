@@ -5,8 +5,8 @@
 # internal/modules/services/journal). Both dev headers are installed here so
 # `make build` (which passes -tags sdjournal) works out of the box.
 #
-# The Go version tracks go.mod / CI (`setup-go` uses 1.26.5).
-FROM golang:1.26.5-bookworm
+# The Go version tracks CI and the Makefile development image.
+FROM golang:1.26.6-bookworm
 
 # System build dependencies:
 #   build-essential  - C toolchain for cgo
