@@ -94,3 +94,12 @@ workflows.
   (parallel security/correctness reviewers plus a synthesizer), and
   `module-audit.yaml` (fans out one audit agent per `internal/modules/*`
   directory). See `workflows/README.md` for setup and schema gotchas.
+- Tool versions are not yet centralized. `golangci-lint` and `svu` are pinned
+  as Makefile variables and re-declared as `.docker/Dockerfile` build args, and
+  the Go toolchain is pinned in `go.mod` (`1.26.3`), the Makefile (`1.26.6`),
+  and every workflow (`1.26.6` or the moving `stable` alias) with values that
+  already disagree. [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
+  adopts frostyard/core ADR-0043: `mise.toml` + `mise.lock` at the repository
+  root, `go.mod` as the only Go pin, no optional tools, and the `make verify` /
+  `check` / `ci` gate triad. Until the adoption change lands, the existing pins
+  remain independent and `make lint` still skips when the linter is absent.

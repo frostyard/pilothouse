@@ -43,6 +43,9 @@ Docs are split by the question they answer (the shape defined by
 - [adr/0011](adr/0011-digest-pinned-test-images-no-default-install-image.md) —
   test images pinned per tier at one site each; `INSTALL_IMAGE` has no
   default
+- [adr/0012](adr/0012-adopt-mise-tool-pinning-and-verify-gate.md) — adopt
+  frostyard/core ADR-0043: `mise.toml` + `mise.lock` at the repo root, `go.mod`
+  as the only Go pin, and the `make verify` / `check` / `ci` gate triad
 
 ### Design
 
