@@ -4,11 +4,11 @@ Pilothouse ships as a neutral product: its generic UI, systemd unit
 descriptions, package metadata, and user-facing documentation carry no
 third-party product identity. This document records the wording rules that
 keep it that way, and — just as importantly — the explicit allowlist of
-places where a `cayo`/`snosi` occurrence is **correct** and must not be
+places where a `floe`/`snosi` occurrence is **correct** and must not be
 swept.
 
 It exists so the boundary is reviewable in-repo and future sweeps do not
-re-litigate it. A blanket find-and-replace over `cayo`/`snosi` is wrong: it
+re-litigate it. A blanket find-and-replace over `floe`/`snosi` is wrong: it
 would rename pinned test fixtures and break the release pipeline.
 
 ## The canonical self-description
@@ -72,7 +72,7 @@ attributing them to an operating-system product:
 
 ## The allowlist — do not sweep these
 
-Every site below intentionally retains a `cayo`/`snosi` occurrence. A
+Every site below intentionally retains a `floe`/`snosi` occurrence. A
 branding sweep must leave each one byte-for-byte unchanged.
 
 ### `*_test.go` fixture names, fixture IDs, and test-function names
@@ -110,7 +110,7 @@ target, not wording. Editing it breaks the release pipeline.
 
 ### `internal/modules/fleet/*` mock demo data
 
-`"cayo 2026.07"`, the host ID `"cayo-01"`, and the `"cayo-03"` placeholder in
+`"floe 2026.07"`, the host ID `"floe-01"`, and the `"floe-03"` placeholder in
 the enrollment view.
 
 **Rationale:** the Fleet module is a preview built entirely on canned mock
@@ -130,20 +130,20 @@ description; rewriting it would make the record inaccurate. This exemption
 covers narrative only — the doc's *current-state* prose (its Purpose
 self-description and the module table's `sysext` row) is live product
 description and was neutralized by this sweep like any other generic
-surface. As of that sweep no `cayo`/`snosi` occurrence remained anywhere in
+surface. As of that sweep no `floe`/`snosi` occurrence remained anywhere in
 the then-single `docs/design/overview.md`; narrative added later (e.g. the
 booted-VM harness scope notes, now in `docs/design/vm-harness.md`) names
 `Snosi` under this same historical-narrative rule.
 
 ## Checking a sweep
 
-Every remaining `cayo`/`snosi` occurrence in the tree should be an
+Every remaining `floe`/`snosi` occurrence in the tree should be an
 allowlisted site (or this file's own description of the allowlist), and the
 product possessive `Snow's` should not appear outside this rule's example.
 That is what the complement grep asserts — it should print nothing:
 
 ```sh
-git grep -i -E "snosi|cayo|snow's" \
+git grep -i -E "snosi|floe|snow's" \
   | grep -v '_test.go' \
   | grep -v 'docs/capabilities.md' \
   | grep -v '.github/workflows/release.yml' \
