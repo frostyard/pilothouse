@@ -96,9 +96,13 @@ workflows.
   directory). See `workflows/README.md` for setup and schema gotchas.
 - Tool versions are not yet centralized. `golangci-lint` and `svu` are pinned
   as Makefile variables and re-declared as `.docker/Dockerfile` build args, and
-  the Go toolchain is pinned in `go.mod` (`1.26.3`), the Makefile (`1.26.6`),
-  and every workflow (`1.26.6` or the moving `stable` alias) with values that
-  already disagree. [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
+  the Go toolchain is pinned in `go.mod`, the Makefile, both development
+  Dockerfiles, and every workflow (one pin per workflow: `1.26.10`, or the
+  moving `stable` alias in the release, snapshot, packaging and image-tier
+  workflows). The values agree on `1.26.10`, but they remain independent pins
+  that a single edit can still desynchronize; `1.26.10` is the first patch
+  release that closes GO-2026-6809 and GO-2026-6603 through GO-2026-6617 in
+  the Go standard library. [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
   adopts frostyard/core ADR-0043: `mise.toml` + `mise.lock` at the repository
   root, `go.mod` as the only Go pin, no optional tools, and the `make verify` /
   `check` / `ci` gate triad. Until the adoption change lands, the existing pins
