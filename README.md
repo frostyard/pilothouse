@@ -67,9 +67,8 @@ CI. The pull-request test workflow starts from no token permissions, grants
 only read-only contents access per job, and adds OIDC only to the unit-test job
 for Codecov; its `govulncheck` installation is version-pinned. The read-only
 `nightly-compliance.yml` workflow reruns the same `make ci` contract daily at
-04:23 UTC and on manual dispatch. Its compliance job remains
-credential-free; a separate job reports drift when the Copilot assignment
-secret is absent.
+04:23 UTC and on manual dispatch. Its single compliance job is
+credential-free.
 Two workflow gates are exceptions. `.github/workflows/packaging.yml`, the
 packaging gate, cannot run locally because it needs the `GORELEASER_KEY` secret
 and the goreleaser Pro distribution. That gate does more than read the
@@ -84,13 +83,6 @@ the booted-VM tier has no local `make` target.
 access, Podman 5, cosign and the GitHub-hosted `ubuntu-26.04` environment to
 exercise released packaging plus checked-out executables on ephemeral uCore
 derivatives, so it has no local make target either.
-
-With the user-scoped token from the [Copilot workflow setup](docs/ai-fix-workflow.md#repository-setup)
-configured, submitted review feedback on an open, non-draft pull request whose
-branch is in this repository is handed to Copilot by
-`.github/workflows/copilot-review-apply.yml`. Empty and approval-only reviews
-are ignored, reruns are deduplicated by review ID, and every resulting change
-must still pass the normal pull-request gates and human review.
 
 With the `ANTHROPIC_API_KEY` repository secret configured, non-draft pull
 requests whose branch is in this repository also receive an advisory,

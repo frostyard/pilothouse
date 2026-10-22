@@ -3,7 +3,7 @@
 Living document; extracted verbatim from [overview.md](overview.md). It
 covers the repository's agent/automation surface: the mill configuration
 (`.mill.toml`), the cross-agent instruction files, risk-tier classification,
-the knowledge index, harvested skills, and the Copilot/Claude automation
+the knowledge index, harvested skills, and the Claude automation
 workflows.
 
 - `.mill.toml` configures the [frostyard/mill](https://github.com/frostyard/mill)
@@ -54,30 +54,11 @@ workflows.
   runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
   `AGENTS.md` requires reading every file there before planning,
   implementing, or reviewing changes — treat them as binding guidance.
-- `.github/workflows/copilot-review-apply.yml` closes the submitted-review
-  feedback loop for same-repository pull requests. Automatic runs admit only
-  open, non-draft pull requests with a branch in this repository; manual
-  dispatch takes numeric pull-request and review IDs. The script re-fetches
-  and revalidates both resources, treats only `COMMENTED` and
-  `CHANGES_REQUESTED` as actionable, ignores empty reviews (including
-  `COMMENTED` reviews without inline findings), and posts one fixed `@copilot`
-  request containing the reviewer and review URL rather than untrusted review
-  text. A hidden review-ID marker makes retries idempotent. Default workflow
-  permissions are empty and no checkout occurs. Posting uses the user-scoped
-  `COPILOT_ASSIGNMENT_TOKEN` secret because a comment authored by the
-  workflow's installation `GITHUB_TOKEN` cannot invoke the coding agent; its
-  owner needs repository write and Copilot coding-agent access, and the token
-  must be configured with Actions, Contents, Issues, and Pull requests access.
-  An availability gate emits a notice and skips the handoff job when the token
-  is absent; the nightly compliance workflow separately reports that persistent
-  secret drift. Automatic fork events skip before the secret-bearing step;
-  manual dispatch re-fetches and rejects a fork target without checking out or
-  executing its contents.
-- `.github/workflows/ai-fix-requested.yml` assigns an open, labelled issue to
-  Copilot only after a gate confirms `COPILOT_ASSIGNMENT_TOKEN` is configured.
-  An absent token produces a notice and a skipped assignment job rather than an
-  event-driven failure; the nightly compliance workflow separately fails its
-  drift job while the secret remains absent.
+- The Copilot assignment flow (`ai-fix-requested.yml`,
+  `copilot-review-apply.yml`) and the nightly drift job for its
+  `COPILOT_ASSIGNMENT_TOKEN` secret were removed on 2026-10-22: the maintainer
+  chose not to provision a user-scoped token. Do not reintroduce a workflow
+  that needs that token without a new decision.
 - `.github/workflows/claude-code-review.yml` provides advisory AI review for
   non-draft, same-repository pull requests. It uses the commit-pinned official
   Anthropic action when `ANTHROPIC_API_KEY` is configured; an explicit

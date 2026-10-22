@@ -455,7 +455,7 @@ rationale.
 
 The mill configuration (`.mill.toml`), cross-agent instruction surfaces,
 risk-tier classification, the knowledge index, harvested skills, and the
-Copilot/Claude automation workflows are described in
+Claude automation workflow are described in
 [agent-workflows.md](agent-workflows.md).
 
 ## Further Reading
