@@ -493,6 +493,6 @@ Other authoritative docs:
   and the Maintenance page's read-only section, which exposes no mutation.
 - `docs/branding.md` — the neutral-branding rules and the allowlist of sites
   naming sweeps must leave unchanged (test fixtures, `docs/capabilities.md`
-  fixture prose, the `release.yml` dispatch, mock Fleet data, and the
+  fixture prose, mock Fleet data, and the
   historical phase narrative formerly in `yeti/OVERVIEW.md`, now spread
   across this directory's subsystem docs).

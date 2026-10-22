@@ -101,13 +101,6 @@ Lines 301, 549, 568-569, 801, and 866 name `snosi-without-bootc` and
 code. Renaming the prose without renaming the fixtures (which the entry
 above forbids) would simply make the documentation wrong.
 
-### `.github/workflows/release.yml`'s `frostyard/snosi` dispatch
-
-The "Kickoff snosi" step's `repository: frostyard/snosi`.
-
-**Rationale:** functional release wiring — a cross-repo `repository_dispatch`
-target, not wording. Editing it breaks the release pipeline.
-
 ### `internal/modules/fleet/*` mock demo data
 
 `"floe 2026.07"`, the host ID `"floe-01"`, and the `"floe-03"` placeholder in
