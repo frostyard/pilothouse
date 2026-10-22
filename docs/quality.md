@@ -10,7 +10,7 @@ rolling acceptance-rate definition without copying values that can go stale.
 | --- | --- | --- |
 | Pull request quality | [`test.yml`](../.github/workflows/test.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, and builds |
 | Repository policy | [`repository.yaml`](../policies/repository.yaml) | Versioned structural requirements for governance, review, workflow, and policy-enforcement assets |
-| Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract plus an automation-secret drift check |
+| Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract |
 | Package quality | [`packaging.yml`](../.github/workflows/packaging.yml) | Package contract checks, installation checks, and opt-in booted-VM validation |
 | Image quality | [`image-tier.yml`](../.github/workflows/image-tier.yml) | Opt-in uCore update and rollback validation under QEMU/KVM |
 | Advisory AI review | [`claude-code-review.yml`](../.github/workflows/claude-code-review.yml) | Claude review findings for eligible same-repository pull requests; comments require human verification |

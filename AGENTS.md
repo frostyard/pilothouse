@@ -159,18 +159,6 @@ target inside an ad hoc container or pass Git credentials into the image.
 Preflight treats `origin` as authoritative for moved and remote-only tags, but
 preserves and rejects local-only tags.
 
-`.github/workflows/copilot-review-apply.yml` hands actionable submitted reviews
-on non-draft, same-repository pull requests to the Copilot coding agent and
-supports manual replay by pull request and review ID. It re-fetches both
-objects, ignores approvals and empty reviews, and uses a review-ID marker to
-prevent duplicate handoffs. The workflow requires the user-scoped
-`COPILOT_ASSIGNMENT_TOKEN` secret because an installation `GITHUB_TOKEN`
-comment cannot invoke the agent. A missing secret must produce a notice and
-skip the handoff job; the nightly compliance workflow reports the persistent
-configuration drift. Keep default permissions empty, never expose the token to
-fork pull requests, and never execute or copy review text into the handoff
-command.
-
 ## Documentation
 
 **update documentation** After any change to source code, update
@@ -217,9 +205,8 @@ Automated harnesses (the mill's deep gate) use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
 gates. `.github/workflows/nightly-compliance.yml` reruns that same `make ci`
 contract every day at 04:23 UTC and on manual dispatch with read-only contents
-access, commit-pinned actions, and non-cancelling concurrency. Its compliance
-job is credential-free; a separate job asserts that the
-`COPILOT_ASSIGNMENT_TOKEN` automation secret is configured. It installs the
+access, commit-pinned actions, and non-cancelling concurrency. Its single
+compliance job is credential-free and consumes no secrets. It installs the
 native headers and pinned linter required to prevent a gate from silently
 degrading on a fresh runner.
 

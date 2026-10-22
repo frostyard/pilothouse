@@ -507,9 +507,8 @@ same contract, not another exception: at 04:23 UTC daily (and on manual
 dispatch) it installs the native PAM/systemd headers, pinned golangci-lint and
 current govulncheck tool on a fresh runner, then invokes `make ci` unchanged.
 That compliance job has read-only contents permission, consumes no secrets,
-uses commit-pinned checkout/setup actions, and has a 45-minute timeout. A
-separate five-minute drift job fails when `COPILOT_ASSIGNMENT_TOKEN` is absent;
-neither job publishes anything, and `cancel-in-progress: false` ensures a
+uses commit-pinned checkout/setup actions, and has a 45-minute timeout. It
+publishes nothing, and `cancel-in-progress: false` ensures a
 delayed run is not hidden by the next one. CI
 *does* run two workflow gates outside the local mirror. The packaging gate
 is `.github/workflows/packaging.yml`, which
