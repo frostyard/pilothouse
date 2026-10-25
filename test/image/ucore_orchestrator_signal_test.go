@@ -506,22 +506,56 @@ exec "$SIGNAL_REAL_SETSID" "$@"
 	t.Fatalf("phase process %d survived orchestrator %s forwarding", signalTargetPID, signal)
 }
 
+// waitForPIDFile polls for a PID that a shell fixture writes with
+// `printf '%s\n' "$pid" >path`. The redirection creates the file empty
+// before printf writes it, so an empty or partial read is normal; only
+// newline-terminated content is a complete PID record. Parsing earlier
+// fails on "" or, worse, returns a truncated PID.
 func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		pidBytes, readErr := os.ReadFile(path)
-		if readErr == nil {
+		if readErr == nil && bytes.HasSuffix(pidBytes, []byte("\n")) {
 			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 			require.NoError(t, parseErr)
 			return pid
 		}
-		require.True(t, errors.Is(readErr, os.ErrNotExist), readErr)
+		if readErr != nil {
+			require.True(t, errors.Is(readErr, os.ErrNotExist), readErr)
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("the bounded phase never reported its process PID in %s", path)
 	return 0
+}
+
+func TestWaitForPIDFileWaitsForCompleteRecord(t *testing.T) {
+	// Reproduces the 2026-10-24 nightly flake deterministically: the shell
+	// redirection creates the PID file empty, then printf fills it.
+	path := filepath.Join(t.TempDir(), "child.pid")
+	writerDone := make(chan error, 1)
+	go func() {
+		file, err := os.Create(path)
+		if err != nil {
+			writerDone <- err
+			return
+		}
+		for _, chunk := range []string{"", "12", "345\n"} {
+			if _, err := file.WriteString(chunk); err != nil {
+				_ = file.Close()
+				writerDone <- err
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		writerDone <- file.Close()
+	}()
+
+	require.Equal(t, 12345, waitForPIDFile(t, path),
+		"an empty or partial PID file must be polled again, not parsed")
+	require.NoError(t, <-writerDone)
 }
 
 func boolInt(value bool) int {
