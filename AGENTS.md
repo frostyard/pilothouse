@@ -159,6 +159,30 @@ target inside an ad hoc container or pass Git credentials into the image.
 Preflight treats `origin` as authoritative for moved and remote-only tags, but
 preserves and rejects local-only tags.
 
+## Releases and dependencies
+
+- Tag format: `v1.2.3` (`.svu.yml`: prefix `v`, `v0: true`). One stable
+  series only. The rolling `dev` tag and release belong to the nightly
+  snapshot: skip it when you look for the latest release.
+- How a release starts: `make bump` (`scripts/bump.sh`) pushes the tag; the
+  tag push runs `.github/workflows/release.yml` (GoReleaser Pro v2,
+  `release --clean`), which builds the `.deb`/`.rpm` assets on the GitHub
+  release. `.github/workflows/snapshot.yml` runs `goreleaser release
+  --nightly` after each green `Tests` run on `main` and replaces the `dev`
+  release.
+- Who tags: Brian. Agents never tag, push tags or release, and never run
+  `make bump`.
+- Version rule: `svu next` at the pinned `SVU_VERSION` in the `Makefile`
+  (`make docker-next-version`), from Conventional Commits.
+- Internal dependencies: none. `go.mod` has no other frostyard or bketelsen
+  module, and no build file pins a frostyard package, sysext or kit.
+- Who uses this repository: `frostyard/snosi` downloads the released
+  `frostyard-pilothouse` `.deb` for its `pilothouse` sysext
+  (`mkosi.images/pilothouse/`), checksum-pinned in
+  `shared/download/sysext-checksums.json` and bumped by its
+  `check-dependencies` workflow. Nothing publishes to an APT repository
+  (frostyard/core ADR-0055).
+
 ## Documentation
 
 **update documentation** After any change to source code, update
