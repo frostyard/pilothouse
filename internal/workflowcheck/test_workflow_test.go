@@ -176,10 +176,6 @@ func checkTestGates(makeText, workflowText string) error {
 	return errors.Join(errs...)
 }
 
-func checkTestGatesRunEveryTest(makeText, workflowText string) error {
-	return checkTestGates(makeText, workflowText)
-}
-
 func TestTestGatesMutationRemovesRequiredCommands(t *testing.T) {
 	makeData, err := os.ReadFile("../../Makefile")
 	if err != nil {
