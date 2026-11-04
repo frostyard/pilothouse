@@ -62,7 +62,8 @@ them.
 
 Before pushing, run `make ci` (or `make docker-ci` on hosts without the
 native toolchain) — it runs every CI gate that runs without credentials, in
-the same order. Local green means the credential-free gates will be green in
+the same order. It runs all Go packages and the tagged sdjournal journal tests;
+the lint recipe fails instead of skipping when `golangci-lint` is absent. Local green means the credential-free gates will be green in
 CI. The pull-request test workflow starts from no token permissions, grants
 only read-only contents access per job, and adds OIDC only to the unit-test job
 for Codecov; its `govulncheck` installation is version-pinned. The read-only
@@ -99,9 +100,9 @@ make race
 make build
 ```
 
-`make test` includes the process-level web checks in `test/e2e/`; they build
-and start the real `pilothouse` binary on an ephemeral local port and need no
-broker.
+`make test` runs `go test ./...`, plus the tagged sdjournal journal tests.
+It also includes the process-level web checks in `test/e2e/`; they build and
+start the real `pilothouse` binary on an ephemeral local port and need no broker.
 
 Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
 

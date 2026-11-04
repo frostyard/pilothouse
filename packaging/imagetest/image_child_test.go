@@ -23,8 +23,10 @@ import (
 
 // imageProcessTimeout is the one deadline used by the image-tier test
 // process contract. The AST guard in image_process_test.go proves that every
-// image-tier child is constructed here with this bound.
-const imageProcessTimeout = time.Second
+// image-tier child is constructed here with this bound. It is 5 s, not 1 s:
+// shellcheck of test/image/ucore-vm-test.sh needs more than 1 s while the
+// race job runs race-instrumented packages in parallel (pilothouse#216).
+const imageProcessTimeout = 5 * time.Second
 const imageOutputReadLimit = 4 << 20
 
 // imageSandbox is the complete test-owned workspace advertised to an
@@ -481,7 +483,9 @@ func TestImageChildDirectToolDeadlineIsBounded(t *testing.T) {
 	sleeper := imageRequireTool(t, "sleep")
 	started := time.Now()
 
-	result := imageRunChild(t, sandbox, sleeper, "4")
+	// The child must outlive the deadline, so the bound, not the child, ends it.
+	sleepSeconds := strconv.Itoa(int((imageProcessTimeout + 3*time.Second) / time.Second))
+	result := imageRunChild(t, sandbox, sleeper, sleepSeconds)
 	elapsed := time.Since(started)
 
 	require.Error(t, result.Err)
