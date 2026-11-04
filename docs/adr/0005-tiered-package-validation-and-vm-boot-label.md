@@ -13,7 +13,7 @@ composes into a bootc image host and survives update/rollback (network +
 KVM + released artifacts). Running everything on every push is unaffordable
 and unnecessary; running only the cheap checks misses exactly the failures
 (PAM, SELinux, unit ordering, image composition) that only a booted host
-shows. Local `make ci` mirrors the credential-free CI gate (core ADR-0022),
+shows. Local `make ci` mirrors the credential-free CI gate (core ADR-0038),
 so anything needing KVM or network cannot live behind it.
 
 ## Decision
@@ -109,6 +109,6 @@ artifact-contract tier".)
   `packaging/verify_install_test.go`
 - Related: [0011 — pinned test images](0011-digest-pinned-test-images-no-default-install-image.md),
   [0004 — packaging contract oracle](0004-hand-transcribed-packaging-contract-oracle.md)
-- Builds on: [core ADR-0022 — make ci is the canonical gate](https://github.com/frostyard/core/blob/main/docs/adr/0022-make-ci-gate-and-test-naming-filter.md),
+- Builds on: [core ADR-0038 — make ci stays canonical; the name filter is chairlift-only](https://github.com/frostyard/core/blob/main/docs/adr/0038-scope-the-test-name-filter-to-chairlift.md),
   [core ADR-0021 — SHA-pinned actions and least-privilege CI](https://github.com/frostyard/core/blob/main/docs/adr/0021-sha-pinned-actions-and-least-privilege-ci.md)
   (see [org-adrs.md](../org-adrs.md))

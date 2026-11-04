@@ -81,4 +81,4 @@ it may not also be the oracle").
   `TestBinaryDestinationsMatchBuilds`)
 - Related: [0010 — forbidden packaging roots](0010-forbidden-packaging-roots-two-unharmonized-layers.md),
   [docs/agents/skills/completeness-tests-need-live-source-of-truth.md](../agents/skills/completeness-tests-need-live-source-of-truth.md)
-- Builds on: [core ADR-0022 — make ci is the canonical gate](https://github.com/frostyard/core/blob/main/docs/adr/0022-make-ci-gate-and-test-naming-filter.md)
+- Builds on: [core ADR-0038 — make ci stays canonical; the name filter is chairlift-only](https://github.com/frostyard/core/blob/main/docs/adr/0038-scope-the-test-name-filter-to-chairlift.md)
