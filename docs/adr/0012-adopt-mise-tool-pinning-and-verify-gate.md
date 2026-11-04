@@ -16,7 +16,7 @@ makes `mise.toml` plus a committed `mise.lock` at the repository root the
 standard tool-pinning mechanism for every Go repository in the fleet, with
 `go.mod` as the only Go pin (a full `1.x.y`, never a floating `1.x`), no
 optional tools, and a named gate triad — `make verify` (non-mutating,
-read-only safe), `make check` (developer gate), `make ci` (ADR-0038's
+read-only safe), `make check` (developer gate), `make ci` (ADR-0022's
 credential-free gate). Core's organization gate checks only that an enabled Go
 repository has `mise.toml`, `mise.lock`, and those three targets; it never
 reads or compares a version.
@@ -70,7 +70,7 @@ Pilothouse adopts core ADR-0043 as written.
     what a read-only reviewer runs. `make verify` on a clean checkout leaves
     `git status --porcelain` empty.
   - `make check` — the developer gate; may format (`make fmt` then `verify`).
-  - `make ci` — ADR-0038's gate: it calls `verify` and adds coverage, the
+  - `make ci` — ADR-0022's gate: it calls `verify` and adds coverage, the
     race detector, and the sdjournal-tagged and cross-arch builds.
     `make docker-ci` stays the containerized equivalent.
 - **The development image installs from the pinned files.** `.docker/Dockerfile`
@@ -135,7 +135,7 @@ records the target contract.
 - Builds on:
   [frostyard/core ADR-0043](https://github.com/frostyard/core/blob/main/docs/adr/0043-pin-repository-tools-in-mise-and-name-the-verify-gate.md)
   (org decision this repo follows — see [org-adrs.md](../org-adrs.md)),
-  [frostyard/core ADR-0038](https://github.com/frostyard/core/blob/main/docs/adr/0038-scope-the-test-name-filter-to-chairlift.md),
+  [frostyard/core ADR-0022](https://github.com/frostyard/core/blob/main/docs/adr/0022-make-ci-gate-and-test-naming-filter.md),
   [frostyard/core ADR-0023](https://github.com/frostyard/core/blob/main/docs/adr/0023-verified-pinned-downloads.md)
 - Shapes: [design/agent-workflows.md](../design/agent-workflows.md),
   [`Makefile`](../../Makefile),
