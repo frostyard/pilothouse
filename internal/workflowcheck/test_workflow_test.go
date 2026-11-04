@@ -25,6 +25,92 @@ type testWorkflow struct {
 	Jobs        map[string]testWorkflowJob `yaml:"jobs"`
 }
 
+func TestTestGatesRunEveryTest(t *testing.T) {
+	workflowData, err := os.ReadFile("../../.github/workflows/test.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeData, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workflowText := string(workflowData)
+	makeText := string(makeData)
+
+	workflowCommands := findGoTestCommands(workflowText)
+	makeCommands := findGoTestCommands(strings.ReplaceAll(makeText, "$(GO)", "go"))
+
+	for _, command := range workflowCommands {
+		checkGoTestCommand(t, ".github/workflows/test.yml", command)
+	}
+	for _, command := range makeCommands {
+		checkGoTestCommand(t, "Makefile", command)
+	}
+
+	if len(workflowCommands) < 2 {
+		t.Errorf(".github/workflows/test.yml: found %d go test commands, want at least 2", len(workflowCommands))
+	}
+	if len(makeCommands) < 2 {
+		t.Errorf("Makefile: found %d go test commands, want at least 2", len(makeCommands))
+	}
+
+	if !strings.Contains(workflowText, "go test -v -tags sdjournal ./internal/modules/logs/journal/...") {
+		t.Error(".github/workflows/test.yml: unit-test must run go test -v -tags sdjournal ./internal/modules/logs/journal/...")
+	}
+	if !strings.Contains(makeText, "$(GO) test -tags sdjournal ./internal/modules/logs/journal/...") {
+		t.Error("Makefile test: must run $(GO) test -tags sdjournal ./internal/modules/logs/journal/...")
+	}
+
+	lintStart := strings.Index(makeText, "lint: ## Run linter")
+	if lintStart == -1 {
+		t.Error("Makefile: lint recipe not found")
+	} else {
+		lintRecipe := makeText[lintStart:]
+		if newline := strings.Index(lintRecipe, "\n"); newline >= 0 {
+			lintRecipe = lintRecipe[newline+1:]
+		}
+		if nextTarget := strings.Index(lintRecipe, "\ndocker-image:"); nextTarget >= 0 {
+			lintRecipe = lintRecipe[:nextTarget]
+		}
+		if strings.Contains(strings.ToLower(lintRecipe), "skipping") {
+			t.Error("Makefile lint recipe must not silently skip golangci-lint")
+		}
+		if !strings.Contains(lintRecipe, "exit 1") {
+			t.Error("Makefile lint recipe must exit non-zero when golangci-lint is absent")
+		}
+	}
+
+	t.Logf("go test commands: test.yml=%d Makefile=%d", len(workflowCommands), len(makeCommands))
+}
+
+func findGoTestCommands(text string) []string {
+	var commands []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "go test ") {
+			commands = append(commands, trimmed)
+		}
+	}
+	return commands
+}
+
+func checkGoTestCommand(t *testing.T, file string, command string) {
+	t.Helper()
+	fields := strings.Fields(command)
+	for _, field := range fields {
+		if field == "-run" || strings.HasPrefix(field, "-run=") {
+			t.Errorf("%s: go test command has forbidden -run flag: %s", file, command)
+		}
+		if field == "-skip" || strings.HasPrefix(field, "-skip=") {
+			t.Errorf("%s: go test command has forbidden -skip flag: %s", file, command)
+		}
+	}
+	if strings.Contains(command, "./internal/...") {
+		t.Errorf("%s: go test command uses narrow ./internal/... package set: %s", file, command)
+	}
+}
+
 func TestTestWorkflowUsesLeastPrivilegeAndPinnedScanner(t *testing.T) {
 	data, err := os.ReadFile("../../.github/workflows/test.yml")
 	if err != nil {

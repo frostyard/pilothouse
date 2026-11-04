@@ -46,9 +46,10 @@ run: generate
 
 test: generate
 	$(GO) test ./...
+	$(GO) test -tags sdjournal ./internal/modules/logs/journal/...
 
 race: generate
-	$(GO) test -race -short ./internal/... -run "^Test[^I]" -skip "Integration"
+	$(GO) test -race -short ./...
 
 fmt: ## Format Go source files
 	$(GOFMT) -w $(GOFILES)
@@ -58,7 +59,7 @@ format-check: ## Verify Go source formatting without rewriting files
 	if [ -n "$$files" ]; then printf '%s\n' "$$files"; exit 1; fi
 
 lint: ## Run linter
-	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run; else echo "golangci-lint not installed, skipping"; fi
+	@if command -v golangci-lint >/dev/null 2>&1 && golangci-lint version >/dev/null 2>&1; then golangci-lint run; else echo "golangci-lint not found on PATH; run 'make docker-lint'." >&2; exit 1; fi
 
 docker-image: ## Build the development image used by docker-* targets
 	$(DOCKER) build \

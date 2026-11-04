@@ -220,7 +220,8 @@ personal data, speculation, or transient worktree state.
 
 **make ci / make docker-ci** runs every CI gate that runs without
 credentials — tidy check, vet, format check, lint, govulncheck, tests, race,
-build — in CI's order. Run it before pushing; if it is green locally, the
+build — in CI's order. `make test` runs `go test ./...` and the tagged
+sdjournal journal tests; `make race` runs every Go package with the race detector. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
 `.github/workflows/test.yml` disables token permissions by default, grants
@@ -232,7 +233,8 @@ contract every day at 04:23 UTC and on manual dispatch with read-only contents
 access, commit-pinned actions, and non-cancelling concurrency. Its single
 compliance job is credential-free and consumes no secrets. It installs the
 native headers and pinned linter required to prevent a gate from silently
-degrading on a fresh runner.
+degrading on a fresh runner. The lint recipe fails when `golangci-lint` is absent
+and points to `make docker-lint`.
 
 Two workflow gates sit outside that one-command mirror. First,
 `.github/workflows/packaging.yml` carries three tiers: it builds the `.deb`
