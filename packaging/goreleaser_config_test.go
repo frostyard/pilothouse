@@ -467,22 +467,34 @@ type stampedBuildsConfig struct {
 	Builds []stampedBuild `yaml:"builds"`
 }
 
-// versionStampRe matches the one ldflag pair that stamps the release version
-// into package main: -X main.version={{ .Version }}. The problem recorder of
-// both binaries (internal/problemrec, ADR 0013) is inert unless main.version
-// is a release semver, so a build that drops the stamp silently records
-// nothing.
-var versionStampRe = regexp.MustCompile(`(^|\s)-X[ =]main\.version=\{\{\s*\.Version\s*\}\}(\s|$)`)
+// versionAssignRe finds each -X assignment to main.version, whatever its
+// value. It consumes only the leading separator, so adjacent assignments in
+// 1 entry are all found. The problem recorder of both binaries
+// (internal/problemrec, ADR 0013) is inert unless main.version is a release
+// semver, so a build that drops the stamp, or overrides it later in the
+// same link, silently records nothing.
+var versionAssignRe = regexp.MustCompile(`(^|\s)-X[ =]main\.version=`)
 
-// checkStampsVersion reports an error unless exactly one ldflags entry stamps
-// main.version from {{ .Version }}.
+// versionTemplateRe matches the one allowed value: {{ .Version }}.
+var versionTemplateRe = regexp.MustCompile(`^\{\{\s*\.Version\s*\}\}`)
+
+// checkStampsVersion reports an error unless the ldflags assign main.version
+// exactly once, and that assignment is {{ .Version }}.
 func checkStampsVersion(ldflags []string) error {
-	count := 0
+	var values []string
 	for _, flag := range ldflags {
-		count += len(versionStampRe.FindAllString(flag, -1))
+		for _, loc := range versionAssignRe.FindAllStringIndex(flag, -1) {
+			rest := flag[loc[1]:]
+			if m := versionTemplateRe.FindString(rest); m != "" {
+				values = append(values, m)
+				continue
+			}
+			value, _, _ := strings.Cut(rest, " ")
+			values = append(values, value)
+		}
 	}
-	if count != 1 {
-		return fmt.Errorf("ldflags %q stamp -X main.version={{ .Version }} %d times, want exactly 1", ldflags, count)
+	if len(values) != 1 || !versionTemplateRe.MatchString(values[0]) {
+		return fmt.Errorf("ldflags %q assign main.version %q, want exactly 1 assignment -X main.version={{ .Version }}", ldflags, values)
 	}
 
 	return nil
@@ -522,6 +534,10 @@ func TestCheckStampsVersionRejectsMutations(t *testing.T) {
 		"fixed value":       {"-s -w -X main.version=dev"},
 		"prefixed name":     {"-s -w -X main.versionX={{ .Version }}"},
 		"stamped twice":     {"-s -w -X main.version={{ .Version }}", "-X main.version={{ .Version }}"},
+		"trailing override": {"-s -w -X main.version={{ .Version }} -X main.version=dev"},
+		"override entry":    {"-s -w -X main.version={{ .Version }}", "-X main.version=dev"},
+		"adjacent twice":    {"-X main.version={{ .Version }} -X main.version={{ .Version }}"},
+		"override first":    {"-X main.version=dev -X main.version={{ .Version }}"},
 	} {
 		require.Errorf(t, checkStampsVersion(ldflags), "%s: %q must be rejected", name, ldflags)
 	}
