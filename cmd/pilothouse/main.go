@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,9 +31,14 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	systemmodule "github.com/frostyard/pilothouse/internal/modules/system"
 	"github.com/frostyard/pilothouse/internal/platform"
-	"github.com/frostyard/pilothouse/internal/tlscert"
+	"github.com/frostyard/pilothouse/internal/problemrec"
 	"github.com/frostyard/pilothouse/internal/web"
 )
+
+// version is the release version, stamped by .goreleaser.yaml with
+// -X main.version. An unstamped build keeps "dev", which makes the problem
+// recorder inert: only release builds write problem records.
+var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
@@ -44,6 +48,10 @@ func main() {
 }
 
 func run() error {
+	// Problem records go only to the local journal (ADR 0013).
+	rec := problemrec.New(version)
+	defer rec.RecoverPanic()
+
 	listen := flag.String("listen", "127.0.0.1:8888", "HTTP listen address (env PILOTHOUSE_LISTEN)")
 	brokerSocket := flag.String("broker-socket", "/run/pilothouse/broker.sock", "privileged broker Unix socket")
 	var allowedOrigins stringListFlag
@@ -54,6 +62,9 @@ func run() error {
 	allowInsecureHTTP := flag.Bool("allow-insecure-http", false, "serve plaintext HTTP on a non-loopback address (env PILOTHOUSE_ALLOW_INSECURE_HTTP)")
 	dev := flag.Bool("dev", false, "register in-development preview modules that are not backed by real functionality")
 	flag.Parse()
+	// Crash output is armed after flag parsing, so -h leaves no crash file.
+	// Its error is ignored silently: the output of the binary stays as is.
+	_ = rec.CrashOutput()
 	allowedOrigins.addCommaSeparated(os.Getenv("PILOTHOUSE_ALLOWED_ORIGINS"))
 
 	// Flag-beats-environment precedence needs to know which flags were
@@ -79,14 +90,9 @@ func run() error {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if mode == serveTLSSelfSigned {
-		host, _, _ := net.SplitHostPort(addr)
-		dir, dirErr := certStateDir()
-		if dirErr != nil {
-			return selfSignedUnavailable(addr, dirErr)
-		}
-		certPath, keyPath, err = tlscert.LoadOrCreate(dir, host, time.Now, logger)
+		certPath, keyPath, err = prepareSelfSigned(addr, time.Now, logger, rec)
 		if err != nil {
-			return selfSignedUnavailable(addr, err)
+			return err
 		}
 	}
 	tlsActive := mode != serveHTTP
@@ -104,7 +110,7 @@ func run() error {
 	}
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           handler.Handler(),
+		Handler:           problemrec.Handler(rec, handler.Handler()),
 		IdleTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Minute,

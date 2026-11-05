@@ -41,8 +41,15 @@ import (
 	"github.com/frostyard/pilothouse/internal/modules/storage"
 	"github.com/frostyard/pilothouse/internal/modules/sysext"
 	"github.com/frostyard/pilothouse/internal/modules/sysext/extctl"
+	"github.com/frostyard/pilothouse/internal/problemrec"
+	"github.com/frostyard/std/problems"
 	dockerclient "github.com/moby/moby/client"
 )
+
+// version is the release version, stamped by .goreleaser.yaml with
+// -X main.version. An unstamped build keeps "dev", which makes the problem
+// recorder inert: only release builds write problem records.
+var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
@@ -76,6 +83,11 @@ func run() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("pilothoused must run as root")
 	}
+	// Problem records go only to the local journal (ADR 0013). A failure to
+	// arm crash output is ignored silently so that the output stays as is.
+	rec := problemrec.New(version)
+	defer rec.RecoverPanic()
+	_ = rec.CrashOutput()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := os.MkdirAll(filepath.Dir(*auditDB), 0o750); err != nil {
@@ -84,19 +96,17 @@ func run() error {
 	if err := os.MkdirAll(filepath.Dir(*jobsDB), 0o750); err != nil {
 		return fmt.Errorf("create jobs directory: %w", err)
 	}
-	auditStore, err := audit.Open(*auditDB, 10_000)
+	auditStore, err := openAuditStore(*auditDB, rec)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = auditStore.Close() }()
-	actions := broker.NewActionRegistry(auditStore)
-	streamActions := broker.NewStreamActionRegistry(auditStore)
-	jobStore, err := jobs.Open(*jobsDB, 1_000)
+	jobStore, err := openJobStore(*jobsDB, rec)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = jobStore.Close() }()
-	actions.UseJobs(jobStore)
+	actions, streamActions := newActionRegistries(auditStore, jobStore, rec)
 	queries := broker.NewQueryRegistry()
 	streamQueries := broker.NewStreamQueryRegistry()
 	caps := capability.Probe(context.Background(), capability.Config{DockerEndpoint: *dockerEndpoint, IncusEnabled: *incusEnabled, K3s: *k3sExecutable, PodmanSocket: *podmanSocket, Updex: *updex})
@@ -258,7 +268,7 @@ func run() error {
 	}()
 
 	server := &http.Server{
-		Handler:           handler.Handler(),
+		Handler:           problemrec.Handler(rec, handler.Handler()),
 		IdleTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      30 * time.Minute,
@@ -280,6 +290,42 @@ func run() error {
 		return fmt.Errorf("serve broker: %w", serveErr)
 	}
 	return nil
+}
+
+// openAuditStore opens the audit database. A failure is recorded under
+// problemrec.CodeAuditOpenFailed (local journal only; an inert rec records
+// nothing) and returned unchanged.
+func openAuditStore(path string, rec *problems.Recorder) (*audit.Store, error) {
+	store, err := audit.Open(path, 10_000)
+	if err != nil {
+		rec.Error(problemrec.CodeAuditOpenFailed, err)
+		return nil, err
+	}
+	return store, nil
+}
+
+// openJobStore opens the jobs database. A failure is recorded under
+// problemrec.CodeJobsOpenFailed and returned unchanged.
+func openJobStore(path string, rec *problems.Recorder) (*jobs.Store, error) {
+	store, err := jobs.Open(path, 1_000)
+	if err != nil {
+		rec.Error(problemrec.CodeJobsOpenFailed, err)
+		return nil, err
+	}
+	return store, nil
+}
+
+// newActionRegistries builds the action and stream action registries on the
+// audit and job stores, and connects rec, so that a failed audit or job
+// write is recorded under problemrec.CodeAuditWriteFailed or
+// problemrec.CodeJobsWriteFailed.
+func newActionRegistries(auditStore *audit.Store, jobStore *jobs.Store, rec *problems.Recorder) (*broker.ActionRegistry, *broker.StreamActionRegistry) {
+	actions := broker.NewActionRegistry(auditStore)
+	actions.UseJobs(jobStore)
+	actions.UseProblems(rec)
+	streamActions := broker.NewStreamActionRegistry(auditStore)
+	streamActions.UseProblems(rec)
+	return actions, streamActions
 }
 
 func newStorageManager(resolve storage.ToolResolver, root string) (*storage.SystemManager, error) {

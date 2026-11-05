@@ -19,14 +19,15 @@ type ActionPrepare func(context.Context, auth.Identity, map[string]string) (map[
 type QueryHandler func(context.Context, auth.Identity, map[string]string) (any, error)
 
 type ActionRegistry struct {
-	actions map[string]registeredAction
-	audit   auditStore
-	jobCtx  context.Context
-	jobStop context.CancelFunc
-	jobs    jobStore
-	locks   *resourceLocks
-	mu      sync.RWMutex
-	wg      sync.WaitGroup
+	actions  map[string]registeredAction
+	audit    auditStore
+	jobCtx   context.Context
+	jobStop  context.CancelFunc
+	jobs     jobStore
+	locks    *resourceLocks
+	mu       sync.RWMutex
+	problems ProblemRecorder
+	wg       sync.WaitGroup
 }
 
 type registeredAction struct {
@@ -88,6 +89,13 @@ func (r *ActionRegistry) UseJobs(store jobStore) {
 	r.jobs = store
 }
 
+// UseProblems sets the recorder of internal audit and job store faults. A
+// nil recorder (the default) records nothing. Call it before the registry
+// serves requests, like UseJobs.
+func (r *ActionRegistry) UseProblems(rec ProblemRecorder) {
+	r.problems = rec
+}
+
 func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id string, parameters map[string]string, confirmation string) error {
 	r.mu.RLock()
 	action, ok := r.actions[id]
@@ -146,6 +154,7 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 	if r.audit != nil {
 		record, err = r.audit.Begin(ctx, audit.Attempt{Action: id, Resource: resource, Username: identity.Username, UID: identity.UID})
 		if err != nil {
+			recordProblem(r.problems, ProblemAuditWriteFailed, err)
 			unlock()
 			return fmt.Errorf("record action intent: %w", err)
 		}
@@ -157,10 +166,11 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 		}
 		job, enqueueErr := r.jobs.Enqueue(ctx, jobs.Attempt{Action: id, AuditID: record.ID, Resource: resource, Username: identity.Username, UID: identity.UID})
 		if enqueueErr != nil {
+			recordProblem(r.problems, ProblemJobsWriteFailed, enqueueErr)
 			unlock()
 			completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 			defer cancel()
-			_ = r.audit.Complete(completeCtx, record.ID, audit.OutcomeFailed, "enqueue_failed")
+			recordProblem(r.problems, ProblemAuditWriteFailed, r.audit.Complete(completeCtx, record.ID, audit.OutcomeFailed, "enqueue_failed"))
 			return fmt.Errorf("queue background action: %w", enqueueErr)
 		}
 		parameters = cloneParameters(parameters)
@@ -180,6 +190,7 @@ func (r *ActionRegistry) Execute(ctx context.Context, identity auth.Identity, id
 		completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		if err := r.audit.Complete(completeCtx, record.ID, outcome, category); err != nil {
+			recordProblem(r.problems, ProblemAuditWriteFailed, err)
 			return fmt.Errorf("action result is uncertain: record completion: %w", err)
 		}
 	}
@@ -196,9 +207,10 @@ func (r *ActionRegistry) runBackground(definition ActionDefinition, identity aut
 	ctx, cancel := context.WithTimeout(r.jobCtx, timeout)
 	defer cancel()
 	if err := r.jobs.Start(ctx, job.ID); err != nil {
+		recordProblem(r.problems, ProblemJobsWriteFailed, err)
 		completeCtx, completeCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer completeCancel()
-		_ = r.audit.Complete(completeCtx, record.ID, audit.OutcomeUnknown, "job_start_failed")
+		recordProblem(r.problems, ProblemAuditWriteFailed, r.audit.Complete(completeCtx, record.ID, audit.OutcomeUnknown, "job_start_failed"))
 		return
 	}
 	actionErr := definition.Handler(ctx, identity, parameters)
@@ -214,10 +226,11 @@ func (r *ActionRegistry) runBackground(definition ActionDefinition, identity aut
 	defer completeCancel()
 	rebootRequired := actionErr == nil && definition.RebootRequired
 	if err := r.jobs.Complete(completeCtx, job.ID, status, category, rebootRequired); err != nil {
+		recordProblem(r.problems, ProblemJobsWriteFailed, err)
 		outcome = audit.OutcomeUnknown
 		category = "job_completion_failed"
 	}
-	_ = r.audit.Complete(completeCtx, record.ID, outcome, category)
+	recordProblem(r.problems, ProblemAuditWriteFailed, r.audit.Complete(completeCtx, record.ID, outcome, category))
 }
 
 func (r *ActionRegistry) Wait(ctx context.Context) error {

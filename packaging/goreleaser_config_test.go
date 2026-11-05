@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -449,5 +450,79 @@ func TestCheckNoSystemdManagedPathsRejectsMutations(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// The types below model only the builds[] keys the version-stamp guard needs.
+// They are declared here, with names distinct from drift_test.go's
+// buildTarget, so that the guard reads id, binary and ldflags of every build.
+
+type stampedBuild struct {
+	ID      string   `yaml:"id"`
+	Binary  string   `yaml:"binary"`
+	Ldflags []string `yaml:"ldflags"`
+}
+
+type stampedBuildsConfig struct {
+	Builds []stampedBuild `yaml:"builds"`
+}
+
+// versionStampRe matches the one ldflag pair that stamps the release version
+// into package main: -X main.version={{ .Version }}. The problem recorder of
+// both binaries (internal/problemrec, ADR 0013) is inert unless main.version
+// is a release semver, so a build that drops the stamp silently records
+// nothing.
+var versionStampRe = regexp.MustCompile(`(^|\s)-X[ =]main\.version=\{\{\s*\.Version\s*\}\}(\s|$)`)
+
+// checkStampsVersion reports an error unless exactly one ldflags entry stamps
+// main.version from {{ .Version }}.
+func checkStampsVersion(ldflags []string) error {
+	count := 0
+	for _, flag := range ldflags {
+		count += len(versionStampRe.FindAllString(flag, -1))
+	}
+	if count != 1 {
+		return fmt.Errorf("ldflags %q stamp -X main.version={{ .Version }} %d times, want exactly 1", ldflags, count)
+	}
+
+	return nil
+}
+
+// TestBuildsStampMainVersion asserts that both builds, and no other, exist,
+// and that each stamps main.version with the release version.
+func TestBuildsStampMainVersion(t *testing.T) {
+	raw, err := os.ReadFile(goreleaserConfigPath)
+	require.NoErrorf(t, err, "read %s", goreleaserConfigPath)
+
+	var cfg stampedBuildsConfig
+	require.NoErrorf(t, yaml.Unmarshal(raw, &cfg), "parse %s", goreleaserConfigPath)
+
+	binaries := make([]string, 0, len(cfg.Builds))
+	for _, build := range cfg.Builds {
+		binaries = append(binaries, build.Binary)
+		require.NoErrorf(t, checkStampsVersion(build.Ldflags), "build %q", build.ID)
+	}
+
+	slices.Sort(binaries)
+	require.Equal(t, []string{"pilothouse", "pilothoused"}, binaries, "builds[].binary")
+}
+
+// checkStampsVersion must reject a build that drops, misnames or doubles the
+// stamp. The mutations run on literals; .goreleaser.yaml is untouched.
+func TestCheckStampsVersionRejectsMutations(t *testing.T) {
+	require.NoError(t, checkStampsVersion([]string{"-s -w -X main.version={{ .Version }}"}))
+	require.NoError(t, checkStampsVersion([]string{"-s -w", "-X=main.version={{.Version}}"}))
+
+	for name, ldflags := range map[string][]string{
+		"no ldflags":        nil,
+		"strip only":        {"-s -w"},
+		"capitalized name":  {"-s -w -X main.Version={{ .Version }}"},
+		"other package":     {"-s -w -X github.com/frostyard/pilothouse/internal/web.version={{ .Version }}"},
+		"commit not semver": {"-s -w -X main.version={{ .ShortCommit }}"},
+		"fixed value":       {"-s -w -X main.version=dev"},
+		"prefixed name":     {"-s -w -X main.versionX={{ .Version }}"},
+		"stamped twice":     {"-s -w -X main.version={{ .Version }}", "-X main.version={{ .Version }}"},
+	} {
+		require.Errorf(t, checkStampsVersion(ldflags), "%s: %q must be rejected", name, ldflags)
 	}
 }

@@ -19,6 +19,7 @@ The ones that bind pilothouse:
 - [ADR-0038 — the test-name filter is chairlift-only](https://github.com/frostyard/core/blob/main/docs/adr/0038-scope-the-test-name-filter-to-chairlift.md) — make ci/docker-ci run every hermetic test
 - [ADR-0025 — One docs/ tree per repository, in core's four-category shape](https://github.com/frostyard/core/blob/main/docs/adr/0025-consolidate-repository-docs-into-docs.md) — docs/{adr,design,specs,plans} + indexed docs/README.md; yeti/OVERVIEW.md folded into docs/design/overview.md
 - [ADR-0043 — Pin repository tools in mise and name the verify gate](https://github.com/frostyard/core/blob/main/docs/adr/0043-pin-repository-tools-in-mise-and-name-the-verify-gate.md) — `mise.toml` + `mise.lock` at the repo root, `go.mod` as the sole Go pin, no optional tools, the `make verify`/`check`/`ci` triad; repo-local adoption recorded in [adr/0012](adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
+- [ADR-0069 — Report problems local-first, opt-in, with one sender per host](https://github.com/frostyard/core/blob/main/docs/adr/0069-report-problems-local-first-opt-in-with-one-sender-per-host.md) — pilothouse only writes problem records to the local journal and never sends them (repo-local [ADR-0013](adr/0013-local-problem-records.md))
 
 When changing behavior covered by one of these, update or supersede the ADR
 in frostyard/core first, then change this repo in the same effort.

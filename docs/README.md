@@ -46,6 +46,9 @@ Docs are split by the question they answer (the shape defined by
 - [adr/0012](adr/0012-adopt-mise-tool-pinning-and-verify-gate.md) — adopt
   frostyard/core ADR-0043: `mise.toml` + `mise.lock` at the repo root, `go.mod`
   as the only Go pin, and the `make verify` / `check` / `ci` gate triad
+- [adr/0013](adr/0013-local-problem-records.md) — record panics and 5 fixed
+  internal error codes with `frostyard/std/problems`, to the local journal
+  only, in release builds only
 
 ### Design
 

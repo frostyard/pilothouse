@@ -36,6 +36,9 @@ internal/
   audit/               durable action-history store (bbolt)
   jobs/                durable background-job store (bbolt), for long-running privileged mutations
   auth/, auth/pam/     NSS group resolution and PAM authentication (used only by pilothoused)
+  problemrec/          app ID, the 5 fixed problem codes, the github.com/frostyard/std/problems
+                       recorder constructor and the panic-recording HTTP middleware used by
+                       both binaries; local journal only, no network code (ADR 0013)
   packagingtest/       test-support helpers imported only by test files: the packaging-tool
                        skip-vs-fail gate and the fixture builders — BuildDeb and BuildRPM from
                        one shared, declarative Spec, BuildDebRaw from an already-staged tree
@@ -233,6 +236,35 @@ The host-image status surface (#51) and its automatic-update companion
   `gid=` options. Version 1 definitions remain supported without migration.
   The web process cannot resolve names or provide free-form mount options, and
   no generic command, filesystem, or socket capability is introduced.
+
+### Problem records stay in the local journal
+
+Both binaries record their own faults with
+`github.com/frostyard/std/problems` (ADR [0013](../adr/0013-local-problem-records.md),
+core ADR-0069 and the core `problem-report.md` spec). `main.version` (default
+`dev`, stamped `{{ .Version }}` by `.goreleaser.yaml`; guarded by
+`packaging.TestBuildsStampMainVersion`) feeds `problemrec.New`, and a version
+that is not a release semver (source, snapshot `0.0.0-<commit>-snapshot` and
+nightly `<n>.0.0-dev` builds) makes the recorder inert. Each `run()` makes the
+recorder early (`pilothoused` after the root check), defers
+`rec.RecoverPanic()`, arms `rec.CrashOutput()` with its error ignored (crash
+files below `$STATE_DIRECTORY/frostyard-problems/org.frostyard.pilothouse`, so
+`/var/lib/pilothouse/...` for the broker and `/var/lib/pilothouse/web/...` for
+the web unit; a leftover file becomes 1 record at the next start), and wraps
+its `http.Server` handler in `problemrec.Handler`, which records a handler panic
+and panics again so net/http's own recovery is unchanged. The 5 codes:
+`tls.self_signed_failed` (`cmd/pilothouse/selfsigned.go` `prepareSelfSigned`,
+both refusal paths of the self-signed guardrail), `audit.open_failed` and
+`jobs.open_failed` (`openAuditStore`/`openJobStore` in
+`cmd/pilothoused/main.go`), `audit.write_failed` and `jobs.write_failed`
+(`internal/broker` `actions.go`/`streams.go`: every failed audit
+`Begin`/`Complete` and job `Enqueue`/`Start`/`Complete`, including the ones
+whose error is otherwise discarded). `internal/broker` does not import the
+library: it declares `ProblemRecorder` and `UseProblems` setters on
+`ActionRegistry` and `StreamActionRegistry` (nil records nothing), skips
+`context.Canceled`, and `cmd/pilothoused`'s `newActionRegistries` connects
+the real recorder. Return values, error texts and audit outcomes are
+unchanged; no flag, environment variable or network call exists for this.
 
 See `docs/capabilities.md` for the full broker-ID-to-capability table and
 `docs/authentication.md` for the full login/session/authorization/audit
