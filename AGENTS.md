@@ -11,6 +11,8 @@ This project is derived from `housecat-inc/scratch` and follows its core stack:
 
 Keep management features isolated in `internal/modules/<name>`. Web modules may collect unprivileged read-only data locally. Privileged reads must use a fixed broker query, and mutations must use a fixed broker action. Register privileged implementations only in `cmd/pilothoused`; never add arbitrary command execution, filesystem access, or generic socket proxying to the broker protocol.
 
+Problem records (ADR 0013): both binaries record panics and only the fixed codes in `internal/problemrec` (`internal/broker` has its own `ProblemRecorder` interface and code constants, pinned to them by a test), and only to the local journal through `github.com/frostyard/std/problems`. Privileged code records a fixed code with no free-form detail beyond the error text; never record a client error or `context.Canceled`, and never send a record over a network.
+
 Run `make generate` after editing `*.templ`. Never hand-edit generated `*_templ.go` files.
 
 When composing templ components with text, put the component invocation in its own template node. Do not embed calls such as `@web.Icon("chevron")` in a text node (`View all @web.Icon("chevron")` renders literally). For example:
@@ -174,8 +176,10 @@ preserves and rejects local-only tags.
   `make bump`.
 - Version rule: `svu next` at the pinned `SVU_VERSION` in the `Makefile`
   (`make docker-next-version`), from Conventional Commits.
-- Internal dependencies: none. `go.mod` has no other frostyard or bketelsen
-  module, and no build file pins a frostyard package, sysext or kit.
+- Internal dependencies: 1 Go module, `github.com/frostyard/std` (its
+  `problems` package, ADR 0013), pinned in `go.mod` to a released tag. No
+  other frostyard or bketelsen module, and no build file pins a frostyard
+  package, sysext or kit.
 - Who uses this repository: `frostyard/snosi` downloads the released
   `frostyard-pilothouse` `.deb` for its `pilothouse` sysext
   (`mkosi.images/pilothouse/`), checksum-pinned in

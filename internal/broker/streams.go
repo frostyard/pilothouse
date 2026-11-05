@@ -73,10 +73,11 @@ type StreamQueryRegistry struct {
 }
 
 type StreamActionRegistry struct {
-	mu      sync.RWMutex
-	actions map[string]StreamActionDefinition
-	audit   auditStore
-	locks   *resourceLocks
+	mu       sync.RWMutex
+	actions  map[string]StreamActionDefinition
+	audit    auditStore
+	locks    *resourceLocks
+	problems ProblemRecorder
 }
 
 func NewStreamQueryRegistry() *StreamQueryRegistry {
@@ -89,6 +90,13 @@ func NewStreamActionRegistry(stores ...auditStore) *StreamActionRegistry {
 		store = stores[0]
 	}
 	return &StreamActionRegistry{actions: make(map[string]StreamActionDefinition), audit: store, locks: newResourceLocks()}
+}
+
+// UseProblems sets the recorder of internal audit store faults. A nil
+// recorder (the default) records nothing. Call it before the registry serves
+// requests.
+func (r *StreamActionRegistry) UseProblems(rec ProblemRecorder) {
+	r.problems = rec
 }
 
 func (r *StreamQueryRegistry) Register(definition StreamQueryDefinition) error {
@@ -225,6 +233,7 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 	if r.audit != nil {
 		record, err = r.audit.Begin(ctx, audit.Attempt{Action: id, Resource: resource, Username: identity.Username, UID: identity.UID})
 		if err != nil {
+			recordProblem(r.problems, ProblemAuditWriteFailed, err)
 			return fmt.Errorf("record stream action intent: %w", err)
 		}
 	}
@@ -243,6 +252,7 @@ func (r *StreamActionRegistry) Execute(ctx context.Context, identity auth.Identi
 		completeCtx, completeCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer completeCancel()
 		if err := r.audit.Complete(completeCtx, record.ID, outcome, category); err != nil {
+			recordProblem(r.problems, ProblemAuditWriteFailed, err)
 			return fmt.Errorf("stream action result is uncertain: record completion: %w", err)
 		}
 	}

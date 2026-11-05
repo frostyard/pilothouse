@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -449,5 +450,102 @@ func TestCheckNoSystemdManagedPathsRejectsMutations(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// The types below model only the builds[] keys the version-stamp guard needs.
+// They are declared here, with names distinct from drift_test.go's
+// buildTarget, so that the guard reads id, binary and ldflags of every build.
+
+type stampedBuild struct {
+	ID      string   `yaml:"id"`
+	Binary  string   `yaml:"binary"`
+	Ldflags []string `yaml:"ldflags"`
+}
+
+type stampedBuildsConfig struct {
+	Builds []stampedBuild `yaml:"builds"`
+}
+
+// versionAssignRe finds each -X assignment to main.version, whatever its
+// value. It consumes only the leading separator, so adjacent assignments in
+// 1 entry are all found. The problem recorder of both binaries
+// (internal/problemrec, ADR 0013) is inert unless main.version is a release
+// semver, so a build that drops the stamp, or overrides it later in the
+// same link, silently records nothing.
+var versionAssignRe = regexp.MustCompile(`(^|\s)-X[ =]main\.version=`)
+
+// versionTemplateRe matches the one allowed value, the whole value:
+// {{ .Version }}.
+var versionTemplateRe = regexp.MustCompile(`^\{\{\s*\.Version\s*\}\}$`)
+
+// templateValueRe matches a value that starts with a template action, which
+// can hold spaces, plus any text up to the next whitespace.
+var templateValueRe = regexp.MustCompile(`^\{\{[^}]*\}\}\S*`)
+
+// checkStampsVersion reports an error unless the ldflags assign main.version
+// exactly once, and that assignment is {{ .Version }}.
+func checkStampsVersion(ldflags []string) error {
+	var values []string
+	for _, flag := range ldflags {
+		for _, loc := range versionAssignRe.FindAllStringIndex(flag, -1) {
+			rest := flag[loc[1]:]
+			if m := templateValueRe.FindString(rest); m != "" {
+				values = append(values, m)
+				continue
+			}
+			value, _, _ := strings.Cut(rest, " ")
+			values = append(values, value)
+		}
+	}
+	if len(values) != 1 || !versionTemplateRe.MatchString(values[0]) {
+		return fmt.Errorf("ldflags %q assign main.version %q, want exactly 1 assignment -X main.version={{ .Version }}", ldflags, values)
+	}
+
+	return nil
+}
+
+// TestBuildsStampMainVersion asserts that both builds, and no other, exist,
+// and that each stamps main.version with the release version.
+func TestBuildsStampMainVersion(t *testing.T) {
+	raw, err := os.ReadFile(goreleaserConfigPath)
+	require.NoErrorf(t, err, "read %s", goreleaserConfigPath)
+
+	var cfg stampedBuildsConfig
+	require.NoErrorf(t, yaml.Unmarshal(raw, &cfg), "parse %s", goreleaserConfigPath)
+
+	binaries := make([]string, 0, len(cfg.Builds))
+	for _, build := range cfg.Builds {
+		binaries = append(binaries, build.Binary)
+		require.NoErrorf(t, checkStampsVersion(build.Ldflags), "build %q", build.ID)
+	}
+
+	slices.Sort(binaries)
+	require.Equal(t, []string{"pilothouse", "pilothoused"}, binaries, "builds[].binary")
+}
+
+// checkStampsVersion must reject a build that drops, misnames or doubles the
+// stamp. The mutations run on literals; .goreleaser.yaml is untouched.
+func TestCheckStampsVersionRejectsMutations(t *testing.T) {
+	require.NoError(t, checkStampsVersion([]string{"-s -w -X main.version={{ .Version }}"}))
+	require.NoError(t, checkStampsVersion([]string{"-s -w", "-X=main.version={{.Version}}"}))
+
+	for name, ldflags := range map[string][]string{
+		"no ldflags":        nil,
+		"strip only":        {"-s -w"},
+		"capitalized name":  {"-s -w -X main.Version={{ .Version }}"},
+		"other package":     {"-s -w -X github.com/frostyard/pilothouse/internal/web.version={{ .Version }}"},
+		"commit not semver": {"-s -w -X main.version={{ .ShortCommit }}"},
+		"fixed value":       {"-s -w -X main.version=dev"},
+		"prefixed name":     {"-s -w -X main.versionX={{ .Version }}"},
+		"stamped twice":     {"-s -w -X main.version={{ .Version }}", "-X main.version={{ .Version }}"},
+		"trailing override": {"-s -w -X main.version={{ .Version }} -X main.version=dev"},
+		"override entry":    {"-s -w -X main.version={{ .Version }}", "-X main.version=dev"},
+		"adjacent twice":    {"-X main.version={{ .Version }} -X main.version={{ .Version }}"},
+		"override first":    {"-X main.version=dev -X main.version={{ .Version }}"},
+		"template suffix":   {"-s -w -X main.version={{ .Version }}-dev"},
+		"template prefix":   {"-s -w -X main.version=v{{ .Version }}"},
+	} {
+		require.Errorf(t, checkStampsVersion(ldflags), "%s: %q must be rejected", name, ldflags)
 	}
 }

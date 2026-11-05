@@ -57,7 +57,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - -s -w -X main.version={{ .Version }}
 
   - id: "pilothoused"
     binary: pilothoused
@@ -82,7 +82,7 @@ builds:
       - -trimpath
       - -tags=sdjournal
     ldflags:
-      - -s -w
+      - -s -w -X main.version={{ .Version }}
 
 archives:
   - files:
