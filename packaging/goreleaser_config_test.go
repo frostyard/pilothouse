@@ -475,8 +475,13 @@ type stampedBuildsConfig struct {
 // same link, silently records nothing.
 var versionAssignRe = regexp.MustCompile(`(^|\s)-X[ =]main\.version=`)
 
-// versionTemplateRe matches the one allowed value: {{ .Version }}.
-var versionTemplateRe = regexp.MustCompile(`^\{\{\s*\.Version\s*\}\}`)
+// versionTemplateRe matches the one allowed value, the whole value:
+// {{ .Version }}.
+var versionTemplateRe = regexp.MustCompile(`^\{\{\s*\.Version\s*\}\}$`)
+
+// templateValueRe matches a value that starts with a template action, which
+// can hold spaces, plus any text up to the next whitespace.
+var templateValueRe = regexp.MustCompile(`^\{\{[^}]*\}\}\S*`)
 
 // checkStampsVersion reports an error unless the ldflags assign main.version
 // exactly once, and that assignment is {{ .Version }}.
@@ -485,7 +490,7 @@ func checkStampsVersion(ldflags []string) error {
 	for _, flag := range ldflags {
 		for _, loc := range versionAssignRe.FindAllStringIndex(flag, -1) {
 			rest := flag[loc[1]:]
-			if m := versionTemplateRe.FindString(rest); m != "" {
+			if m := templateValueRe.FindString(rest); m != "" {
 				values = append(values, m)
 				continue
 			}
@@ -538,6 +543,8 @@ func TestCheckStampsVersionRejectsMutations(t *testing.T) {
 		"override entry":    {"-s -w -X main.version={{ .Version }}", "-X main.version=dev"},
 		"adjacent twice":    {"-X main.version={{ .Version }} -X main.version={{ .Version }}"},
 		"override first":    {"-X main.version=dev -X main.version={{ .Version }}"},
+		"template suffix":   {"-s -w -X main.version={{ .Version }}-dev"},
+		"template prefix":   {"-s -w -X main.version=v{{ .Version }}"},
 	} {
 		require.Errorf(t, checkStampsVersion(ldflags), "%s: %q must be rejected", name, ldflags)
 	}
