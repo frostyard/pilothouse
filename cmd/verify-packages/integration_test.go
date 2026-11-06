@@ -17,7 +17,7 @@ import (
 // non-zero. No test here injects a backend or a verification result; that is
 // confined to main_test.go's exit-semantics table, and only for the outcomes a
 // real artifact cannot produce here
-// (docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md).
+// (docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim).
 //
 // Every fixture is a placeholder package, so it cannot satisfy #66's artifact
 // contract and Verify always has something to say about it. That is the point:
@@ -120,7 +120,7 @@ func fixtureSpec(name string) packagingtest.Spec {
 // Every assertion is scoped to the block, never to the whole capture, so a run
 // reporting several artifacts cannot satisfy one artifact's assertion with
 // another's output
-// (docs/agents/skills/scope-html-assertions-to-the-region-under-test.md).
+// (docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test).
 func assertVerifiedBlock(t *testing.T, out, path, label string) string {
 	t.Helper()
 
@@ -170,7 +170,7 @@ func assertClosedCodes(t *testing.T, path, block string) {
 // is neither an indented finding line nor a line the command emits on its own
 // behalf. Counting them is how a test asserts how many artifacts a run
 // reported, independently of the summary line's own arithmetic
-// (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md).
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle).
 func artifactHeaderLines(out string) []string {
 	var headers []string
 

@@ -49,6 +49,10 @@ Docs are split by the question they answer (the shape defined by
 - [adr/0013](adr/0013-local-problem-records.md) — record panics and 5 fixed
   internal error codes with `frostyard/std/problems`, to the local journal
   only, in release builds only
+- [adr/0014](adr/0014-adopt-the-repository-baseline.md) — adopt frostyard/core's
+  repository baseline (ADR-0071, rows B1 to B16): `.agents/skills/`,
+  `.memory/corrections.jsonl`, the template gate, risk paths, `ci.yml`; the
+  mill and superpowers trees are retired
 
 ### Design
 
@@ -75,8 +79,12 @@ Docs are split by the question they answer (the shape defined by
   booted-VM harness and the `vm-boot` CI job
 - [design/image-tier.md](design/image-tier.md) — the #80 image-tier
   validation on a uCore/bootc host and `image-tier.yml`
-- [design/agent-workflows.md](design/agent-workflows.md) — mill
-  configuration, risk tiers, knowledge index, automation workflows
+- [design/agent-workflows.md](design/agent-workflows.md) — agent
+  instruction surfaces, risk tiers and risk paths, knowledge index, automation
+  workflows
+- [design/engineering-lessons.md](design/engineering-lessons.md) — the rules
+  learned from earlier defects and reviews (tests, fixtures, packaging, shell
+  harness, docs); code comments link its anchors
 
 ### Specs
 
@@ -90,6 +98,14 @@ Docs are split by the question they answer (the shape defined by
 
 ### Subsystem docs (uncategorized, indexed in place)
 
+- [features.md](features.md) — the full feature list ("What works") and the
+  module architecture; the root README links it
+- [install.md](install.md) — install a release package or from source, turn
+  on the optional surfaces, remote access and runtime configuration
+- [development.md](development.md) — gates and review, build and test, run
+  locally, package and booted-VM validation, releases
+- [problem-records.md](problem-records.md) — what the binaries record to the
+  local journal (ADR 0013): codes, crash files, what is never sent
 - [authentication.md](authentication.md) — login, session, authorization,
   audit, PAM policy, deployment rules
 - [autoupdate.md](autoupdate.md) — the automatic-update reporting surface:
@@ -115,18 +131,12 @@ Docs are split by the question they answer (the shape defined by
 
 ### Agent surfaces
 
-- [agents/skills/](agents/skills/) — durable lessons harvested from mill runs
-  plus org-synced skills (`.agents` and `skills` symlink here)
-
-### Superpowers (historical)
-
-Design-doc/plan pairs from the July 2026 superpowers effort. These are
-historical records of what was planned and built at the time — they are not
-the new [specs/](specs/) and [plans/](plans/) categories, and they retain
-pre-migration paths (e.g. `yeti/OVERVIEW.md`, now `design/overview.md`).
-
-- [superpowers/specs/](superpowers/specs/) — per-feature design specs
-- [superpowers/plans/](superpowers/plans/) — the matching phased plans
+Outside `docs/`: `AGENTS.md` (the canonical instructions; `CLAUDE.md`,
+`GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` link to it),
+`.agents/skills/` (skills synced from frostyard/core; `.claude/skills` links
+to it), `.memory/corrections.jsonl` (the corrections inbox) and
+`.knowledge/README.md` (the knowledge index). See
+[design/agent-workflows.md](design/agent-workflows.md).
 
 ## Conventions
 

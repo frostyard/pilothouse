@@ -1,7 +1,7 @@
 # Handler capability table
 
 This is the binding reference for the broker capability model (phase 1a of
-issue #35, `.mill/spec.md`). It maps every broker ID registered today —
+issue #35). It maps every broker ID registered today —
 across all four registries (`QueryRegistry`, `ActionRegistry`,
 `StreamQueryRegistry`, `StreamActionRegistry`) in `cmd/pilothoused/main.go` —
 to the capability (or capabilities) it will require once its registration is
@@ -303,14 +303,14 @@ Canonical capability IDs: `systemd`, `journald`,
 
 ## Module-level defaults applied
 
-Per `.mill/spec.md`: services state/actions → systemd; services journal →
+Per the issue #35 spec: services state/actions → systemd; services journal →
 journald; logs → journald; storage remote-mount actions → systemd; backups
 → systemd; maintenance → systemd; podman/docker/incus → their engine
 capability; k3s → k3s; system, files, activity, jobs → none. sysext is per-action, not
 module-level.
 
 Maintenance's "→ systemd" default is now a **per-surface** requirement rather
-than a whole-module one, per `.mill/spec.md`'s phase-2 re-grounding: reboot
+than a whole-module one, per the phase-2 re-grounding of the #51 spec: reboot
 posture and the reboot action (`QueryMaintenanceState`,
 `ActionMaintenanceReboot`, guarded by `registerMaintenance`) still require
 systemd, while host-image reporting (`QueryHostImageStatus`, guarded by the
@@ -683,7 +683,7 @@ query:
 
 `maintenance.State` carries no `Updates` field at all any more, and the
 Maintenance page renders no updates table — the ownership statement in
-`.mill/spec.md` ("extension inventory, update availability, and extension jobs
+the #52 spec ("extension inventory, update availability, and extension jobs
 remain owned by Extensions and Activity") is enforced structurally, by the
 field not existing, rather than by convention.
 
@@ -724,7 +724,7 @@ reason — see the extension-read note below.
 
 ## Extension-read note (`QueryMaintenanceState` / sysext)
 
-`.mill/spec.md` says sysext reads are "updex OR sysext". As of #52 that
+The #52 spec says sysext reads are "updex OR sysext". As of #52 that
 requirement has its own standalone read query, `QueryExtensionsState`
 (exception #6 above); the paragraphs below describe how the *other*
 extension-touching query, `QueryMaintenanceState`, consumes that same

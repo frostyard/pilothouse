@@ -26,7 +26,7 @@ When composing templ components with text, put the component invocation in its o
 
 For any new or changed templ component invocation, add or update a rendering test that asserts the rendered HTML contains the component output and does not contain the literal `@web.` call syntax.
 
-Run `make build`, `make test`, `make fmt`, and `make lint` before handing off changes.
+Run `make check` (it runs `make fmt`, then `make verify`) and `make build` before handing off changes.
 
 Process-level web E2E tests live in `test/e2e/`. They build and start the real `pilothouse` binary on an ephemeral local port (loopback, plus one wildcard bind exercising the self-signed TLS path), require no broker, and run as part of `make test`.
 
@@ -194,6 +194,15 @@ relevant documentation in this file (`AGENTS.md`, which `CLAUDE.md`
 symlinks), README.md, and `docs/`. A task is not complete without
 reviewing and updating relevant documentation.
 
+**README.md** follows frostyard/core's README spec (`docs/specs/readme.md`,
+core ADR-0072, baseline row B17) for the kind `service`: a short top block,
+`What it does`, `Interface`, `Deploy`, `Problem records`, `Develop` and
+`Where to go next`, at most 1000 words. Guides go in `docs/`, not in the
+README: the feature list in `docs/features.md`, installation and remote
+access in `docs/install.md`, build, validation and release in
+`docs/development.md`, and problem records in `docs/problem-records.md`.
+Check it with core's `.agents/skills/frostyard-readme/scripts/check-readme.mjs`.
+
 **docs/ directory** All documentation lives in one tree, `docs/`, in
 frostyard/core's four-category shape per
 [core ADR-0025](https://github.com/frostyard/core/blob/main/docs/adr/0025-consolidate-repository-docs-into-docs.md):
@@ -209,28 +218,49 @@ org-wide decisions go to frostyard/core, with a back-link recorded in
 [docs/org-adrs.md](docs/org-adrs.md). Write every doc to be maximally
 useful to an agent's context window — dense, factual, exact paths and
 constants, decision rationale rather than user-facing guides.
-Inbox-style notes (corrections, `.memory/`-style learnings) are seeds,
-not archives: fold them into the right `docs/` page (or this file, for
-rules of engagement) and delete the entry.
+Corrections are seeds, not archives: fold each rule into the right `docs/`
+page (or this file, for rules of engagement), then set that line's
+`promoted_to` to the new owner. Never edit or delete a line of
+`.memory/corrections.jsonl`: it is append-only, and `make ci BASE=<ref>`
+refuses a changed line (only an empty `promoted_to` may be filled in).
 
 **.knowledge/ directory** is the cross-session entry point for committed agent
 knowledge. Read `.knowledge/README.md` before planning changes, then follow its
-links to this file, `corrections.jsonl`, every learned skill, the design
-overview, and authoritative subsystem docs. Append only verified corrections,
+links to this file, `.memory/corrections.jsonl`,
+[docs/design/engineering-lessons.md](docs/design/engineering-lessons.md), the
+design overview, and authoritative subsystem docs. Append only verified corrections,
 promote stable rules to their durable owner, and never commit credentials,
 personal data, speculation, or transient worktree state.
 
 ## One command mirrors CI
 
+**The gate triad** (core ADR-0043 and ADR-0044, repo-local ADR 0012):
+
+- `make verify` is the non-mutating gate for a read-only reviewer: tidy
+  check, vet, format check, lint at the `mise.toml` pin, the template gate
+  (`make verify-template`: agent symlinks, docs index, risk paths,
+  corrections, vendored copies, and its Node tests), govulncheck and tests.
+  It leaves `git status --porcelain` unchanged (`*_templ.go` is gitignored).
+- `make check` is the developer gate: `make fmt`, then `make verify`.
+- `make ci` runs `make verify`, then the corrections append-only check
+  against `BASE` (`make ci BASE=origin/main`; no `BASE`, no comparison), the
+  race detector and the build.
+
+`mise install` provisions the pinned tools (`mise.toml`, `mise.lock`:
+golangci-lint and Node 22 or later; Go comes from `go.mod`).
+
 **make ci / make docker-ci** runs every CI gate that runs without
-credentials — tidy check, vet, format check, lint, govulncheck, tests, race,
-build — in CI's order. `make test` runs `go test ./...` and the tagged
+credentials — tidy check, vet, format check, lint, template gate,
+govulncheck, tests, corrections, race, build — in CI's order. `make test` runs `go test ./...` and the tagged
 sdjournal journal tests; `make race` runs every Go package with the race detector. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
-`.github/workflows/test.yml` disables token permissions by default, grants
-each job read-only contents access, and grants OIDC only to the Codecov job.
-Automated harnesses (the mill's deep gate) use this same target, so agents
+`.github/workflows/ci.yml` (workflow name `Tests`) runs the same gates as 6
+separate jobs (Lint, Security Scan, Unit Tests, Race Detection, Verify,
+Build) that together cover every target `make ci` runs; Verify runs the tidy,
+vet, format, template and corrections checks. It disables token permissions
+by default, grants each job read-only contents access, and grants OIDC only
+to the Codecov job. Agents use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
 gates. `.github/workflows/nightly-compliance.yml` reruns that same `make ci`
 contract every day at 04:23 UTC and on manual dispatch with read-only contents
@@ -264,14 +294,37 @@ access, Podman 5, cosign and up to 180 minutes on the GitHub-hosted
 `ubuntu-26.04` image. It cannot run inside the development container or the
 credential-free local CI mirror, and deliberately has no local `make` target.
 
-## Learned agent skills
+## Engineering lessons and skills
 
-**docs/agents/skills/** Read every file in `docs/agents/skills/` before
-planning, implementing, or reviewing changes. Each file is a durable lesson
-distilled from a previous automated run of [the mill](https://github.com/frostyard/mill)
-(the spec→PR harness, configured here via `.mill.toml`); they are binding
-guidance, not suggestions. New skills are added by the mill's harvest step
-and reviewed like any other change in the PR that carries them.
+**docs/design/engineering-lessons.md** Read
+[docs/design/engineering-lessons.md](docs/design/engineering-lessons.md)
+before planning, implementing, or reviewing changes. Its sections are rules
+learned from earlier defects and review findings, each checked against the
+code; they are binding guidance, not suggestions. Code comments cite its
+anchors (`docs/design/engineering-lessons.md#<anchor>`): keep anchors stable,
+and update a lesson in the same change that makes it untrue. A new lesson
+comes with the change that shows it, plus a line in
+`.memory/corrections.jsonl` when it came from a review finding.
+
+**.agents/skills/** holds the skills that frostyard/core syncs into this
+repository (core ADR-0026). They are byte-identical copies: change them in
+core, never here. `.claude/skills` links to `.agents/skills`.
+
+The archived mill harness and the superpowers plans are retired
+([ADR 0014](docs/adr/0014-adopt-the-repository-baseline.md)); do not add
+`.mill.toml`, `docs/agents/skills/` or `docs/superpowers/` back.
+
+## Security and risk paths
+
+Report vulnerabilities through GitHub private vulnerability reporting
+([SECURITY.md](SECURITY.md)). `.github/risk-paths.json` lists the high-risk
+paths (core ADR-0068): the gate and governance files, the release files,
+`packaging/**`, `cmd/pilothoused/**`, `internal/broker/**` and
+`internal/auth/**`. A pull request that touches one gets the `risk:high`
+label from `.github/workflows/risk-paths.yml`; never remove that label to
+make a pull request ready. Its body names each matched path and why the
+change is safe. Add a new privileged or release path to the list in the same
+change that creates it.
 
 ## Org-wide decisions
 

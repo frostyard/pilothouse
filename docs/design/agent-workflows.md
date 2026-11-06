@@ -1,30 +1,37 @@
 # Agent workflow tooling
 
-Living document; extracted verbatim from [overview.md](overview.md). It
-covers the repository's agent/automation surface: the mill configuration
-(`.mill.toml`), the cross-agent instruction files, risk-tier classification,
-the knowledge index, harvested skills, and the Claude automation
-workflows.
+Living document; extracted from [overview.md](overview.md). It covers the
+repository's agent and automation surface: the cross-agent instruction files,
+risk-tier classification and risk paths, the knowledge index and corrections
+inbox, the engineering lessons, the synced skills, and the Claude automation
+workflows. The repository baseline it follows is recorded in
+[ADR-0014](../adr/0014-adopt-the-repository-baseline.md).
 
-- `.mill.toml` configures the [frostyard/mill](https://github.com/frostyard/mill)
-  spec→PR harness for this repo: `[gates].chunk` (`make generate`, `gofmt`,
-  `go vet`, `go test`) runs after every chunk, `[gates].deep` (`make
-  docker-ci`) runs before the ship decision, and `[context].docs` lists
-  `AGENTS.md`, `docs/design/overview.md`,
-  `docs/design/capability-gating.md`, and `docs/modules.md` as required
-  reading for every mill agent. The mill engine itself lives in the separate
-  `frostyard/mill` repo; this repo carries only config, learned skills, and
-  cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
-  `.github/copilot-instructions.md`, all pointing back to `AGENTS.md`).
-  `CLAUDE.md` is a symlink to `AGENTS.md`, so the two are byte-identical by
-  construction and can never drift.
+- `AGENTS.md` is the one canonical instruction file. `CLAUDE.md`, `GEMINI.md`,
+  `.cursorrules` and `.github/copilot-instructions.md` are committed relative
+  symlinks to it, so they are byte-identical by construction and can never
+  drift; edit `AGENTS.md`, never an alias. `make verify-template`
+  (`scripts/check-template.mjs`, check `agent-symlinks`) fails when an alias
+  stops resolving to it.
+- `.agents/skills/` holds the skills that frostyard/core syncs into this
+  repository (core ADR-0026: `golang-*` and `frostyard-*`). They are
+  byte-identical copies: change them in core, never here. `.claude/skills` is
+  a relative symlink to `../.agents/skills`.
+- The archived [frostyard/mill](https://github.com/frostyard/mill) spec→PR
+  harness and the superpowers plan/spec workflow are retired. Their
+  configuration (`.mill.toml`), their 50 lesson files (once in
+  `docs/agents/skills/`) and their finished plans (once in
+  `docs/superpowers/`) were removed by ADR-0014; the lessons that still hold
+  are sections of [engineering-lessons.md](engineering-lessons.md), and Git
+  history keeps the rest.
 - `AGENTS.md` (and therefore `CLAUDE.md`) is deliberately generic: it carries
   only repository-wide process, stack, build-target, templ, release, and
   skill-review instructions, with no per-module feature inventory and no
   module-specific claim anywhere in it. A change that adds or reshapes a
   module's surface therefore does not make any sentence in it stale — the
   per-module feature narrative lives in `docs/design/overview.md`, in
-  `docs/modules.md`, and in `README.md`'s "What works" list. Confirm this is
+  `docs/modules.md`, and in `docs/features.md`'s "What works" list (the
+  root `README.md` keeps only a short summary that links it). Confirm this is
   still true when reviewing AGENTS.md's "update relevant documentation after
   any change to source code" invariant for a feature change, rather than
   assuming either that it must be edited or that it can be skipped
@@ -41,19 +48,32 @@ workflows.
   confirmation. The pull request template records the decision, while
   `CONTRIBUTING.md` explains when it must be updated; classification never
   substitutes for an existing gate.
+- `.github/risk-paths.json` lists the high-risk paths (core ADR-0068): the
+  gate and governance files, the release files (`.svu.yml`,
+  `.goreleaser.yaml`, `scripts/bump.sh`, every workflow), the installed
+  packaging files (`packaging/**`) and the privileged code
+  (`cmd/pilothoused/**`, `internal/broker/**`, `internal/auth/**`).
+  `.github/workflows/risk-paths.yml` calls core's reusable workflow on
+  `pull_request_target`; it checks out nothing, and adds the label
+  `risk:high` to a pull request that touches a listed path. It is not a
+  required check. `make verify-template` validates the list.
 - `.knowledge/README.md` is the cross-session knowledge index. It points agents
-  to the live owners of durable facts — `AGENTS.md`, the append-only
-  `corrections.jsonl`, every file under `docs/agents/skills/`,
-  `docs/design/overview.md`,
-  and authoritative subsystem docs — rather than copying those facts into a
-  second store that can drift. Its correction schema requires a date, scope,
-  the prior belief plus verified reality, evidence, and an optional promotion
-  target. Committed knowledge must contain no credentials, personal data,
-  speculation, or transient worktree state.
-- `docs/agents/skills/` holds durable lessons harvested from previous mill
-  runs (e.g. `templ-generated-files.md` on gitignored `*_templ.go` output).
-  `AGENTS.md` requires reading every file there before planning,
-  implementing, or reviewing changes — treat them as binding guidance.
+  to the live owners of durable facts — `AGENTS.md`,
+  `.memory/corrections.jsonl`, [engineering-lessons.md](engineering-lessons.md),
+  `docs/design/overview.md`, and authoritative subsystem docs — rather than
+  copying those facts into a second store that can drift.
+- `.memory/corrections.jsonl` is the append-only corrections inbox (core
+  ADR-0018). Each line is one JSON object with exactly `date`, `scope`,
+  `correction`, `evidence` and `promoted_to` (a string: `""` until the rule
+  moves to a durable owner). `make verify` validates every line
+  (`scripts/check-corrections.mjs`); `make ci BASE=<ref>` and the Verify job
+  also refuse a changed or removed line. A blocking review point adds 1 line
+  in the pull request that fixes it. Committed knowledge must contain no
+  credentials, personal data, speculation, or transient worktree state.
+- [engineering-lessons.md](engineering-lessons.md) holds the rules learned
+  from earlier defects and review findings. Code comments cite its anchors
+  (`docs/design/engineering-lessons.md#<anchor>`), so keep anchors stable.
+  Read it before planning, implementing or reviewing a change.
 - The Copilot assignment flow (`ai-fix-requested.yml`,
   `copilot-review-apply.yml`) and the nightly drift job for its
   `COPILOT_ASSIGNMENT_TOKEN` secret were removed on 2026-10-22: the maintainer
@@ -70,21 +90,24 @@ workflows.
   `pull_request_target`. Model output remains untrusted and cannot replace
   deterministic gates or human review. See `docs/claude-code-review.md`.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
-  multi-agent workflow definitions unrelated to the mill: `test-triage.yaml`
+  multi-agent workflow definitions: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`
   (parallel security/correctness reviewers plus a synthesizer), and
   `module-audit.yaml` (fans out one audit agent per `internal/modules/*`
   directory). See `workflows/README.md` for setup and schema gotchas.
-- Tool versions are not yet centralized. `golangci-lint` and `svu` are pinned
-  as Makefile variables and re-declared as `.docker/Dockerfile` build args, and
-  the Go toolchain is pinned in `go.mod`, the Makefile, both development
-  Dockerfiles, and every workflow (one pin per workflow: `1.26.10`, or the
-  moving `stable` alias in the release, snapshot, packaging and image-tier
-  workflows). The values agree on `1.26.10`, but they remain independent pins
-  that a single edit can still desynchronize; `1.26.10` is the first patch
-  release that closes GO-2026-6809 and GO-2026-6603 through GO-2026-6617 in
-  the Go standard library. [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md)
-  adopts frostyard/core ADR-0043: `mise.toml` + `mise.lock` at the repository
-  root, `go.mod` as the only Go pin, no optional tools, and the `make verify` /
-  `check` / `ci` gate triad. Until the adoption change lands, the existing pins
-  remain independent and `make lint` still skips when the linter is absent.
+- Tool pins: `mise.toml` and `mise.lock` at the repository root pin
+  `golangci-lint` (2.11.4) and Node (24.22.2, for the template gate); Go comes
+  from `go.mod` (`1.26.10`, `idiomatic_version_file_enable_tools`). The
+  Makefile reads its `GOLANGCI_LINT_VERSION` from `mise.toml`, and
+  `make lint` fails unless the installed release is that pin. The CI Lint and
+  Verify jobs and the nightly compliance job install the tools with
+  `jdx/mise-action`. `make verify`, `make check` and `make ci` are the gate
+  triad of [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md).
+  Not done yet from ADR-0012: the Makefile `GO_VERSION` variable, the
+  hard-coded `go-version: "1.26.10"` inputs and the `stable` alias in the
+  release, snapshot, packaging and image-tier workflows remain separate Go
+  pins (all `1.26.10` or `stable` today); `svu` is still pinned only in the
+  Makefile and `.docker/Dockerfile`; and both development Dockerfiles still
+  take versions as build arguments instead of running `mise install`.
+  `1.26.10` is the first patch release that closes GO-2026-6809 and
+  GO-2026-6603 through GO-2026-6617 in the Go standard library.

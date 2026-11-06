@@ -2,8 +2,9 @@
 // the two parsers it exercises are unexported. It exists to reach the shapes a
 // real dpkg-deb cannot be made to emit: a Depends field with an empty
 // comma-separated component, a conffiles member of nothing but blank lines. Per
-// docs/agents/skills/test-the-composing-function-not-its-merge-helper.md these
-// tables SUPPLEMENT the fixture-backed tests in deb_test.go, which drive the
+// docs/design/engineering-lessons.md#test-the-composing-function-not-its-merge-helper
+// these tables SUPPLEMENT the fixture-backed tests in deb_test.go, which drive
+// the
 // same parsers through Deb itself against a real .deb; they do not replace them,
 // and no row here stands in for an end-to-end case that a fixture can express.
 //

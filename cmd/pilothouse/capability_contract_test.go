@@ -376,9 +376,10 @@ var capabilityAnyRequirements = map[string][]capability.ID{
 // which whole-module capability gate each web module carries, transcribed
 // from docs/capabilities.md's "Module-level defaults applied" section — NOT
 // derived by calling platform.Available (the production gating predicate
-// this harness exists to verify). Per docs/agents/skills/dont-use-the-gate-
-// under-test-as-the-test-oracle.md, computing the expected availability by
-// calling that same predicate would be tautological: a regression that made
+// this harness exists to verify). Per
+// docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle,
+// computing the expected availability by calling that same predicate would be
+// tautological: a regression that made
 // an "unaffected" module (e.g. system, files, activity) accidentally pick up
 // a Systemd gate — or drop one it should keep — would shift both the
 // expected and the actual side together, so the degraded fixture would keep
@@ -448,9 +449,10 @@ var moduleRequiredAnyCapabilities = map[string][]capability.ID{
 // exactly those two aggregation predicates — maintenance's whole-module gate
 // is platform.CapabilityGateAny → platform.AvailableAny → caps.HasAny(Systemd,
 // Bootc, RPMOStree), and queryHostImage's guard is caps.HasAny(Bootc,
-// RPMOStree). Per docs/agents/skills/dont-use-the-gate-under-test-as-the-test-
-// oracle.md, computing the expected side with the same predicate would be
-// tautological: if HasAny silently degraded into HasAll (or vice versa), the
+// RPMOStree). Per
+// docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle,
+// computing the expected side with the same predicate would be tautological: if
+// HasAny silently degraded into HasAll (or vice versa), the
 // expectation and the observed behavior would move together and every any-of
 // fixture below would keep passing while the acceptance criterion was
 // violated. Combining per-capability Has checks with Go's own control flow
@@ -530,9 +532,9 @@ func expectModuleAvailable(t *testing.T, manifestID string, caps capability.Set)
 // rendered surfaces whose per-field markup this harness asserts
 // present-or-absent per fixture, and an empty response would make every one of
 // those "absent" assertions vacuously true — the failure mode
-// docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md records. QueryAutoUpdateStatus in particular must *not* fall
-// through to cannedQueryResponse's generic `{}`: that default is
+// docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
+// records. QueryAutoUpdateStatus in particular must *not* fall through to
+// cannedQueryResponse's generic `{}`: that default is
 // indistinguishable from a genuine "no updater is configured" response, so a
 // configured-state assertion against it could never fail.
 //
@@ -557,8 +559,8 @@ type fakeCapabilityBroker struct {
 // shapes as well as the fully-successful one, and autoUpdate so a fixture
 // whose capability set lacks the Autoupdate* capabilities gets the zero-value
 // AutoUpdateStatus the daemon would really return for it rather than a
-// populated payload that host can never emit (docs/agents/skills/calibrate-
-// canned-fixture-data-per-capability-set.md).
+// populated payload that host can never emit
+// (docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 //
 // extensions is passed in for the same reason, and one more: besides the
 // per-capability calibration calibratedExtensionsState performs, the aggregate
@@ -675,8 +677,8 @@ func (b *fakeCapabilityBroker) Query(_ context.Context, _, id string, _ map[stri
 		// Never a shared constant: every fixture's response is either derived
 		// from its own capability set (calibratedExtensionsState) or is one of
 		// the two explicit per-source failure shapes, so a fixture can never be
-		// served inventory its host could not produce (docs/agents/skills/
-		// calibrate-canned-fixture-data-per-capability-set.md).
+		// served inventory its host could not produce
+		// (docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 		encoded, err := json.Marshal(b.extensions)
 		if err != nil {
 			return err
@@ -718,9 +720,9 @@ const (
 //
 // It deliberately carries all three deployment slots — booted, *staged*, and
 // *rollback* — plus rpm-ostree's supplementary Version/Checksum on the
-// booted deployment, and a non-nil SoftRebootCapable. Per docs/agents/
-// skills/canned-fixtures-need-populated-data-for-what-they-assert.md, an
-// empty or booted-only response would make this chunk's "no host-image
+// booted deployment, and a non-nil SoftRebootCapable. Per
+// docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert,
+// an empty or booted-only response would make this chunk's "no host-image
 // detail is rendered under a fixture with no host-image source" assertions
 // vacuously true: internal/modules/maintenance/views.templ renders the
 // staged and rollback rows only when those slots are non-nil and the
@@ -753,9 +755,10 @@ func cannedHostImageStatus() maintenance.HostImageStatus {
 
 // cannedHostImageStatusBootcOnly is the bootc-only fixture's own canned
 // response, calibrated to what a host advertising bootc and nothing else can
-// actually produce, per docs/agents/skills/calibrate-canned-fixture-data-per-
-// capability-set.md. Serving that fixture the default response would hand it
-// RPMOStreeAvailable true plus populated rpm-ostree Version/Checksum detail,
+// actually produce, per
+// docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set.
+// Serving that fixture the default response would hand it RPMOStreeAvailable
+// true plus populated rpm-ostree Version/Checksum detail,
 // which HostImageManager.Status cannot emit on a host whose rpm-ostree
 // capability was never advertised: its rpmOstreeAvailable branch is not
 // entered at all, so the supplement stays empty and the pair stays zeroed.
@@ -870,9 +873,10 @@ var (
 // capabilities) is the only such fixture in this file.
 //
 // Pairing it with ucoreCapabilitySet() or bootcOnlyCapabilitySet() would be the
-// exact miscalibration docs/agents/skills/calibrate-canned-fixture-data-per-
-// capability-set.md records: those two advertise bootc/rpm-ostree — enough for
-// the query itself to be registered — but neither Autoupdate* capability, so
+// exact miscalibration
+// docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set
+// records: those two advertise bootc/rpm-ostree — enough for the query itself
+// to be registered — but neither Autoupdate* capability, so
 // their only possible response is the zero-value AutoUpdateStatus. Serving them
 // this one would assert a daemon state the real manager cannot produce, and
 // would destroy the assertion those fixtures exist for: that an image host with
@@ -913,9 +917,10 @@ func cannedAutoUpdateStatus() maintenance.AutoUpdateStatus {
 // It reproduces, by hand, the one rule AutoUpdateManager.Status applies: a
 // payload accompanies its own Autoupdate* capability and nothing else. The rule
 // is spelled out per capability with capability.Set.Has rather than delegated to
-// HasAny/HasAll or to any production helper, per docs/agents/skills/dont-use-
-// the-gate-under-test-as-the-test-oracle.md — the fixture data must be an
-// independent statement of what the daemon would return, not a re-derivation
+// HasAny/HasAll or to any production helper, per
+// docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle
+// — the fixture data must be an independent statement of what the daemon would
+// return, not a re-derivation
 // through the code the harness is verifying.
 //
 // The Bootc/RPMOStree capabilities deliberately play no part here: they decide
@@ -991,9 +996,9 @@ const (
 // which source contributed, never by carrying unrelated invented data.
 //
 // It is populated, and populated across every kind, for the reason
-// docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md records: each of the Extensions page's conditionally-rendered
-// elements only exists on a row of the matching kind, so a thinner fixture
+// docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
+// records: each of the Extensions page's conditionally-rendered elements only
+// exists on a row of the matching kind, so a thinner fixture
 // would make the corresponding absence assertion vacuously true — it would pass
 // identically whether the gating/rendering logic were correct or deleted
 // outright. Concretely:
@@ -1072,7 +1077,7 @@ func cannedExtensionsState() sysext.ExtensionsState {
 // the single place every extensions fixture in this file is derived from, and
 // it reproduces by hand — never by calling into internal/modules/sysext or
 // cmd/pilothoused — the one rule the daemon's aggregate union applies
-// (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md):
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle):
 //
 //   - updex contributes Description, Enabled, Managed, and Updates. Updates in
 //     particular is updex-only because Check() is: a host without updex reports
@@ -1122,8 +1127,8 @@ func extensionsStateFromSources(updexAnswered, sysextAnswered bool) sysext.Exten
 // calibratedAutoUpdateStatus's shape: the rule is spelled out per capability
 // with capability.Set.Has rather than delegated to HasAny/HasAll or to any
 // production helper, so no fixture can be handed inventory its host could not
-// produce (docs/agents/skills/calibrate-canned-fixture-data-per-capability-
-// set.md).
+// produce
+// (docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 //
 // A fixture without updex therefore reports UpdexAvailable false, no Managed
 // extension anywhere, and no pending updates at all; a fixture without
@@ -1141,8 +1146,9 @@ func calibratedExtensionsState(caps capability.Set) sysext.ExtensionsState {
 // present, and every control the tool gates still renders) and simply did not
 // answer, which is a different fact from the tool being absent. Without both,
 // only half of ExtensionsState's symmetric availability/error convention is
-// ever exercised — exactly the gap docs/agents/skills/calibrate-canned-fixture-
-// data-per-capability-set.md records for the host-image sources.
+// ever exercised — exactly the gap
+// docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set
+// records for the host-image sources.
 //
 // Each keeps the other source's contribution completely intact, which is what
 // the "a source that fails leaves the other source's data intact" half of the
@@ -1200,9 +1206,10 @@ func cannedMaintenanceState() maintenance.State {
 //     renders the Mount and Delete forms (the Unmount form is suppressed
 //     while a mount is not mounted).
 //
-// Per docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md, an empty Snapshot can never render ManagedMountTable's
-// per-mount forms under any fixture, so an assertion that those forms are
+// Per
+// docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert,
+// an empty Snapshot can never render ManagedMountTable's per-mount forms under
+// any fixture, so an assertion that those forms are
 // absent under a gated fixture would be vacuously true — it would pass
 // identically whether the gating logic correctly hid the forms or whether
 // the forms were deleted outright. Crucially, a *single* mounted mount is
@@ -1276,7 +1283,8 @@ func cannedQueryResponse(target any) error {
 // brokerClient, returning both the registry (so tests can enumerate the
 // real module list) and the assembled HTTP handler. Using newRegistry(...)
 // rather than a hand-built module list is the whole point of this harness:
-// per docs/agents/skills/completeness-tests-need-live-source-of-truth.md,
+// per
+// docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth,
 // a completeness assertion is only meaningful when it is checked against
 // the live production wiring, not a second copy of the module list that
 // could silently drift from it.
@@ -1567,9 +1575,10 @@ func dashboardCardModuleIDs(t *testing.T, registry *platform.Registry) map[strin
 // hostImageSectionPattern locates the Maintenance page's "Host image" card
 // (internal/modules/maintenance/views.templ's hostImageSection). Every
 // host-image assertion is scoped to this region rather than to the whole
-// page, per docs/agents/skills/scope-html-assertions-to-the-region-under-
-// test.md: an image reference or digest appearing anywhere else on the page
-// must not be able to satisfy an assertion about the host-image section.
+// page, per
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test:
+// an image reference or digest appearing anywhere else on the page must not be
+// able to satisfy an assertion about the host-image section.
 var hostImageSectionPattern = regexp.MustCompile(`(?s)<article\b[^>]*\bid="host-image"[^>]*>(.*?)</article>`)
 
 // maintenanceRebootFormAction is the admin-only reboot form's action, which
@@ -1635,9 +1644,10 @@ func contractDeploymentSlots(hostImage maintenance.HostImageStatus) []contractDe
 // card (internal/modules/maintenance/views.templ's autoUpdateSection), and
 // autoUpdaterBlockPattern locates one updater's subsection *inside* it. Every
 // automatic-update assertion below is scoped through these two rather than run
-// against the whole page, per docs/agents/skills/scope-html-assertions-to-the-
-// region-under-test.md: the Maintenance page already talks about updates,
-// timers, and policy in three other regions (the summary stats, the
+// against the whole page, per
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test:
+// the Maintenance page already talks about updates, timers, and policy in three
+// other regions (the summary stats, the
 // reboot-required card, and the host-image section), so a page-wide Contains
 // could not tell "rendered in the automatic-update section" apart from
 // "rendered somewhere else", and the per-updater scoping is what stops bootc's
@@ -1773,7 +1783,7 @@ func assertAutoUpdaterNotConfigured(t *testing.T, block, slug string) {
 // presence and every per-updater field against expectations derived by hand
 // from docs/capabilities.md and from the fixture's own canned response, never
 // from platform.Available, the module's gate, or capability.Set.HasAny
-// (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md).
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle).
 //
 // Two independent facts are asserted, because the production code keeps them
 // independent:
@@ -1835,8 +1845,8 @@ func assertAutoUpdateSurfaces(t *testing.T, run contractFixtureRun, caps capabil
 // assertMaintenanceSurfaces drives GET /maintenance and checks the module's
 // two independently-gated halves against expectations written out by hand
 // from docs/capabilities.md, never from platform.Available/AvailableAny or
-// from the module's own RequiredAnyCapabilities (docs/agents/skills/dont-
-// use-the-gate-under-test-as-the-test-oracle.md):
+// from the module's own RequiredAnyCapabilities
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle):
 //
 //   - the module itself is present when any of systemd / bootc / rpm-ostree
 //     is advertised (docs/capabilities.md, "Module-level defaults applied");
@@ -1998,9 +2008,10 @@ func assertMaintenanceSurfaces(t *testing.T, run contractFixtureRun, caps capabi
 // the primary nav, the dashboard's Summary card, the Extensions page's
 // intro/actions block, and the page's two table cards ("Available extensions"
 // and "Available updates"). Each assertion below is scoped to its own region
-// before Contains/NotContains runs, per docs/agents/skills/scope-html-
-// assertions-to-the-region-under-test.md: an extension name, a version string,
-// a "0 pending" count, or the word "Updates" can legitimately appear in more
+// before Contains/NotContains runs, per
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test:
+// an extension name, a version string, a "0 pending" count, or the word
+// "Updates" can legitimately appear in more
 // than one of those regions (and the Summary card repeats up to four extension
 // rows verbatim), so a whole-page check could not tell "rendered in the updates
 // table" apart from "rendered in the Summary mini-list" and would stay green
@@ -2033,8 +2044,9 @@ var (
 // The two action-form markers are listed separately from the generic
 // `action="/sysext` prefix on purpose: the prefix alone would also be satisfied
 // by a stray substring, while naming each form makes the enumeration an audit
-// of the module's actual route families (docs/agents/skills/partial-gate-
-// modules-need-full-view-element-audit.md) rather than one catch-all check.
+// of the module's actual route families
+// (docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit)
+// rather than one catch-all check.
 func sysextAbsenceMarkers() []string {
 	return []string{
 		`href="/sysext"`,
@@ -2099,8 +2111,8 @@ func contractPageBody(t *testing.T, run contractFixtureRun, path string) string 
 // module renders, checked against expectations written out by hand from
 // docs/capabilities.md and from the fixture's own canned response, never from
 // platform.AvailableAny, sysext.Module's own RequiredAnyCapabilities, or
-// capability.Set.HasAny/HasAll (docs/agents/skills/dont-use-the-gate-under-
-// test-as-the-test-oracle.md).
+// capability.Set.HasAny/HasAll
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle).
 //
 // Four independent facts are asserted, because the production code keeps them
 // independent (see internal/modules/sysext/module.go's Mount):
@@ -2246,8 +2258,8 @@ func assertExtensionsSurfaces(t *testing.T, run contractFixtureRun, caps capabil
 			// The per-row action cell is a partial gate over the
 			// POST /sysext/{name}/{action} family, whose two members share one
 			// requirement — so both forms are audited together as one unit
-			// (docs/agents/skills/partial-gate-modules-need-full-view-element-
-			// audit.md), and an unmanaged row must render neither regardless of
+			// (docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit),
+			// and an unmanaged row must render neither regardless of
 			// capabilities, because the broker could not act on it.
 			enableForm := `action="/sysext/` + extension.Name + `/enable"`
 			disableForm := `action="/sysext/` + extension.Name + `/disable"`
@@ -2314,8 +2326,8 @@ func assertExtensionsSurfaces(t *testing.T, run contractFixtureRun, caps capabil
 // TestCannedHostImageFixtureIsPopulated pins the shape of the default
 // host-image fixture, which is what makes every "this element is absent under
 // a degraded fixture" assertion in this file meaningful rather than vacuously
-// true (docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md).
+// true
+// (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert).
 //
 // assertMaintenanceSurfaces now asserts each element present-or-absent from
 // the fixture's own values, which is what lets the two per-source failure
@@ -2387,8 +2399,9 @@ func TestCannedHostImageFixtureIsPopulated(t *testing.T) {
 // RequiredCapabilities — the services journal tab and the whole logs
 // module both need systemd AND journald). contractSubRoutes enumerates
 // every one of those secondary routes so the degraded fixtures exercise
-// them explicitly, per docs/agents/skills/gate-every-call-path-not-just-
-// routes-and-nav.md and partial-gate-modules-need-full-view-element-audit.md.
+// them explicitly, per
+// docs/design/engineering-lessons.md#gate-every-call-path-not-just-routes-and-nav
+// and partial-gate-modules-need-full-view-element-audit.md.
 var sampleUnit = "sample.service"
 var sampleDefinitionID = strings.Repeat("0123456789abcdef", 2)          // 32 hex chars (a mounted managed mount)
 var sampleUnmountedDefinitionID = strings.Repeat("fedcba9876543210", 2) // 32 hex chars (an unmounted managed mount)
@@ -2552,9 +2565,10 @@ func runCapabilityContractFixtureWith(t *testing.T, caps capability.Set, hostIma
 
 	assertNoDeadLinks(t, handler, cookie, "/", dashboardBody)
 
-	// Storage is the plan's one partial-gate module (docs/agents/skills/
-	// partial-gate-modules-need-full-view-element-audit.md): its inventory
-	// page (GET /storage) has no capability requirement and must stay
+	// Storage is the plan's one partial-gate module
+	// (docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit):
+	// its inventory page (GET /storage) has no capability requirement and must
+	// stay
 	// available in every fixture, but its remote-mount controls (the "Add
 	// remote mount" link, gated together with the Mount/Unmount/Delete
 	// forms per storage.Module.Mount's remoteMountCapabilities) require
@@ -2566,12 +2580,13 @@ func runCapabilityContractFixtureWith(t *testing.T, caps capability.Set, hostIma
 	// — Mount (only on the unmounted row), Unmount (only on the mounted
 	// row), and Delete (on both) — actually renders when available, proving
 	// each is hidden when gated rather than vacuously absent from an empty
-	// mount table (docs/agents/skills/canned-fixtures-need-populated-data-
-	// for-what-they-assert.md). Covering the Mount form specifically matters:
+	// mount table
+	// (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert).
+	// Covering the Mount form specifically matters:
 	// a lone mounted mount never renders it, so a regression that left the
 	// per-row Mount form visible when systemd is absent would otherwise slip
-	// through (docs/agents/skills/partial-gate-modules-need-full-view-
-	// element-audit.md).
+	// through
+	// (docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit).
 	storageRequest := httptest.NewRequest(http.MethodGet, "/storage", nil)
 	storageRequest.AddCookie(cookie)
 	storageRecorder := httptest.NewRecorder()
@@ -2632,8 +2647,8 @@ func runCapabilityContractFixtureWith(t *testing.T, caps capability.Set, hostIma
 	// Maintenance is this phase's composite surface — a whole-module any-of
 	// gate over two independently gated halves — so it gets its own
 	// per-element audit rather than only the generic module-level checks
-	// above (docs/agents/skills/partial-gate-modules-need-full-view-element-
-	// audit.md).
+	// above
+	// (docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit).
 	assertMaintenanceSurfaces(t, run, caps, hostImage, autoUpdate)
 
 	// Extensions is this phase's composite surface — a whole-module any-of
@@ -2677,8 +2692,8 @@ func TestCapabilityContractFullCapabilityFixture(t *testing.T) {
 // requirement requireAvailable now actually enforces against every fixture.
 // Transcribed by hand from docs/capabilities.md's sysext action rows and
 // cmd/pilothoused's registerSysextActions, not read back from the production
-// gate (docs/agents/skills/dont-use-the-gate-under-test-as-the-test-
-// oracle.md).
+// gate
+// (docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle).
 func TestSysextBrokerIDsAreSubjectToTheOrdinaryCapabilityCheck(t *testing.T) {
 	for id, want := range map[string][]capability.ID{
 		broker.ActionSysextDisable: {capability.Updex, capability.Sysext},
@@ -2896,9 +2911,10 @@ func TestCapabilityContractHostImageFixtures(t *testing.T) {
 // assertion here goes through a real newRegistry + web.NewServer + GET
 // /maintenance round trip against the fake broker, never through a direct call
 // to platform.Available/AvailableAny, capability.Set.HasAny, or any other
-// gating helper (docs/agents/skills/exercise-the-actual-boundary-not-a-
-// precomputed-shim.md). What is being proven is that internal/web's real wiring
-// asks the module, which asks the capability set, before deciding to fetch and
+// gating helper
+// (docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim).
+// What is being proven is that internal/web's real wiring asks the module,
+// which asks the capability set, before deciding to fetch and
 // render — not that a pure predicate agrees with itself.
 //
 // The four fixtures are the ones the spec's fixture-calibration paragraph
@@ -3023,8 +3039,8 @@ func autoUpdateSectionFor(t *testing.T, run contractFixtureRun) string {
 // fixture-calibration requirement at the data level, so a regression in the
 // fixtures themselves fails here loudly instead of quietly making every
 // rendering assertion above agree with an emptier or an impossible response
-// (docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md and calibrate-canned-fixture-data-per-capability-set.md).
+// (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
+// and calibrate-canned-fixture-data-per-capability-set.md).
 func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
 	// Populated: every field the section renders carries a value, so no
 	// "renders this field" assertion can pass against a blank.
@@ -3104,9 +3120,9 @@ func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
 // extensions fixture requirement at the data level, so a regression in the
 // fixtures themselves fails here loudly instead of quietly making every
 // rendering assertion in assertExtensionsSurfaces agree with an emptier or an
-// impossible response (docs/agents/skills/canned-fixtures-need-populated-data-
-// for-what-they-assert.md and calibrate-canned-fixture-data-per-capability-
-// set.md).
+// impossible response
+// (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
+// and calibrate-canned-fixture-data-per-capability- set.md).
 func TestCannedExtensionsFixtureIsPopulatedAndCalibrated(t *testing.T) {
 	canned := cannedExtensionsState()
 	require.True(t, canned.UpdexAvailable, "the default fixture must report updex as having answered")
@@ -3234,8 +3250,8 @@ func TestCannedExtensionsFixtureIsPopulatedAndCalibrated(t *testing.T) {
 // TestCapabilityContractHostImageFixtures closed #51's. Every assertion goes
 // through a real newRegistry + web.NewServer + HTTP round trip against the fake
 // broker, never through a direct call to platform.AvailableAny or any other
-// gating helper (docs/agents/skills/exercise-the-actual-boundary-not-a-
-// precomputed-shim.md).
+// gating helper
+// (docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim).
 //
 // The four fixtures separate the two independent axes the Extensions surface
 // depends on: which tools the host advertises (the module's any-of gate and the
@@ -3386,8 +3402,8 @@ func TestCapabilityContractExtensionsFixtures(t *testing.T) {
 func TestCapabilityContractBootcSnosiFixture(t *testing.T) {
 	// Both at once. The host-image response is calibrated to bootc-only, since
 	// a host advertising bootc without rpm-ostree cannot produce rpm-ostree
-	// supplementary detail (docs/agents/skills/calibrate-canned-fixture-data-
-	// per-capability-set.md).
+	// supplementary detail
+	// (docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 	t.Run("both-surfaces-together", func(t *testing.T) {
 		caps := bootcSnosiCapabilitySet()
 		require.False(t, caps.Has(capability.Systemd),

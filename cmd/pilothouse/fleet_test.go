@@ -26,8 +26,8 @@ import (
 // platform.Gate rejecting a mounted one. The assertions therefore go through
 // the real production path end to end: the actual newRegistry(dev) the
 // binary's run() calls, a real web.NewServer, and real authenticated HTTP
-// round trips through Server.Handler(), per docs/agents/skills/exercise-the-
-// actual-boundary-not-a-precomputed-shim.md.
+// round trips through Server.Handler(), per
+// docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim.
 //
 // cmd/pilothouse/capability_contract_test.go's harness deliberately stays on
 // newRegistry(true) (see newCapabilityContractServer); the dev-off default is

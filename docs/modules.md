@@ -278,7 +278,7 @@ of the existing `admin bool`): the "Add remote mount" link and the entire
 per-mount `Mount`/`Unmount`/`Delete` actions block are gated on that single
 flag, so a host missing `Systemd` never renders a link, button, or form
 pointing at a route that would 404 — see
-`docs/agents/skills/partial-gate-modules-need-full-view-element-audit.md`
+[`docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit`](design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit)
 for the failure mode this avoids.
 
 ### Any-of whole-module gating (`CapabilityGateAny`)

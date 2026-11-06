@@ -15,7 +15,7 @@ harness invites the copies to drift apart. Separately, `make
 verify-package-install` runs an arbitrary image with `--user 0:0` on the
 developer's machine, so letting the Makefile silently default the image is
 also a trust decision (see
-`docs/agents/skills/docker-run-must-not-trust-a-user-supplied-image-default.md`).
+[`docs/design/engineering-lessons.md#docker-run-must-not-trust-a-user-supplied-image-default`](../design/engineering-lessons.md#docker-run-must-not-trust-a-user-supplied-image-default)).
 
 ## Decision
 
@@ -90,4 +90,4 @@ drift, so pinning it would defeat its purpose.
   the `verify-package-install` guard in `Makefile`
 - Related: [0005 — tiered package validation](0005-tiered-package-validation-and-vm-boot-label.md),
   [0004 — hand-transcribed packaging contract](0004-hand-transcribed-packaging-contract-oracle.md),
-  [docs/agents/skills/docker-run-must-not-trust-a-user-supplied-image-default.md](../agents/skills/docker-run-must-not-trust-a-user-supplied-image-default.md)
+  [docs/design/engineering-lessons.md#docker-run-must-not-trust-a-user-supplied-image-default](../design/engineering-lessons.md#docker-run-must-not-trust-a-user-supplied-image-default)

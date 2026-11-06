@@ -55,8 +55,8 @@ func mixedState() ExtensionsState {
 
 // extensionRow isolates one extension's <tr> so a per-row assertion cannot
 // be satisfied by markup belonging to a different row or to another section
-// of the same page, per docs/agents/skills/scope-html-assertions-to-the-
-// region-under-test.md.
+// of the same page, per
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test.
 func extensionRow(t *testing.T, body, name string) string {
 	t.Helper()
 	table := section(t, body, "Available extensions")

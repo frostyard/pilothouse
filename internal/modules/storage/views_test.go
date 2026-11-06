@@ -337,8 +337,8 @@ func TestManagedPageRendersLifecycleControlsForMountState(t *testing.T) {
 // as one unit — including for a mount state ("mounted" or "active") that
 // would otherwise render one of Mount/Unmount — since all three post to the
 // same three systemd-gated remote-mount routes and none may survive
-// independently of the others (see docs/agents/skills/
-// partial-gate-modules-need-full-view-element-audit.md).
+// independently of the others (see
+// docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit).
 func TestManagedPageHidesAllRemoteMountControlsWhenUnavailable(t *testing.T) {
 	id := "remote:0123456789abcdef0123456789abcdef"
 	for _, test := range []struct {

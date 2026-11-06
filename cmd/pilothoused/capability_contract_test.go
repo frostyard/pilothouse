@@ -64,7 +64,8 @@ const (
 // Those two aggregation predicates are precisely what this phase's guards are
 // built on (registerHostImage calls caps.HasAny(Bootc, RPMOStree)), so using
 // them as the expectation would make the matrix tautological in exactly the
-// way docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md
+// way
+// docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle
 // describes: an any-of guard that silently degraded into an all-of one would
 // shift the expected and actual sides together and keep passing.
 type capabilityRequirement struct {
@@ -213,9 +214,10 @@ var moduleLevelNoneIDs = []string{
 // that documented grep into an executed assertion by parsing the same file
 // with go/ast, so the table above is compared against the *live* constant
 // declarations rather than against a second hand-maintained list that could
-// drift with it (docs/agents/skills/completeness-tests-need-live-source-of-
-// truth.md: a fixture-vs-fixture length check would pass identically if a
-// real ID were silently dropped and a placeholder substituted).
+// drift with it
+// (docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth:
+// a fixture-vs-fixture length check would pass identically if a real ID were
+// silently dropped and a placeholder substituted).
 
 // brokerAPIPath is internal/broker/api.go relative to this package's
 // directory, which is the working directory `go test` runs this file in.

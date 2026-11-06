@@ -1,8 +1,6 @@
 /bin/
 /pilothouse
-/.superpowers/
 /.worktrees/
-/.superpowers/
 /*_templ.go
 /**/*_templ.go
 site/node_modules/

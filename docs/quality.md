@@ -8,7 +8,8 @@ rolling acceptance-rate definition without copying values that can go stale.
 
 | Signal | Source | What it reports |
 | --- | --- | --- |
-| Pull request quality | [`test.yml`](../.github/workflows/test.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, and builds |
+| Pull request quality | [`ci.yml`](../.github/workflows/ci.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, the template gate (agent symlinks, docs index, risk paths, corrections), and builds |
+| Risk paths | [`risk-paths.yml`](../.github/workflows/risk-paths.yml), [`risk-paths.json`](../.github/risk-paths.json) | The `risk:high` label on a pull request that touches a high-risk path (not a required check) |
 | Repository policy | [`repository.yaml`](../policies/repository.yaml) | Versioned structural requirements for governance, review, workflow, and policy-enforcement assets |
 | Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract |
 | Package quality | [`packaging.yml`](../.github/workflows/packaging.yml) | Package contract checks, installation checks, and opt-in booted-VM validation |
@@ -26,10 +27,12 @@ wrapped CPU counters, and rendering of the composed dashboard resource summary.
 
 ## Local verification
 
-Run `make ci` before pushing. It checks module tidiness, vetting, formatting,
-lint, known Go vulnerabilities, tests (including the repository policy), race
-detection, and both binaries in the same order as the credential-free CI
-contract. Use `make docker-ci` when the host lacks the required native
+Run `make ci BASE=origin/main` before pushing. It runs `make verify` (module
+tidiness, vetting, formatting, lint at the `mise.toml` pin, the template gate,
+known Go vulnerabilities and tests, including the repository policy), then the
+corrections append-only check against `BASE`, race detection, and both
+binaries, in the same order as the credential-free CI contract. `make verify`
+alone is the non-mutating gate for a read-only review. Use `make docker-ci` when the host lacks the required native
 dependencies.
 
 Packaging and image validation require credentials, artifacts, containers, or

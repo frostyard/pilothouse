@@ -336,7 +336,7 @@ hang needs the *consumer* to leave first with more than a buffer still to
 write. None of the three simulates a denial by `chmod`-ing a directory
 unwritable: root and `CAP_DAC_OVERRIDE` write into one anyway, so such a row
 asserts a property of whoever ran the test rather than of the code (see
-`docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md`);
+[`docs/design/engineering-lessons.md#dont-use-chmod-to-simulate-permission-denied-in-tests`](engineering-lessons.md#dont-use-chmod-to-simulate-permission-denied-in-tests));
 a file that is not an rpm, a path that does not exist and an unimplemented
 option get the same answer for every user. The happy path is the other side of
 that contract, proving a producer's progress chatter on standard error is not
@@ -664,7 +664,7 @@ in `make docker-ci` (`.goreleaser.yaml` uses a GoReleaser Pro block, and the dev
 image deliberately has no goreleaser). Asserting the clean path one level down,
 on a reporting helper, would leave `run`'s own return value asserted only on
 failures — where a `run` that returned 1 unconditionally would pass everything
-(`docs/agents/skills/test-the-composing-function-not-its-merge-helper.md`). So
+([`docs/design/engineering-lessons.md#test-the-composing-function-not-its-merge-helper`](engineering-lessons.md#test-the-composing-function-not-its-merge-helper)). So
 that table injects an extraction result and a verification result, and only
 those: a placeholder `Model` with a `verify` returning nothing gives exit 0 with
 the zero-finding summary and no failure text, for a `.deb` row and an `.rpm` row;
@@ -677,7 +677,7 @@ knowledge — the findings use invented codes that are none of the nine, and the
 models are the same `/opt/phx/…` placeholders the fixtures use. Everything a real
 artifact *can* demonstrate — discovery, dispatch, extraction failure — is asserted
 through `defaultDeps()`, which keeps the seam a seam and not a shim
-(`docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md`).
+([`docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim`](engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim)).
 The narrowing that remains, stated plainly: **no test asserts exit 0 for a real
 artifact**, because no conforming one can be produced here.
 

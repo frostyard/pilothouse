@@ -50,9 +50,10 @@ func TestLayoutRendersFrostyardShellAndComponents(t *testing.T) {
 
 // systemPickerRegionPattern isolates the sidebar's system-picker block — the
 // markup between its opening <div class="system-picker"> and the primary
-// navigation that follows it. Per docs/agents/skills/scope-html-assertions-
-// to-the-region-under-test.md, a whole-page Contains check could not tell
-// "the system-picker still hardcodes a /fleet link" apart from "the nav loop
+// navigation that follows it. Per
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test,
+// a whole-page Contains check could not tell "the system-picker still hardcodes
+// a /fleet link" apart from "the nav loop
 // rendered a legitimate /fleet entry", since both regions carry the same
 // href; scoping to this region proves the picker independently.
 var systemPickerRegionPattern = regexp.MustCompile(`(?s)<div class="system-picker">(.*?)<nav\b`)

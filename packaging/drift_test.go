@@ -26,7 +26,8 @@ import (
 // tables drifting from .goreleaser.yaml, the file those tables were
 // transcribed from, and a guard that compared them against an embedded
 // snapshot of the YAML would be the
-// fixture-vs-fixture test docs/agents/skills/completeness-tests-need-live-source-of-truth.md
+// fixture-vs-fixture test
+// docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth
 // forbids: the snapshot and the tables would drift together, undetected.
 //
 // So this file reads ../.goreleaser.yaml — through goreleaserConfigPath, the

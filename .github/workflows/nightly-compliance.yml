@@ -35,9 +35,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libpam0g-dev libsystemd-dev
 
+      # golangci-lint comes from mise.toml and mise.lock, checksum-verified,
+      # so the nightly run uses exactly the release `make lint` checks for.
+      # `make ci` runs with no BASE here: a scheduled run has no pull request
+      # base commit to compare .memory/corrections.jsonl with.
+      - name: Install golangci-lint and Node
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install: true
+          install_args: golangci-lint node
+          cache: true
+
       - name: Install compliance tools
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
           go install golang.org/x/vuln/cmd/govulncheck@latest
           golangci-lint version
           govulncheck -version

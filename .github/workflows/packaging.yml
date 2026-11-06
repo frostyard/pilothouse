@@ -7,11 +7,11 @@
 # installed package on a host with systemd as PID 1, so a packaging regression
 # fails a pull request instead of shipping.
 #
-# Why this is its own file, and not a job in .github/workflows/test.yml:
+# Why this is its own file, and not a job in .github/workflows/ci.yml:
 # this job needs the GORELEASER_KEY secret, and GitHub does not hand repository
 # secrets to a workflow run triggered by a pull request from a fork. A job
-# added to test.yml would therefore fail for every fork contributor, and
-# test.yml must stay green for them. Keeping the credential-dependent gate in
+# added to ci.yml would therefore fail for every fork contributor, and
+# ci.yml must stay green for them. Keeping the credential-dependent gate in
 # its own file lets that whole file skip on fork pull requests while the rest
 # of the gates keep running.
 #
@@ -56,6 +56,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Set up Go
@@ -158,6 +159,8 @@ jobs:
       # tree, not from the artifact.
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download the built packages
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -207,6 +210,8 @@ jobs:
       # The harness comes from the tree, never from the artifact.
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Standard GitHub-hosted runners expose /dev/kvm but not to the job's
       # user. This udev rule is what makes hardware acceleration usable; the

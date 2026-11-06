@@ -52,17 +52,12 @@ conductor run workflows/module-audit.yaml
 conductor run workflows/module-audit.yaml -i filter=podman   # subset
 ```
 
-### The mill (moved to frostyard/mill)
-The spec→PR harness now lives in [frostyard/mill](https://github.com/frostyard/mill)
-as a shared engine for all frostyard repos. This repo carries only its
-config (`.mill.toml`), its learned skills (`docs/agents/skills/`), and the
-cross-agent surface links (`CLAUDE.md`, `GEMINI.md`,
-`.github/copilot-instructions.md`, `.agents` → all reading `AGENTS.md`).
-
-```bash
-curl -sSfL https://raw.githubusercontent.com/frostyard/mill/main/install.sh | sh
-mill 35 --no-pr        # run issue #35, interactive gates, keep local
-```
+### The mill (retired)
+The archived [frostyard/mill](https://github.com/frostyard/mill) spec→PR
+harness no longer runs here. Its configuration and lesson files were removed
+by [ADR 0014](../docs/adr/0014-adopt-the-repository-baseline.md); the lessons
+that still hold are in
+[`docs/design/engineering-lessons.md`](../docs/design/engineering-lessons.md).
 
 ## Useful flags
 

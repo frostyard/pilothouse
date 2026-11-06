@@ -25,5 +25,5 @@ credentials, or other sensitive values.
 ## Context
 
 - Record concise details needed to resume safely. Put durable repository
-  lessons in `docs/agents/skills/` and correction records in
-  `corrections.jsonl`.
+  lessons in `docs/design/engineering-lessons.md` and correction records in
+  `.memory/corrections.jsonl`.

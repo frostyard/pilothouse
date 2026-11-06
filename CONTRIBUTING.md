@@ -15,7 +15,7 @@ Thank you for helping improve Pilothouse.
 
 Pilothouse requires Go 1.26 or newer. The application uses idiomatic Go, templ,
 HTMX, and vanilla CSS and JavaScript. See the [development
-instructions](README.md#develop) for local setup and commands.
+instructions](docs/development.md) for local setup and commands.
 
 Keep management features in `internal/modules/<name>`. Unprivileged web modules
 may collect read-only data locally, but privileged reads and mutations must use
@@ -44,11 +44,15 @@ review requirements and never replaces repository checks or invariants.
 
 ## Validate and submit
 
-Run the credential-free CI checks before opening a pull request:
+Install the pinned tools with `mise install` (`mise.toml`, `mise.lock`), then
+run the credential-free CI checks before opening a pull request:
 
 ```sh
-make ci
+make ci BASE=origin/main
 ```
+
+`make verify` is the same gate without the race detector and build, and it
+changes no file; `make check` formats first, then runs `make verify`.
 
 If your host lacks Go, PAM, or systemd development dependencies, use:
 
