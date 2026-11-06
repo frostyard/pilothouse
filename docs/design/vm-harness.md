@@ -601,7 +601,7 @@ second build.
 - Its steps are `actions/checkout@v7` (the harness comes from the tree), the
   KVM rule, an `apt-get install` of `qemu-system-x86`, `qemu-utils` and
   `xorriso` (boot, overlay creation and the NoCloud seed ISO respectively),
-  `actions/download-artifact@v5` for the matrix row's artifact **only**, and a
+  `actions/download-artifact@v8` for the matrix row's artifact **only**, and a
   single run step: `bash test/vm/vm-boot-test.sh --family ${{ matrix.family }}
   --artifact-dir dist`. The **explicit interpreter** is not decoration —
   `test/vm/vm-boot-test.sh` is also committed `100755`, so neither the file
