@@ -258,6 +258,12 @@ personal data, speculation, or transient worktree state.
 
 `mise install` provisions the pinned tools (`mise.toml`, `mise.lock`:
 golangci-lint and Node 22 or later; Go comes from `go.mod`).
+Never replace, rebuild or reinstall a shared tool binary on the host (a mise
+install, `~/go/bin`) to make a gate pass: `make lint-version-check` checks the
+official release that `mise.toml` and `mise.lock` pin, and CI installs that
+same release, so a local substitute hides a CI failure. When a tool does not
+match its pin, run `mise install` (or use `make docker-ci`) and report the
+mismatch.
 
 **make ci / make docker-ci** runs every CI gate that runs without
 credentials — tidy check, vet, format check, lint, template gate,
