@@ -67,13 +67,14 @@ func citationProblems(rel, text string, anchors map[string]bool) (problems []str
 			}
 		}
 	}
-	for _, m := range lessonAnchorRef.FindAllStringSubmatch(joined, -1) {
+	// URLs name files in other repositories: only local citations count.
+	local := urlText.ReplaceAllString(joined, "")
+	for _, m := range lessonAnchorRef.FindAllStringSubmatch(local, -1) {
 		citations++
 		if !anchors[m[1]] {
 			problems = append(problems, rel+": engineering-lessons.md#"+m[1]+" names no anchor")
 		}
 	}
-	local := urlText.ReplaceAllString(joined, "")
 	deleted := map[string]bool{}
 	for _, name := range deletedLessonNames {
 		deleted[name] = true
@@ -106,6 +107,7 @@ func TestCitationProblemsFixtures(t *testing.T) {
 		{"deleted lesson name", "a.md", "see go-sum-diff-criteria-can-be-unsatisfiable.md\n", 1},
 		{"split name", "a.go", "// per-capability- set.md\n", 1},
 		{"illustrative name", "a.md", "create `replace-the-remote-mount-ui.md` in docs/plans\n", 0},
+		{"external lesson anchor", "a.md", "[x](https://github.com/frostyard/chairlift/blob/main/docs/design/engineering-lessons.md#another-project-rule)\n", 0},
 		{"external reference", "a.md", "[x](https://github.com/frostyard/core/blob/main/docs/adr/0071-hold-every-code-repository-to-one-baseline.md)\n", 0},
 	}
 	for _, tc := range cases {
@@ -119,7 +121,8 @@ func TestCitationProblemsFixtures(t *testing.T) {
 }
 
 // TestNoCitationOfRetiredPaths guards the baseline cleanup (ADR 0014): no
-// tracked text file cites the deleted docs/agents/skills/ lessons or the
+// text file in the working tree (outside .git, .agents and build output)
+// cites the deleted docs/agents/skills/ lessons or the
 // renamed .github/workflows/test.yml, every engineering-lessons.md#<anchor>
 // citation names an anchor that exists, and no file cites a lesson by its
 // old file name. Wrapped comment lines are joined first.
