@@ -69,10 +69,11 @@ func TestPublicWebFlowEndToEnd(t *testing.T) {
 		}
 		_ = command.Process.Signal(os.Interrupt)
 		select {
-		case <-wait:
+		case err := <-wait:
+			t.Logf("pilothouse exited: %v", err)
 		case <-time.After(5 * time.Second):
 			_ = command.Process.Kill()
-			<-wait
+			t.Logf("pilothouse exited after kill: %v", <-wait)
 		}
 	})
 

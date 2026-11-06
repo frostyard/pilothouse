@@ -337,8 +337,12 @@ paths (core ADR-0068): the gate and governance files, the release files,
 `internal/auth/**`. A pull request that touches one gets the `risk:high`
 label from `.github/workflows/risk-paths.yml`; never remove that label to
 make a pull request ready. Its body names each matched path and why the
-change is safe. Add a new privileged or release path to the list in the same
-change that creates it.
+change is safe. Build that list from the whole final diff, not from memory:
+match every path of `git diff --name-only BASE...HEAD`, tests and docs
+included, against the base's `.github/risk-paths.json` (the risk-paths job
+summary lists the matches), and check it again after each new commit. Add
+a new privileged or release path to the list in the same change that
+creates it.
 
 ## Org-wide decisions
 

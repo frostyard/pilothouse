@@ -254,8 +254,7 @@ func TestStreamActionStreamsBodyWithoutPrereading(t *testing.T) {
 		assert.Equal(t, "ab", got)
 	case <-time.After(time.Second):
 		close(release)
-		<-done
-		t.Fatal("handler did not receive the first chunk before the source released the rest")
+		t.Fatalf("handler did not receive the first chunk before the source released the rest (stream result: %v)", <-done)
 	}
 	close(release)
 	require.NoError(t, <-done)

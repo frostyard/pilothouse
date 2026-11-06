@@ -288,7 +288,7 @@ Layer A in CI, and it is a *consumer* of the `packages` job, not a second build:
   message names, for the same reason: a floating tag makes the gate's result
   depend on when it ran.
 - Its steps are `actions/checkout@v7` (the script and the Makefile come from the
-  tree, never from the artifact), `actions/download-artifact@v5` fetching the
+  tree, never from the artifact), `actions/download-artifact@v8` fetching the
   matrix row's artifact into `dist/`, then
   `make verify-package-install INSTALL_IMAGE=${{ matrix.image }}
   ARTIFACT_DIR=dist` — the *same* target a developer runs, so CI and a
