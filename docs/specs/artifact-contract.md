@@ -549,7 +549,7 @@ They are **not** a restatement of `goreleaser_config_test.go`. That test asserts
 *the config* matches hand-written expectations; these assert *`Verify`'s tables*
 match the live config. Opposite direction, and the only thing standing between
 `contract.go` and silent divergence
-(`docs/agents/skills/completeness-tests-need-live-source-of-truth.md` is why an
+([`docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth`](../design/engineering-lessons.md#completeness-tests-need-live-source-of-truth) is why an
 embedded snapshot of the YAML would not do: the snapshot and the tables would
 drift together, undetected).
 

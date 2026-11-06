@@ -1,8 +1,8 @@
 // This file is an INTERNAL test — package extract, not extract_test — because
 // the three parsers it tables are unexported: the file-table line parser, the
 // dependency-pairing function and the postinstall presence-marker parser. Per
-// docs/agents/skills/test-the-composing-function-not-its-merge-helper.md those
-// tables SUPPLEMENT the fixture-backed tests below, which drive the same
+// docs/design/engineering-lessons.md#test-the-composing-function-not-its-merge-helper
+// those tables SUPPLEMENT the fixture-backed tests below, which drive the same
 // parsers through RPM itself against a real .rpm built by
 // packagingtest.BuildRPM; they do not replace them, and no table row stands in
 // for an end-to-end case a fixture can express.
@@ -767,7 +767,7 @@ func TestRPMWithoutToolWrapsErrToolUnavailable(t *testing.T) {
 // implementation hung on forever, and the one a happy-path row cannot reach:
 // the CONSUMER exits first, while the producer still has more than a pipe
 // buffer left to write. See
-// docs/agents/skills/piped-subprocess-pairs-need-concurrent-wait.md.
+// docs/design/engineering-lessons.md#piped-subprocess-pairs-need-concurrent-wait.
 //
 // The happy-path test above is the other side of the same contract: a
 // successful extraction proves that a tool's exit status, not any output it
@@ -808,7 +808,7 @@ func TestRPMPipeReportsFailureInEitherHalf(t *testing.T) {
 		// any process holding CAP_DAC_OVERRIDE write into one anyway, so a
 		// chmod-simulated denial makes the required failure a property of the
 		// runner rather than of the code (see
-		// docs/agents/skills/dont-use-chmod-to-simulate-permission-denied-in-tests.md).
+		// docs/design/engineering-lessons.md#dont-use-chmod-to-simulate-permission-denied-in-tests).
 		missing := filepath.Join(t.TempDir(), "no-such-directory")
 
 		err := rpmExtractPayload(t.Context(), artifact, missing)

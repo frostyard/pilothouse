@@ -31,8 +31,9 @@ func TestPageRendersMaintenanceStateAndComponents(t *testing.T) {
 // strip. The update-availability assertions below are scoped to it (and to the
 // Summary card, and to the page as a whole for the removed table) rather than
 // run page-wide, per
-// docs/agents/skills/scope-html-assertions-to-the-region-under-test.md: the
-// page legitimately talks about updates in the read-only "Automatic updates"
+// docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test:
+// the page legitimately talks about updates in the read-only "Automatic
+// updates"
 // section, so a bare page-wide search for "updates" could not tell the removed
 // extension-update surfaces apart from the section that must stay.
 const engineStatsOpenTag = `<section class="engine-stats"`
@@ -106,7 +107,7 @@ func TestSummaryOmitsExtensionUpdateAvailability(t *testing.T) {
 // against the whole page: the page legitimately mentions reboots, images, and
 // versions in three other regions, so a page-wide Contains could not tell
 // "rendered in the host-image section" apart from "rendered somewhere else"
-// (docs/agents/skills/scope-html-assertions-to-the-region-under-test.md).
+// (docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test).
 const hostImageOpenTag = `<article class="card" id="host-image"`
 
 // rebootCardOpenTag is the opening tag of the Systemd-gated reboot-posture
@@ -168,9 +169,10 @@ func stagedBootcState() State {
 
 // fullHostImageStatus is a populated host-image report: a booted deployment
 // with an image reference and digest, plus staged and rollback deployments.
-// Per docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-
-// assert.md, every slot whose rendering these tests assert on is populated, so
-// an "absent" assertion under a gated fixture cannot pass merely because the
+// Per
+// docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert,
+// every slot whose rendering these tests assert on is populated, so an "absent"
+// assertion under a gated fixture cannot pass merely because the
 // data was empty everywhere.
 func fullHostImageStatus(softReboot *bool) HostImageStatus {
 	return HostImageStatus{
@@ -494,7 +496,8 @@ func TestPageExposesNoHostImageMutationControl(t *testing.T) {
 // run against the whole page: the page already talks about updates, timers,
 // and policy in three other regions, so a page-wide Contains could not tell
 // "rendered in the automatic-update section" apart from "rendered somewhere
-// else" (docs/agents/skills/scope-html-assertions-to-the-region-under-test.md).
+// else"
+// (docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test).
 const autoUpdateOpenTag = `<article class="card" id="auto-update"`
 
 // bootcAutoUpdatePayload and rpmOStreeAutoUpdatePayload are populated
@@ -503,7 +506,7 @@ const autoUpdateOpenTag = `<article class="card" id="auto-update"`
 // the two payloads. That is deliberate: an assertion scoped to one updater's
 // block cannot pass by accidentally matching the other's data, and neither
 // drop-in boolean can pass by matching the other's rendering
-// (docs/agents/skills/canned-fixtures-need-populated-data-for-what-they-assert.md).
+// (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert).
 //
 // The policy strings are real members of each updater's own closed vocabulary —
 // bootc's from autoupdate.go, rpm-ostree's from autoupdate_rpmostree.go — never
@@ -552,7 +555,7 @@ func bothConfiguredAutoUpdate() AutoUpdateStatus {
 //
 // Each cell carries the capability set a real daemon would have to advertise to
 // produce it, per the spec's fixture-calibration requirement and
-// docs/agents/skills/calibrate-canned-fixture-data-per-capability-set.md:
+// docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set:
 // AutoUpdateManager derives BootcConfigured/RPMOStreeConfigured from
 // capability.AutoupdateBootc/AutoupdateRPMOStree, so a configured payload only
 // ever accompanies its own Autoupdate* capability, while the query itself stays

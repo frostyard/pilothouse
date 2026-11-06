@@ -10,7 +10,7 @@ required_files:
   - docs/security/SECURITY-AI.md
   - .github/pull_request_template.md
   - .github/workflows/nightly-compliance.yml
-  - .github/workflows/test.yml
+  - .github/workflows/ci.yml
   - internal/workflowcheck/actions_test.go
   - internal/workflowcheck/repository_policy_test.go
   - policies/README.md

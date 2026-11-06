@@ -28,7 +28,7 @@ type testWorkflow struct {
 }
 
 func TestTestGatesRunEveryTest(t *testing.T) {
-	workflowData, err := os.ReadFile("../../.github/workflows/test.yml")
+	workflowData, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestTestGatesRunEveryTest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("go test commands: test.yml=%d Makefile=%d; required targets: test=%d race=%d; unit-test=%d race-test=%d",
+	t.Logf("go test commands: ci.yml=%d Makefile=%d; required targets: test=%d race=%d; unit-test=%d race-test=%d",
 		len(workflowCommands), len(makeCommands),
 		len(findGoTestCommands(strings.ReplaceAll(strings.Join(makeTargets["test"], "\n"), "$(GO)", "go"))),
 		len(findGoTestCommands(strings.ReplaceAll(strings.Join(makeTargets["race"], "\n"), "$(GO)", "go"))),
@@ -113,19 +113,19 @@ func checkTestGates(makeText, workflowText string) error {
 
 	var workflow testWorkflow
 	if err := yaml.Unmarshal([]byte(workflowText), &workflow); err != nil {
-		errs = append(errs, fmt.Errorf(".github/workflows/test.yml: parse workflow: %w", err))
+		errs = append(errs, fmt.Errorf(".github/workflows/ci.yml: parse workflow: %w", err))
 		return errors.Join(errs...)
 	}
 
 	for _, command := range findWorkflowGoTestCommands(workflowText) {
 		if err := validateGoTestCommand(command); err != nil {
-			errs = append(errs, fmt.Errorf(".github/workflows/test.yml: %w", err))
+			errs = append(errs, fmt.Errorf(".github/workflows/ci.yml: %w", err))
 		}
 	}
 
 	unitJob, ok := workflow.Jobs["unit-test"]
 	if !ok {
-		errs = append(errs, errors.New(".github/workflows/test.yml: missing unit-test job"))
+		errs = append(errs, errors.New(".github/workflows/ci.yml: missing unit-test job"))
 	} else {
 		var unitFull, unitSdjournal int
 		for _, command := range findJobGoTestCommands(unitJob) {
@@ -140,18 +140,18 @@ func checkTestGates(makeText, workflowText string) error {
 			}
 		}
 		if unitFull != 1 {
-			errs = append(errs, fmt.Errorf(".github/workflows/test.yml unit-test: found %d full-suite go test commands, want exactly 1", unitFull))
+			errs = append(errs, fmt.Errorf(".github/workflows/ci.yml unit-test: found %d full-suite go test commands, want exactly 1", unitFull))
 		}
 		if unitSdjournal != 1 {
-			errs = append(errs, fmt.Errorf(".github/workflows/test.yml unit-test: found %d sdjournal go test commands, want exactly 1", unitSdjournal))
+			errs = append(errs, fmt.Errorf(".github/workflows/ci.yml unit-test: found %d sdjournal go test commands, want exactly 1", unitSdjournal))
 		}
 	}
 
 	raceJob, ok := workflow.Jobs["race-test"]
 	if !ok {
-		errs = append(errs, errors.New(".github/workflows/test.yml: missing race-test job"))
+		errs = append(errs, errors.New(".github/workflows/ci.yml: missing race-test job"))
 	} else if countMakeRaceSteps(raceJob) != 1 {
-		errs = append(errs, fmt.Errorf(".github/workflows/test.yml race-test: found %d make race steps, want exactly 1", countMakeRaceSteps(raceJob)))
+		errs = append(errs, fmt.Errorf(".github/workflows/ci.yml race-test: found %d make race steps, want exactly 1", countMakeRaceSteps(raceJob)))
 	}
 
 	lintStart := strings.Index(makeText, "lint: ## Run linter")
@@ -181,7 +181,7 @@ func TestTestGatesMutationRemovesRequiredCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowData, err := os.ReadFile("../../.github/workflows/test.yml")
+	workflowData, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestFindGoTestCommandsIgnoresComments(t *testing.T) {
 }
 
 func TestTestWorkflowUsesLeastPrivilegeAndPinnedScanner(t *testing.T) {
-	data, err := os.ReadFile("../../.github/workflows/test.yml")
+	data, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
 	}

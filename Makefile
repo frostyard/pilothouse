@@ -1,4 +1,4 @@
-.PHONY: build generate run test race fmt format-check lint package bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages verify-package-install help
+.PHONY: build generate run test race fmt format-check lint lint-version-check verify verify-template corrections-base check package bump bump-preflight bump-verify docker-bump-verify docker-next-version docker-tools-check test-bump docker-image docker-build docker-generate docker-run docker-test docker-race docker-fmt docker-lint verify-packages verify-package-install help
 
 GO ?= go
 GOFMT ?= gofmt
@@ -10,7 +10,22 @@ GOFMT ?= gofmt
 # does when it drives format-check with a stub gofmt.
 GOFILES = $$(find . -type f -name '*.go' -not -name '*_templ.go')
 GO_VERSION ?= 1.26.10
-GOLANGCI_LINT_VERSION ?= v2.11.4
+# The Go release this module is built with, from go.mod's go line: the only Go
+# pin (mise reads the same line). golangci-lint must be built with a Go at
+# least this new, or its embedded gofmt and typechecker disagree with the
+# toolchain.
+GO_MOD_VERSION := $(strip $(shell sed -n 's/^go \(.*\)/\1/p' go.mod))
+# Pinned golangci-lint release, read from mise.toml — mise.toml is the only pin:
+# `mise install` provisions it locally and in CI (jdx/mise-action), verified
+# against mise.lock. Bump it there, never here. The docker image's
+# `go install ...@vX.Y.Z` build arg needs the `v` prefix, while
+# `golangci-lint version --short` prints the bare "X.Y.Z"
+# (GOLANGCI_LINT_PIN).
+GOLANGCI_LINT_VERSION ?= v$(strip $(shell sed -n 's/^golangci-lint = "\(.*\)"/\1/p' mise.toml))
+GOLANGCI_LINT_PIN = $(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
+# The major version of the Node on PATH (mise.toml pins it), checked by
+# make verify-template so the template gate needs no package install.
+NODE_MAJOR := $(shell node -p "process.versions.node.split('.')[0]" 2>/dev/null)
 SVU_VERSION ?= v3.4.1
 DOCKER ?= docker
 DOCKER_IMAGE ?= pilothouse-dev:go$(GO_VERSION)
@@ -58,8 +73,39 @@ format-check: ## Verify Go source formatting without rewriting files
 	@files="$$($(GOFMT) -l $(GOFILES))" || exit $$?; \
 	if [ -n "$$files" ]; then printf '%s\n' "$$files"; exit 1; fi
 
+# Fail unless the installed golangci-lint is the mise.toml pin and was built
+# with a Go no older than go.mod's go line. The patch level is not compared:
+# golangci-lint releases are built with the Go patch current at their release
+# (2.11.4 with go1.26.1), while go.mod's go line is a patch-level release
+# (1.26.10), and a patch difference does not change gofmt's output.
+lint-version-check: ## Fail unless golangci-lint is the mise.toml pin, built with a Go no older than go.mod's
+	@test -n "$(GOLANGCI_LINT_VERSION)" || { echo "mise.toml pins no golangci-lint"; exit 1; }
+	@installed="$$(golangci-lint version --short 2>/dev/null)" || { \
+		echo "golangci-lint $(GOLANGCI_LINT_PIN) is required (not installed; run: mise install)"; exit 1; }; \
+	if [ "$$installed" != "$(GOLANGCI_LINT_PIN)" ]; then \
+		echo "expected golangci-lint $(GOLANGCI_LINT_PIN), found $$installed (run: mise install)"; \
+		exit 1; \
+	fi; \
+	built="$$(golangci-lint version 2>/dev/null | sed -n 's/.*built with go\([0-9.]*\).*/\1/p')"; \
+	built_minor="$$(printf '%s' "$$built" | cut -d. -f1,2)"; \
+	module_minor="$$(printf '%s' "$(GO_MOD_VERSION)" | cut -d. -f1,2)"; \
+	if [ -n "$$built" ] && [ "$$(printf '%s\n%s\n' "$$module_minor" "$$built_minor" | sort -V | head -1)" != "$$module_minor" ]; then \
+		echo "golangci-lint $(GOLANGCI_LINT_PIN) was built with go$$built, older than go.mod's go$(GO_MOD_VERSION): bump golangci-lint first"; \
+		exit 1; \
+	fi
+
 lint: ## Run linter
-	@if command -v golangci-lint >/dev/null 2>&1 && golangci-lint version >/dev/null 2>&1; then golangci-lint run; else echo "golangci-lint not found on PATH; run 'make docker-lint'." >&2; exit 1; fi
+	@if ! command -v golangci-lint >/dev/null 2>&1; then echo "golangci-lint not found on PATH; run 'mise install' or 'make docker-lint'." >&2; exit 1; fi
+	@$(MAKE) --no-print-directory lint-version-check
+	golangci-lint run
+
+# Check the agent surfaces, docs index, risk paths, corrections and vendored
+# copies (needs Node.js 22 or later, from mise.toml)
+verify-template: ## Check agent surfaces, docs index, risk paths, corrections and vendored copies (needs Node 22+)
+	@if ! command -v node >/dev/null 2>&1; then echo "FAIL: verify-template requires Node.js 22 or later (run: mise install)"; exit 1; fi
+	@if [ "$(NODE_MAJOR)" = "" ] || [ "$(NODE_MAJOR)" -lt 22 ]; then echo "FAIL: verify-template requires Node.js 22 or later (found: $$(node --version 2>/dev/null || echo missing)); run: mise install"; exit 1; fi
+	node scripts/check-template.mjs
+	node --test test/*.test.mjs
 
 docker-image: ## Build the development image used by docker-* targets
 	$(DOCKER) build \
@@ -103,19 +149,52 @@ docker-fmt: docker-image ## Format Go source files in Docker
 docker-lint: docker-image ## Run golangci-lint in Docker
 	$(DOCKER_RUN) golangci-lint run
 
-ci: generate ## Run every CI gate that runs without credentials (lint, vuln, tidy, vet, fmt, test, race, build); the packaging.yml gate needs GORELEASER_KEY and cannot run here
+verify: generate ## Non-mutating gate: tidy diff, vet, format check, lint, template gate, govulncheck, tests
 	@echo "==> go mod tidy check" && go mod tidy -diff
 	@echo "==> go vet" && go vet ./...
 	@echo "==> format check" && $(MAKE) format-check
 	@echo "==> lint" && $(MAKE) lint
+	@echo "==> template gate" && $(MAKE) verify-template
 	@echo "==> govulncheck" && { command -v govulncheck >/dev/null 2>&1 && govulncheck ./... || go run golang.org/x/vuln/cmd/govulncheck@latest ./...; }
 	@echo "==> tests" && $(MAKE) test
+
+# One command mirrors CI's credential-free gates: verify (the tidy diff, vet,
+# the gofmt check, the pinned golangci-lint, the template gate, govulncheck and
+# the tests), then the corrections check against BASE (corrections-base), then
+# the race detector, then the build, in fail-fast order.
+ci: verify ## Run every CI gate that runs without credentials (lint, vuln, tidy, vet, fmt, template gate, corrections, test, race, build); the packaging.yml gate needs GORELEASER_KEY and cannot run here
+	$(MAKE) --no-print-directory corrections-base
 	@echo "==> race" && $(MAKE) race
 	@echo "==> build" && $(MAKE) build
 	@echo "all CI gates passed"
 
+# The corrections check compares .memory/corrections.jsonl with BASE: lines are
+# append-only (only an empty promoted_to may be filled in). The contract starts
+# with the gate: a BASE that does not hold scripts/check-corrections.mjs had no
+# such rule, so the comparison is skipped with a notice. A BASE that does not
+# resolve to a commit is an error, never an old base: a typo or an unfetched ref
+# must not turn the comparison into a silent pass.
+corrections-base: ## Check that .memory/corrections.jsonl is append-only against BASE
+	@if [ -z "$(BASE)" ]; then exit 0; fi; \
+	if ! git rev-parse --verify --quiet "$(BASE)^{commit}" >/dev/null; then \
+		echo "FAIL: BASE $(BASE) does not resolve to a commit (fetch it first)"; \
+		exit 1; \
+	fi; \
+	if git cat-file -e "$(BASE):scripts/check-corrections.mjs" 2>/dev/null; then \
+		node scripts/check-corrections.mjs --base "$(BASE)"; \
+	else \
+		echo "==> corrections: BASE $(BASE) predates the corrections gate; append-only comparison skipped"; \
+	fi
+
+check: fmt verify ## Developer gate: format, then verify
+
+# docker-ci passes BASE into the container, so `make docker-ci BASE=origin/main`
+# runs the same corrections comparison as `make ci BASE=origin/main`. The
+# container sees only the bind-mounted checkout: BASE must resolve there (a
+# clone whose .git is a directory), or corrections-base fails rather than
+# skipping. In a git worktree, run `make corrections-base BASE=...` on the host.
 docker-ci: docker-image ## Run every CI gate that runs without credentials inside the development image; the packaging.yml gate needs GORELEASER_KEY and cannot run here
-	$(DOCKER_RUN) make ci
+	$(DOCKER_RUN) make ci BASE="$(BASE)"
 
 bump-preflight: ## Verify that main is clean and synchronized
 	@DOCKER="$(DOCKER)" ./scripts/bump.sh preflight

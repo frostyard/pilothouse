@@ -1,6 +1,6 @@
 // Package capability defines the vocabulary of host capabilities that
 // pilothoused probes at startup and advertises over the broker's
-// QueryCapabilities query (see .mill/spec.md and docs/capabilities.md). It
+// QueryCapabilities query (see docs/capabilities.md). It
 // defines only the ID/Set model used to encode the query response and to
 // gate handler registration in cmd/pilothoused; it contains no probing
 // logic itself and is deliberately independent of internal/broker.

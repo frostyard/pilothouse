@@ -15,7 +15,7 @@ produced the artifacts can only detect packaging-tool bugs, never a wrong or
 accidentally edited config: if someone changes a destination path or drops a
 dependency in `.goreleaser.yaml`, artifacts and expectations move together and
 nothing fails. The repo already had a near miss of this shape, documented in
-`docs/agents/skills/completeness-tests-need-live-source-of-truth.md`.
+[`docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth`](../design/engineering-lessons.md#completeness-tests-need-live-source-of-truth).
 
 ## Decision
 
@@ -80,5 +80,5 @@ it may not also be the oracle").
   (`TestContractTablesMatchGoreleaserConfig`,
   `TestBinaryDestinationsMatchBuilds`)
 - Related: [0010 — forbidden packaging roots](0010-forbidden-packaging-roots-two-unharmonized-layers.md),
-  [docs/agents/skills/completeness-tests-need-live-source-of-truth.md](../agents/skills/completeness-tests-need-live-source-of-truth.md)
+  [docs/design/engineering-lessons.md#completeness-tests-need-live-source-of-truth](../design/engineering-lessons.md#completeness-tests-need-live-source-of-truth)
 - Builds on: [core ADR-0022 — make ci is the canonical gate](https://github.com/frostyard/core/blob/main/docs/adr/0022-make-ci-gate-and-test-naming-filter.md)

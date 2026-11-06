@@ -15,14 +15,14 @@ import (
 
 // Every test in this file drives run, the function whose return value becomes
 // the process exit status — never a reporting or dispatch helper
-// (docs/agents/skills/test-the-composing-function-not-its-merge-helper.md).
+// (docs/design/engineering-lessons.md#test-the-composing-function-not-its-merge-helper).
 //
 // Every test but TestRunExitStatusIsDerivedFromResults drives it through
 // defaultDeps(), the production wiring, so discovery, dispatch by extension and
 // real extraction failures are proven against the code main runs. That one test
 // injects substitutes, and only for the outcomes no artifact available here can
 // produce: a successful extraction and a clean verification
-// (docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md).
+// (docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim).
 //
 // None of these tests needs a packaging tool. dpkg-deb is present on the
 // development host and rpm is not, and every assertion below holds either way:
@@ -49,8 +49,8 @@ func execRun(t *testing.T, d deps, args ...string) (int, string, string) {
 // Substring assertions over a run that reports several artifacts are applied to
 // this slice, never to the whole capture, because a whole-capture check cannot
 // tell "the deb block named dpkg-deb" from "some other block did"
-// (docs/agents/skills/scope-html-assertions-to-the-region-under-test.md, which
-// generalizes to any multi-region output).
+// (docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test,
+// which generalizes to any multi-region output).
 func artifactBlock(t *testing.T, out, path string) string {
 	t.Helper()
 

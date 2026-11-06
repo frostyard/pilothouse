@@ -22,12 +22,13 @@ import (
 const autoUpdateManagerSourcePath = "autoupdate_manager.go"
 
 // The test matrix this file covers, written out in full before the tests
-// were, per docs/agents/skills/enumerate-the-full-test-matrix-for-multi-axis-criteria.md.
+// were, per
+// docs/design/engineering-lessons.md#enumerate-the-full-test-matrix-for-multi-axis-criteria.
 // Rows are the two updaters; every cell below has its own assertion, and every
 // one of them is driven through the manager's real Status(ctx) -- never
 // through a helper that takes pre-computed properties as a plain parameter
-// (docs/agents/skills/exercise-the-actual-boundary-not-a-precomputed-shim.md,
-// docs/agents/skills/test-the-composing-function-not-its-merge-helper.md).
+// (docs/design/engineering-lessons.md#exercise-the-actual-boundary-not-a-precomputed-shim,
+// docs/design/engineering-lessons.md#test-the-composing-function-not-its-merge-helper).
 //
 //	| condition                              | bootc                                    | rpm-ostree                                     |
 //	|----------------------------------------|------------------------------------------|------------------------------------------------|
@@ -56,8 +57,9 @@ type autoUpdateCall struct {
 
 // fakeAutoUpdateSystemdClient implements the manager's whole systemdClient
 // interface end-to-end, not a narrower connector-only shim
-// (docs/agents/skills/dbus-fake-must-cover-full-success-path.md): both property
-// getters answer from per-unit maps and can be made to fail independently, so
+// (docs/design/engineering-lessons.md#dbus-fake-must-cover-full-success-path):
+// both property getters answer from per-unit maps and can be made to fail
+// independently, so
 // the full success path and each individual failure branch are all reachable
 // through the production Status call.
 type fakeAutoUpdateSystemdClient struct {
@@ -93,7 +95,7 @@ var autoUpdateNextTrigger = time.Date(2026, 7, 23, 3, 30, 0, 0, time.UTC)
 // "inactive"/"static", their results and next triggers differ -- so a manager
 // that read the wrong updater's units, or crossed the two payloads, fails
 // loudly instead of matching by coincidence
-// (docs/agents/skills/calibrate-canned-fixture-data-per-capability-set.md).
+// (docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 //
 // dropIns selects whether either pair carries drop-ins; the empty slices in
 // the no-drop-ins case are what systemd itself reports for an unmodified unit
@@ -713,7 +715,7 @@ func TestAutoUpdateManagerRPMOStreeDropInsAreIndependentOfPolicy(t *testing.T) {
 // TestAutoUpdateManagerRereadsOnEveryCall proves the no-caching claim the
 // file's doc comment makes, so no later documentation chunk can describe a
 // shared or memoized parse that does not exist
-// (docs/agents/skills/dont-claim-a-shared-parse-without-verifying-memoization.md).
+// (docs/design/engineering-lessons.md#dont-claim-a-shared-parse-without-verifying-memoization).
 func TestAutoUpdateManagerRereadsOnEveryCall(t *testing.T) {
 	client := liveAutoUpdateClient(false, false)
 	root := autoUpdateRoot(t, "[Daemon]\nAutomaticUpdatePolicy=check\n")

@@ -4,7 +4,7 @@
 
 Closes #
 
-## Change classification
+## Risk tier
 
 <!-- Select the highest applicable tier from docs/risk-tiers.md and explain why. -->
 

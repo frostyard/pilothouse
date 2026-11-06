@@ -82,8 +82,17 @@ test/image/           the image-tier (#80) validation of the released RPM on a
 .docker/              development container image (Go + PAM + systemd headers,
                       systemd, shellcheck, jq, rpm tooling) for docker-* make targets;
                       declares PILOTHOUSE_REQUIRE_PACKAGING_TOOLS=1 so tool-dependent
-                      tests fail rather than skip inside it
+                      tests fail rather than skip inside it, and copies in the pinned
+                      Node that `make verify-template` needs
                       (see docs/design/packaging-test-fixtures.md)
+scripts/              bump.sh + bump_test.sh (make bump), and the template gate
+                      copied from bketelsen/agentic-template: check-template.mjs,
+                      check-corrections.mjs, lib/risk-paths.mjs (tested by
+                      test/check-template.test.mjs; run by `make verify-template`)
+.agents/skills/       skills synced from frostyard/core (never edit here);
+                      .claude/skills links to it
+.memory/              corrections.jsonl, the append-only corrections inbox
+mise.toml, mise.lock  tool pins (golangci-lint, Node); Go comes from go.mod
 ```
 
 ### Two binaries, one protocol
@@ -115,7 +124,7 @@ Both packaged broker units (`packaging/deb/pilothoused.service` and
 declare no `Wants=` on any engine socket, so
 installing and starting the broker never pulls in or activates
 `incus.socket` or `podman.socket`; an operator enables those units
-themselves (see the README's Podman note). The unit keeps
+themselves (see "Optional surfaces" in docs/install.md). The unit keeps
 `After=incus.socket systemd-sysext.service podman.socket`, which only orders
 the broker behind those units when something else has already started them.
 That change removed only the unit-level pull-in; presence-based enablement
@@ -478,17 +487,33 @@ behind, divergent, feature-branch, and detached-HEAD states), runs
 verification and semantic-version calculation (`svu`) inside the dev
 container, then uses authenticated *host* Git (not the container) to create
 and push an annotated tag. Never run the full `bump` target inside an ad
-hoc container or pass Git credentials into the image — see
-`docs/superpowers/specs/2026-07-21-bump-workflow-design.md` and
-`docs/superpowers/plans/2026-07-21-bump-workflow.md` for the design
-rationale.
+hoc container or pass Git credentials into the image. Docker never sees the
+host's Git metadata or configuration: `docker-bump-verify` runs
+`make bump-verify` on a temporary `git clone --no-local` with its `.git`
+removed, and `docker-next-version` runs `svu next` on a temporary
+`git clone --mirror` with its `origin` remote removed, mounted read-only.
+Preflight fetches `+refs/tags/*:refs/tags/*` from `origin`, so moved and
+remote-only tags take the origin value, then compares every local tag ref
+with `git ls-remote --tags origin` (direct refs; peeled `^{}` entries are
+left out) and refuses a local-only tag. The fetch uses `--no-prune`, so a
+host pruning setting cannot delete that local-only tag before the check.
+`svu next` MUST print exactly 1 line matching `^v[0-9]+\.[0-9]+\.[0-9]+$`.
+The target refuses a version tag that already exists locally or on
+`origin`, then creates `git tag -a <version> -m "Version <version>"` on
+`HEAD` and pushes only `refs/tags/<version>`. When the push reports a
+failure, it asks `origin` again: a tag at the intended commit counts as
+published; no remote tag deletes the new local tag; a tag at another commit
+is a conflict and keeps the local tag; an unanswered query is
+"indeterminate" and keeps the local tag (`scripts/bump.sh`, tested by
+`scripts/bump_test.sh` through `make test-bump`).
 
 ## Agent workflow tooling
 
-The mill configuration (`.mill.toml`), cross-agent instruction surfaces,
-risk-tier classification, the knowledge index, harvested skills, and the
-Claude automation workflow are described in
-[agent-workflows.md](agent-workflows.md).
+Cross-agent instruction surfaces, risk-tier classification and risk paths,
+the knowledge index and corrections inbox, the synced skills, the tool pins
+and the Claude automation workflow are described in
+[agent-workflows.md](agent-workflows.md). The rules learned from earlier
+defects and reviews are in [engineering-lessons.md](engineering-lessons.md).
 
 ## Further Reading
 
@@ -506,8 +531,18 @@ Subsystem design docs (in this directory):
   [vm-harness.md](vm-harness.md), [image-tier.md](image-tier.md) — the
   packaging and validation chain (see "Packaging and validation" above).
 - [agent-workflows.md](agent-workflows.md) — agent/automation tooling.
+- [engineering-lessons.md](engineering-lessons.md) — rules learned from
+  earlier defects and reviews; code comments cite its anchors.
 - [../specs/artifact-contract.md](../specs/artifact-contract.md) (spec) —
   the exact packaging artifact contract.
+- [../specs/files.md](../specs/files.md) (spec) — the Files module: root
+  flags, `openat2` resolution, list limits, download and `O_TMPFILE` upload,
+  the streaming broker contract and the status mapping.
+- [../specs/logs.md](../specs/logs.md) (spec) — the Logs module's journal
+  query: filters, limits, record rules and polling.
+- [../specs/storage.md](../specs/storage.md) (spec) — the Storage module:
+  snapshot limits, health rules, remote-mount actions, artifacts, target
+  rules, lifecycle and anchors.
 
 Other authoritative docs:
 

@@ -1,0 +1,46 @@
+# Dependabot (frostyard/core ADR-0071 row B13). This repository has 4
+# ecosystems with a manifest: the actions the workflows pin (github-actions),
+# go.mod (gomod), the 3 Containerfiles under .docker, .devcontainer and
+# test/image/ucore (docker), and the site's package.json (npm).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/.docker"
+      - "/.devcontainer"
+      - "/test/image/ucore"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  # The Astro site under site/ is replaced by the B9 docs-site follow-up,
+  # which removes this entry together with site/.
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build"
+      include: "scope"

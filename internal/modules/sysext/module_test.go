@@ -119,7 +119,7 @@ func post(t *testing.T, mux *http.ServeMux, path string) *httptest.ResponseRecor
 // TestModuleImplementsAnyOfGateOnly pins the module's gate shape. The
 // expected value is written out by hand from the spec (updex OR sysext),
 // never read back from platform.AvailableAny, per
-// docs/agents/skills/dont-use-the-gate-under-test-as-the-test-oracle.md.
+// docs/design/engineering-lessons.md#dont-use-the-gate-under-test-as-the-test-oracle.
 func TestModuleImplementsAnyOfGateOnly(t *testing.T) {
 	module := New()
 	var gateAny platform.CapabilityGateAny = module
@@ -232,8 +232,8 @@ func TestGetPageReportsQueryFailure(t *testing.T) {
 // TestGatedPageOmitsControlsForAbsentTools is the view-element half of the
 // gate: it drives the real GET /sysext handler (not Page directly) so the
 // flags under test are the ones the production handler computes from
-// host.Capabilities, per docs/agents/skills/partial-gate-modules-need-full-
-// view-element-audit.md.
+// host.Capabilities, per
+// docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit.
 func TestGatedPageOmitsControlsForAbsentTools(t *testing.T) {
 	render := func(caps capability.Set) string {
 		host := newTestHost(caps)
