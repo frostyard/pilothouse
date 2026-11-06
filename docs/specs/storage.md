@@ -127,14 +127,22 @@ own action instead of empty `uid`/`gid` values. The manager then applies:
 | Manifest | `/var/lib/pilothouse/storage/mounts/<id>.json` | `0600` root |
 | SMB credentials (`username=…\npassword=…\n`) | `/etc/pilothouse/storage/credentials/<id>` | `0600` root |
 | Mount unit, automount unit | `/etc/systemd/system/<systemd-escaped-target>.mount`, `.automount` | `0644` root |
-| Created target directory | the target | `0755` |
+| Created target directory | the target | `mkdirat` asks for `0755` (`PathManager.CreateTarget`, `paths.go`); the process umask applies and nothing changes the mode later, so under the packaged broker units (`UMask=0077`) the directory is `0700` |
 
-- Every artifact starts with `# Managed by Pilothouse; definition=<id>` and
-  is written through a temporary file in the same directory, `fdatasync`ed,
-  then put in place. Mount and unmount first compare every artifact byte for
-  byte with freshly rendered content (`loadVerified`); delete verifies each
-  artifact just before it removes it. A mismatch stops the action;
-  Pilothouse never changes an unmanaged unit or `/etc/fstab`.
+- The 2 unit files start with `# Managed by Pilothouse; definition=<id>`
+  (`artifactMarker`). The manifest is plain JSON (`marshalManifest`) and the
+  credentials file holds only its `username=` and `password=` lines
+  (`RenderCredentials`); neither carries the comment. Every artifact is
+  written through a temporary file in the same directory, `fdatasync`ed,
+  then put in place.
+- Verification (`VerifyOwnedArtifacts`, which mount and unmount reach through
+  `loadVerified` unless the state is `needs-attention`): the manifest and the
+  2 units are compared byte for byte with freshly rendered content, plus
+  their mode and root ownership (`verifyFile`); the credentials file is
+  checked for metadata only (a regular file, mode `0600`, root owner and
+  group: `verifyMetadata`), never for its content. Delete checks each
+  artifact the same way just before it removes it. A mismatch stops the
+  action; Pilothouse never changes an unmanaged unit or `/etc/fstab`.
 - Mount unit: `Wants=` and `After=network-online.target`, `TimeoutSec=30`,
   and sorted `Options=` built only from `nodev`, `nosuid`, `ro` or `rw`,
   `nfsvers=<v>` or `vers=<v>` (not for `auto`), `guest` or
