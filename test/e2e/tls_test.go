@@ -81,16 +81,18 @@ func startPilothouse(t *testing.T, binary string, args []string, extraEnv []stri
 	}()
 	t.Cleanup(func() {
 		select {
-		case <-wait:
+		case err := <-wait:
+			t.Logf("pilothouse exited: %v", err)
 			return
 		default:
 		}
 		_ = command.Process.Signal(os.Interrupt)
 		select {
-		case <-wait:
+		case err := <-wait:
+			t.Logf("pilothouse exited: %v", err)
 		case <-time.After(5 * time.Second):
 			_ = command.Process.Kill()
-			<-wait
+			t.Logf("pilothouse exited after kill: %v", <-wait)
 		}
 	})
 	return wait, logPath
