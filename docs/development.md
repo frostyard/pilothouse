@@ -18,7 +18,8 @@ engineering lessons, architecture context, and subsystem documentation without d
 them.
 
 Before pushing, run `mise install` once and then `make ci BASE=origin/main`
-(or `make docker-ci` on hosts without the native toolchain) — it runs every CI
+(or `make docker-ci BASE=origin/main` on hosts without the native toolchain;
+it passes `BASE` into the container, so run it in a clone, not a git worktree) — it runs every CI
 gate that runs without credentials, in the same order. `make verify` is the
 non-mutating subset and `make check` formats first. It runs all Go packages and the tagged sdjournal journal tests;
 the lint recipe fails instead of skipping when `golangci-lint` is absent or

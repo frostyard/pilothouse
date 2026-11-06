@@ -494,9 +494,18 @@ removed, and `docker-next-version` runs `svu next` on a temporary
 `git clone --mirror` with its `origin` remote removed, mounted read-only.
 Preflight fetches `+refs/tags/*:refs/tags/*` from `origin`, so moved and
 remote-only tags take the origin value, then compares every local tag ref
-with `git ls-remote --tags origin` and refuses a local-only tag
-(`scripts/bump.sh`, tested by `scripts/bump_test.sh` through
-`make test-bump`).
+with `git ls-remote --tags origin` (direct refs; peeled `^{}` entries are
+left out) and refuses a local-only tag. The fetch uses `--no-prune`, so a
+host pruning setting cannot delete that local-only tag before the check.
+`svu next` MUST print exactly 1 line matching `^v[0-9]+\.[0-9]+\.[0-9]+$`.
+The target refuses a version tag that already exists locally or on
+`origin`, then creates `git tag -a <version> -m "Version <version>"` on
+`HEAD` and pushes only `refs/tags/<version>`. When the push reports a
+failure, it asks `origin` again: a tag at the intended commit counts as
+published; no remote tag deletes the new local tag; a tag at another commit
+is a conflict and keeps the local tag; an unanswered query is
+"indeterminate" and keeps the local tag (`scripts/bump.sh`, tested by
+`scripts/bump_test.sh` through `make test-bump`).
 
 ## Agent workflow tooling
 
@@ -526,6 +535,14 @@ Subsystem design docs (in this directory):
   earlier defects and reviews; code comments cite its anchors.
 - [../specs/artifact-contract.md](../specs/artifact-contract.md) (spec) —
   the exact packaging artifact contract.
+- [../specs/files.md](../specs/files.md) (spec) — the Files module: root
+  flags, `openat2` resolution, list limits, download and `O_TMPFILE` upload,
+  the streaming broker contract and the status mapping.
+- [../specs/logs.md](../specs/logs.md) (spec) — the Logs module's journal
+  query: filters, limits, record rules and polling.
+- [../specs/storage.md](../specs/storage.md) (spec) — the Storage module:
+  snapshot limits, health rules, remote-mount actions, artifacts, target
+  rules, lifecycle and anchors.
 
 Other authoritative docs:
 

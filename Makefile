@@ -188,8 +188,13 @@ corrections-base: ## Check that .memory/corrections.jsonl is append-only against
 
 check: fmt verify ## Developer gate: format, then verify
 
+# docker-ci passes BASE into the container, so `make docker-ci BASE=origin/main`
+# runs the same corrections comparison as `make ci BASE=origin/main`. The
+# container sees only the bind-mounted checkout: BASE must resolve there (a
+# clone whose .git is a directory), or corrections-base fails rather than
+# skipping. In a git worktree, run `make corrections-base BASE=...` on the host.
 docker-ci: docker-image ## Run every CI gate that runs without credentials inside the development image; the packaging.yml gate needs GORELEASER_KEY and cannot run here
-	$(DOCKER_RUN) make ci
+	$(DOCKER_RUN) make ci BASE="$(BASE)"
 
 bump-preflight: ## Verify that main is clean and synchronized
 	@DOCKER="$(DOCKER)" ./scripts/bump.sh preflight

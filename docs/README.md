@@ -91,6 +91,14 @@ Docs are split by the question they answer (the shape defined by
 - [specs/artifact-contract.md](specs/artifact-contract.md) — the exact
   packaging artifact contract: model, finding codes, required destinations,
   dependency lists, `packaging.Verify` semantics, drift guards
+- [specs/files.md](specs/files.md) — the Files module contract: root flags,
+  descriptor-based `openat2` resolution, list limits, download, `O_TMPFILE`
+  upload, streaming broker operations, status mapping
+- [specs/logs.md](specs/logs.md) — the Logs module's journal query: filter
+  grammar, scan and size limits, record rules, polling
+- [specs/storage.md](specs/storage.md) — the Storage module contract:
+  snapshot limits, health rules, remote-mount actions and grammar, artifacts
+  and modes, target rules, lifecycle, anchors
 
 ### Plans
 

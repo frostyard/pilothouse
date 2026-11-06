@@ -224,6 +224,16 @@ page (or this file, for rules of engagement), then set that line's
 `.memory/corrections.jsonl`: it is append-only, and `make ci BASE=<ref>`
 refuses a changed line (only an empty `promoted_to` may be filled in).
 
+**Deleting or moving a doc** (ADR 0014): before you delete a doc, or move
+text out of one, carry every contract it states that is still true (limits,
+flags, syscalls, routes, status mappings, file modes) into the right `docs/`
+page, checked against the code. A finished plan or spec is not empty: its
+design facts outlive the plan. In the pull request, name where each kept fact
+went and each dropped fact with the code evidence that it is untrue. A
+renamed or deleted path must leave no citation: `TestNoCitationOfRetiredPaths`
+checks the retired lesson directory, the old CI workflow path and every
+`engineering-lessons.md#<anchor>` citation.
+
 **.knowledge/ directory** is the cross-session entry point for committed agent
 knowledge. Read `.knowledge/README.md` before planning changes, then follow its
 links to this file, `.memory/corrections.jsonl`,
@@ -254,7 +264,11 @@ credentials — tidy check, vet, format check, lint, template gate,
 govulncheck, tests, corrections, race, build — in CI's order. `make test` runs `go test ./...` and the tagged
 sdjournal journal tests; `make race` runs every Go package with the race detector. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
-equivalent for hosts without Go/PAM/systemd headers or golangci-lint.
+equivalent for hosts without Go/PAM/systemd headers or golangci-lint; it
+passes `BASE` into the container (`make docker-ci BASE=origin/main`), so the
+base must resolve inside the bind-mounted checkout (a clone, not a git
+worktree), or the corrections check fails rather than skipping
+(`TestDockerCIPassesBase`).
 `.github/workflows/ci.yml` (workflow name `Tests`) runs the same gates as 6
 separate jobs (Lint, Security Scan, Unit Tests, Race Detection, Verify,
 Build) that together cover every target `make ci` runs; Verify runs the tidy,

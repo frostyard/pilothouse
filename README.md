@@ -50,7 +50,7 @@ journalctl MESSAGE_ID=8915bdd215c84cbab0c31c05a1a33e7e
 ```sh
 mise install                  # the pinned tools
 make ci BASE=origin/main      # what CI runs
-make docker-ci                # the same, without PAM and systemd headers
+make docker-ci BASE=origin/main  # the same, in the development image
 ```
 
 The build, run, package-validation and release guide is [docs/development.md](docs/development.md).

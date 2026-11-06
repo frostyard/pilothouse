@@ -20,7 +20,9 @@ archived). The baseline cleanup
 ([ADR-0014](../adr/0014-adopt-the-repository-baseline.md)) moved the
 lessons that still hold into this file, under anchors named after the old
 file names, and deleted the lessons about the mill's own plan and chunk
-process. Git history keeps the originals.
+process; where such a lesson also held a reusable engineering rule, only
+that rule is kept here, under the old anchor. Git history keeps the
+originals.
 
 Where a lesson names code that does not follow it yet, the section says so
 under "Open gap". Fix the gap in its own change; do not copy the old shape.
@@ -298,6 +300,39 @@ family (`{action}` covers mount, unmount and delete), grep the module's
 them behind one condition. In `internal/modules/storage/views.templ` that
 condition is the `remoteMountsAvailable` parameter of `ManagedPage`,
 `ManagedSnapshotRegion` and `ManagedMountTable`.
+
+<a id="map-every-spec-requirement-to-a-chunk-or-explicit-deferral"></a>
+#### A move or a central change updates every consumer
+
+Two rules for a change that moves behavior or changes a shared mechanism:
+
+- **Move: the destination gets its checks first.** When a change moves a
+  feature from one module or file to another, the destination gets the
+  tests that assert the rendered output there (a section, a field, a table)
+  in the same change that removes the source copy, or before it. "The data
+  is still in the query" is not enough: the feature is gone for the user
+  when no page renders it. Example: extension update availability moved
+  from Maintenance to Extensions (#52).
+  `TestAvailableUpdatesSection` (`internal/modules/sysext/views_test.go`)
+  asserts the destination; `TestPageOmitsExtensionUpdateAvailability` and
+  `TestSummaryOmitsExtensionUpdateAvailability`
+  (`internal/modules/maintenance/views_test.go`) assert the removal.
+- **Central change: update every chokepoint.** When a change alters a
+  central mechanism, find every place that decides by that mechanism and
+  update it in the same change. Example: whole-module gating has 2 shapes,
+  `platform.CapabilityGate` (all-of) and `platform.CapabilityGateAny`
+  (any-of). `moduleAvailable` in `internal/web/server.go` checks both
+  (`platform.Available(...) && platform.AvailableAny(...)`) for the nav
+  (`availableManifests`) and the dashboard; `attention.Module.findings`
+  type-asserts both (see
+  [gate-every-call-path-not-just-routes-and-nav](#gate-every-call-path-not-just-routes-and-nav)).
+  A third gate shape needs both places, or the module stays visible.
+  Guard: `TestModuleAvailabilityCoversCapabilityGateCapabilityGateAnyAndNeither`
+  in `internal/web/server_test.go`.
+
+Before you call such a change done, list each requirement of the change and
+name the test or the code that meets it; a requirement with neither is not
+done.
 
 <a id="gate-zero-value-fields-on-their-sources-available-flag"></a>
 #### Read a single-source field only when that source answered
@@ -720,6 +755,45 @@ Example: `internal/modules/sysext` (Extensions) is any-of
 card and `QueryExtensionsState` stay when systemd-sysext is present; only
 the operations that need updex go. `docs/modules.md` records each module's
 gate (for `sysext`: `HasAny(Updex, Sysext)`).
+
+<a id="dont-doc-ahead-of-the-chunk"></a>
+#### Write each doc clause from the landed code
+
+A sentence that describes a mechanism is a factual claim. Write it from the
+code in the same change, not from the intended design, and check it clause
+by clause:
+
+- what a function takes and calls: `platform.Available(module, caps)`
+  takes an already computed `capability.Set` and never calls `Host`;
+- when state refreshes: the web capability cache refreshes at login and,
+  after a call has seen `broker.ErrUnavailable`, at the next authenticated
+  request (`refreshCapabilities` and `staleAfterOutage` in
+  `internal/web/server.go`); nothing else refreshes it;
+- what is logged, and in which order calls happen: `ProbeIncus` in
+  `internal/capability/probe_engines.go` builds the client
+  (`newIncusProbeClient`, no I/O) before the `enabled` check in
+  `probeIncus`, so "a disabled probe builds no client" is false;
+- every table that lists the siblings of a new item (a new flag goes into
+  each flag list, with its default);
+- an example command: the claim next to it must hold for that exact command
+  (a `pilothoused` run without `--incus` probes no Incus socket and
+  advertises no Incus capability, so the Incus nav entry and routes are
+  absent).
+
+A doc claim must also be true at the commit that adds it, not only after
+later work lands.
+
+<a id="verify-shell-acceptance-criteria"></a>
+#### Run a command before you cite it
+
+A command that a doc or a test comment gives as evidence (a count, a
+property) must be run against the tree before it is written down. In a
+single-quoted `grep` pattern, `\t` is not a tab: with the GNU grep on this
+host, `grep -c '^\tAction' internal/broker/api.go` prints `0` while the file
+has 40 `Action*` lines. Use `[[:space:]]`, as `docs/capabilities.md` does.
+After `git add`, plain `git diff -- <file>` is empty; use
+`git diff --cached` or `git diff <base>`. A `--stat` line count does not
+prove which lines changed.
 
 ## Operational notes
 

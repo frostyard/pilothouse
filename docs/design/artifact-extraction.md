@@ -585,10 +585,10 @@ with them; it is described in full under "The CI job (`vm-boot`)" in
 does not stop at the artifact payload: it also proves the packages install,
 and that the installed package works on a booted host.
 
-It is a **separate file** from `.github/workflows/test.yml` because GitHub does
+It is a **separate file** from `.github/workflows/ci.yml` because GitHub does
 not hand repository secrets to a run triggered by a fork's pull request: a job
-needing `GORELEASER_KEY` inside `test.yml` would fail for every fork
-contributor, and `test.yml` must stay green for them and must gain no
+needing `GORELEASER_KEY` inside `ci.yml` would fail for every fork
+contributor, and `ci.yml` must stay green for them and must gain no
 `GORELEASER_KEY` dependency. Instead the `packages` job carries
 `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
 so a fork pull request **skips** the job — neutral, never failed — and never

@@ -70,9 +70,12 @@ of their features is in the code, and their current design is in
   The lessons about the mill's plan-chunk process are deleted.
 - **README** (core ADR-0072, row B17, added to the baseline while this change
   was open). `README.md` follows core's README spec for the kind `service`.
-  Its operator and developer guides move, unchanged except for link paths
-  and the example release version, to `docs/features.md`,
-  `docs/install.md`, `docs/development.md` and `docs/problem-records.md`.
+  Its operator and developer guides move to `docs/features.md`,
+  `docs/install.md`, `docs/development.md` and `docs/problem-records.md`,
+  each with a short introduction. The moved text keeps its facts; the
+  changes are link paths, the example release version, and the gate
+  instructions this ADR changes (`mise install`, `make ci BASE=...`, the
+  gate triad, the lint pin).
 - **Framework trees.** `.mill.toml`, `docs/agents/skills/`,
   `docs/superpowers/` and the `.pyc` file are deleted. The one superpowers
   fact that a current doc still pointed to (the `make bump` design) is now in

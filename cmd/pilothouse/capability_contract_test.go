@@ -2401,7 +2401,7 @@ func TestCannedHostImageFixtureIsPopulated(t *testing.T) {
 // every one of those secondary routes so the degraded fixtures exercise
 // them explicitly, per
 // docs/design/engineering-lessons.md#gate-every-call-path-not-just-routes-and-nav
-// and partial-gate-modules-need-full-view-element-audit.md.
+// and docs/design/engineering-lessons.md#partial-gate-modules-need-full-view-element-audit.
 var sampleUnit = "sample.service"
 var sampleDefinitionID = strings.Repeat("0123456789abcdef", 2)          // 32 hex chars (a mounted managed mount)
 var sampleUnmountedDefinitionID = strings.Repeat("fedcba9876543210", 2) // 32 hex chars (an unmounted managed mount)
@@ -3040,7 +3040,7 @@ func autoUpdateSectionFor(t *testing.T, run contractFixtureRun) string {
 // fixtures themselves fails here loudly instead of quietly making every
 // rendering assertion above agree with an emptier or an impossible response
 // (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
-// and calibrate-canned-fixture-data-per-capability-set.md).
+// and docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
 	// Populated: every field the section renders carries a value, so no
 	// "renders this field" assertion can pass against a blank.
@@ -3122,7 +3122,7 @@ func TestCannedAutoUpdateFixtureIsCalibratedAndPopulated(t *testing.T) {
 // rendering assertion in assertExtensionsSurfaces agree with an emptier or an
 // impossible response
 // (docs/design/engineering-lessons.md#canned-fixtures-need-populated-data-for-what-they-assert
-// and calibrate-canned-fixture-data-per-capability- set.md).
+// and docs/design/engineering-lessons.md#calibrate-canned-fixture-data-per-capability-set).
 func TestCannedExtensionsFixtureIsPopulatedAndCalibrated(t *testing.T) {
 	canned := cannedExtensionsState()
 	require.True(t, canned.UpdexAvailable, "the default fixture must report updex as having answered")
