@@ -262,8 +262,10 @@ Never replace, rebuild or reinstall a shared tool binary on the host (a mise
 install, `~/go/bin`) to make a gate pass: `make lint-version-check` checks the
 official release that `mise.toml` and `mise.lock` pin, and CI installs that
 same release, so a local substitute hides a CI failure. When a tool does not
-match its pin, run `mise install` (or use `make docker-ci`) and report the
-mismatch.
+match its pin, run `mise install` and report the mismatch. `make docker-ci`
+is no substitute here: `.docker/Dockerfile` builds golangci-lint from source
+with `go install`, so a pass there does not show that the release CI installs
+passes.
 
 **make ci / make docker-ci** runs every CI gate that runs without
 credentials — tidy check, vet, format check, lint, template gate,
