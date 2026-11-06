@@ -9,7 +9,7 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/mdx": "^7.0.5",
+    "@astrojs/mdx": "^8.1.2",
     "astro": "^7.2.0"
   },
   "devDependencies": {
