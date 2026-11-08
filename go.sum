@@ -57,8 +57,8 @@ github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
 github.com/flosch/pongo2/v6 v6.1.0 h1:A/NJbrQJJD2B2mbpw3DRFwBYG0xpCr3vwFlEr46y1HQ=
 github.com/flosch/pongo2/v6 v6.1.0/go.mod h1:CuDpFm47R0uGGE7z13/tTlt1Y6zdxvr2RLT5LJhsHEU=
-github.com/frostyard/std v0.4.0 h1:DZWBKJkjhbTMs9yeNw1YqlJbEZyIk+hEYtAKOdj/Dy0=
-github.com/frostyard/std v0.4.0/go.mod h1:zZ6oRXY2CZvTu81OcAsXzn2MZ/+qPKluflHdZvYiG4k=
+github.com/frostyard/std v0.5.0 h1:SUmy+LnGpFAsfCrokeJc8Sa/M5pj3jpSlwHlgaIJR94=
+github.com/frostyard/std v0.5.0/go.mod h1:zZ6oRXY2CZvTu81OcAsXzn2MZ/+qPKluflHdZvYiG4k=
 github.com/fsnotify/fsnotify v1.4.7/go.mod h1:jwhsz4b93w/PPRr/qN1Yymfu8t87LnFCMoQvtojpjFo=
 github.com/fsnotify/fsnotify v1.10.1 h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx59Ho=
 github.com/fsnotify/fsnotify v1.10.1/go.mod h1:TLheqan6HD6GBK6PrDWyDPBaEV8LspOxvPSjC+bVfgo=
