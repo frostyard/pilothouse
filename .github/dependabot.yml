@@ -2,6 +2,9 @@
 # ecosystems with a manifest: the actions the workflows pin (github-actions),
 # go.mod (gomod), the 3 Containerfiles under .docker, .devcontainer and
 # test/image/ucore (docker), and the site's package.json (npm).
+# Each entry has 1 group with `patterns: ["*"]`, so it opens at most 1
+# version-update PR for each run (frostyard/core ADR-0075). Security
+# updates stay ungrouped.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -12,6 +15,9 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: "gomod"
     directory: "/"
@@ -21,6 +27,9 @@ updates:
     commit-message:
       prefix: "build"
       include: "scope"
+    groups:
+      gomod:
+        patterns: ["*"]
 
   - package-ecosystem: "docker"
     directories:
@@ -33,6 +42,9 @@ updates:
     commit-message:
       prefix: "build"
       include: "scope"
+    groups:
+      docker:
+        patterns: ["*"]
 
   # The Astro site under site/ is replaced by the B9 docs-site follow-up,
   # which removes this entry together with site/.
@@ -44,3 +56,6 @@ updates:
     commit-message:
       prefix: "build"
       include: "scope"
+    groups:
+      npm:
+        patterns: ["*"]
