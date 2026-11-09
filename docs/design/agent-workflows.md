@@ -48,15 +48,19 @@ workflows. The repository baseline it follows is recorded in
   confirmation. The pull request template records the decision, while
   `CONTRIBUTING.md` explains when it must be updated; classification never
   substitutes for an existing gate.
-- `.github/risk-paths.json` lists the high-risk paths (core ADR-0068): the
-  gate and governance files, the release files (`.svu.yml`,
+- `.github/risk-paths.json` lists the high-risk paths (core ADR-0068, amended
+  by ADR-0078): schema version 2, where each entry is a glob with a level and
+  `default_level` (L3) covers a path that no glob matches. The listed paths
+  are the gate and governance files, the release files (`.svu.yml`,
   `.goreleaser.yaml`, `scripts/bump.sh`, every workflow), the installed
   packaging files (`packaging/**`) and the privileged code
   (`cmd/pilothoused/**`, `internal/broker/**`, `internal/auth/**`).
-  `.github/workflows/risk-paths.yml` calls core's reusable workflow on
-  `pull_request_target`; it checks out nothing, and adds the label
-  `risk:high` to a pull request that touches a listed path. It is not a
-  required check. `make verify-template` validates the list.
+  `.github/workflows/risk-paths.yml`, workflow name `PR triage`, calls core's
+  `pr-triage.yml` on `pull_request_target` (core ADR-0077, ADR-0078); it
+  checks out nothing. It adds one level label `level:L1` to `level:L4` and
+  `risk:high` for L1 and L2, and removes `ready-for-human` when the head moves
+  after the label. It is not a required check. `make verify-template`
+  validates the list.
 - `.knowledge/README.md` is the cross-session knowledge index. It points agents
   to the live owners of durable facts — `AGENTS.md`,
   `.memory/corrections.jsonl`, [engineering-lessons.md](engineering-lessons.md),

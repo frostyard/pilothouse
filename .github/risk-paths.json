@@ -1,65 +1,81 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "default_level": "L3",
   "paths": [
     {
       "glob": ".github/risk-paths.json",
+      "level": "L2",
       "why": "governance: the high-risk path list"
     },
     {
       "glob": ".github/workflows/**",
+      "level": "L2",
       "why": "governance: CI, the risk-paths caller and token permissions"
     },
     {
       "glob": "Makefile",
+      "level": "L2",
       "why": "governance: the verify gate"
     },
     {
       "glob": "scripts/check-template.mjs",
+      "level": "L2",
       "why": "governance: the template verification gate"
     },
     {
       "glob": "scripts/check-corrections.mjs",
+      "level": "L2",
       "why": "governance: the corrections validation gate"
     },
     {
       "glob": "scripts/lib/**",
+      "level": "L2",
       "why": "governance: the vendored risk-path validator and matcher"
     },
     {
       "glob": "mise.toml",
-      "why": "supply chain: the tool pins that CI installs"
+      "level": "L1",
+      "why": "update verification: the tool pins that CI installs"
     },
     {
       "glob": "mise.lock",
-      "why": "supply chain: the checksums of the tools that CI installs"
+      "level": "L1",
+      "why": "update verification: the checksums of the tools that CI installs"
     },
     {
       "glob": ".svu.yml",
-      "why": "release: the version configuration for release tags"
+      "level": "L1",
+      "why": "publication: the version configuration for release tags"
     },
     {
       "glob": ".goreleaser.yaml",
-      "why": "release: the build and package definitions GoReleaser runs"
+      "level": "L1",
+      "why": "publication: the build and package definitions GoReleaser runs"
     },
     {
       "glob": "scripts/bump.sh",
-      "why": "release: creates and pushes the version tag"
+      "level": "L1",
+      "why": "publication: creates and pushes the version tag"
     },
     {
       "glob": "packaging/**",
-      "why": "install: systemd units, PAM stacks, sysusers and the root postinstall script"
+      "level": "L1",
+      "why": "auth: systemd units, PAM stacks, sysusers and the root postinstall script"
     },
     {
       "glob": "cmd/pilothoused/**",
-      "why": "privileged: the root broker executable"
+      "level": "L1",
+      "why": "auth: the root broker executable"
     },
     {
       "glob": "internal/broker/**",
-      "why": "privileged: the broker protocol and its fixed queries and actions"
+      "level": "L1",
+      "why": "auth: the broker protocol and its fixed queries and actions"
     },
     {
       "glob": "internal/auth/**",
-      "why": "security: PAM login and session handling"
+      "level": "L1",
+      "why": "auth: PAM login and session handling"
     }
   ]
 }
