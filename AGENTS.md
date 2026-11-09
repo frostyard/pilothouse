@@ -341,17 +341,23 @@ The archived mill harness and the superpowers plans are retired
 
 Report vulnerabilities through GitHub private vulnerability reporting
 ([SECURITY.md](SECURITY.md)). `.github/risk-paths.json` lists the high-risk
-paths (core ADR-0068): the gate and governance files, the release files,
-`packaging/**`, `cmd/pilothoused/**`, `internal/broker/**` and
-`internal/auth/**`. A pull request that touches one gets the `risk:high`
-label from `.github/workflows/risk-paths.yml`; never remove that label to
-make a pull request ready. Its body names each matched path and why the
-change is safe. Build that list from the whole final diff, not from memory:
-match every path of `git diff --name-only BASE...HEAD`, tests and docs
-included, against the base's `.github/risk-paths.json` (the risk-paths job
-summary lists the matches), and check it again after each new commit. Add
-a new privileged or release path to the list in the same change that
-creates it.
+paths (core ADR-0068, amended by ADR-0078): schema version 2, where each
+entry is a glob with a level, and `default_level` (L3) covers a path that no
+glob matches. The listed paths are the gate and governance files, the release
+files, `packaging/**`, `cmd/pilothoused/**`, `internal/broker/**` and
+`internal/auth/**`. `.github/workflows/risk-paths.yml`, workflow name
+`PR triage`, runs core's `pr-triage.yml` on every pull request (core
+ADR-0077, ADR-0078). It adds one level label `level:L1` to `level:L4`, from
+the list at the base, and `risk:high` for L1 and L2; never remove `risk:high`
+or a level label to make a pull request ready. It removes `ready-for-human`
+when the head moves after the label, or when the label comes while CI at the
+head is not green. A pull request that touches a listed path names each
+matched path in its body and why the change is safe. Build that list from the whole
+final diff, not from memory: match every path of
+`git diff --name-only BASE...HEAD`, tests and docs included, against the
+base's `.github/risk-paths.json` (the `pr-triage` job summary lists the
+matches), and check it again after each new commit. Add a new privileged or
+release path to the list in the same change that creates it.
 
 ## Org-wide decisions
 

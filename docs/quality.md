@@ -9,7 +9,7 @@ rolling acceptance-rate definition without copying values that can go stale.
 | Signal | Source | What it reports |
 | --- | --- | --- |
 | Pull request quality | [`ci.yml`](../.github/workflows/ci.yml) | Lint, vulnerability scanning, unit-test coverage, race detection, module tidiness, formatting, vetting, the template gate (agent symlinks, docs index, risk paths, corrections), and builds |
-| Risk paths | [`risk-paths.yml`](../.github/workflows/risk-paths.yml), [`risk-paths.json`](../.github/risk-paths.json) | The `risk:high` label on a pull request that touches a high-risk path (not a required check) |
+| Risk paths | [`risk-paths.yml`](../.github/workflows/risk-paths.yml), [`risk-paths.json`](../.github/risk-paths.json) | PR triage: one level label `level:L1` to `level:L4`, `risk:high` for L1 and L2, and `ready-for-human` removed when the head moves after the label (not a required check) |
 | Repository policy | [`repository.yaml`](../policies/repository.yaml) | Versioned structural requirements for governance, review, workflow, and policy-enforcement assets |
 | Nightly compliance | [`nightly-compliance.yml`](../.github/workflows/nightly-compliance.yml) | A scheduled run of the complete credential-free `make ci` contract |
 | Package quality | [`packaging.yml`](../.github/workflows/packaging.yml) | Package contract checks, installation checks, and opt-in booted-VM validation |
