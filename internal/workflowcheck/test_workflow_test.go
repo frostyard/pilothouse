@@ -204,7 +204,7 @@ func TestTestGatesMutationRemovesRequiredCommands(t *testing.T) {
 		{
 			name: "race command",
 			mutateMake: func(t *testing.T, text string) string {
-				return removeOnce(t, text, "\t$(GO) test -race -short ./...\n")
+				return removeOnce(t, text, "\tumask 0077 && $(GO) test -race -short ./...\n")
 			},
 		},
 		{
@@ -381,6 +381,18 @@ func describeGoTestCommand(command string) (goTestCommandShape, error) {
 	return shape, nil
 }
 
+func isUmaskMode(field string) bool {
+	if len(field) != 4 || field[0] != '0' {
+		return false
+	}
+	for _, digit := range field[1:] {
+		if digit < '0' || digit > '7' {
+			return false
+		}
+	}
+	return true
+}
+
 func validateGoTestCommand(command string) error {
 	fields := strings.Fields(command)
 	commandIndex := -1
@@ -398,7 +410,13 @@ func validateGoTestCommand(command string) error {
 		"CGO_ENABLED": true, "GOOS": true, "GOARCH": true,
 		"CC": true, "CGO_LDFLAGS": true,
 	}
-	for i := 0; i < commandIndex; i++ {
+	// make race runs the suite under a fixed umask, so the guard accepts exactly
+	// that prefix ("umask 0077 && ") and nothing else before the command.
+	firstField := 0
+	if commandIndex >= 3 && fields[0] == "umask" && fields[2] == "&&" && isUmaskMode(fields[1]) {
+		firstField = 3
+	}
+	for i := firstField; i < commandIndex; i++ {
 		field := fields[i]
 		if field == "run:" {
 			continue
@@ -521,6 +539,10 @@ func TestValidateGoTestCommand(t *testing.T) {
 		{name: "GOFLAGS run", command: `GOFLAGS=-run=^$ go test ./...`},
 		{name: "GOFLAGS count", command: `GOFLAGS=-count=0 go test ./...`},
 		{name: "unknown assignment", command: `FOO=bar go test ./...`},
+		{name: "short umask mode", command: `umask 77 && go test ./...`},
+		{name: "non octal umask mode", command: `umask 0099 && go test ./...`},
+		{name: "umask without and", command: `umask 0077 ; go test ./...`},
+		{name: "umask with unknown assignment", command: `umask 0077 && FOO=bar go test ./...`},
 		{name: "wrong tags", command: `go test -tags foo ./...`},
 		{name: "internal package", command: `go test ./internal/...`},
 		{name: "command package", command: `go test ./cmd/...`},
@@ -545,6 +567,7 @@ func TestValidateGoTestCommand(t *testing.T) {
 	}{
 		{name: "test workflow unit", command: `run: go test -v ./... -coverprofile=coverage.out -covermode=atomic`},
 		{name: "make race", command: `$(GO) test -race -short ./...`},
+		{name: "make race under umask", command: `umask 0077 && $(GO) test -race -short ./...`},
 		{name: "CGO assignment race short", command: `CGO_ENABLED=1 go test -race -short ./...`},
 		{name: "test workflow sdjournal", command: `go test -v -tags sdjournal ./internal/modules/logs/journal/...`},
 		{name: "make sdjournal", command: `$(GO) test -tags sdjournal ./internal/modules/logs/journal/...`},

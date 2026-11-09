@@ -150,27 +150,47 @@ func TestMountUnitNameEscapesLiteralHyphens(t *testing.T) {
 	assert.Equal(t, "var-lib-media\\x2darchive.mount", mountUnitName("/var/lib/media-archive"))
 }
 
+// TestCreateTargetCreatesOnlyMissingLeafWithExpectedMode pins the umask-dependent
+// mode of a created target. docs/specs/storage.md (row "Created target directory")
+// records that CreateTarget asks mkdirat for 0755 and the process umask applies,
+// with nothing changing the mode later; under the packaged units (UMask=0077) the
+// directory is therefore 0700. Both are intended, so the test sets the umask
+// itself. umask is process-global, so this test does not run in parallel.
 func TestCreateTargetCreatesOnlyMissingLeafWithExpectedMode(t *testing.T) {
-	base := t.TempDir()
-	target := filepath.Join(base, "target")
-	manager := newPathManager(t)
+	for _, testCase := range []struct {
+		name  string
+		umask uint32
+		want  os.FileMode
+	}{
+		{name: "umask 0022 gives 0755", umask: 0o022, want: 0o755},
+		{name: "umask 0077 gives 0700", umask: 0o077, want: 0o700},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			previous := syscall.Umask(int(testCase.umask))
+			t.Cleanup(func() { syscall.Umask(previous) })
 
-	created, err := manager.CreateTarget(context.Background(), target, nil)
-	require.NoError(t, err)
-	assert.True(t, created)
-	info, err := os.Stat(target)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
-	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
-	assert.Equal(t, uint32(os.Getuid()), stat.Uid)
+			base := t.TempDir()
+			target := filepath.Join(base, "target")
+			manager := newPathManager(t)
 
-	created, err = manager.CreateTarget(context.Background(), target, nil)
-	require.NoError(t, err)
-	assert.False(t, created)
-	_, err = manager.CreateTarget(context.Background(), filepath.Join(base, "missing", "nested"), nil)
-	assert.Error(t, err)
+			created, err := manager.CreateTarget(context.Background(), target, nil)
+			require.NoError(t, err)
+			assert.True(t, created)
+			info, err := os.Stat(target)
+			require.NoError(t, err)
+			assert.True(t, info.IsDir())
+			assert.Equal(t, testCase.want, info.Mode().Perm())
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			require.True(t, ok)
+			assert.Equal(t, uint32(os.Getuid()), stat.Uid)
+
+			created, err = manager.CreateTarget(context.Background(), target, nil)
+			require.NoError(t, err)
+			assert.False(t, created)
+			_, err = manager.CreateTarget(context.Background(), filepath.Join(base, "missing", "nested"), nil)
+			assert.Error(t, err)
+		})
+	}
 }
 
 func TestCreateTargetRejectsConflictingInventory(t *testing.T) {

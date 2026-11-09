@@ -74,6 +74,9 @@ func TestListRootNestedFiltersAndMetadata(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(root, "directory"), 0o750))
 	require.NoError(t, os.Mkdir(filepath.Join(root, "nested"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "Alpha.log"), []byte("a"), 0o640))
+	// The umask applies to creation but never to chmod, so this keeps the asserted
+	// 0640 independent of the caller's umask.
+	require.NoError(t, os.Chmod(filepath.Join(root, "Alpha.log"), 0o640))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "naïve.txt"), []byte("text"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".hidden"), nil, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "nested", "child"), nil, 0o600))
