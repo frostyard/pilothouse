@@ -271,7 +271,7 @@ passes.
 **make ci / make docker-ci** runs every CI gate that runs without
 credentials — tidy check, vet, format check, lint, template gate,
 govulncheck, tests, corrections, race, build — in CI's order. `make test` runs `go test ./...` and the tagged
-sdjournal journal tests; `make race` runs every Go package with the race detector. Run it before pushing; if it is green locally, the
+sdjournal journal tests; `make race` runs every Go package with the race detector under `umask 0077`, so a test that depends on the caller's umask fails in CI; a test that needs a mode sets it with `os.Chmod` or sets the umask itself with `syscall.Umask`. Run it before pushing; if it is green locally, the
 credential-free gates will be green in CI. `docker-ci` is the containerized
 equivalent for hosts without Go/PAM/systemd headers or golangci-lint; it
 passes `BASE` into the container (`make docker-ci BASE=origin/main`), so the

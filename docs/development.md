@@ -65,6 +65,9 @@ make build
 `make test` runs `go test ./...`, plus the tagged sdjournal journal tests.
 It also includes the process-level web checks in `test/e2e/`; they build and
 start the real `pilothouse` binary on an ephemeral local port and need no broker.
+`make race` runs the same packages with the race detector under `umask 0077`,
+so a test that depends on the caller's umask fails there: a test that needs a
+mode sets it with `os.Chmod` or sets the umask itself with `syscall.Umask`.
 
 Docker equivalents are available when the host does not have Go, PAM headers, or systemd headers installed:
 
