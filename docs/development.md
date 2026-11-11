@@ -224,12 +224,12 @@ and runs the assertions in `test/vm/` against the running guest:
   recreated, and `/var/lib/pilothouse` persists.
 
 The job runs on every push to `main` and, on a pull request, only while the
-`vm-boot` label is present. It is **not** a required check, it builds no
-packages of its own, and it publishes nothing: the throwaway overlay disk, the
-cloud-init seed and the run-time credentials never leave the job, and
-diagnostics (QEMU stderr and the guest serial console) go to the job log. There
-is no local `make` target for it — it needs KVM, network access and the
-artifact the build job produced.
+`vm-boot` label is present; a label event for any other label starts no run.
+It is **not** a required check, it builds no packages of its own, and it
+publishes nothing: the throwaway overlay disk, the cloud-init seed and the
+run-time credentials never leave the job, and diagnostics (QEMU stderr and the
+guest serial console) go to the job log. There is no local `make` target for
+it — it needs KVM, network access and the artifact the build job produced.
 
 What it deliberately does **not** cover, all of which is
 [#80](https://github.com/frostyard/pilothouse/issues/80): image-based hosts

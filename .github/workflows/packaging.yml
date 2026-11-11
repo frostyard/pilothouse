@@ -40,6 +40,12 @@ on:
     # the event that added it, so a later push to the same pull request runs it
     # again — a label that certified only the commit at HEAD when it was
     # applied would be a worse guarantee than not running at all.
+    #
+    # A `labeled` event runs the jobs only when the label it added is `vm-boot`;
+    # any other label (for example `ready-for-human`) skips them, so adding one
+    # starts no check run that is still in progress when `PR triage` reads the
+    # checks. On a push event `github.event.action` is empty, so the guard does
+    # not affect push runs.
     types: [opened, synchronize, reopened, labeled]
 
 permissions:
@@ -53,7 +59,14 @@ jobs:
     runs-on: ubuntu-24.04
     # Fork pull requests never receive GORELEASER_KEY, so skip the job for them
     # rather than failing it.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # A `labeled` event runs this job only when the label it added is `vm-boot`;
+    # any other label skips it, so a label event starts no `Build and verify
+    # packages` run that is still running when `PR triage` reads the checks.
+    # `install` and `vm-boot` inherit the skip through `needs: packages`.
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'vm-boot')
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -188,7 +201,8 @@ jobs:
   # `if:` is the label gate and nothing else.
   #
   # This tier is not a required check. It runs on every push to main, and on a
-  # pull request only while the `vm-boot` label is on it.
+  # pull request only while the `vm-boot` label is on it. A `labeled` event for
+  # any other label skips `packages`, and so skips this job with it.
   #
   # It builds nothing: no GoReleaser step, and only the matching format's
   # artifact is downloaded. It publishes nothing either — no upload-artifact

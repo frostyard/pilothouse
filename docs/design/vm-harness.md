@@ -591,9 +591,19 @@ second build.
   happened to be at HEAD when the label was applied. The workflow's
   `pull_request.types` is widened to `[opened, synchronize, reopened,
   labeled]` for the same reason: without `labeled` the trigger cannot fire when
-  the label goes on. Widening `types:` also lets `packages` start on a labeling
-  event, which is expected and is not a second build. The fork skip is **not**
-  restated: `needs: packages` inherits it.
+  the label goes on. The fork skip is **not** restated: `needs: packages`
+  inherits it.
+- The widened `types:` starts no run for any other label. `packages`
+  conjoins `(github.event.action != 'labeled' || github.event.label.name ==
+  'vm-boot')` to its fork skip, so a `labeled` event runs it only when the
+  added label is `vm-boot`; `install` and `vm-boot` inherit that skip through
+  `needs: packages`. Adding `ready-for-human` therefore starts no `Build and
+  verify packages` run that is still `in_progress` when `PR triage` reads the
+  checks (triage removes the label on a non-green check at the head), and it
+  does not restart this 180-minute job on a pull request that already carries
+  `vm-boot`. `github.event.action` is empty on a push event, so push runs are
+  unaffected. `packaging/workflow_label_guard_test.go` pins the guard on both
+  workflows.
 - **No tag trigger was added.** `packaging.yml` is deliberately not
   tag-triggered; adding one so `needs: packages` could be satisfied on tags
   would create a third GoReleaser build alongside `release.yml` for no gain,

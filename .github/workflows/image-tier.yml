@@ -12,6 +12,11 @@ on:
     branches: [main]
     # Presence matters: synchronizing an already-labelled pull request must
     # validate its new head, not only the commit that was labelled.
+    #
+    # A `labeled` event runs the job only when the label it added is `vm-boot`;
+    # any other label skips it, so adding one starts no 180-minute run. On a
+    # push event `github.event.action` is empty, so the guard does not affect
+    # push runs.
     types: [opened, synchronize, reopened, labeled]
 
 permissions:
@@ -23,7 +28,12 @@ jobs:
     # ubuntu-26.04 carries Podman 5, whose --imagestore option keeps the
     # composed-image container storage isolated in the job-local private store.
     runs-on: ubuntu-26.04
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')
+    # Label PRESENCE, not the labeling event, and only when a `labeled` event
+    # added `vm-boot`: any other label skips the job instead of starting a new
+    # run.
+    if: >-
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'vm-boot')
     timeout-minutes: 180
     steps:
       - name: Checkout code

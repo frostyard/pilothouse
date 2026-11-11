@@ -648,7 +648,10 @@ authorize deletion of a pre-existing target.
 `.github/workflows/image-tier.yml` carries one `ucore-vm` job. It runs on every
 push to `main`; for pull requests it runs only while the `vm-boot` label is
 present, and `opened`, `synchronize`, `reopened` and `labeled` triggers ensure
-the label certifies the current head. The job uses `ubuntu-26.04` specifically:
+the label certifies the current head. A `labeled` event runs the job only when
+the added label is `vm-boot` (`packaging/workflow_label_guard_test.go`), so any
+other label on a labelled pull request starts no second 180-minute run. The job
+uses `ubuntu-26.04` specifically:
 that runner provides Podman 5 and the `--imagestore` option the private-store
 contract requires. It sets up Go, installs the native PAM/systemd headers plus
 QEMU/OVMF and cosign, builds the checked-out executables without GoReleaser,

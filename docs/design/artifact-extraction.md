@@ -590,9 +590,14 @@ not hand repository secrets to a run triggered by a fork's pull request: a job
 needing `GORELEASER_KEY` inside `ci.yml` would fail for every fork
 contributor, and `ci.yml` must stay green for them and must gain no
 `GORELEASER_KEY` dependency. Instead the `packages` job carries
-`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
+`if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event.action != 'labeled' || github.event.label.name == 'vm-boot')`,
 so a fork pull request **skips** the job — neutral, never failed — and never
-receives the key. Neither `install` nor `vm-boot` restates that condition:
+receives the key, and a `labeled` event runs the job only when the added label
+is `vm-boot`: any other label (for example `ready-for-human`) skips every job of
+the workflow, so it starts no `Build and verify packages` check run that is still
+`in_progress` when `PR triage` reads the checks. On a push event
+`github.event.action` is empty, so push runs are unaffected.
+Neither `install` nor `vm-boot` restates that condition:
 `needs: packages` means a skipped `packages` skips them too. (`vm-boot` does
 carry an `if:` — the `vm-boot` label gate — but nothing about forks.)
 `GORELEASER_KEY` is the only secret the

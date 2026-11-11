@@ -15,8 +15,9 @@ import (
 const (
 	imageTierWorkflowPath = "../.github/workflows/image-tier.yml"
 	imageTierJobName      = "ucore-vm"
-	imageTierLabelGate    = "github.event_name != 'pull_request' || " +
-		"contains(github.event.pull_request.labels.*.name, 'vm-boot')"
+	imageTierLabelGate    = "(github.event_name != 'pull_request' || " +
+		"contains(github.event.pull_request.labels.*.name, 'vm-boot')) && " +
+		"(github.event.action != 'labeled' || github.event.label.name == 'vm-boot')"
 )
 
 type imageTierStep struct {
