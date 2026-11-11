@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   snapshot:
-    runs-on: ubuntu-latest
+    # The arm64 cross build takes the ports libraries and the glibc of the
+    # runner's release, so this job pins the image instead of ubuntu-latest.
+    runs-on: ubuntu-24.04
     # Only run if the Tests workflow succeeded
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     # Nightlies replace the same dev tag and release. Scope cancellation to
