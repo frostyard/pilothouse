@@ -1,6 +1,6 @@
 module github.com/frostyard/pilothouse
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/a-h/templ v0.3.1100

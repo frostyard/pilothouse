@@ -367,7 +367,10 @@ list in `cmd/pilothouse/main.go`, not just registered in
   `JOURNAL_SMOKE`.
 
 **Native build dependencies:** PAM (`libpam0g-dev`) and systemd
-(`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`. If
+(`libsystemd-dev`) headers; `pilothoused` is built with `-tags sdjournal`.
+`internal/auth/pam` links with `-lpam`, so the `libpam.so` development link
+from `libpam0g-dev` is required at build time (Go 1.27.4 and later reject the
+soname form `-l:libpam.so.0` in `#cgo LDFLAGS`). If
 unavailable locally, use `make docker-build` / `make docker-test` /
 `make docker-fmt` / `make docker-lint` / `make docker-generate`, which build
 and reuse the repo's dev container image.

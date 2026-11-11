@@ -19,6 +19,7 @@ type testWorkflowStep struct {
 
 type testWorkflowJob struct {
 	Permissions map[string]string  `yaml:"permissions"`
+	RunsOn      string             `yaml:"runs-on"`
 	Steps       []testWorkflowStep `yaml:"steps"`
 }
 

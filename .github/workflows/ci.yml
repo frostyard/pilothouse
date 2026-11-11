@@ -28,7 +28,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       - name: Generate templ
         run: go tool templ generate
@@ -59,7 +59,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       - name: Generate templ
         run: go tool templ generate
@@ -72,7 +72,11 @@ jobs:
 
   unit-test:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    # On the ubuntu-latest image (Ubuntu 26.04), the INT cases of
+    # TestUCoreOrchestratorForwardsSignalsAndWaits time out; pin the image
+    # where the suite passes until that is resolved
+    # (https://github.com/frostyard/pilothouse/issues/255).
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -85,7 +89,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       - name: Download dependencies
         run: go mod download
@@ -115,7 +119,8 @@ jobs:
 
   race-test:
     name: Race Detection
-    runs-on: ubuntu-latest
+    # Same image as Unit Tests: see the note there.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -127,7 +132,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       - name: Download dependencies
         run: go mod download
@@ -160,7 +165,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       # Node comes from mise.toml and mise.lock, checksum-verified, for the
       # template gate in `make verify-template`.
@@ -193,7 +198,9 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    # The arm64 cross build takes the ports libraries and the glibc of the
+    # runner's release, so this job pins the image instead of ubuntu-latest.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     strategy:
@@ -209,7 +216,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
 
       # pilothoused links libpam and libsystemd via cgo. Install headers for the
       # native build, plus the aarch64 cross toolchain and arm64 libraries.
@@ -222,10 +229,13 @@ jobs:
             # Pin existing repositories to amd64 so apt does not try to fetch
             # arm64 from mirrors that don't serve it (e.g. security.ubuntu.com).
             sudo sed -i 's|^Types: deb|Types: deb\nArchitectures: amd64|' /etc/apt/sources.list.d/ubuntu.sources
-            sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+            # The ports suite must match the runner's Ubuntu release, or apt
+            # mixes amd64 and arm64 package versions.
+            codename="$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")"
+            sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<EOF
           Types: deb
           URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-security
+          Suites: ${codename} ${codename}-updates ${codename}-security
           Components: main universe
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
