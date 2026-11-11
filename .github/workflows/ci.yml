@@ -72,7 +72,11 @@ jobs:
 
   unit-test:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    # On the ubuntu-latest image (Ubuntu 26.04), the INT cases of
+    # TestUCoreOrchestratorForwardsSignalsAndWaits time out; pin the image
+    # where the suite passes until that is resolved
+    # (https://github.com/frostyard/pilothouse/issues/255).
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -115,7 +119,8 @@ jobs:
 
   race-test:
     name: Race Detection
-    runs-on: ubuntu-latest
+    # Same image as Unit Tests: see the note there.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
