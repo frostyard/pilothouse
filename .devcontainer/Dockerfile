@@ -6,7 +6,7 @@
 # `make build` (which passes -tags sdjournal) works out of the box.
 #
 # The Go version tracks CI and the Makefile development image.
-FROM golang:1.27.3-bookworm
+FROM golang:1.27.4-bookworm
 
 # System build dependencies:
 #   build-essential  - C toolchain for cgo

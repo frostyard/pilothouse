@@ -9,7 +9,7 @@ GOFMT ?= gofmt
 # exist. Overriding it on the command line still works, as scripts/bump_test.sh
 # does when it drives format-check with a stub gofmt.
 GOFILES = $$(find . -type f -name '*.go' -not -name '*_templ.go')
-GO_VERSION ?= 1.27.3
+GO_VERSION ?= 1.27.4
 # The Go release this module is built with, from go.mod's go line: the only Go
 # pin (mise reads the same line). golangci-lint must be built with a Go at
 # least this new, or its embedded gofmt and typechecker disagree with the
@@ -76,7 +76,7 @@ format-check: ## Verify Go source formatting without rewriting files
 # Fail unless the installed golangci-lint is the mise.toml pin and was built
 # with a Go no older than go.mod's go line. The patch level is not compared:
 # golangci-lint releases are built with the Go patch current at their release,
-# while go.mod's go line is a patch-level release (1.27.3). A patch difference
+# while go.mod's go line is a patch-level release (1.27.4). A patch difference
 # does not change gofmt's output.
 lint-version-check: ## Fail unless golangci-lint is the mise.toml pin, built with a Go no older than go.mod's
 	@test -n "$(GOLANGCI_LINT_VERSION)" || { echo "mise.toml pins no golangci-lint"; exit 1; }

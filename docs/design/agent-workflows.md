@@ -101,16 +101,16 @@ workflows. The repository baseline it follows is recorded in
   directory). See `workflows/README.md` for setup and schema gotchas.
 - Tool pins: `mise.toml` and `mise.lock` at the repository root pin
   `golangci-lint` (2.15.0) and Node (24.22.2, for the template gate); Go comes
-  from `go.mod` (`1.27.3`, `idiomatic_version_file_enable_tools`). The
+  from `go.mod` (`1.27.4`, `idiomatic_version_file_enable_tools`). The
   Makefile reads its `GOLANGCI_LINT_VERSION` from `mise.toml`, and
   `make lint` fails unless the installed release is that pin. The CI Lint and
   Verify jobs and the nightly compliance job install the tools with
   `jdx/mise-action`. `make verify`, `make check` and `make ci` are the gate
   triad of [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md).
   Not done yet from ADR-0012: the Makefile `GO_VERSION` variable, the
-  hard-coded `go-version: "1.27.3"` inputs and the `stable` alias in the
+  hard-coded `go-version: "1.27.4"` inputs and the `stable` alias in the
   release, snapshot, packaging and image-tier workflows remain separate Go
-  pins (all `1.27.3` or `stable` today); `svu` is still pinned only in the
+  pins (all `1.27.4` or `stable` today); `svu` is still pinned only in the
   Makefile and `.docker/Dockerfile`; and both development Dockerfiles still
   take versions as build arguments instead of running `mise install`.
-  Go 1.27.3 is the repository build and CI pin.
+  Go 1.27.4 is the repository build and CI pin.

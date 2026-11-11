@@ -1,7 +1,12 @@
 package pam
 
 /*
-#cgo linux LDFLAGS: -l:libpam.so.0
+// Link PAM by name. Go 1.27.4 and later reject the soname form -l:libpam.so.0
+// in #cgo LDFLAGS (https://go.dev/s/invalidflag). -lpam needs the libpam.so
+// development link from libpam0g-dev, which every build workflow and both
+// development images install; the binary still records NEEDED libpam.so.0,
+// which the packages declare through libpam0g.
+#cgo linux LDFLAGS: -lpam
 #include <stdlib.h>
 #include <string.h>
 
