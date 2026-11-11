@@ -44,10 +44,13 @@ jobs:
           # security.ubuntu.com).
           sudo sed -i 's|^Types: deb|Types: deb\nArchitectures: amd64|' /etc/apt/sources.list.d/ubuntu.sources
           # Provide arm64 packages from ports.ubuntu.com.
-          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+          # The ports suite must match the runner's Ubuntu release, or apt
+          # mixes amd64 and arm64 package versions.
+          codename="$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")"
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<EOF
           Types: deb
           URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-security
+          Suites: ${codename} ${codename}-updates ${codename}-security
           Components: main universe
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
