@@ -137,6 +137,12 @@ run_bounded() {
     trap 'pending_signal=INT' INT
     trap 'pending_signal=TERM' TERM
     (
+        # Without job control, bash starts this asynchronous subshell with
+        # SIGINT and SIGQUIT ignored, and exec keeps an ignored signal.
+        # GNU timeout installs its own handler, which hid this; uutils
+        # timeout (Ubuntu 26.04) keeps SIG_IGN, so the whole phase group
+        # would ignore the forwarded INT. Restore the defaults first.
+        trap - INT QUIT
         exec setsid timeout --signal=TERM --kill-after=30s "$duration" \
             bash "$SCRIPT_DIR/capture-bounded-output.sh" \
             "$phase_log" "$LOG_BYTES" "$@"

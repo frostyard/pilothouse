@@ -586,6 +586,27 @@ symptoms, and fail at once, by name, on anything else.
 124 (the probe's bound), and reports any other status with the remote output
 before `wait_for_boot_id_change` runs.
 
+<a id="async-subshell-ignores-interrupt"></a>
+#### An asynchronous subshell starts with SIGINT and SIGQUIT ignored
+
+Without job control (the default for non-interactive bash), bash starts
+`( ... ) &` with SIGINT and SIGQUIT set to `SIG_IGN`. From bash 5.3 (Ubuntu 26.04), an `exec` in that
+subshell keeps them ignored; bash 5.2 restored the defaults. A wrapper can
+hide this: GNU `timeout` installs its own handler, so its command gets the
+default action back, but uutils `timeout` (the Ubuntu 26.04 default) keeps
+the inherited `SIG_IGN`. A group that ignores INT does not stop when the
+owner forwards INT to it. Reset the dispositions in the subshell before
+`exec` (`trap - INT QUIT`), and do not rely on a wrapper to do it. The
+reset restores the dispositions the script started with: it cannot recover
+a signal that was already ignored when the script started, because bash
+does not let a non-interactive shell trap or reset such a signal.
+
+`run_bounded` in `test/image/ucore-image-test.sh` does this (#255). Guards:
+`TestUCoreRunBoundedRestoresDefaultInterruptAndQuit` reads the dispositions of
+the phase command, and `TestUCoreOrchestratorForwardsSignalsAndWaits` also
+runs with a `timeout` shim that keeps an ignored signal. Both fail without
+the reset on bash 5.3 or later; on bash 5.2 they pass without it.
+
 <a id="shell-helper-exports-die-in-command-substitution"></a>
 #### A helper that exports cannot run in `$(...)`
 

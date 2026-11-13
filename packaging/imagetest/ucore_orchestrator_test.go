@@ -251,6 +251,7 @@ log "starting ${phase}"
 trap 'pending_signal=INT' INT
 trap 'pending_signal=TERM' TERM
 (
+    trap - INT QUIT
     exec setsid timeout --signal=TERM --kill-after=30s "$duration" \
         bash "$SCRIPT_DIR/capture-bounded-output.sh" \
         "$phase_log" "$LOG_BYTES" "$@"

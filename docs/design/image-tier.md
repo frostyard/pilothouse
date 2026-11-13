@@ -607,7 +607,12 @@ phase-local regular log. It does not set a process file-size limit, so
 compilers, image builders and other phase commands can create artifacts larger
 than the log bound, while the outer timeout still covers collection and a
 writer that keeps the stream open. `run_bounded` creates exactly one
-separate-session background process group, records its PID, confirms the group
+separate-session background process group, restores the default SIGINT and
+SIGQUIT actions in it before `exec` (a non-job-control shell starts the
+asynchronous subshell with both ignored, bash 5.3 keeps that through `exec`,
+and uutils `timeout` does not reset it; see
+[engineering-lessons.md](engineering-lessons.md#async-subshell-ignores-interrupt)),
+records its PID, confirms the group
 exists, waits for its leader, and rejects and terminates any same-group
 descendant that survives the direct command before clearing the PID. The tail
 collector ignores soft INT/TERM so producer shutdown yields EOF and flushes
@@ -616,7 +621,9 @@ bounds a collector that cannot drain after `timeout` exits. INT/TERM received
 during launch is latched until that readiness check;
 then it is forwarded to the entire group and waited before EXIT cleanup
 proceeds. Behavioral tests cover INT and TERM both before and after group
-readiness and prove the phase process is gone. The outer shell creates no
+readiness, with the host `timeout` and with a shim that keeps an ignored
+signal, and prove the phase process is gone; a disposition test proves the
+phase command starts with default SIGINT and SIGQUIT. The outer shell creates no
 coprocess, disowned or process-substitution children.
 
 The success path and the EXIT/INT/TERM path converge on the same cleanup
