@@ -122,3 +122,4 @@ of their features is in the code, and their current design is in
 - Builds on: [ADR 0012](0012-adopt-mise-tool-pinning-and-verify-gate.md)
 - Org: core ADR-0018, ADR-0021, ADR-0025, ADR-0026, ADR-0029, ADR-0043,
   ADR-0044, ADR-0068, ADR-0071 (see [org-adrs.md](../org-adrs.md))
+- Amended in part by: [core ADR-0081](https://github.com/frostyard/core/blob/main/docs/adr/0081-store-each-correction-in-a-file-of-its-own.md)

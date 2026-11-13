@@ -91,7 +91,7 @@ scripts/              bump.sh + bump_test.sh (make bump), and the template gate
                       test/check-template.test.mjs; run by `make verify-template`)
 .agents/skills/       skills synced from frostyard/core (never edit here);
                       .claude/skills links to it
-.memory/              corrections.jsonl, the append-only corrections inbox
+.memory/              corrections/, the corrections inbox (1 file for each record)
 mise.toml, mise.lock  tool pins (golangci-lint, Node); Go comes from go.mod
 ```
 

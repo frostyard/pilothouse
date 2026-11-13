@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "docs deletions",
+  "correction": "Belief: finished superpowers specs and process-only mill lessons could be deleted once their features existed. Reality: they still held current contracts (the Files openat2 and O_TMPFILE upload rules, the feature-relocation rule) that no other doc kept",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) of head 9dcf033, finding F3",
+  "promoted_to": "AGENTS.md"
+}

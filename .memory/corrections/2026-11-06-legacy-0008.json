@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "internal/workflowcheck/retired_paths_test.go",
+  "correction": "Belief: removing URLs before the file-name check was enough. Reality: the anchor check ran before URL removal, so a link to another repository's engineering-lessons.md#anchor failed the local guard",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) re-review 2 of head 6066715, finding F10 (non-blocking)",
+  "promoted_to": "internal/workflowcheck/retired_paths_test.go"
+}

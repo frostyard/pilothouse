@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "tools",
+  "correction": "Belief: a golangci-lint built from source at the pinned version is equivalent to the release. Reality: in frostyard/nsl a source build replaced the shared mise binary on the host, so a local gate passed while CI, which installs the official release, failed; the same host and pins serve this repository",
+  "evidence": "frostyard/nsl#88, CI verify job at head 995afd3",
+  "promoted_to": "AGENTS.md"
+}

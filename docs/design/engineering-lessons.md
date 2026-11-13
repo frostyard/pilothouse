@@ -820,7 +820,7 @@ prove which lines changed.
 
 - Add a lesson here in the change that shows it: a rule that a test cannot
   enforce, or one that applies to more than one change. When it comes from a
-  review finding, also add a line to `.memory/corrections.jsonl`
+  review finding, also add a record file under `.memory/corrections/`
   ([ADR-0014](../adr/0014-adopt-the-repository-baseline.md)).
 - Prefer a guard test over a lesson. When a test enforces the rule, name it
   in the section.

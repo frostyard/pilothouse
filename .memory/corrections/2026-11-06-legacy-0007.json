@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "baseline PR body",
+  "correction": "Belief: the PR body's counts and verification output still held after the fix commit. Reality: test-file and corrections counts changed, and the recorded output came from the earlier head; each recorded run must name its SHA",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) re-review 1 of head c42952d, finding F9",
+  "promoted_to": ""
+}

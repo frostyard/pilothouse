@@ -51,7 +51,7 @@ Docs are split by the question they answer (the shape defined by
   only, in release builds only
 - [adr/0014](adr/0014-adopt-the-repository-baseline.md) — adopt frostyard/core's
   repository baseline (ADR-0071, rows B1 to B16): `.agents/skills/`,
-  `.memory/corrections.jsonl`, the template gate, risk paths, `ci.yml`; the
+  `.memory/corrections/`, the template gate, risk paths, `ci.yml`; the
   mill and superpowers trees are retired
 
 ### Design
@@ -142,7 +142,7 @@ Docs are split by the question they answer (the shape defined by
 Outside `docs/`: `AGENTS.md` (the canonical instructions; `CLAUDE.md`,
 `GEMINI.md`, `.cursorrules` and `.github/copilot-instructions.md` link to it),
 `.agents/skills/` (skills synced from frostyard/core; `.claude/skills` links
-to it), `.memory/corrections.jsonl` (the corrections inbox) and
+to it), `.memory/corrections/` (the corrections inbox) and
 `.knowledge/README.md` (the knowledge index). See
 [design/agent-workflows.md](design/agent-workflows.md).
 

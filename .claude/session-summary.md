@@ -26,4 +26,4 @@ credentials, or other sensitive values.
 
 - Record concise details needed to resume safely. Put durable repository
   lessons in `docs/design/engineering-lessons.md` and correction records in
-  `.memory/corrections.jsonl`.
+  `.memory/corrections/`.

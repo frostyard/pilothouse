@@ -38,7 +38,7 @@ jobs:
       # golangci-lint comes from mise.toml and mise.lock, checksum-verified,
       # so the nightly run uses exactly the release `make lint` checks for.
       # `make ci` runs with no BASE here: a scheduled run has no pull request
-      # base commit to compare .memory/corrections.jsonl with.
+      # base commit to compare the records in .memory/corrections/ with.
       - name: Install golangci-lint and Node
         uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:

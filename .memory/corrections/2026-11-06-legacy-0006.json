@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "internal/workflowcheck/retired_paths_test.go",
+  "correction": "Belief: the retired-path guard saw citations wrapped over 2 comment lines. Reality: it searched the raw text for retired paths and joined wrapped lines only for the other checks, so a wrapped .github/workflows/ + test.yml passed",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) re-review 1 of head c42952d, finding F7",
+  "promoted_to": "internal/workflowcheck/retired_paths_test.go"
+}

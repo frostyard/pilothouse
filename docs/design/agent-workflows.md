@@ -63,17 +63,18 @@ workflows. The repository baseline it follows is recorded in
   validates the list.
 - `.knowledge/README.md` is the cross-session knowledge index. It points agents
   to the live owners of durable facts — `AGENTS.md`,
-  `.memory/corrections.jsonl`, [engineering-lessons.md](engineering-lessons.md),
+  `.memory/corrections/`, [engineering-lessons.md](engineering-lessons.md),
   `docs/design/overview.md`, and authoritative subsystem docs — rather than
   copying those facts into a second store that can drift.
-- `.memory/corrections.jsonl` is the append-only corrections inbox (core
-  ADR-0018). Each line is one JSON object with exactly `date`, `scope`,
-  `correction`, `evidence` and `promoted_to` (a string: `""` until the rule
-  moves to a durable owner). `make verify` validates every line
+- `.memory/corrections/` is the corrections inbox (core ADR-0018, ADR-0081).
+  Each correction is 1 file holding one JSON object with exactly `date`,
+  `scope`, `correction`, `evidence` and `promoted_to` (a string: `""` until the
+  rule moves to a durable owner). `make verify` validates every file
   (`scripts/check-corrections.mjs`); `make ci BASE=<ref>` and the Verify job
-  also refuse a changed or removed line. A blocking review point adds 1 line
-  in the pull request that fixes it. Committed knowledge must contain no
-  credentials, personal data, speculation, or transient worktree state.
+  also refuse a changed or removed record. A blocking review point adds 1
+  record file in the pull request that fixes it. Committed knowledge must
+  contain no credentials, personal data, speculation, or transient worktree
+  state.
 - [engineering-lessons.md](engineering-lessons.md) holds the rules learned
   from earlier defects and review findings. Code comments cite its anchors
   (`docs/design/engineering-lessons.md#<anchor>`), so keep anchors stable.
