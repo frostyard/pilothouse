@@ -41,35 +41,157 @@ func TestUCoreOrchestratorForwardsSignalsAndWaits(t *testing.T) {
 	})
 	require.Len(t, functions, 4)
 
-	for _, cleanupActive := range []bool{false, true} {
-		for _, delayGroup := range []bool{false, true} {
-			for _, testCase := range []struct {
-				name       string
-				signal     syscall.Signal
-				exitStatus int
-			}{
-				{name: "INT", signal: syscall.SIGINT, exitStatus: 130},
-				{name: "TERM", signal: syscall.SIGTERM, exitStatus: 143},
-			} {
-				name := fmt.Sprintf(
-					"%s/cleanup=%t/before-group=%t",
-					testCase.name,
-					cleanupActive,
-					delayGroup,
-				)
-				t.Run(name, func(t *testing.T) {
-					testUCoreOrchestratorSignal(
-						t,
-						functions,
-						testCase.signal,
-						testCase.exitStatus,
+	// The defect of #255 needs 2 conditions. bash 5.3 keeps SIGINT ignored
+	// through exec in the asynchronous subshell of run_bounded (bash 5.2
+	// restored the default), and the timeout must keep that SIG_IGN: uutils
+	// timeout (Ubuntu 26.04) does, GNU timeout installs its own handler. The
+	// keeps-ignored shim models uutils timeout, so on bash 5.3 or later the
+	// INT cases fail without the fix whatever timeout the host has.
+	for _, keepIgnored := range []bool{false, true} {
+		for _, cleanupActive := range []bool{false, true} {
+			for _, delayGroup := range []bool{false, true} {
+				for _, testCase := range []struct {
+					name       string
+					signal     syscall.Signal
+					exitStatus int
+				}{
+					{name: "INT", signal: syscall.SIGINT, exitStatus: 130},
+					{name: "TERM", signal: syscall.SIGTERM, exitStatus: 143},
+				} {
+					name := fmt.Sprintf(
+						"%s/timeout=%s/cleanup=%t/before-group=%t",
+						testCase.name,
+						timeoutVariantName(keepIgnored),
 						cleanupActive,
 						delayGroup,
 					)
-				})
+					t.Run(name, func(t *testing.T) {
+						testUCoreOrchestratorSignal(
+							t,
+							functions,
+							testCase.signal,
+							testCase.exitStatus,
+							cleanupActive,
+							delayGroup,
+							keepIgnored,
+						)
+					})
+				}
 			}
 		}
 	}
+}
+
+// TestUCoreRunBoundedRestoresDefaultInterruptAndQuit checks the signal
+// dispositions that the phase command starts with. Without job control,
+// bash starts the asynchronous subshell of run_bounded with SIGINT and
+// SIGQUIT ignored, and from bash 5.3 exec keeps them ignored; run_bounded
+// must restore both defaults whatever timeout implementation the host has
+// (#255). On bash 5.2 the case passes without the fix too.
+func TestUCoreRunBoundedRestoresDefaultInterruptAndQuit(t *testing.T) {
+	source, err := os.ReadFile("ucore-image-test.sh")
+	require.NoError(t, err)
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(bytes.NewReader(source), "ucore-image-test.sh")
+	require.NoError(t, err)
+
+	functions := map[string]string{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, ok := node.(*syntax.FuncDecl)
+		if !ok || declaration.Name == nil {
+			return true
+		}
+		switch declaration.Name.Value {
+		case "log", "handle_signal", "stop_phase_group", "run_bounded":
+			var rendered bytes.Buffer
+			require.NoError(t, syntax.NewPrinter().Print(&rendered, declaration))
+			functions[declaration.Name.Value] = rendered.String()
+		}
+		return true
+	})
+	require.Len(t, functions, 4)
+
+	for _, keepIgnored := range []bool{false, true} {
+		t.Run("timeout="+timeoutVariantName(keepIgnored), func(t *testing.T) {
+			sandbox := t.TempDir()
+			ignoredPath := filepath.Join(sandbox, "sigignore")
+			probePath := filepath.Join(sandbox, "disposition-probe.sh")
+			scriptDir, getwdErr := os.Getwd()
+			require.NoError(t, getwdErr)
+			probe := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+readonly LOG_BYTES=65536
+readonly SCRIPT_DIR=%q
+workspace="$1"
+current_phase_pid=""
+cleanup_active=0
+termination_status=0
+%s
+%s
+%s
+%s
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+run_bounded disposition-probe 30s bash -c \
+    'exec grep "^SigIgn:" /proc/self/status >"$1"' probe "$2"
+`, scriptDir, functions["log"], functions["handle_signal"],
+				functions["stop_phase_group"], functions["run_bounded"])
+			require.NoError(t, os.WriteFile(probePath, []byte(probe), 0o700))
+
+			command := exec.Command("bash", probePath, sandbox, ignoredPath)
+			if keepIgnored {
+				command.Env = append(os.Environ(),
+					"PATH="+keepIgnoredTimeoutDir(t, sandbox)+":"+os.Getenv("PATH"))
+			}
+			output, runErr := command.CombinedOutput()
+			require.NoError(t, runErr, string(output))
+
+			// bash ignores SIGQUIT for itself, so the probe execs grep and
+			// reads the dispositions of a process that is not a shell.
+			recorded, readErr := os.ReadFile(ignoredPath)
+			require.NoError(t, readErr, string(output))
+			fields := strings.Fields(string(recorded))
+			require.Len(t, fields, 2, string(recorded))
+			ignored, parseErr := strconv.ParseUint(fields[1], 16, 64)
+			require.NoError(t, parseErr)
+			for _, signal := range []syscall.Signal{syscall.SIGINT, syscall.SIGQUIT} {
+				require.Zerof(t, ignored&(1<<(uint(signal)-1)),
+					"the phase command must not start with %s ignored (SigIgn %s)",
+					signal, fields[1])
+			}
+		})
+	}
+}
+
+func timeoutVariantName(keepIgnored bool) string {
+	if keepIgnored {
+		return "keeps-ignored"
+	}
+	return "host"
+}
+
+// keepIgnoredTimeoutDir writes a timeout shim that drops its options and
+// duration and execs the command unchanged, so the command keeps every
+// inherited signal disposition. uutils coreutils timeout 0.10.0 (Ubuntu
+// 26.04) behaves this way for an ignored SIGINT; GNU timeout does not. The
+// shim does not enforce the duration: callers end the phase themselves.
+// /bin/sh must keep an ignored signal through exec, as POSIX requires.
+func keepIgnoredTimeoutDir(t *testing.T, sandbox string) string {
+	t.Helper()
+
+	shimDir := filepath.Join(sandbox, "timeout-shim")
+	require.NoError(t, os.Mkdir(shimDir, 0o700))
+	shim := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --*) shift ;;
+        *) shift; break ;;
+    esac
+done
+exec "$@"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(shimDir, "timeout"), []byte(shim), 0o700))
+	return shimDir
 }
 
 func TestUCoreVMReadonlyEnvironmentRejectsArithmeticMutation(t *testing.T) {
@@ -375,6 +497,7 @@ func testUCoreOrchestratorSignal(
 	exitStatus int,
 	cleanupActive bool,
 	delayGroup bool,
+	keepIgnored bool,
 ) {
 	t.Helper()
 
@@ -432,9 +555,13 @@ fi
 exec "$SIGNAL_REAL_SETSID" "$@"
 `
 	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0o700))
+	path := wrapperDir + ":" + os.Getenv("PATH")
+	if keepIgnored {
+		path = keepIgnoredTimeoutDir(t, sandbox) + ":" + path
+	}
 	command.Env = append(
 		os.Environ(),
-		"PATH="+wrapperDir+":"+os.Getenv("PATH"),
+		"PATH="+path,
 		"SIGNAL_DELAY_GROUP="+strconv.Itoa(boolInt(delayGroup)),
 		"SIGNAL_GROUP_DELAY_PID_PATH="+groupDelayPIDPath,
 		"SIGNAL_REAL_SETSID="+realSetsid,
