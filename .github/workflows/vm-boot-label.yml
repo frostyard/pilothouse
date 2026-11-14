@@ -1,0 +1,39 @@
+# .github/workflows/vm-boot-label.yml
+#
+# Starts the packaging gate when the `vm-boot` label goes on a pull request,
+# and does nothing for any other label (#263).
+#
+# Why this is its own file: GitHub cannot filter a `pull_request` `labeled`
+# trigger by label name. While .github/workflows/packaging.yml listed
+# `labeled`, every label started a full packaging run. `PR triage`
+# (.github/workflows/risk-paths.yml) reads the check runs at the head about
+# 10 seconds after a label, found `Build and verify packages` in progress, and
+# removed `ready-for-human` again. A job `if:` in packaging.yml would leave a
+# skipped `Build and verify packages` run as the newest run of that check,
+# which hides an earlier failed run of the same name from a reader that counts
+# only the newest run of each check. Here, a label other than `vm-boot` skips
+# the single caller job below. Its check run carries this job's own name, it
+# completes at once, and a skipped run counts as green.
+#
+# A `vm-boot` label runs packaging.yml in full for the pull request's head:
+# `packages`, `install` and `vm-boot`, whose label-presence gate then holds.
+# Pushes to a labelled pull request keep running packaging.yml directly.
+name: vm-boot label
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  packaging:
+    name: vm-boot packaging
+    if: github.event.label.name == 'vm-boot'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/packaging.yml
+    secrets:
+      GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
