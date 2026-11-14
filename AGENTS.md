@@ -237,6 +237,12 @@ renamed or deleted path must leave no citation: `TestNoCitationOfRetiredPaths`
 checks the retired lesson directory, the old CI workflow path and every
 `engineering-lessons.md#<anchor>` citation.
 
+**Pull request body claims**: a status claim in a pull request body (a
+baseline row is done, moved text is unchanged) must hold for every clause of
+the row and for every edit in the diff, and each recorded command output
+names the head SHA it ran at. After each new commit, run the recorded
+commands again and update their counts, outputs and SHAs.
+
 **.knowledge/ directory** is the cross-session entry point for committed agent
 knowledge. Read `.knowledge/README.md` before planning changes, then follow its
 links to this file, `.memory/corrections/`,
