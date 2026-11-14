@@ -219,10 +219,10 @@ org-wide decisions go to frostyard/core, with a back-link recorded in
 useful to an agent's context window — dense, factual, exact paths and
 constants, decision rationale rather than user-facing guides.
 Corrections are seeds, not archives: fold each rule into the right `docs/`
-page (or this file, for rules of engagement), then set that line's
-`promoted_to` to the new owner. Never edit or delete a line of
-`.memory/corrections.jsonl`: it is append-only, and `make ci BASE=<ref>`
-refuses a changed line (only an empty `promoted_to` may be filled in).
+page (or this file, for rules of engagement), then set that record's
+`promoted_to` to the new owner. Never edit, rename or delete a record in
+`.memory/corrections/`: `make ci BASE=<ref>` refuses a changed, renamed or
+removed record (only an empty `promoted_to` may be filled in).
 
 **Deleting or moving a doc** (ADR 0014): before you delete a doc, or move
 text out of one, carry every contract it states that is still true (limits,
@@ -236,11 +236,12 @@ checks the retired lesson directory, the old CI workflow path and every
 
 **.knowledge/ directory** is the cross-session entry point for committed agent
 knowledge. Read `.knowledge/README.md` before planning changes, then follow its
-links to this file, `.memory/corrections.jsonl`,
+links to this file, `.memory/corrections/`,
 [docs/design/engineering-lessons.md](docs/design/engineering-lessons.md), the
-design overview, and authoritative subsystem docs. Append only verified corrections,
-promote stable rules to their durable owner, and never commit credentials,
-personal data, speculation, or transient worktree state.
+design overview, and authoritative subsystem docs. Add a record file under
+`.memory/corrections/` for each verified correction, promote stable rules to
+their durable owner, and never commit credentials, personal data,
+speculation, or transient worktree state.
 
 ## One command mirrors CI
 
@@ -252,7 +253,7 @@ personal data, speculation, or transient worktree state.
   corrections, vendored copies, and its Node tests), govulncheck and tests.
   It leaves `git status --porcelain` unchanged (`*_templ.go` is gitignored).
 - `make check` is the developer gate: `make fmt`, then `make verify`.
-- `make ci` runs `make verify`, then the corrections append-only check
+- `make ci` runs `make verify`, then the corrections records check
   against `BASE` (`make ci BASE=origin/main`; no `BASE`, no comparison), the
   race detector and the build.
 
@@ -326,8 +327,8 @@ learned from earlier defects and review findings, each checked against the
 code; they are binding guidance, not suggestions. Code comments cite its
 anchors (`docs/design/engineering-lessons.md#<anchor>`): keep anchors stable,
 and update a lesson in the same change that makes it untrue. A new lesson
-comes with the change that shows it, plus a line in
-`.memory/corrections.jsonl` when it came from a review finding.
+comes with the change that shows it, plus a record file in
+`.memory/corrections/` when it came from a review finding.
 
 **.agents/skills/** holds the skills that frostyard/core syncs into this
 repository (core ADR-0026). They are byte-identical copies: change them in

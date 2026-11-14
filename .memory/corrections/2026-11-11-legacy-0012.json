@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-11",
+  "scope": "workflow guard tests",
+  "correction": "Belief: a guard that finds a required token anywhere in a workflow file proves the step uses it. Reality: a commented-out line or a line in another step still holds the token, so the guard passed while the step would write an empty apt suite; parse the workflow and check the executable lines of the one step",
+  "evidence": "frostyard/pilothouse#254, cross-review (openai/gpt-6.1-sol) re-review 1 of head 8655000, finding 1",
+  "promoted_to": "docs/design/engineering-lessons.md#scope-guard-assertions-to-the-exact-region-under-test"
+}

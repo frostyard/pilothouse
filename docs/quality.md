@@ -30,7 +30,7 @@ wrapped CPU counters, and rendering of the composed dashboard resource summary.
 Run `make ci BASE=origin/main` before pushing. It runs `make verify` (module
 tidiness, vetting, formatting, lint at the `mise.toml` pin, the template gate,
 known Go vulnerabilities and tests, including the repository policy), then the
-corrections append-only check against `BASE`, race detection, and both
+corrections records check against `BASE`, race detection, and both
 binaries, in the same order as the credential-free CI contract. `make verify`
 alone is the non-mutating gate for a read-only review. Use `make docker-ci` when the host lacks the required native
 dependencies.

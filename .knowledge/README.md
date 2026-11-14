@@ -9,8 +9,8 @@ prior conversation.
 
 - [`../AGENTS.md`](../AGENTS.md) — binding repository-wide invariants, build
   gates, and contribution instructions.
-- [`../.memory/corrections.jsonl`](../.memory/corrections.jsonl) — append-only
-  records of verified differences between an agent's prior belief and
+- [`../.memory/corrections/`](../.memory/corrections/) — 1 file for each
+  record of verified differences between an agent's prior belief and
   repository reality (contract: [`../.memory/README.md`](../.memory/README.md)).
 - [`../docs/design/engineering-lessons.md`](../docs/design/engineering-lessons.md)
   — durable implementation and review lessons, each checked against the code.
@@ -28,17 +28,23 @@ prior conversation.
 ## Recording knowledge
 
 Record a correction only after a repository file, command, issue, pull request,
-or maintainer response verifies it. Append one JSON object per line to
-`.memory/corrections.jsonl` with this shape (all 5 fields are required
-strings; `make verify` validates each line):
+or maintainer response verifies it. Add 1 JSON file for each record in
+`.memory/corrections/`, with this shape (all 5 fields are required strings;
+`make verify` validates each file):
 
 ```json
-{"date":"YYYY-MM-DD","scope":"repo-relative path or subsystem","correction":"prior belief and verified reality","evidence":"file, command, issue, or pull request","promoted_to":""}
+{
+  "date": "YYYY-MM-DD",
+  "scope": "repo-relative path or subsystem",
+  "correction": "prior belief and verified reality",
+  "evidence": "file, command, issue, or pull request",
+  "promoted_to": ""
+}
 ```
 
-Lines are append-only. Set an empty `promoted_to` to the durable document that
-now carries the rule; never change a line otherwise. Put
-stable repository-wide instructions in `AGENTS.md`, reusable implementation
+A record file is never removed or renamed. Set an empty `promoted_to` to the
+durable document that now carries the rule; never change a record otherwise.
+Put stable repository-wide instructions in `AGENTS.md`, reusable implementation
 lessons in `docs/design/engineering-lessons.md`, architecture and rationale in
 `docs/design/overview.md`, and subsystem contracts in the relevant `docs/` file.
 Do not duplicate those facts in this index.

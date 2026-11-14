@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "lesson citations",
+  "correction": "Belief: rewriting docs/agents/skills/<slug>.md citations caught every lesson reference. Reality: abbreviated second citations (and <slug>.md without the directory, one split by a space) kept the deleted file names",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) of head 9dcf033, finding F4",
+  "promoted_to": "internal/workflowcheck/retired_paths_test.go"
+}

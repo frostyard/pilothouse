@@ -44,7 +44,7 @@ AI-assisted work must use least privilege.
   private vulnerability details, or other non-public data to a model or
   unapproved external service.
 - Never place secrets in prompts, source, commits, logs, test fixtures,
-  artifacts, `.memory/corrections.jsonl`, or `docs/design/engineering-lessons.md`. Redact sensitive
+  artifacts, `.memory/corrections/`, or `docs/design/engineering-lessons.md`. Redact sensitive
   values before retaining diagnostic output.
 - Keep repository work inside the checkout and designated temporary
   directories. Destructive operations must have a narrowly resolved target and
@@ -131,7 +131,7 @@ approval.
 - After containment, review every artifact and change produced by the affected
   run before resuming.
 - Durable lessons may be added to `docs/design/engineering-lessons.md` or
-  `.memory/corrections.jsonl` only after secrets and private vulnerability details have
+  `.memory/corrections/` only after secrets and private vulnerability details have
   been removed.
 
 ## Policy maintenance
