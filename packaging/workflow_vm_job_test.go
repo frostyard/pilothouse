@@ -35,24 +35,100 @@ var wantVMMatrix = []workflowMatrixEntry{
 const wantVMLabelGate = "github.event_name != 'pull_request' || " +
 	"contains(github.event.pull_request.labels.*.name, 'vm-boot')"
 
-// wantPullRequestTypes is the trigger list the label gate needs: the three
-// defaults plus `labeled`, so applying the label can start a run.
-var wantPullRequestTypes = []string{"opened", "synchronize", "reopened", "labeled"}
+// wantPullRequestTypes is the trigger list of packaging.yml: the three
+// defaults, and deliberately NOT `labeled`. A label event must not start the
+// packaging jobs (#263): `PR triage` then found `Build and verify packages` in
+// progress and removed `ready-for-human`. `vm-boot-label.yml` starts the run
+// for the `vm-boot` label instead.
+var wantPullRequestTypes = []string{"opened", "synchronize", "reopened"}
 
-// workflowTriggers models only the `on:` block. gopkg.in/yaml.v3 keeps `on` as
-// a string key (it does not apply YAML 1.1's boolean aliases), so this decodes
-// as written.
-type workflowTriggers struct {
-	On struct {
-		Push struct {
-			Branches []string  `yaml:"branches"`
-			Tags     yaml.Node `yaml:"tags"`
-		} `yaml:"push"`
-		PullRequest struct {
-			Branches []string `yaml:"branches"`
-			Types    []string `yaml:"types"`
-		} `yaml:"pull_request"`
-	} `yaml:"on"`
+// wantTriggerEvents is the exact set of keys under `on:`, hand-written. A new
+// event, such as a label trigger or a second pull_request block, fails here.
+var wantTriggerEvents = []string{"push", "pull_request", "workflow_call"}
+
+// workflowEvents decodes only the `on:` block, keeping each event as a raw node
+// so the test can check the exact event set before it decodes any event.
+// gopkg.in/yaml.v3 keeps `on` as a string key (it does not apply YAML 1.1's
+// boolean aliases), so this decodes as written.
+type workflowEvents struct {
+	On map[string]yaml.Node `yaml:"on"`
+}
+
+type pushTrigger struct {
+	Branches []string  `yaml:"branches"`
+	Tags     yaml.Node `yaml:"tags"`
+}
+
+type pullRequestTrigger struct {
+	Branches []string `yaml:"branches"`
+	Types    []string `yaml:"types"`
+}
+
+// workflowCallSecret is one entry under `on.workflow_call.secrets`.
+type workflowCallSecret struct {
+	Required bool `yaml:"required"`
+}
+
+// decodeNodeAt decodes the raw node under key into out. A map index is not
+// addressable, so Decode cannot be called on it directly.
+func decodeNodeAt(t *testing.T, nodes map[string]yaml.Node, key string, out any) {
+	t.Helper()
+
+	node, ok := nodes[key]
+	require.Truef(t, ok, "the mapping must have the key %q", key)
+	require.NoErrorf(t, node.Decode(out), "decode %q", key)
+}
+
+// mapKeys returns the keys of a decoded mapping, in no particular order.
+func mapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	return keys
+}
+
+// secretUseExpression matches a `${{ ... }}` expression that reads the
+// `secrets` context, however it is spelled (`secrets.KEY`, `secrets['KEY']`).
+var secretUseExpression = regexp.MustCompile(`\$\{\{[^}]*\bsecrets\b`)
+
+// yamlSecretUse is one scalar that reads the `secrets` context, with the path
+// of the key that holds it. The path is structural (for example
+// `jobs.packages.steps[].env.GORELEASER_KEY`), so a comment that mentions a
+// secret cannot be counted.
+type yamlSecretUse struct {
+	path  string
+	value string
+}
+
+// walkYAML calls visit for every node with its dotted key path. Sequence items
+// use `[]` in the path. Mapping keys are not visited as nodes.
+func walkYAML(n *yaml.Node, path string, visit func(n *yaml.Node, path string)) {
+	visit(n, path)
+
+	switch n.Kind {
+	case yaml.DocumentNode:
+		for _, child := range n.Content {
+			walkYAML(child, path, visit)
+		}
+	case yaml.SequenceNode:
+		for _, child := range n.Content {
+			walkYAML(child, path+"[]", visit)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			walkYAML(n.Content[i+1], joinYAMLPath(path, n.Content[i].Value), visit)
+		}
+	}
+}
+
+func joinYAMLPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+
+	return path + "." + key
 }
 
 func loadVMJob(t *testing.T) (workflowJob, string) {
@@ -119,23 +195,44 @@ func TestPackagingWorkflowVMJobLabelGate(t *testing.T) {
 		vmJobName)
 }
 
-func TestPackagingWorkflowTriggersAllowTheLabel(t *testing.T) {
+func TestPackagingWorkflowTriggersIgnoreLabelEvents(t *testing.T) {
 	t.Parallel()
 
 	_, raw := loadPackagingWorkflow(t)
 
-	var triggers workflowTriggers
-	require.NoErrorf(t, yaml.Unmarshal([]byte(raw), &triggers), "decode %s triggers", packagingWorkflowPath)
+	var events workflowEvents
+	require.NoErrorf(t, yaml.Unmarshal([]byte(raw), &events), "decode %s triggers", packagingWorkflowPath)
 
-	require.Equal(t, wantPullRequestTypes, triggers.On.PullRequest.Types,
-		"pull_request.types must be the three defaults plus `labeled`, so applying the vm-boot label can start a run")
-	require.Equal(t, []string{"main"}, triggers.On.PullRequest.Branches,
+	require.ElementsMatchf(t, wantTriggerEvents, mapKeys(events.On),
+		"%s's `on:` must have exactly push, pull_request and workflow_call: no label trigger may start the packaging jobs (#263)",
+		packagingWorkflowPath)
+
+	var pull pullRequestTrigger
+	decodeNodeAt(t, events.On, "pull_request", &pull)
+	require.Equalf(t, wantPullRequestTypes, pull.Types,
+		"pull_request.types must be exactly opened, synchronize, reopened: a label event must not start the packaging jobs (#263); .github/workflows/vm-boot-label.yml starts the run for the vm-boot label")
+	require.NotContainsf(t, pull.Types, "labeled",
+		"pull_request.types must not contain `labeled`: each label would start a full packaging run, and PR triage would then remove ready-for-human (#263)")
+	require.Equal(t, []string{"main"}, pull.Branches,
 		"the pull_request trigger stays scoped to main")
-	require.Equal(t, []string{"main"}, triggers.On.Push.Branches,
+
+	var push pushTrigger
+	decodeNodeAt(t, events.On, "push", &push)
+	require.Equal(t, []string{"main"}, push.Branches,
 		"the push trigger stays scoped to main")
-	require.Zerof(t, triggers.On.Push.Tags.Kind,
+	require.Zerof(t, push.Tags.Kind,
 		"%s must gain no tag trigger: a tag points at a commit main already covered, and satisfying `needs: packages` on tags would add a third GoReleaser build alongside release.yml",
 		packagingWorkflowPath)
+
+	var call map[string]yaml.Node
+	decodeNodeAt(t, events.On, "workflow_call", &call)
+	require.ElementsMatchf(t, []string{"secrets"}, mapKeys(call),
+		"workflow_call must declare only `secrets`, and no `inputs`: the caller in vm-boot-label.yml passes none")
+
+	var declared map[string]workflowCallSecret
+	decodeNodeAt(t, call, "secrets", &declared)
+	require.ElementsMatchf(t, []string{"GORELEASER_KEY"}, mapKeys(declared),
+		"workflow_call must declare exactly one secret, GORELEASER_KEY, and no other")
 }
 
 func TestPackagingWorkflowVMJobRunsTheHarnessThroughAnInterpreter(t *testing.T) {
@@ -270,17 +367,46 @@ func TestPackagingWorkflowVMJobAddsNoSecret(t *testing.T) {
 
 	workflow, raw := loadPackagingWorkflow(t)
 
-	// Every form a secret can be reached by — `secrets.KEY`, `secrets['KEY']`
-	// and a YAML `secrets:` declaration — counts, so the criterion cannot be
-	// sidestepped by spelling the reference differently.
-	secretReference := regexp.MustCompile(`\bsecrets\s*[.\[:]`)
+	// The file has 2 secret forms, and each is counted on its own, so a new
+	// reference in any spelling fails here:
+	//   - a use: an expression `${{ secrets.KEY }}` in a step's env, found by
+	//     walking the decoded YAML tree (comments are not nodes, so a comment
+	//     that mentions a secret is not counted);
+	//   - a declaration: the `secrets:` key under `on.workflow_call`, which
+	//     exposes GORELEASER_KEY to the caller (vm-boot-label.yml).
+	var doc yaml.Node
+	require.NoErrorf(t, yaml.Unmarshal([]byte(raw), &doc), "decode %s as a YAML node tree", packagingWorkflowPath)
 
-	require.Lenf(t, secretReference.FindAllString(raw, -1), 1,
-		"%s must use exactly one secret — GORELEASER_KEY, in the packages job — and this tier must add none",
+	var uses []yamlSecretUse
+	var declarations []string
+	walkYAML(&doc, "", func(n *yaml.Node, path string) {
+		switch n.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if n.Content[i].Value == "secrets" {
+					declarations = append(declarations, joinYAMLPath(path, "secrets"))
+				}
+			}
+		case yaml.ScalarNode:
+			if secretUseExpression.MatchString(n.Value) {
+				uses = append(uses, yamlSecretUse{path: path, value: n.Value})
+			}
+		}
+	})
+
+	require.Lenf(t, uses, 1,
+		"%s must use exactly one secret expression — GORELEASER_KEY, in the packages job — and this tier must add none",
 		packagingWorkflowPath)
-	require.Containsf(t, raw, "${{ secrets.GORELEASER_KEY }}",
-		"%s's one secret use is GORELEASER_KEY", packagingWorkflowPath)
+	require.Equalf(t, "${{ secrets.GORELEASER_KEY }}", uses[0].value,
+		"%s's one secret use must be exactly ${{ secrets.GORELEASER_KEY }}", packagingWorkflowPath)
+	require.Truef(t, strings.HasPrefix(uses[0].path, "jobs.packages."),
+		"the one secret use must sit in the packages job, not at %q", uses[0].path)
 
+	require.Equalf(t, []string{"on.workflow_call.secrets"}, declarations,
+		"%s's only `secrets:` declaration must be the workflow_call one that exposes GORELEASER_KEY to the caller",
+		packagingWorkflowPath)
+
+	secretReference := regexp.MustCompile(`\bsecrets\s*[.\[:]`)
 	for name, job := range workflow.Jobs {
 		if name == "packages" {
 			continue
