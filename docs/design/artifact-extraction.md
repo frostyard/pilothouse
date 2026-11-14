@@ -564,8 +564,12 @@ host and in the development image.
 
 *The CI packaging gate* is `.github/workflows/packaging.yml` (workflow name
 `Packaging`). It triggers on `push` to `main` and on `pull_request` targeting
-`main` with `types: [opened, synchronize, reopened, labeled]` — no tag
-trigger, no `workflow_run` — holds `permissions: contents:
+`main` with `types: [opened, synchronize, reopened]` — deliberately not
+`labeled`, because each label used to start a run of the whole workflow
+(#263) — and on `workflow_call`, which only
+`.github/workflows/vm-boot-label.yml` calls, when the `vm-boot` label goes on
+a pull request. There is no tag trigger and no `workflow_run`. The workflow
+holds `permissions: contents:
 read` because it publishes nothing, and runs **three** jobs. The first,
 `packages`, installs the packaging and cgo build dependencies (`rpm`
 explicitly, since no ambient runner tool may be relied on, plus the
@@ -596,8 +600,11 @@ receives the key. Neither `install` nor `vm-boot` restates that condition:
 `needs: packages` means a skipped `packages` skips them too. (`vm-boot` does
 carry an `if:` — the `vm-boot` label gate — but nothing about forks.)
 `GORELEASER_KEY` is the only secret the
-workflow takes; there is
-no `GITHUB_TOKEN`, because `--snapshot` publishes nothing and needs no tag.
+workflow takes. `packages` reads it, and the `workflow_call` declaration
+receives it from the caller, which names it explicitly (`secrets:` with
+`GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}`, never `secrets: inherit`).
+There is no `GITHUB_TOKEN`, because `--snapshot` publishes nothing and needs
+no tag.
 
 It is also a separate file from `.github/workflows/snapshot.yml`, which is a
 publisher rather than a gate: snapshot.yml runs after `Tests` succeeds on

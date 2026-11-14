@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-14",
+  "scope": "workflow triggers and PR triage",
+  "correction": "Belief: adding `labeled` to a workflow's pull_request types only starts the jobs that gate on the vm-boot label. Reality: every label starts a run of the whole workflow, so the ungated packages job was in progress when PR triage read the checks after ready-for-human, and triage removed the label; start label-only work from a separate caller workflow whose skipped job has its own check name",
+  "evidence": "frostyard/pilothouse#263 (runs 43534770235, 43534777554, 43534782978)",
+  "promoted_to": "docs/design/vm-harness.md"
+}

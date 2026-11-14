@@ -587,13 +587,25 @@ second build.
   `github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'vm-boot')`
   and nothing else. That is label **presence**, not the labeling event, so a
   later push to an already-labelled pull request runs the job again — a gate
-  keyed to the `labeled` event alone would certify only the commit that
-  happened to be at HEAD when the label was applied. The workflow's
-  `pull_request.types` is widened to `[opened, synchronize, reopened,
-  labeled]` for the same reason: without `labeled` the trigger cannot fire when
-  the label goes on. Widening `types:` also lets `packages` start on a labeling
-  event, which is expected and is not a second build. The fork skip is **not**
-  restated: `needs: packages` inherits it.
+  keyed to the labeling event alone would certify only the commit that
+  happened to be at HEAD when the label was applied.
+- `packaging.yml`'s `pull_request.types` is `[opened, synchronize, reopened]`
+  and does **not** list `labeled` (#263). Each label event used to start the
+  whole workflow. The ungated `packages` job was then in progress when `PR
+  triage` (`.github/workflows/risk-paths.yml`) read the checks after
+  `ready-for-human` was added, and triage removed the label.
+- The label starts the run through `.github/workflows/vm-boot-label.yml`. Its
+  one job, `packaging` (check name `vm-boot packaging`), calls `packaging.yml`
+  with `uses:` only when the added label is `vm-boot`. That call passes
+  `GORELEASER_KEY` by name, and `packaging.yml` declares it under
+  `workflow_call`. Any other label skips the caller job, so no `Build and
+  verify packages` run starts and `ready-for-human` stays on the pull request.
+- The `if:` is not placed in `packaging.yml` because a skipped `Build and
+  verify packages` run would be the newest run of that check name. A reader
+  that counts only the newest run of each check would then miss an earlier
+  failed run of the same name. The separate caller keeps the skipped run under
+  its own check name.
+- The fork skip is **not** restated: `needs: packages` inherits it.
 - **No tag trigger was added.** `packaging.yml` is deliberately not
   tag-triggered; adding one so `needs: packages` could be satisfied on tags
   would create a third GoReleaser build alongside `release.yml` for no gain,
@@ -626,9 +638,21 @@ test, and it asserts the harness step's command *starts with* `bash
 test/vm/vm-boot-test.sh` and passes `--family` and `--artifact-dir`. It also
 asserts the absences that matter: no tag trigger, no fork-skip restatement, no
 GoReleaser step in the job (the workflow-wide count stays exactly one), no
-upload-artifact and no registry push, no `tcg` fallback, and no `secrets.`
-reference outside `packages`. It executes nothing — the harness needs KVM and
-a network.
+upload-artifact and no registry push, no `tcg` fallback, and exactly one secret
+use (`${{ secrets.GORELEASER_KEY }}`, in `packages`) plus one `secrets:`
+declaration (under `on.workflow_call`). `TestPackagingWorkflowTriggersIgnoreLabelEvents`
+pins the `on:` event set (`push`, `pull_request`, `workflow_call`), the
+`labeled`-free `pull_request.types`, and the one `workflow_call` secret, with
+no `inputs`.
+
+`packaging/workflow_vm_label_test.go` guards the caller,
+`.github/workflows/vm-boot-label.yml`, from its own file:
+`TestVMBootLabelWorkflowTriggersOnlyOnLabeledMain` (one event, `labeled` on
+`main`), `TestVMBootLabelWorkflowPermissionsAreReadOnly`, and
+`TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel` (one job named
+`vm-boot packaging`, the exact `vm-boot` `if:`, `uses:`, an explicit `secrets:`
+mapping with only `GORELEASER_KEY`, no `steps`, no `runs-on`). It executes
+nothing — the harness needs KVM and a network.
 
 **What this tier proves, and what it does not.** It proves what a container
 cannot: units activating on a booted host, systemd itself creating
