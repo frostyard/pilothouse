@@ -595,11 +595,15 @@ second build.
   triage` (`.github/workflows/risk-paths.yml`) read the checks after
   `ready-for-human` was added, and triage removed the label.
 - The label starts the run through `.github/workflows/vm-boot-label.yml`. Its
-  one job, `packaging` (check name `vm-boot packaging`), calls `packaging.yml`
+  job `packaging` (check name `vm-boot packaging`) calls `packaging.yml`
   with `uses:` only when the added label is `vm-boot`. That call passes
   `GORELEASER_KEY` by name, and `packaging.yml` declares it under
   `workflow_call`. Any other label skips the caller job, so no `Build and
   verify packages` run starts and `ready-for-human` stays on the pull request.
+  Its second job, `image-tier` (check name `vm-boot image tier`), calls
+  `.github/workflows/image-tier.yml` with the same `if:`, passes no secret and
+  has the same reason (#266): `image-tier.yml` no longer lists `labeled` and
+  declares an empty `workflow_call` (see [image-tier.md](image-tier.md)).
 - The `if:` is not placed in `packaging.yml` because a skipped `Build and
   verify packages` run would be the newest run of that check name. A reader
   that counts only the newest run of each check would then miss an earlier
@@ -649,10 +653,21 @@ no `inputs`.
 `.github/workflows/vm-boot-label.yml`, from its own file:
 `TestVMBootLabelWorkflowTriggersOnlyOnLabeledMain` (one event, `labeled` on
 `main`), `TestVMBootLabelWorkflowPermissionsAreReadOnly`, and
-`TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel` (one job named
-`vm-boot packaging`, the exact `vm-boot` `if:`, `uses:`, an explicit `secrets:`
-mapping with only `GORELEASER_KEY`, no `steps`, no `runs-on`). It executes
-nothing — the harness needs KVM and a network.
+`TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel` (exactly the
+jobs `packaging` and `image-tier`; `packaging` named `vm-boot packaging`, the
+exact `vm-boot` `if:`, `uses:`, an explicit `secrets:` mapping with only
+`GORELEASER_KEY`, no `steps`, no `runs-on`), and
+`TestVMBootLabelWorkflowCallsImageTierOnlyForTheVMBootLabel` (`image-tier`
+named `vm-boot image tier`, the exact `vm-boot` `if:`,
+`uses: ./.github/workflows/image-tier.yml`, no `secrets:` key, permissions
+exactly `contents: read`, no `steps`, no `runs-on`). It executes nothing — the
+harness needs KVM and a network. `packaging/workflow_label_trigger_test.go`
+(`TestWorkflowsListLabeledOnlyWhenAllowed`, with
+`TestWorkflowListsLabeledHandlesEveryOnShape` for the string, list and map
+forms of `on:`) reads every workflow in `.github/workflows/` and fails when one
+outside its hand-written allow-list (`vm-boot-label.yml`, `risk-paths.yml`,
+each with its reason) lists `labeled` in `pull_request` or
+`pull_request_target` types.
 
 **What this tier proves, and what it does not.** It proves what a container
 cannot: units activating on a booted host, systemd itself creating

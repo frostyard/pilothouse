@@ -49,6 +49,9 @@ type imageTierWorkflow struct {
 			Branches []string `yaml:"branches"`
 			Types    []string `yaml:"types"`
 		} `yaml:"pull_request"`
+		// WorkflowCall is a yaml.Node so that a present but empty key is told
+		// apart from an absent one (Kind 0).
+		WorkflowCall yaml.Node `yaml:"workflow_call"`
 	} `yaml:"on"`
 	Jobs map[string]imageTierJob `yaml:"jobs"`
 }
@@ -82,9 +85,23 @@ func TestImageTierWorkflowTriggerAndJobBoundary(t *testing.T) {
 		"the image tier must not run again for a tag already tested on main")
 	require.Equal(t, []string{"main"}, workflow.On.PullRequest.Branches)
 	require.Equal(t,
-		[]string{"opened", "synchronize", "reopened", "labeled"},
+		[]string{"opened", "synchronize", "reopened"},
 		workflow.On.PullRequest.Types,
 	)
+	require.NotContainsf(t, workflow.On.PullRequest.Types, "labeled",
+		"pull_request.types must not list `labeled`: every label on a vm-boot pull request "+
+			"would start the 180-minute ucore-vm job again; vm-boot-label.yml starts it for the label (#266)")
+
+	// Only .github/workflows/vm-boot-label.yml calls the image tier. The call
+	// passes nothing: the job needs no input and no repository secret.
+	require.NotZerof(t, workflow.On.WorkflowCall.Kind,
+		"on.workflow_call must be present: vm-boot-label.yml calls this workflow when the vm-boot label goes on (#266)")
+	var call map[string]yaml.Node
+	require.NoError(t, workflow.On.WorkflowCall.Decode(&call))
+	require.NotContainsf(t, call, "inputs", "on.workflow_call must declare no inputs")
+	require.NotContainsf(t, call, "secrets",
+		"on.workflow_call must declare no secrets: the image tier uses only github.token")
+	require.Emptyf(t, call, "on.workflow_call must be an empty mapping")
 	require.Len(t, workflow.Jobs, 1,
 		"the image workflow owns one complete lifecycle, not independently scheduled phases")
 

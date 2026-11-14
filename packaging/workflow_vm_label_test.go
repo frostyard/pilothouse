@@ -8,13 +8,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// vmBootLabelWorkflowPath is the caller that starts the packaging gate when the
-// `vm-boot` label goes on a pull request, relative to this test package's
+// vmBootLabelWorkflowPath is the caller that starts the packaging gate and the
+// image tier when the `vm-boot` label goes on a pull request, relative to this test package's
 // directory. It is read from the working tree, like packagingWorkflowPath.
 const vmBootLabelWorkflowPath = "../.github/workflows/vm-boot-label.yml"
 
-// vmBootLabelJobName is the one job of the caller.
+// vmBootLabelJobName is the caller job that calls packaging.yml (#263).
 const vmBootLabelJobName = "packaging"
+
+// vmBootLabelImageTierJobName is the caller job that calls image-tier.yml
+// (#266).
+const vmBootLabelImageTierJobName = "image-tier"
+
+// vmBootLabelGate is the exact `if:` of every caller job, hand-written.
+const vmBootLabelGate = "github.event.label.name == 'vm-boot'"
 
 // The types below model only the parts of the caller this guard asserts on.
 // Each field that must be absent is a yaml.Node, so a present but empty key
@@ -100,9 +107,9 @@ func TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel(t *testing.T) {
 
 	workflow := loadVMBootLabelWorkflow(t)
 
-	require.ElementsMatchf(t, []string{vmBootLabelJobName}, mapKeys(workflow.Jobs),
-		"%s must have exactly one job, %q: any other job would run on every label (#263)",
-		vmBootLabelWorkflowPath, vmBootLabelJobName)
+	require.ElementsMatchf(t, []string{vmBootLabelJobName, vmBootLabelImageTierJobName}, mapKeys(workflow.Jobs),
+		"%s must have exactly the jobs %q and %q: any other job would run on every label (#263, #266)",
+		vmBootLabelWorkflowPath, vmBootLabelJobName, vmBootLabelImageTierJobName)
 
 	job := workflow.Jobs[vmBootLabelJobName]
 
@@ -115,7 +122,7 @@ func TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel(t *testing.T) {
 	var condition string
 	require.NotZerof(t, job.If.Kind, "the caller job must gate on the label in its `if:`")
 	require.NoError(t, job.If.Decode(&condition))
-	require.Equalf(t, "github.event.label.name == 'vm-boot'", condition,
+	require.Equalf(t, vmBootLabelGate, condition,
 		"the caller's `if:` must be exactly the vm-boot label check: a label other than vm-boot must skip the job (#263)")
 
 	require.Equalf(t, "./.github/workflows/packaging.yml", job.Uses,
@@ -140,4 +147,42 @@ func TestVMBootLabelWorkflowCallsPackagingOnlyForTheVMBootLabel(t *testing.T) {
 		"the caller job must have no steps: it only calls packaging.yml, so it runs nothing itself")
 	require.Zerof(t, job.RunsOn.Kind,
 		"the caller job must have no runs-on: a called workflow runs its own jobs on their own runners")
+}
+
+func TestVMBootLabelWorkflowCallsImageTierOnlyForTheVMBootLabel(t *testing.T) {
+	t.Parallel()
+
+	workflow := loadVMBootLabelWorkflow(t)
+
+	job, ok := workflow.Jobs[vmBootLabelImageTierJobName]
+	require.Truef(t, ok, "%s must have the job %q, which starts the image tier for the vm-boot label (#266)",
+		vmBootLabelWorkflowPath, vmBootLabelImageTierJobName)
+
+	require.Equalf(t, "vm-boot image tier", job.Name,
+		"the caller job's check name must be %q: a skipped run of that name is what a label other than vm-boot leaves behind",
+		"vm-boot image tier")
+
+	// A label other than vm-boot must start no ucore-vm job. The job's `if:`
+	// is the only gate, so its exact text is pinned, not matched by substring.
+	var condition string
+	require.NotZerof(t, job.If.Kind, "the image-tier caller job must gate on the label in its `if:`")
+	require.NoError(t, job.If.Decode(&condition))
+	require.Equalf(t, vmBootLabelGate, condition,
+		"the image-tier caller's `if:` must be exactly the vm-boot label check: a label other than vm-boot must skip the job (#266)")
+
+	require.Equalf(t, "./.github/workflows/image-tier.yml", job.Uses,
+		"the caller must call exactly .github/workflows/image-tier.yml, a reusable workflow in this repository")
+
+	// The image tier uses only github.token, so the call passes no secret,
+	// neither by name nor by `inherit`.
+	require.Zerof(t, job.Secrets.Kind,
+		"the image-tier caller job must have no `secrets:` key: the image tier needs no repository secret")
+
+	require.Equalf(t, map[string]string{"contents": "read"}, job.Permissions,
+		"the image-tier caller job's permissions must be exactly contents: read")
+
+	require.Zerof(t, job.Steps.Kind,
+		"the image-tier caller job must have no steps: it only calls image-tier.yml, so it runs nothing itself")
+	require.Zerof(t, job.RunsOn.Kind,
+		"the image-tier caller job must have no runs-on: a called workflow runs its own jobs on their own runners")
 }

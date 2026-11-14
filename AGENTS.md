@@ -149,7 +149,10 @@ If the reset group survives bounded TERM/KILL escalation, removal is refused
 and the workspace is preserved rather than deleted beneath a live process.
 `.github/workflows/image-tier.yml` invokes it on `ubuntu-26.04`, whose Podman 5
 provides the required `--imagestore` option. The job runs on every push to
-`main` and on a pull request only while the `vm-boot` label is present. It is
+`main` and on a pull request only while the `vm-boot` label is present.
+Applying the label starts it through `.github/workflows/vm-boot-label.yml`
+(job `image-tier`); a label event does not start `image-tier.yml` directly
+(#266). It is
 not a required check, uses the last released RPM rather than a branch package,
 overlays locally built checked-out executables, and never uploads or publishes
 a package, image, disk or log artifact.
