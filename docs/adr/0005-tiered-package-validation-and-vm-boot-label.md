@@ -60,6 +60,16 @@ required status checks (`packaging.yml:182-183`,
 PRs they are reviewer-invoked evidence, per the tier rules in
 [risk-tiers.md](../risk-tiers.md).
 
+**Update (2026-11-14, #263/#264 and #266):** `labeled` is no longer in the
+`pull_request` trigger types of `packaging.yml` or `image-tier.yml`; every
+label started a run of the whole workflow. Applying the `vm-boot` label now
+starts both runs through `.github/workflows/vm-boot-label.yml` (jobs
+`packaging` and `image-tier`, each gated on the added label's name), which
+calls each workflow through its `workflow_call` trigger. The presence gate
+above is unchanged, and a push to a labelled PR still runs both tiers. See
+[vm-harness.md](../design/vm-harness.md) and
+[image-tier.md](../design/image-tier.md).
+
 (Naming note: `docs/design/overview.md`'s "artifact-contract portability:
 four tiers" is an unrelated taxonomy of Go source layering inside
 `packaging/`; the VM and image harnesses are explicitly "not a fifth

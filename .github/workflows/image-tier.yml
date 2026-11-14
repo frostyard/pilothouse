@@ -10,9 +10,24 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Presence matters: synchronizing an already-labelled pull request must
-    # validate its new head, not only the commit that was labelled.
-    types: [opened, synchronize, reopened, labeled]
+    # The three defaults, written out, and deliberately NOT `labeled` (#266,
+    # the same cause as #263 in packaging.yml). With `labeled` here, every
+    # label on a pull request that carries `vm-boot` (for example
+    # `ready-for-human`) started the 180-minute `ucore-vm` job again.
+    # Applying the `vm-boot` label starts this workflow through
+    # .github/workflows/vm-boot-label.yml instead, which calls it below. The
+    # job gates on the label being PRESENT, not on the event that added it, so
+    # synchronizing an already-labelled pull request validates its new head,
+    # not only the commit that was labelled. A label-name `if:` here would
+    # leave a skipped `ucore-vm` run as the newest run of that check name and
+    # hide an earlier failed run from PR triage.
+    types: [opened, synchronize, reopened]
+  # Only .github/workflows/vm-boot-label.yml calls this workflow, when the
+  # `vm-boot` label goes on a pull request. A called workflow sees the caller's
+  # `pull_request` event, so the job `if:` below reads the same payload. It
+  # takes no inputs and no secret, because the job uses only `github.token`,
+  # which a called workflow receives.
+  workflow_call: {}
 
 permissions:
   contents: read

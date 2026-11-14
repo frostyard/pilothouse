@@ -654,8 +654,20 @@ authorize deletion of a pre-existing target.
 
 `.github/workflows/image-tier.yml` carries one `ucore-vm` job. It runs on every
 push to `main`; for pull requests it runs only while the `vm-boot` label is
-present, and `opened`, `synchronize`, `reopened` and `labeled` triggers ensure
-the label certifies the current head. The job uses `ubuntu-26.04` specifically:
+present. Its `pull_request.types` is `[opened, synchronize, reopened]`, so a
+push to a labelled pull request validates the new head, and it also declares
+`workflow_call` with no `inputs` and no secrets. It does **not** list `labeled`
+(#266, the same cause as #263 in `packaging.yml`): every label on a pull
+request that carries `vm-boot`, for example `ready-for-human`, started the
+180-minute job again. Applying the label starts the run through
+`.github/workflows/vm-boot-label.yml`, whose job `image-tier` (check name
+`vm-boot image tier / <callee job name>`) calls `image-tier.yml` with `uses:`
+only when the added label is `vm-boot`; a called workflow sees the caller's
+`pull_request` event, so the job's presence gate reads the same payload. No
+label-name `if:` sits in `image-tier.yml`: a skipped run under the `ucore-vm`
+check name would be the newest run of that check name and hide an earlier
+failed run from PR triage. The separate caller keeps the skipped run under its
+own check name. The job uses `ubuntu-26.04` specifically:
 that runner provides Podman 5 and the `--imagestore` option the private-store
 contract requires. It sets up Go, installs the native PAM/systemd headers plus
 QEMU/OVMF and cosign, builds the checked-out executables without GoReleaser,
@@ -683,5 +695,14 @@ exercises INT/TERM before and after group readiness, cleanup-active return and
 owned/unowned workspace cleanup. `packaging/workflow_image_tier_test.go`
 decodes the live YAML and fixes its complete permission map and ordered step
 bodies in addition to its trigger, label, runner and timeout, so an added
-upload step or a fail-open suffix is visible.
+upload step or a fail-open suffix is visible. Its trigger assertions pin
+`pull_request.types` to exactly `opened`, `synchronize`, `reopened`, assert
+explicitly that `labeled` is absent (#266), and require `on.workflow_call` to
+be present as an empty mapping with no `inputs` and no `secrets`.
+`packaging/workflow_vm_label_test.go`
+(`TestVMBootLabelWorkflowCallsImageTierOnlyForTheVMBootLabel`) pins the caller
+job, and `packaging/workflow_label_trigger_test.go`
+(`TestWorkflowsListLabeledOnlyWhenAllowed`) fails when any workflow outside its
+allow-list (`vm-boot-label.yml`, `risk-paths.yml`) lists `labeled` in
+`pull_request` or `pull_request_target` types.
 
