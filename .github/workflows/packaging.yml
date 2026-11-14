@@ -35,12 +35,24 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `labeled` is added to the three defaults so applying the `vm-boot` label
-    # can start a run. The VM job then gates on the label being PRESENT, not on
-    # the event that added it, so a later push to the same pull request runs it
-    # again — a label that certified only the commit at HEAD when it was
-    # applied would be a worse guarantee than not running at all.
-    types: [opened, synchronize, reopened, labeled]
+    # The three defaults, written out, and deliberately NOT `labeled`. With
+    # `labeled` here, every label started a new run, and `PR triage`
+    # (.github/workflows/risk-paths.yml) then found `Build and verify packages`
+    # in progress when `ready-for-human` came and removed that label (#263).
+    # Applying the `vm-boot` label starts this workflow through
+    # .github/workflows/vm-boot-label.yml instead, which calls it below. The VM
+    # job gates on the label being PRESENT, not on the event that added it, so
+    # a later push to a labelled pull request runs it again — a label that
+    # certified only the commit at HEAD when it was applied would be a worse
+    # guarantee than not running at all.
+    types: [opened, synchronize, reopened]
+  # Only .github/workflows/vm-boot-label.yml calls this workflow, when the
+  # `vm-boot` label goes on a pull request. A called workflow sees the caller's
+  # event, so every job condition below reads the same `pull_request` payload.
+  workflow_call:
+    secrets:
+      GORELEASER_KEY:
+        required: false
 
 permissions:
   contents: read
