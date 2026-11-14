@@ -64,9 +64,11 @@ type pullRequestTrigger struct {
 	Types    []string `yaml:"types"`
 }
 
-// workflowCallSecret is one entry under `on.workflow_call.secrets`.
+// workflowCallSecret is one entry under `on.workflow_call.secrets`. Required
+// is a pointer so the test can tell an explicit `required: false` from an
+// absent key.
 type workflowCallSecret struct {
-	Required bool `yaml:"required"`
+	Required *bool `yaml:"required"`
 }
 
 // decodeNodeAt decodes the raw node under key into out. A map index is not
@@ -89,9 +91,79 @@ func mapKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// secretUseExpression matches a `${{ ... }}` expression that reads the
-// `secrets` context, however it is spelled (`secrets.KEY`, `secrets['KEY']`).
-var secretUseExpression = regexp.MustCompile(`\$\{\{[^}]*\bsecrets\b`)
+// secretsIdentifier matches the `secrets` context name in the code of an
+// expression, however it is accessed (`secrets.KEY`, `secrets['KEY']`). The
+// Actions expression syntax resolves context names without regard to case, so
+// `SeCrEtS.KEY` reads the same secret and the match ignores case.
+var secretsIdentifier = regexp.MustCompile(`(?i)\bsecrets\b`)
+
+// bareSecretReference matches the `secrets` context name followed by an
+// access (`secrets.`, `secrets[`) or a `secrets:` key spelled in a value,
+// without regard to case. It is the fallback for text outside `${{ }}`: an
+// `if:` is an expression without the delimiters.
+var bareSecretReference = regexp.MustCompile(`(?i)\bsecrets\s*[.\[:]`)
+
+// readsSecrets reports whether value holds a `${{ ... }}` expression that
+// reads the `secrets` context. It scans each expression the way the Actions
+// expression syntax delimits it: a string literal is single-quoted, `”` is a
+// quote inside it, and the expression ends at the first `}}` outside a string
+// literal. A brace inside a literal, as in `${{ format('}}{0}', secrets.KEY)
+// }}`, therefore does not end the expression, and the word `secrets` inside a
+// literal is text, not a context read. An expression with no closing `}}`
+// runs to the end of the value, so it is still searched.
+func readsSecrets(value string) bool {
+	for {
+		start := strings.Index(value, "${{")
+		if start < 0 {
+			return false
+		}
+
+		code, rest := expressionCode(value[start+len("${{"):])
+		if secretsIdentifier.MatchString(code) {
+			return true
+		}
+
+		value = rest
+	}
+}
+
+// expressionCode reads one expression body from s, which starts just after
+// `${{`. It returns the body with each string literal replaced by a space, and
+// the text after the closing `}}`.
+func expressionCode(s string) (code, rest string) {
+	var b strings.Builder
+	inLiteral := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if inLiteral {
+			if c != '\'' {
+				continue
+			}
+			if i+1 < len(s) && s[i+1] == '\'' {
+				i++ // `''` is an escaped quote: the literal goes on.
+
+				continue
+			}
+			inLiteral = false
+			b.WriteByte(' ')
+
+			continue
+		}
+
+		switch {
+		case c == '\'':
+			inLiteral = true
+		case c == '}' && i+1 < len(s) && s[i+1] == '}':
+			return b.String(), s[i+2:]
+		default:
+			b.WriteByte(c)
+		}
+	}
+
+	return b.String(), ""
+}
 
 // yamlSecretUse is one scalar that reads the `secrets` context, with the path
 // of the key that holds it. The path is structural (for example
@@ -129,6 +201,68 @@ func joinYAMLPath(path, key string) string {
 	}
 
 	return path + "." + key
+}
+
+// collectSecretForms walks a decoded workflow and returns its 2 secret forms:
+// each scalar that reads the `secrets` context in an expression (a use, in any
+// key: run, env, with, if and the others), and the path of each `secrets:`
+// mapping key (a declaration). Comments are not nodes, so a comment that
+// mentions a secret is not counted.
+func collectSecretForms(t *testing.T, raw string) (uses []yamlSecretUse, declarations []string) {
+	t.Helper()
+
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(raw), &doc), "decode the workflow as a YAML node tree")
+
+	walkYAML(&doc, "", func(n *yaml.Node, path string) {
+		switch n.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if n.Content[i].Value == "secrets" {
+					declarations = append(declarations, joinYAMLPath(path, "secrets"))
+				}
+			}
+		case yaml.ScalarNode:
+			if readsSecrets(n.Value) {
+				uses = append(uses, yamlSecretUse{path: path, value: n.Value})
+			}
+		}
+	})
+
+	return uses, declarations
+}
+
+// collectBareSecretNames returns the path of each scalar, in document order,
+// that names the secrets context (bareSecretReference) in a job other than
+// `packages`, in any key: run, env, with, if and the others, at job or step
+// level.
+func collectBareSecretNames(t *testing.T, raw string) []string {
+	t.Helper()
+
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(raw), &doc), "decode the workflow as a YAML node tree")
+
+	var paths []string
+	walkYAML(&doc, "", func(n *yaml.Node, path string) {
+		if n.Kind != yaml.ScalarNode || !strings.HasPrefix(path, "jobs.") || strings.HasPrefix(path, "jobs.packages.") {
+			return
+		}
+		if bareSecretReference.MatchString(n.Value) {
+			paths = append(paths, path)
+		}
+	})
+
+	return paths
+}
+
+// secretUsePaths returns the path of each use, in document order.
+func secretUsePaths(uses []yamlSecretUse) []string {
+	paths := make([]string, 0, len(uses))
+	for _, use := range uses {
+		paths = append(paths, use.path)
+	}
+
+	return paths
 }
 
 func loadVMJob(t *testing.T) (workflowJob, string) {
@@ -233,6 +367,12 @@ func TestPackagingWorkflowTriggersIgnoreLabelEvents(t *testing.T) {
 	decodeNodeAt(t, call, "secrets", &declared)
 	require.ElementsMatchf(t, []string{"GORELEASER_KEY"}, mapKeys(declared),
 		"workflow_call must declare exactly one secret, GORELEASER_KEY, and no other")
+
+	required := declared["GORELEASER_KEY"].Required
+	require.NotNilf(t, required,
+		"workflow_call must state `required: false` for GORELEASER_KEY explicitly")
+	require.Falsef(t, *required,
+		"workflow_call must keep GORELEASER_KEY `required: false`: a pull request from a fork has no GORELEASER_KEY, and the packages job skips itself for that case instead of failing the call")
 }
 
 func TestPackagingWorkflowVMJobRunsTheHarnessThroughAnInterpreter(t *testing.T) {
@@ -365,34 +505,15 @@ func TestPackagingWorkflowVMJobEnablesKVM(t *testing.T) {
 func TestPackagingWorkflowVMJobAddsNoSecret(t *testing.T) {
 	t.Parallel()
 
-	workflow, raw := loadPackagingWorkflow(t)
+	_, raw := loadPackagingWorkflow(t)
 
 	// The file has 2 secret forms, and each is counted on its own, so a new
 	// reference in any spelling fails here:
-	//   - a use: an expression `${{ secrets.KEY }}` in a step's env, found by
-	//     walking the decoded YAML tree (comments are not nodes, so a comment
-	//     that mentions a secret is not counted);
+	//   - a use: an expression `${{ secrets.KEY }}` in a step's env, found in
+	//     every scalar of the decoded YAML tree (collectSecretForms);
 	//   - a declaration: the `secrets:` key under `on.workflow_call`, which
 	//     exposes GORELEASER_KEY to the caller (vm-boot-label.yml).
-	var doc yaml.Node
-	require.NoErrorf(t, yaml.Unmarshal([]byte(raw), &doc), "decode %s as a YAML node tree", packagingWorkflowPath)
-
-	var uses []yamlSecretUse
-	var declarations []string
-	walkYAML(&doc, "", func(n *yaml.Node, path string) {
-		switch n.Kind {
-		case yaml.MappingNode:
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				if n.Content[i].Value == "secrets" {
-					declarations = append(declarations, joinYAMLPath(path, "secrets"))
-				}
-			}
-		case yaml.ScalarNode:
-			if secretUseExpression.MatchString(n.Value) {
-				uses = append(uses, yamlSecretUse{path: path, value: n.Value})
-			}
-		}
-	})
+	uses, declarations := collectSecretForms(t, raw)
 
 	require.Lenf(t, uses, 1,
 		"%s must use exactly one secret expression — GORELEASER_KEY, in the packages job — and this tier must add none",
@@ -406,14 +527,136 @@ func TestPackagingWorkflowVMJobAddsNoSecret(t *testing.T) {
 		"%s's only `secrets:` declaration must be the workflow_call one that exposes GORELEASER_KEY to the caller",
 		packagingWorkflowPath)
 
-	secretReference := regexp.MustCompile(`\bsecrets\s*[.\[:]`)
-	for name, job := range workflow.Jobs {
-		if name == "packages" {
-			continue
-		}
-		for _, step := range job.Steps {
-			require.NotRegexpf(t, secretReference, step.Run,
-				"job %q must reference no secret (step %q)", name, step.Name)
-		}
+	// Fallback outside expressions: no scalar of another job may name the
+	// secrets context at all, in any key (run, env, with, if and the others).
+	// An `if:` is an expression without `${{ }}`, and a run script must not
+	// spell a secret either.
+	require.Emptyf(t, collectBareSecretNames(t, raw),
+		"only the packages job may reference a secret in %s", packagingWorkflowPath)
+}
+
+// TestReadsSecretsFindsEveryExpressionForm pins the secret-use detection that
+// TestPackagingWorkflowVMJobAddsNoSecret relies on. The cases marked
+// "quoted brace" were missed by the earlier pattern `\$\{\{[^}]*\bsecrets\b`,
+// which stopped at the first `}` even inside a string literal.
+func TestReadsSecretsFindsEveryExpressionForm(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"dot form", "${{ secrets.GORELEASER_KEY }}", true},
+		{"bracket form", "${{ secrets['GORELEASER_KEY'] }}", true},
+		{"mixed-case dot form", "${{ SeCrEtS.GORELEASER_KEY }}", true},
+		{"upper-case bracket form", "${{ SECRETS['GORELEASER_KEY'] }}", true},
+		{"quoted brace before the read", "${{ format('}}{0}', secrets.GORELEASER_KEY) }}", true},
+		{"quoted brace, bracket form", "${{ format('{0}}', secrets['GORELEASER_KEY']) }}", true},
+		{"quoted brace after an escaped quote", "${{ format('it''s }}{0}', secrets.GORELEASER_KEY) }}", true},
+		{"second expression of the value", "${{ github.ref }}/${{ secrets.GORELEASER_KEY }}", true},
+		{"expression with no closing braces", "${{ secrets.GORELEASER_KEY", true},
+		{"no expression", "echo secrets.GORELEASER_KEY", false},
+		{"another context", "${{ matrix.family }}", false},
+		{"the word only inside a literal", "${{ format('secrets.{0}', matrix.family) }}", false},
+		{"the word after the expression ends", "${{ '}}' }} secrets.GORELEASER_KEY", false},
+		{"a longer identifier", "${{ env.my_secrets_dir }}", false},
 	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equalf(t, tc.want, readsSecrets(tc.value), "readsSecrets(%q)", tc.value)
+		})
+	}
+}
+
+// TestCollectSecretFormsFindsUsesInEveryStepKey checks that a secret read is
+// counted in a step's run, env and with values alike, and that a comment is
+// not. Each use sits behind a quoted brace, which the earlier pattern missed.
+func TestCollectSecretFormsFindsUsesInEveryStepKey(t *testing.T) {
+	t.Parallel()
+
+	const workflow = `
+jobs:
+  probe:
+    # ${{ secrets.IN_A_COMMENT }}
+    steps:
+      - run: echo "${{ format('}}{0}', secrets.IN_RUN) }}"
+        env:
+          KEY: ${{ format('}}{0}', secrets.IN_ENV) }}
+          PLAIN: ${{ format('}}{0}', matrix.family) }}
+        with:
+          token: ${{ format('{0}}', secrets['IN_WITH']) }}
+`
+
+	uses, declarations := collectSecretForms(t, workflow)
+
+	require.Equal(t, []string{
+		"jobs.probe.steps[].run",
+		"jobs.probe.steps[].env.KEY",
+		"jobs.probe.steps[].with.token",
+	}, secretUsePaths(uses), "each step key that reads a secret must be counted once, and only those")
+	require.Empty(t, declarations, "the workflow declares no `secrets:` key")
+}
+
+// TestCollectSecretFormsIgnoresCase checks that a mixed-case context name in
+// a job outside `packages` is counted as a use: the Actions expression syntax
+// resolves context names without regard to case.
+func TestCollectSecretFormsIgnoresCase(t *testing.T) {
+	t.Parallel()
+
+	const workflow = `
+jobs:
+  vm-boot:
+    env:
+      DOT: ${{ SeCrEtS.GORELEASER_KEY }}
+    steps:
+      - with:
+          token: ${{ SECRETS['GORELEASER_KEY'] }}
+`
+
+	uses, _ := collectSecretForms(t, workflow)
+
+	require.Equal(t, []string{
+		"jobs.vm-boot.env.DOT",
+		"jobs.vm-boot.steps[].with.token",
+	}, secretUsePaths(uses), "a mixed-case secrets context read must be counted")
+}
+
+// TestCollectBareSecretNamesCoversEveryKeyOutsidePackages checks the fallback
+// for text outside `${{ }}`: a bare secrets name is found in a job's env and
+// if, and in a step's env and with, not only in run, in any case; the
+// `packages` job is exempt, and text with no access after the word is not
+// counted.
+func TestCollectBareSecretNamesCoversEveryKeyOutsidePackages(t *testing.T) {
+	t.Parallel()
+
+	const workflow = `
+jobs:
+  packages:
+    env:
+      ALLOWED: secrets.GORELEASER_KEY
+  vm-boot:
+    if: secrets.GORELEASER_KEY != ''
+    env:
+      JOB_ENV: secrets.GORELEASER_KEY
+    steps:
+      - name: no secrets here
+        run: echo build
+        env:
+          STEP_ENV: Secrets['GORELEASER_KEY']
+        with:
+          token: SECRETS.GORELEASER_KEY
+      - run: echo secrets.GORELEASER_KEY
+`
+
+	require.Equal(t, []string{
+		"jobs.vm-boot.if",
+		"jobs.vm-boot.env.JOB_ENV",
+		"jobs.vm-boot.steps[].env.STEP_ENV",
+		"jobs.vm-boot.steps[].with.token",
+		"jobs.vm-boot.steps[].run",
+	}, collectBareSecretNames(t, workflow),
+		"each scalar outside packages that names the secrets context must be found, and only those")
 }

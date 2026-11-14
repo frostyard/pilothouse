@@ -644,10 +644,23 @@ asserts the absences that matter: no tag trigger, no fork-skip restatement, no
 GoReleaser step in the job (the workflow-wide count stays exactly one), no
 upload-artifact and no registry push, no `tcg` fallback, and exactly one secret
 use (`${{ secrets.GORELEASER_KEY }}`, in `packages`) plus one `secrets:`
-declaration (under `on.workflow_call`). `TestPackagingWorkflowTriggersIgnoreLabelEvents`
+declaration (under `on.workflow_call`). A use is any scalar, in any key
+(`run`, `env`, `with`, `if` and the others), with a `${{ … }}` expression
+that reads the `secrets` context: `readsSecrets` delimits each expression as
+the Actions syntax does (single-quoted literals, `''` escape, the expression
+ends at the first `}}` outside a literal) and matches the context name
+without regard to case, as Actions resolves it, so `secrets['KEY']`,
+`SeCrEtS.KEY` and a read after a quoted brace (`format('}}{0}', secrets.KEY)`)
+count; `TestReadsSecretsFindsEveryExpressionForm`,
+`TestCollectSecretFormsFindsUsesInEveryStepKey` and
+`TestCollectSecretFormsIgnoresCase` pin that detection. Outside expressions,
+no scalar of another job may name `secrets.`, `secrets[` or `secrets:`, in
+any case (`collectBareSecretNames`, pinned by
+`TestCollectBareSecretNamesCoversEveryKeyOutsidePackages`). `TestPackagingWorkflowTriggersIgnoreLabelEvents`
 pins the `on:` event set (`push`, `pull_request`, `workflow_call`), the
-`labeled`-free `pull_request.types`, and the one `workflow_call` secret, with
-no `inputs`.
+`labeled`-free `pull_request.types`, and the one `workflow_call` secret,
+`GORELEASER_KEY` with an explicit `required: false` (a pull request from a
+fork has no `GORELEASER_KEY`), with no `inputs`.
 
 `packaging/workflow_vm_label_test.go` guards the caller,
 `.github/workflows/vm-boot-label.yml`, from its own file:
