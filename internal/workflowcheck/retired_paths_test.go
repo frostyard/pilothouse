@@ -121,7 +121,8 @@ func TestCitationProblemsFixtures(t *testing.T) {
 }
 
 // TestNoCitationOfRetiredPaths guards the baseline cleanup (ADR 0014): no
-// text file in the working tree (outside .git, .agents and build output)
+// text file in the working tree (outside .git, .agents, the correction
+// records in .memory/corrections and build output)
 // cites the deleted docs/agents/skills/ lessons or the
 // renamed .github/workflows/test.yml, every engineering-lessons.md#<anchor>
 // citation names an anchor that exists, and no file cites a lesson by its
@@ -151,6 +152,11 @@ func TestNoCitationOfRetiredPaths(t *testing.T) {
 		if d.IsDir() {
 			switch rel {
 			case ".git", ".agents", "bin", "dist", "site/node_modules", "site/dist", "site/.astro":
+				return filepath.SkipDir
+			case ".memory/corrections":
+				// Correction records are permanent history (core ADR-0081):
+				// a record may name a path that a later change retired, and
+				// its text must never change.
 				return filepath.SkipDir
 			}
 			return nil

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "risk:high PR body",
+  "correction": "Belief: the risk paths of a PR are the workflow and tool-pin files it changes. Reality: test files under packaging/** and internal/broker/** also match .github/risk-paths.json; match every changed path against the base list (the risk-paths job summary) before writing the body",
+  "evidence": "frostyard/pilothouse#240, cross-review (openai/gpt-6.1-sol) initial review of head 21b3832, finding 1",
+  "promoted_to": "AGENTS.md"
+}

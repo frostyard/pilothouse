@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "Makefile docker-ci",
+  "correction": "Belief: make docker-ci BASE=<ref> ran the same corrections comparison as make ci BASE=<ref>. Reality: docker-ci ran make ci in the container without BASE, so the append-only comparison skipped silently; it now passes BASE",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) of head 9dcf033, finding F1",
+  "promoted_to": "internal/workflowcheck/docker_ci_base_test.go"
+}

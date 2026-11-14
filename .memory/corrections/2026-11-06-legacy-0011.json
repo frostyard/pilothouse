@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "AGENTS.md tools rule",
+  "correction": "Belief: make docker-ci is a fallback with the same golangci-lint as CI. Reality: .docker/Dockerfile builds golangci-lint from source with go install, while CI installs the official release through mise, so a docker-ci pass cannot show release parity",
+  "evidence": "frostyard/pilothouse#241, cross-review (openai/gpt-6.1-sol) initial review of head f8770c9, finding 1",
+  "promoted_to": "AGENTS.md"
+}

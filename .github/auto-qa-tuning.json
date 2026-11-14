@@ -5,7 +5,7 @@
   "signals": {
     "repository_ci": ".github/workflows/ci.yml",
     "coverage": ".github/workflows/ci.yml#unit-test",
-    "correction_frequency": ".memory/corrections.jsonl",
+    "correction_frequency": ".memory/corrections/",
     "recurring_review_findings": "docs/design/engineering-lessons.md"
   },
   "thresholds": {

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "baseline PR body",
+  "correction": "Belief: a row is done when its check command passes and moved text is unchanged apart from links. Reality: B5's rule also covers workflow-level permissions and every checkout, and the moved guides also gained updated gate instructions; a status claim must match every clause of the row and every edit",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) of head 9dcf033, findings F2 and F5",
+  "promoted_to": ""
+}

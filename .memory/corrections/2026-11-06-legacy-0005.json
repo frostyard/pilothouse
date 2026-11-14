@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "docs/specs/storage.md",
+  "correction": "Belief (carried from a deleted spec): every remote-mount artifact starts with the managed comment, all are compared byte for byte, and the target directory is 0755. Reality: only the 2 units carry the comment, credentials get a metadata check only, and mkdirat's 0755 is cut by the broker's UMask=0077 to 0700",
+  "evidence": "frostyard/pilothouse#220, cross-review (openai/gpt-6.1-sol) re-review 1 of head c42952d, findings F6 and F8",
+  "promoted_to": "AGENTS.md"
+}
