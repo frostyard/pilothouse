@@ -12,12 +12,6 @@ import (
 
 var errOutputTooLarge = errors.New("tool output exceeds limit")
 
-type fileIdentity struct {
-	Mode    os.FileMode
-	Regular bool
-	UID     uint32
-}
-
 type commandRunner struct {
 	limit int
 	run   func(context.Context, string, ...string) ([]byte, error)
@@ -89,18 +83,6 @@ func NewOptionalToolResolver() ToolResolver {
 	}
 }
 
-func NewToolset() (Toolset, error) {
-	lsblk, err := resolveSystemTool("lsblk", []string{"/usr/bin/lsblk", "/bin/lsblk"})
-	if err != nil {
-		return Toolset{}, err
-	}
-	findmnt, err := resolveSystemTool("findmnt", []string{"/usr/bin/findmnt", "/bin/findmnt"})
-	if err != nil {
-		return Toolset{}, err
-	}
-	return Toolset{LSBLK: lsblk, Findmnt: findmnt}, nil
-}
-
 func NewToolsetWithResolver(resolve ToolResolver) (Toolset, error) {
 	lsblk, present, err := resolve([]string{"/usr/bin/lsblk", "/bin/lsblk"})
 	if err != nil {
@@ -117,48 +99,6 @@ func NewToolsetWithResolver(resolve ToolResolver) (Toolset, error) {
 		return Toolset{}, errors.New("findmnt is unavailable")
 	}
 	return Toolset{LSBLK: lsblk, Findmnt: findmnt}, nil
-}
-
-func resolveSystemTool(name string, candidates []string) (string, error) {
-	return resolveTool(candidates, func(path string) (fileIdentity, error) {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return fileIdentity{}, err
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return fileIdentity{}, fmt.Errorf("inspect %s ownership", path)
-		}
-		return fileIdentity{Mode: info.Mode(), Regular: info.Mode().IsRegular(), UID: stat.Uid}, nil
-	})
-}
-
-func resolveTool(candidates []string, identity func(string) (fileIdentity, error)) (string, error) {
-	var lastErr error
-	for _, path := range candidates {
-		file, err := identity(path)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if !file.Regular {
-			lastErr = fmt.Errorf("tool %s is not a regular file", path)
-			continue
-		}
-		if file.UID != 0 {
-			lastErr = fmt.Errorf("tool %s is not root-owned", path)
-			continue
-		}
-		if file.Mode.Perm()&0o022 != 0 {
-			lastErr = fmt.Errorf("tool %s is group- or world-writable", path)
-			continue
-		}
-		return path, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("no tool candidates")
-	}
-	return "", fmt.Errorf("resolve tool: %w", lastErr)
 }
 
 func resolveOptionalTool(candidates []string, lstat, stat func(string) (os.FileInfo, error)) (string, bool, error) {

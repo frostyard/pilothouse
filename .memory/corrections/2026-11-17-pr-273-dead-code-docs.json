@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-17",
+  "scope": "dead code removal and docs",
+  "correction": "Belief: deleting dead code needs no doc change when no doc names the deleted symbols. Reality: the AGENTS.md documentation rule asks for a review of the relevant docs after any source change; when the deletion leaves 1 path, say in the spec which path stays (here NewToolsetWithResolver with NewOptionalToolResolver in docs/specs/storage.md)",
+  "evidence": "frostyard/pilothouse#273 cross-review (openai/gpt-6.1-sol at ac1602e0053266046795e04c57df73e3cabb33dd)",
+  "promoted_to": "AGENTS.md"
+}
