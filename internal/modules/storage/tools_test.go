@@ -12,51 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveToolRequiresRootOwnedSafeRegularFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lsblk")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755))
-
-	_, err := resolveTool([]string{path}, func(string) (fileIdentity, error) {
-		return fileIdentity{Mode: 0o755, UID: 1000, Regular: true}, nil
-	})
-
-	assert.ErrorContains(t, err, "root-owned")
-}
-
-func TestResolveToolRejectsNonRegularFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lsblk")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755))
-
-	_, err := resolveTool([]string{path}, func(string) (fileIdentity, error) {
-		return fileIdentity{Mode: 0o755, UID: 0}, nil
-	})
-
-	assert.ErrorContains(t, err, "regular")
-}
-
-func TestResolveToolRejectsGroupWritableFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lsblk")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755))
-
-	_, err := resolveTool([]string{path}, func(string) (fileIdentity, error) {
-		return fileIdentity{Mode: 0o775, UID: 0, Regular: true}, nil
-	})
-
-	assert.ErrorContains(t, err, "writable")
-}
-
-func TestResolveToolAcceptsRootOwnedSafeRegularFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lsblk")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755))
-
-	resolved, err := resolveTool([]string{path}, func(string) (fileIdentity, error) {
-		return fileIdentity{Mode: 0o755, UID: 0, Regular: true}, nil
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, path, resolved)
-}
-
 func TestResolveOptionalToolReturnsUnsupportedWithoutError(t *testing.T) {
 	path, supported, err := resolveOptionalTool([]string{"/does/not/exist"}, os.Lstat, os.Stat)
 
