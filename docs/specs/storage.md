@@ -98,7 +98,10 @@ own action instead of empty `uid`/`gid` values. The manager then applies:
   symlink whose resolved target is a root-owned regular file that is not
   group- or world-writable, and the original candidate path is executed
   (`ResolveOptionalTool`, `internal/modules/storage/tools.go`). No shell, and
-  no argument from a request.
+  no argument from a request. The core tools resolve through the same check:
+  `cmd/pilothoused` passes `NewOptionalToolResolver()` to
+  `NewToolsetWithResolver`, which fails when `lsblk` or `findmnt` has no
+  candidate, or has any unsafe candidate.
 - Only the SMART enricher is cached (`CacheHealth`), for 5 minutes
   (`healthCacheTTL`), keyed by the enricher name. When a refresh after expiry
   fails, the old result is served with the detail `Health data: Stale`.
