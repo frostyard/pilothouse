@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/frostyard/pilothouse/internal/platform"
+	"github.com/frostyard/pilothouse/internal/web"
 )
 
 type Module struct {
@@ -87,17 +88,7 @@ func (m *Module) Mount(mux *http.ServeMux, host platform.Host) {
 }
 
 func formatBytes(value uint64) string {
-	const unit = 1024
-	if value < unit {
-		return fmt.Sprintf("%d B", value)
-	}
-	divisor := uint64(unit)
-	exponent := 0
-	for quotient := value / unit; quotient >= unit && exponent < 5; quotient /= unit {
-		divisor *= unit
-		exponent++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(divisor), "KMGTPE"[exponent])
+	return web.FormatBytes(value)
 }
 
 func formatUptime(value int64) string {

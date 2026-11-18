@@ -31,7 +31,8 @@ cmd/verify-packages/  repository tool (main.go) — reports packaging.Verify's f
 internal/
   modules/<name>/     vertical feature slices (UI + domain logic), one per management area
   platform/           Module contract (platform.Module), Host interface, module Registry
-  web/                HTTP server, session/auth middleware, shell.templ layout, embedded static assets
+  web/                HTTP server, session/auth middleware, shell.templ layout, embedded static assets,
+                      shared view helpers such as FormatBytes
   broker/             fixed query/action/stream protocol, registries, HTTP-over-Unix-socket server+client
   audit/               durable action-history store (bbolt)
   jobs/                durable background-job store (bbolt), for long-running privileged mutations
