@@ -12,6 +12,7 @@ type automationStep struct {
 	ID    string            `yaml:"id"`
 	If    string            `yaml:"if"`
 	Shell string            `yaml:"shell"`
+	Uses  string            `yaml:"uses"`
 	Env   map[string]string `yaml:"env"`
 	Run   string            `yaml:"run"`
 }

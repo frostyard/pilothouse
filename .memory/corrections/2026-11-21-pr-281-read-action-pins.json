@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-21",
+  "scope": "workflow pin tests",
+  "correction": "Belief: a job test guards an action pin best by comparing it with the literal SHA. Reality: the literal fails every Dependabot bump (pilothouse#260, #279) and was the only check that kept 1 SHA for each action across jobs; per core ADR-0088 and ADR-0090, job tests check the action name and the 40-hex form, and internal/workflowcheck/actions_test.go checks the # vX.Y.Z or # vX.Y comment and 1 SHA for each action repository-wide",
+  "evidence": "frostyard/pilothouse#260 and #279 (red only for literal SHAs in tests); frostyard/core#281 (ADR-0088) and #283 (ADR-0090)",
+  "promoted_to": "internal/workflowcheck/actions_test.go"
+}

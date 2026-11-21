@@ -413,9 +413,9 @@ func TestPackagingWorkflowVMJobBuildsAndPublishesNothing(t *testing.T) {
 		}
 	}
 
-	require.Contains(t, uses, "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+	requireUsesAction(t, uses, "actions/checkout",
 		"the VM job checks the tree out: the harness comes from the repository, not the artifact")
-	require.Contains(t, uses, "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+	requireUsesAction(t, uses, "actions/download-artifact",
 		"the VM job downloads the already-uploaded artifact instead of building a second time")
 
 	for _, ref := range uses {

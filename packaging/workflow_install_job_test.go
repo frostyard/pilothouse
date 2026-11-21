@@ -126,7 +126,7 @@ func TestPackagingWorkflowInstallJob(t *testing.T) {
 			"the install matrix must be exactly the two digest-pinned images, each paired with its own format's artifact")
 	})
 
-	t.Run("checkout and download use the versions already in the file", func(t *testing.T) {
+	t.Run("checks out and downloads with pinned actions", func(t *testing.T) {
 		var uses []string
 		for _, step := range job.Steps {
 			if step.Uses != "" {
@@ -134,9 +134,9 @@ func TestPackagingWorkflowInstallJob(t *testing.T) {
 			}
 		}
 
-		require.Contains(t, uses, "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+		requireUsesAction(t, uses, "actions/checkout",
 			"the install job checks the tree out: verify-install.sh and the Makefile come from the repository, not the artifact")
-		require.Contains(t, uses, "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+		requireUsesAction(t, uses, "actions/download-artifact",
 			"the install job downloads the already-uploaded artifact instead of building a second time")
 
 		for _, ref := range uses {
