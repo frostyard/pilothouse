@@ -45,13 +45,6 @@ access, Podman 5, cosign and the GitHub-hosted `ubuntu-26.04` environment to
 exercise released packaging plus checked-out executables on ephemeral uCore
 derivatives, so it has no local make target either.
 
-With the `ANTHROPIC_API_KEY` repository secret configured, non-draft pull
-requests whose branch is in this repository also receive an advisory,
-least-privilege [Claude code review](claude-code-review.md). Fork pull
-requests are deliberately skipped, comments remain untrusted until a human
-verifies them, and the workflow cannot approve, merge, deploy, or publish. If
-the key is absent, the workflow reports a warning and skips the review.
-
 ## Build and test
 
 Go 1.26 or newer is required.
