@@ -605,11 +605,18 @@ exec "$SIGNAL_REAL_SETSID" "$@"
 			"the orchestrator probe must report its signal-derived failure")
 		require.Equal(t, exitStatus, exitError.ExitCode())
 	case <-time.After(5 * time.Second):
+		groups := []int{command.Process.Pid}
+		if pidBytes, readErr := os.ReadFile(groupDelayPIDPath); readErr == nil {
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes))); parseErr == nil {
+				groups = append(groups, pid)
+			}
+		}
 		t.Fatalf(
-			"orchestrator did not forward %s and exit promptly\nstdout:\n%s\nstderr:\n%s",
+			"orchestrator did not forward %s and exit promptly\nstdout:\n%s\nstderr:\n%s\nprocesses:\n%s",
 			signal,
 			stdout.String(),
 			stderr.String(),
+			describeProcessGroups(groups...),
 		)
 	}
 
@@ -631,6 +638,62 @@ exec "$SIGNAL_REAL_SETSID" "$@"
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("phase process %d survived orchestrator %s forwarding", signalTargetPID, signal)
+}
+
+// describeProcessGroups reports every live process in the given process
+// groups with the state and signal masks that decide whether a forwarded
+// signal can arrive, so a timeout names the process that kept running.
+func describeProcessGroups(pgids ...int) string {
+	wanted := map[int]bool{}
+	for _, pgid := range pgids {
+		wanted[pgid] = true
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return err.Error()
+	}
+	var report strings.Builder
+	for _, entry := range entries {
+		pid, convErr := strconv.Atoi(entry.Name())
+		if convErr != nil {
+			continue
+		}
+		stat, readErr := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if readErr != nil {
+			continue
+		}
+		// The comm field may hold spaces; the fields after it start at
+		// the last closing parenthesis: state, ppid, pgrp, session.
+		end := bytes.LastIndexByte(stat, ')')
+		if end < 0 {
+			continue
+		}
+		fields := strings.Fields(string(stat[end+1:]))
+		if len(fields) < 3 {
+			continue
+		}
+		pgid, convErr := strconv.Atoi(fields[2])
+		if convErr != nil || !wanted[pgid] {
+			continue
+		}
+		cmdline, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		wchan, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "wchan"))
+		fmt.Fprintf(&report, "pid=%d ppid=%s pgid=%d state=%s wchan=%s cmd=%q\n",
+			pid, fields[1], pgid, fields[0], wchan,
+			strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " ")))
+		status, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
+		for _, line := range strings.Split(string(status), "\n") {
+			for _, key := range []string{"SigPnd:", "ShdPnd:", "SigBlk:", "SigIgn:", "SigCgt:"} {
+				if strings.HasPrefix(line, key) {
+					fmt.Fprintf(&report, "    %s\n", strings.Join(strings.Fields(line), " "))
+				}
+			}
+		}
+	}
+	if report.Len() == 0 {
+		return "no live process in the orchestrator or phase group\n"
+	}
+	return report.String()
 }
 
 // waitForPIDFile polls for a PID that a shell fixture writes with
