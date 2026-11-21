@@ -135,7 +135,7 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 		},
 		{
 			Name: "Set up Go",
-			Uses: "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+			Uses: "actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5",
 			With: map[string]string{"go-version": "stable"},
 		},
 		{
