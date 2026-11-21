@@ -3,7 +3,7 @@
 Living document; extracted from [overview.md](overview.md). It covers the
 repository's agent and automation surface: the cross-agent instruction files,
 risk-tier classification and risk paths, the knowledge index and corrections
-inbox, the engineering lessons, the synced skills, and the Claude automation
+inbox, the engineering lessons, the synced skills, and the automation
 workflows. The repository baseline it follows is recorded in
 [ADR-0014](../adr/0014-adopt-the-repository-baseline.md).
 
@@ -84,16 +84,9 @@ workflows. The repository baseline it follows is recorded in
   `COPILOT_ASSIGNMENT_TOKEN` secret were removed on 2026-10-22: the maintainer
   chose not to provision a user-scoped token. Do not reintroduce a workflow
   that needs that token without a new decision.
-- `.github/workflows/claude-code-review.yml` provides advisory AI review for
-  non-draft, same-repository pull requests. It uses the commit-pinned official
-  Anthropic action when `ANTHROPIC_API_KEY` is configured; an explicit
-  configuration step otherwise emits a warning and gates off both checkout and
-  review. The job has only `contents: read` plus `pull-requests: write`;
-  checkout credentials are not persisted and its tools can only inspect PR data
-  and create comments. The ordinary `pull_request` trigger and explicit
-  head-repository check skip forks rather than exposing the secret through
-  `pull_request_target`. Model output remains untrusted and cannot replace
-  deterministic gates or human review. See `docs/claude-code-review.md`.
+- The Claude code review workflow and its API key secret were removed on
+  2026-11-21 (Brian). Do not reintroduce an AI review workflow without a new
+  decision; `TestClaudeCodeReviewStaysRemoved` guards it.
 - `workflows/` holds standalone [Conductor](https://github.com/microsoft/conductor)
   multi-agent workflow definitions: `test-triage.yaml`
   (gate chain, only escalates to an LLM on failure), `code-review.yaml`

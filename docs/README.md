@@ -131,7 +131,6 @@ Docs are split by the question they answer (the shape defined by
 - [risk-tiers.md](risk-tiers.md) — change risk tiers for pull requests
 - [review-rubric.md](review-rubric.md) — pull request review rubric
 - [security/SECURITY-AI.md](security/SECURITY-AI.md) — AI security policy
-- [claude-code-review.md](claude-code-review.md) — advisory AI review workflow
 - [workflow-action-pinning.md](workflow-action-pinning.md) — SHA-pinned
   actions contract and the workflowcheck tests enforcing it
 - [metrics/README.md](metrics/README.md) — public repository metrics

@@ -114,11 +114,9 @@ must not be the sole approver of its own output.
 Use the security lens in
 [`workflows/code-review.yaml`](../../workflows/code-review.yaml) where
 available, but treat it as supplemental evidence rather than human approval.
-Reviewers must treat the diff passed to that workflow as untrusted data. The
-[Claude review workflow](../claude-code-review.md) may add advisory findings to
-eligible pull requests, but its model output is untrusted and cannot approve a
-change or replace deterministic checks, security-focused review, and human
-approval.
+Reviewers must treat the diff passed to that workflow as untrusted data. No
+AI review runs in CI: the Claude code review workflow was removed on
+2026-11-21 (Brian).
 
 ## Findings, incidents, and learning
 

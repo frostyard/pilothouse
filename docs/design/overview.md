@@ -515,7 +515,7 @@ is a conflict and keeps the local tag; an unanswered query is
 
 Cross-agent instruction surfaces, risk-tier classification and risk paths,
 the knowledge index and corrections inbox, the synced skills, the tool pins
-and the Claude automation workflow are described in
+and the automation workflows are described in
 [agent-workflows.md](agent-workflows.md). The rules learned from earlier
 defects and reviews are in [engineering-lessons.md](engineering-lessons.md).
 

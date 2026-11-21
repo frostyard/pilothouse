@@ -48,13 +48,11 @@ skipped) and checks every `uses:` value, repository-wide:
   `OWNER/REPO@SHA` pin, so it cannot pass on an empty walk. `TestPinCheckSelfTest`
   runs the same check on synthetic fixtures (placeholder SHAs) for each rule.
 
-Job tests (`internal/workflowcheck/claude_review_test.go`,
-`packaging/workflow_*_test.go`) check an action by its name and the 40-hex form
-of its ref, and never write a live SHA
+Job tests (`packaging/workflow_*_test.go`) check an action by its name and
+the 40-hex form of its ref, and never write a live SHA
 ([ADR-0088](https://github.com/frostyard/core/blob/main/docs/adr/0088-read-the-action-pin-in-workflow-tests-never-hard-code-it.md)),
-so a Dependabot bump that keeps these rules passes without a test edit. The
-`claude-code-review.yml` test asserts exactly 1 `anthropics/claude-code-action`
-step. Container image digests in a matrix, such as `wantInstallMatrix` in
+so a Dependabot bump that keeps these rules passes without a test edit.
+Container image digests in a matrix, such as `wantInstallMatrix` in
 `packaging/workflow_install_job_test.go`, are not action pins and stay literal.
 
 ## Reviewing a bump
@@ -62,8 +60,8 @@ step. Container image digests in a matrix, such as `wantInstallMatrix` in
 The tests do not decide whether a new commit is safe. A pull request that
 changes `.github/workflows/**` is level L2 and `risk:high`, so it goes to the
 owner's review. Before the merge, read the upstream changes between the old and
-the new SHA, above all for `anthropics/claude-code-action`, which runs with the
-`ANTHROPIC_API_KEY` secret and a `pull-requests: write` token.
+the new SHA, above all for an action that runs with a secret or a write
+token.
 
 To check each comment against its upstream tag (and the core pin against core's
 `main`), run the online script of ADR-0090 from the repository root, with an
