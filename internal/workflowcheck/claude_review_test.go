@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	claudeActionSHA = "4fa93a88de49bbef68b10eb15aabedf28ca0e1ed"
+	claudeActionSHA = "6070f08d2b4766348e0acded463606a7b176417b"
 	claudeTools     = "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 )
 
