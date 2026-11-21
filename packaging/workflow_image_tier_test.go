@@ -127,20 +127,32 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 	workflow, _ := loadImageTierWorkflow(t)
 	job := workflow.Jobs[imageTierJobName]
 
+	// Each action is compared by name; its ref must be a full commit SHA.
+	steps := make([]imageTierStep, len(job.Steps))
+	copy(steps, job.Steps)
+	for i, step := range steps {
+		if step.Uses == "" {
+			continue
+		}
+		action := actionOf(step.Uses)
+		require.NotEmptyf(t, action, "step %q uses %q, want OWNER/REPO@<40-hex commit SHA>", step.Name, step.Uses)
+		steps[i].Uses = action
+	}
+
 	require.Equal(t, []imageTierStep{
 		{
 			Name: "Checkout code",
-			Uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+			Uses: "actions/checkout",
 			With: map[string]string{"persist-credentials": "false"},
 		},
 		{
 			Name: "Set up Go",
-			Uses: "actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5",
+			Uses: "actions/setup-go",
 			With: map[string]string{"go-version": "stable"},
 		},
 		{
 			Name: "Install cosign",
-			Uses: "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532",
+			Uses: "sigstore/cosign-installer",
 		},
 		{
 			Name: "Enable KVM acceleration",
@@ -173,7 +185,7 @@ func TestImageTierWorkflowRunsOneRootOwnedOrchestrator(t *testing.T) {
 				"  bash test/image/ucore-image-test.sh \\\n" +
 				"  --run-id \"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\n",
 		},
-	}, job.Steps,
+	}, steps,
 		"the complete ordered workflow step set and every executable body are closed")
 }
 

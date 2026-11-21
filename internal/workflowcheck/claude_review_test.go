@@ -4,14 +4,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 const (
-	claudeActionSHA = "6070f08d2b4766348e0acded463606a7b176417b"
-	claudeTools     = "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+	claudeAction = "anthropics/claude-code-action"
+	claudeTools  = "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 )
+
+// claudeActionPin is the action at a full commit SHA. The SHA itself is not
+// written here (core ADR-0088): TestWorkflowActionsUseImmutableReferences
+// checks its version comment and that it is the only SHA of the action, and
+// the owner's review of each bump pull request checks the commit.
+var claudeActionPin = regexp.MustCompile(`^` + regexp.QuoteMeta(claudeAction) + `@[0-9a-f]{40}$`)
 
 func readWorkflowContractFile(t *testing.T, path ...string) string {
 	t.Helper()
@@ -36,7 +43,6 @@ func TestClaudeReviewWorkflowIsPinnedAndLeastPrivilege(t *testing.T) {
 		"CONFIGURED: ${{ secrets.ANTHROPIC_API_KEY != '' }}",
 		"::warning::ANTHROPIC_API_KEY is not configured; skipping Claude code review",
 		"persist-credentials: false",
-		"anthropics/claude-code-action@" + claudeActionSHA,
 		"anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}",
 		`--allowedTools "` + claudeTools + `"`,
 	} {
@@ -51,11 +57,26 @@ func TestClaudeReviewWorkflowIsPinnedAndLeastPrivilege(t *testing.T) {
 		"issues: write",
 		"actions: write",
 		"id-token: write",
-		"anthropics/claude-code-action@v",
+		claudeAction + "@v",
 	} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("Claude review workflow contains forbidden contract %q", forbidden)
 		}
+	}
+
+	var pins []string
+	for name, job := range loadAutomationWorkflow(t, "claude-code-review.yml").Jobs {
+		for _, step := range job.Steps {
+			if step.Uses == claudeAction || strings.HasPrefix(step.Uses, claudeAction+"@") {
+				pins = append(pins, name+": "+step.Uses)
+				if !claudeActionPin.MatchString(step.Uses) {
+					t.Errorf("job %s uses %q, want %s at a full 40-hex commit SHA", name, step.Uses, claudeAction)
+				}
+			}
+		}
+	}
+	if len(pins) != 1 {
+		t.Errorf("Claude review workflow has %d %s steps %q, want exactly 1", len(pins), claudeAction, pins)
 	}
 }
 
