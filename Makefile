@@ -162,11 +162,15 @@ verify: generate ## Non-mutating gate: tidy diff, vet, format check, lint, templ
 # the gofmt check, the pinned golangci-lint, the template gate, govulncheck and
 # the tests), then the corrections check against BASE (corrections-base), then
 # the race detector, then the build, in fail-fast order.
+#
+# The recipe lines below are bare `$(MAKE) <target>` calls, so ci.yml's jobs
+# can run each part as `make <target>` and the two can never disagree about
+# what the gate runs (core ADR-0073, baseline row B12). A change to this recipe
+# must keep that shape: TestCIWorkflowRunsEveryPartOfMakeCI checks it.
 ci: verify ## Run every CI gate that runs without credentials (lint, vuln, tidy, vet, fmt, template gate, corrections, test, race, build); the packaging.yml gate needs GORELEASER_KEY and cannot run here
-	$(MAKE) --no-print-directory corrections-base
-	@echo "==> race" && $(MAKE) race
-	@echo "==> build" && $(MAKE) build
-	@echo "all CI gates passed"
+	$(MAKE) corrections-base
+	$(MAKE) race
+	$(MAKE) build
 
 # The corrections check compares the record files in .memory/corrections/ with
 # BASE: no record is removed, renamed or changed, except that an empty

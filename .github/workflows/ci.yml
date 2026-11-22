@@ -1,8 +1,13 @@
 # The CI workflow (name: Tests, which snapshot.yml follows). The 6 jobs
-# together run every target of `make ci`: lint (lint), security (govulncheck),
-# unit-test (test), race-test (race), verify (the go.mod tidy diff, vet, the
-# gofmt check, the template gate and the corrections check) and build. Each
-# job keeps `contents: read` only, and no checkout persists credentials.
+# together run every part of `make ci` as core ADR-0073 (baseline row B12)
+# asks, each part as `make <target>`: Verify runs `make verify` (the go.mod
+# tidy diff, vet, the gofmt check, lint, the template gate, govulncheck and the
+# tests) and `make corrections-base`, Race Detection runs `make race`, and
+# Build runs `make build` on linux amd64 and arm64. Lint, Security Scan and
+# Unit Tests run lint, govulncheck and the coverage test run on their own (the
+# last uploads coverage to Codecov). Each job keeps `contents: read` only, and
+# no checkout persists credentials.
+# TestCIWorkflowRunsEveryPartOfMakeCI guards this.
 name: Tests
 
 on:
@@ -162,29 +167,37 @@ jobs:
         with:
           go-version: "1.27.4"
 
-      # Node comes from mise.toml and mise.lock, checksum-verified, for the
-      # template gate in `make verify-template`.
-      - name: Install Node
+      # `make verify` runs every gate, but the lint and template gates need
+      # the tools and the tests need the cgo headers.
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libsystemd-dev
+
+      # golangci-lint and Node come from mise.toml and mise.lock,
+      # checksum-verified, for the lint and template gates in `make verify`.
+      - name: Install golangci-lint and Node
         uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           install: true
-          install_args: node
+          install_args: golangci-lint node
           cache: true
+
+      # `make verify` falls back to an unpinned `go run
+      # golang.org/x/vuln/cmd/govulncheck@latest` when govulncheck is not on
+      # PATH; this keeps CI on the pin the Security Scan job uses.
+      - name: Install pinned govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       - name: Generate templ
         run: go tool templ generate
 
-      - name: Verify go.mod is tidy
-        run: go mod tidy -diff
-
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Check formatting
-        run: make format-check
-
-      - name: Run the template gate
-        run: make verify-template
+      # The `verify` prerequisite of `make ci`: the tidy diff, vet, the format
+      # check, lint, the template gate, govulncheck and the tests. It repeats
+      # the Lint, Security Scan and Unit Tests checks on purpose, so that one
+      # job runs `make verify` itself, as core ADR-0073 asks.
+      - name: Run make verify
+        run: make verify
 
       - name: Check the corrections records against the PR base
         run: make corrections-base BASE="$BASE"
@@ -242,12 +255,17 @@ jobs:
       - name: Generate templ
         run: go tool templ generate
 
+      # `make build` depends on `generate`, and `go tool templ` builds templ
+      # for GOOS/GOARCH, so under the arm64 cross environment it would build an
+      # arm64 templ the runner cannot execute. The `Generate templ` step above
+      # already ran it natively, and `-o generate` tells make to treat
+      # `generate` as up to date (`make -n -o generate build` prints only the
+      # two go build lines).
       - name: Build binaries
         run: |
           export GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=1
           if [ "${{ matrix.goarch }}" = "arm64" ]; then
             export CC=aarch64-linux-gnu-gcc CGO_LDFLAGS=-L/usr/lib/aarch64-linux-gnu
           fi
-          go build -buildvcs=false -o bin/pilothouse ./cmd/pilothouse
-          go build -tags sdjournal -buildvcs=false -o bin/pilothoused ./cmd/pilothoused
+          make -o generate build
           ls -lh bin/

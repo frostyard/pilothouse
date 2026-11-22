@@ -24,7 +24,9 @@ gate that runs without credentials, in the same order. `make verify` is the
 non-mutating subset and `make check` formats first. It runs all Go packages and the tagged sdjournal journal tests;
 the lint recipe fails instead of skipping when `golangci-lint` is absent or
 is not the `mise.toml` pin. Local green means the credential-free gates will be green in
-CI. The pull-request test workflow starts from no token permissions, grants
+CI. The `Tests` workflow's jobs run the same make targets (Verify `make verify`
+and `make corrections-base`, Race Detection `make race`, Build `make build`),
+so each part of `make ci` runs in CI. The pull-request test workflow starts from no token permissions, grants
 only read-only contents access per job, and adds OIDC only to the unit-test job
 for Codecov; its `govulncheck` installation is version-pinned. The read-only
 `nightly-compliance.yml` workflow reruns the same `make ci` contract daily at

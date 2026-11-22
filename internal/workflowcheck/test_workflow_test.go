@@ -637,6 +637,25 @@ func TestTestWorkflowUsesLeastPrivilegeAndPinnedScanner(t *testing.T) {
 		t.Errorf("govulncheck installs = %#v, want %#v", scannerInstalls, wantInstall)
 	}
 
+	// The Verify job runs `make verify`, whose govulncheck step falls back to an
+	// unpinned `@latest` when govulncheck is not on PATH, so it installs the same
+	// pin the Security Scan job does.
+	for _, job := range []string{"security", "verify"} {
+		var installs []string
+		for _, step := range workflow.Jobs[job].Steps {
+			if strings.Contains(step.Run, "go install golang.org/x/vuln/cmd/govulncheck@") {
+				installs = append(installs, step.Run)
+			}
+		}
+		if len(installs) != 1 {
+			t.Errorf("job %q govulncheck installs = %d, want exactly 1", job, len(installs))
+			continue
+		}
+		if installs[0] != wantInstall[0] {
+			t.Errorf("job %q govulncheck install = %q, want %q", job, installs[0], wantInstall[0])
+		}
+	}
+
 	var codecovSteps []testWorkflowStep
 	for _, step := range workflow.Jobs["unit-test"].Steps {
 		if strings.HasPrefix(step.Uses, "codecov/codecov-action@") {
@@ -648,5 +667,53 @@ func TestTestWorkflowUsesLeastPrivilegeAndPinnedScanner(t *testing.T) {
 	}
 	if codecovSteps[0].With["use_oidc"] != "true" {
 		t.Errorf("Codecov use_oidc = %q, want true", codecovSteps[0].With["use_oidc"])
+	}
+}
+
+// The Verify job runs `make verify`, so it installs the tools that target
+// needs rather than running the individual gates itself (core ADR-0073).
+func TestVerifyJobInstallsMakeVerifyTools(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var workflow testWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse test workflow: %v", err)
+	}
+	verify, ok := workflow.Jobs["verify"]
+	if !ok {
+		t.Fatal("missing verify job")
+	}
+
+	var miseSteps []testWorkflowStep
+	for _, step := range verify.Steps {
+		if strings.HasPrefix(step.Uses, "jdx/mise-action@") {
+			miseSteps = append(miseSteps, step)
+		}
+	}
+	if len(miseSteps) != 1 {
+		t.Fatalf("verify mise-action steps = %d, want exactly 1", len(miseSteps))
+	}
+	if got, want := miseSteps[0].With["install_args"], "golangci-lint node"; got != want {
+		t.Errorf("verify mise install_args = %q, want %q", got, want)
+	}
+
+	headers := false
+	makeVerify := 0
+	for _, step := range verify.Steps {
+		if strings.Contains(step.Run, "libpam0g-dev libsystemd-dev") {
+			headers = true
+		}
+		if step.Run == "make verify" {
+			makeVerify++
+		}
+	}
+	if !headers {
+		t.Error("verify job installs no native build dependencies (libpam0g-dev libsystemd-dev)")
+	}
+	if makeVerify != 1 {
+		t.Errorf("verify job `make verify` steps = %d, want exactly 1", makeVerify)
 	}
 }
