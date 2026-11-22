@@ -290,8 +290,12 @@ worktree), or the corrections check fails rather than skipping
 (`TestDockerCIPassesBase`).
 `.github/workflows/ci.yml` (workflow name `Tests`) runs the same gates as 6
 separate jobs (Lint, Security Scan, Unit Tests, Race Detection, Verify,
-Build) that together cover every target `make ci` runs; Verify runs the tidy,
-vet, format, template and corrections checks. It disables token permissions
+Build) that together cover every target `make ci` runs: Verify runs
+`make verify` (which repeats lint, govulncheck and the tests) and
+`make corrections-base`, Race Detection runs `make race`, and Build runs
+`make build` (`make -o generate build` under the arm64 cross environment), so
+the jobs together run every part of `make ci` (core ADR-0073, baseline row
+B12; `TestCIWorkflowRunsEveryPartOfMakeCI`). It disables token permissions
 by default, grants each job read-only contents access, and grants OIDC only
 to the Codecov job. Agents use this same target, so agents
 and CI can never disagree about what "passing" means for the credential-free
