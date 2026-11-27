@@ -19,9 +19,10 @@ const packagingWorkflowPath = "../.github/workflows/packaging.yml"
 // permissions and every other job's contents parse and are discarded.
 
 type workflowStep struct {
-	Name string `yaml:"name"`
-	Uses string `yaml:"uses"`
-	Run  string `yaml:"run"`
+	Name string            `yaml:"name"`
+	Uses string            `yaml:"uses"`
+	Run  string            `yaml:"run"`
+	With map[string]string `yaml:"with"`
 }
 
 type workflowMatrixEntry struct {
@@ -63,6 +64,21 @@ func loadPackagingWorkflow(t *testing.T) (packagingWorkflow, string) {
 	require.NoErrorf(t, yaml.Unmarshal(raw, &workflow), "decode %s as YAML", packagingWorkflowPath)
 
 	return workflow, string(raw)
+}
+
+func TestPackagingWorkflowReadsGoVersionFromGoMod(t *testing.T) {
+	t.Parallel()
+
+	workflow, _ := loadPackagingWorkflow(t)
+	var setups int
+	for _, step := range workflow.Jobs["packages"].Steps {
+		if actionOf(step.Uses) == "actions/setup-go" {
+			setups++
+			require.Equal(t, "go.mod", step.With["go-version-file"])
+			require.Empty(t, step.With["go-version"], "go-version overrides go-version-file")
+		}
+	}
+	require.Equal(t, 1, setups, "packages must have one setup-go step")
 }
 
 // installJobName is the key the install-validation job is registered under.

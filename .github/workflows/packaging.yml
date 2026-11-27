@@ -76,7 +76,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # nfpm's rpm packager shells out to rpm-family tools, so `rpm` is
       # installed explicitly instead of relying on whatever the runner image
