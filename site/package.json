@@ -10,11 +10,11 @@
   },
   "dependencies": {
     "@astrojs/mdx": "^8.1.6",
-    "astro": "^7.4.12"
+    "astro": "^7.4.13"
   },
   "devDependencies": {
     "pagefind": "^1.6.0",
-    "wrangler": "^4.164.0"
+    "wrangler": "^4.168.0"
   },
   "overrides": {
     "js-yaml": "^4.3.1",
