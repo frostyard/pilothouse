@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/a-h/templ v0.3.1118
 	github.com/coreos/go-systemd/v22 v22.7.0
-	github.com/frostyard/std v0.5.0
+	github.com/frostyard/std v0.5.1
 	github.com/lxc/incus/v7 v7.6.0
 	github.com/moby/moby/api v1.57.0
 	github.com/moby/moby/client v0.6.3
