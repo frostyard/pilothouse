@@ -101,11 +101,12 @@ workflows. The repository baseline it follows is recorded in
   Verify jobs and the nightly compliance job install the tools with
   `jdx/mise-action`. `make verify`, `make check` and `make ci` are the gate
   triad of [ADR-0012](../adr/0012-adopt-mise-tool-pinning-and-verify-gate.md).
-  Packaging and Image tier read the Go pin from `go.mod` through
-  `actions/setup-go`. Not done yet from ADR-0012: the Makefile `GO_VERSION`
-  variable, hard-coded `go-version` inputs, and the `stable` alias in the
-  release and snapshot workflows remain separate Go inputs; `svu` is still
-  pinned only in the Makefile and `.docker/Dockerfile`; and both development
-  Dockerfiles still take versions as build arguments instead of running
-  `mise install`.
+  Packaging, the Image tier, and the release and snapshot workflows read the
+  Go pin from `go.mod` through `actions/setup-go` (`go-version-file: go.mod`).
+  `TestReleaseWorkflowsUseGoMod` guards the release and snapshot inputs.
+  Not done yet from ADR-0012: the Makefile `GO_VERSION` variable and the
+  hard-coded `go-version` inputs in `ci.yml` and `nightly-compliance.yml`
+  remain separate Go inputs; `svu` is still pinned only in the Makefile and
+  `.docker/Dockerfile`; and both development Dockerfiles still take versions
+  as build arguments instead of running `mise install`.
   Go 1.27.4 is the repository build and CI pin.
